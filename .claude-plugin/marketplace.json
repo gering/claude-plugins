@@ -1,0 +1,32 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claude-plugins",
+  "owner": {
+    "name": "gering"
+  },
+  "metadata": {
+    "description": "A collection of Claude Code plugins by gering"
+  },
+  "plugins": [
+    {
+      "name": "knowledge-system",
+      "source": {
+        "source": "github",
+        "repo": "gering/claude-knowledge-system",
+        "path": "plugins/knowledge-system"
+      },
+      "description": "Lightweight, native knowledge management for Claude Code projects. Three layers of persistent knowledge: Rules (always active), Knowledge (on demand), and Memory (automatic).",
+      "version": "1.0.3"
+    },
+    {
+      "name": "work-system",
+      "source": {
+        "source": "github",
+        "repo": "gering/claude-work-system",
+        "path": "plugins/work-system"
+      },
+      "description": "Generic task and worktree workflow system for Claude Code. Manage tasks as markdown files, work in isolated git worktrees, and track progress through the full lifecycle.",
+      "version": "1.0.0"
+    }
+  ]
+}
