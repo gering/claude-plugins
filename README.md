@@ -1,13 +1,24 @@
-# Claude Plugins by gering
+# Claude Code Plugins by gering
 
 A collection of [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugins for enhanced development workflows.
 
 ## Plugins
 
-| Plugin | Description |
-|--------|-------------|
-| [knowledge-system](https://github.com/gering/claude-knowledge-system) | Lightweight, native knowledge management for Claude Code projects |
-| [work-system](https://github.com/gering/claude-work-system) | Task and worktree workflow system for parallel development |
+### Knowledge System
+
+Lightweight, native knowledge management for Claude Code projects. Three layers of persistent knowledge: Rules (always active), Knowledge (on demand), and Memory (automatic).
+
+**Commands:** `/init`, `/query`, `/curate`, `/migrate`
+
+[Documentation →](plugins/knowledge-system/)
+
+### Work System
+
+Generic task and worktree workflow system. Manage tasks as markdown files, work in isolated git worktrees, and track progress through the full lifecycle.
+
+**Commands:** `/work-create`, `/work-start`, `/work-continue`, `/work-check`, `/work-close`, `/work-list`
+
+[Documentation →](plugins/work-system/)
 
 ## Installation
 
@@ -35,7 +46,7 @@ A collection of [Claude Code](https://docs.anthropic.com/en/docs/claude-code) pl
 Plugins update automatically when the marketplace is refreshed. To manually update:
 
 ```
-/plugin marketplace update claude-plugins
+/plugin marketplace update gering-plugins
 /reload-plugins
 ```
 
