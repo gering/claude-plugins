@@ -27,8 +27,8 @@ user_invocable: true
 4. **Get worktree info**:
    - Run: `git worktree list`
    - Identify main repo (first entry)
-   - Derive worktree path: `../<project-name>-task-<task-name>`
-   - Find worktree for this task (if exists)
+   - Find worktree for this task (match by branch name `task/<task-name>`)
+   - Worktree is typically at `.claude/worktrees/<task-name>` (but verify from `git worktree list` output)
 
 5. **Handle current location**:
    - If currently in the worktree being deleted:
@@ -36,11 +36,11 @@ user_invocable: true
      - Show: "After cleanup, switch to: <main-repo-path>"
 
 6. **Remove worktree** (if exists):
-   - Run: `git worktree remove ../<project-name>-task-<task-name>`
+   - Run: `git worktree remove <worktree-path>`
    - If fails (uncommitted changes):
      - Show `git status` from worktree
      - Ask: "Force remove? (uncommitted changes will be lost)"
-     - If yes: `git worktree remove ../<project-name>-task-<task-name> --force`
+     - If yes: `git worktree remove <worktree-path> --force`
 
 7. **Delete local branch**:
    - Run: `git branch -d task/<task-name>`

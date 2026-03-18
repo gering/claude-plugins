@@ -17,7 +17,7 @@ user_invocable: true
    📂 Active Worktrees:
    ┌─────────────────────────────────────────────────────────┐
    │ Main repo: /path/to/project (main)                     │
-   │ Worktree:  /path/to/project-task-dark-mode              │
+   │ Worktree:  /path/to/project/.claude/worktrees/dark-mode  │
    │            └─ Branch: task/dark-mode                    │
    └─────────────────────────────────────────────────────────┘
    ```
@@ -53,7 +53,7 @@ user_invocable: true
    - Worktrees with merged PRs (can be cleaned up)
    ```
    ⚠️ Cleanup Suggested:
-   • project-task-old-feature — PR merged, can be removed
+   • .claude/worktrees/old-feature — PR merged, can be removed
    ```
 
 5. **Summary statistics**:

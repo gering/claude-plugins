@@ -34,18 +34,18 @@ user_invocable: true
    - Use detected branch as base for the worktree
 
 6. **Derive worktree path**:
-   - Get current directory name: `basename "$PWD"`
-   - Worktree path: `../<project-name>-task-<task-name>`
-   - Example: project `my-app` with task `fix-bug` → `../my-app-task-fix-bug`
+   - Worktree path: `.claude/worktrees/<task-name>`
+   - Create parent directory if needed: `mkdir -p .claude/worktrees`
+   - Example: task `fix-bug` → `.claude/worktrees/fix-bug`
 
 7. **Create worktree**:
-   - Run: `git worktree add ../<project-name>-task-<task-name> -b task/<task-name>`
-   - If branch already exists, use: `git worktree add ../<project-name>-task-<task-name> task/<task-name>`
+   - Run: `git worktree add .claude/worktrees/<task-name> -b task/<task-name>`
+   - If branch already exists, use: `git worktree add .claude/worktrees/<task-name> task/<task-name>`
 
 8. **Copy files to worktree**:
-   - Copy task file: `cp tasks/<task-name>.md ../<project-name>-task-<task-name>/TASK.md`
-   - Copy Claude config if it exists: `cp -r .claude ../<project-name>-task-<task-name>/ 2>/dev/null`
-   - This gives Claude in the worktree access to the task and all commands/permissions
+   - Copy task file: `cp tasks/<task-name>.md .claude/worktrees/<task-name>/TASK.md`
+   - Copy Claude config if it exists: `cp -r .claude/settings.json .claude/worktrees/<task-name>/.claude/ 2>/dev/null`
+   - This gives Claude in the worktree access to the task and permissions
 
 9. **Symlinks note**:
    - For large directories like `node_modules`, configure `symlinkDirectories` in `.claude/settings.json`
@@ -59,7 +59,7 @@ user_invocable: true
     ```
     Worktree created!
 
-    Location: ../<project-name>-task-<task-name>
+    Location: .claude/worktrees/<task-name>
     Branch: task/<task-name>
     Task file copied to: TASK.md
 
@@ -69,7 +69,7 @@ user_invocable: true
     3. Run: /work-continue
 
     Or use this one-liner:
-    cd ../<project-name>-task-<task-name> && claude
+    cd .claude/worktrees/<task-name> && claude
     ```
 
 ## Remember
