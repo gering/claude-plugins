@@ -53,7 +53,11 @@ user_invocable: true
    - Based on TASK.md requirements, create actionable todos
    - Mark any completed items based on git history
 
-7. **Ready to work**:
+7. **Rename session**:
+   - Run: `/rename task/<task-name>`
+   - This makes the session easily identifiable in the session list
+
+8. **Ready to work**:
    ```
    Context loaded for task: <task-name>
 
