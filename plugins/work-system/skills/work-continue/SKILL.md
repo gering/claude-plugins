@@ -23,22 +23,23 @@ user_invocable: true
      - Run: `git worktree list` to get main repo path (first entry)
      - Try to read from main repo's `tasks/<task-name>.md`
 
-3. **Check dependencies**:
-   Auto-detect project type and suggest install command if dependencies appear missing:
+3. **Install dependencies automatically**:
+   Auto-detect project type and install if dependencies are missing:
 
    | Indicator | Missing check | Command |
    |-----------|--------------|---------|
-   | `pubspec.yaml` | `.dart_tool` missing | `flutter pub get` |
+   | `bun.lockb` or `bun.lock` | `node_modules` missing | `bun install` |
    | `package-lock.json` | `node_modules` missing | `npm install` |
    | `pnpm-lock.yaml` | `node_modules` missing | `pnpm install` |
    | `yarn.lock` | `node_modules` missing | `yarn install` |
+   | `pubspec.yaml` | `.dart_tool` missing | `flutter pub get` |
    | `Gemfile.lock` | `vendor/bundle` missing | `bundle install` |
    | `go.sum` | — | `go mod download` |
    | `Cargo.lock` | `target` missing | `cargo build` |
    | `requirements.txt` | `.venv` missing | `pip install -r requirements.txt` |
 
-   Only suggest if the indicator file exists AND the missing check directory is absent.
-   Ask before running: "Dependencies not installed. Run `<command>`?"
+   Only run if the indicator file exists AND the missing check directory is absent.
+   Run the install command automatically — do NOT ask, just run it and show the result.
 
 4. **Load project context** (optional):
    - If `.claude/knowledge/` exists, query the Knowledge Agent: "What are the project patterns and architecture?"
@@ -53,11 +54,7 @@ user_invocable: true
    - Based on TASK.md requirements, create actionable todos
    - Mark any completed items based on git history
 
-7. **Rename session**:
-   - Run: `/rename task/<task-name>`
-   - This makes the session easily identifiable in the session list
-
-8. **Ready to work**:
+7. **Ready to work**:
    ```
    Context loaded for task: <task-name>
 
@@ -68,6 +65,8 @@ user_invocable: true
    - Branch: task/<task-name>
    - Changed files: <count>
    - Commits: <count since branching>
+
+   💡 Rename this session: /rename task/<task-name>
 
    Ready to continue! What would you like to work on?
    ```
