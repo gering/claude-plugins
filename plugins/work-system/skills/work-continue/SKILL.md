@@ -66,8 +66,6 @@ user_invocable: true
    - Changed files: <count>
    - Commits: <count since branching>
 
-   💡 Rename this session: /rename task/<task-name>
-
    Ready to continue! What would you like to work on?
    ```
 

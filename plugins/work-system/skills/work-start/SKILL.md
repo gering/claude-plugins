@@ -65,11 +65,11 @@ user_invocable: true
 
     Next steps:
     1. Open terminal in the worktree directory
-    2. Run: claude
+    2. Run: claude --name "task/<task-name>"
     3. Run: /work-continue
 
     Or use this one-liner:
-    cd .claude/worktrees/<task-name> && claude
+    cd .claude/worktrees/<task-name> && claude -n "task/<task-name>"
     ```
 
 ## Remember
