@@ -36,8 +36,11 @@ user_invocable: true
      - Show: "After cleanup, switch to: <main-repo-path>"
 
 6. **Remove worktree** (if exists):
-   - Run: `git worktree remove <worktree-path>`
-   - If fails (uncommitted changes):
+   - First check for untracked/modified files: `git -C <worktree-path> status --short`
+   - If the only difference is `TASK.md` (untracked, copied by work-start), use `--force` directly:
+     `git worktree remove <worktree-path> --force`
+   - Otherwise try: `git worktree remove <worktree-path>`
+   - If fails (uncommitted changes beyond TASK.md):
      - Show `git status` from worktree
      - Ask: "Force remove? (uncommitted changes will be lost)"
      - If yes: `git worktree remove <worktree-path> --force`
@@ -56,7 +59,9 @@ user_invocable: true
 9. **Remove task file**:
    - Navigate to main repo if needed
    - Run: `rm tasks/<task-name>.md`
-   - Ask user if they want to commit the removal
+   - Check if the file was git-tracked: `git status --short tasks/<task-name>.md`
+   - If there is a staged/unstaged change (file was tracked): ask user if they want to commit the removal
+   - If no git change (file was gitignored or untracked): just report "Task file removed", no commit needed
 
 10. **Final summary**:
     ```
