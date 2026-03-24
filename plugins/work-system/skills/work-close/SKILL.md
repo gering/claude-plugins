@@ -46,9 +46,11 @@ user_invocable: true
      - If yes: `git worktree remove <worktree-path> --force`
 
 7. **Delete local branch**:
-   - Run: `git branch -d task/<task-name>`
-   - If fails (not fully merged):
-     - Ask: "Force delete branch?"
+   - If a merged PR was confirmed in step 2: use `git branch -D task/<task-name>` directly
+     (the `-d` safety check produces false positives with GitHub's rebase-merge strategy,
+     where commits are rewritten with new SHAs — the real safety gate is the merged-PR check)
+   - If NO merged PR was found (manual close): try `git branch -d task/<task-name>` first
+     - If fails (not fully merged): ask "Force delete branch?"
      - If yes: `git branch -D task/<task-name>`
 
 8. **Delete remote branch** (if exists):
