@@ -16,7 +16,7 @@ user_invocable: true
    - If on the main branch, run `/work-list` and ask which task to close
 
 2. **Verify task is merged** (if `gh` is available):
-   - Run: `gh pr list --state merged --search "task/<task-name>" --limit 5 --json number,title,mergedAt,headRefName`
+   - Run: `gh pr list --state merged --head "task/<task-name>" --limit 1 --json number,title,mergedAt,headRefName`
    - **If merged PR found**: Show details and continue
    - **If NO merged PR**: Warn user and ask for confirmation before proceeding
 

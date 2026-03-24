@@ -25,7 +25,7 @@ user_invocable: true
    - Extract task name from filename (e.g., `fix-calendar-bug.md` → `fix-calendar-bug`)
 
 4. **Quick completion check**:
-   - If `gh` is available: `gh pr list --state merged --search "task/<task-name>" --limit 1 --json number,title`
+   - If `gh` is available: `gh pr list --state merged --head "task/<task-name>" --limit 1 --json number,title`
    - If merged PR found, warn user and ask if they want to continue or delete the task
 
 5. **Detect main branch**:
