@@ -195,24 +195,28 @@ user_invocable: true
    - If empty → ⚠️ "No CI detected — repo may not have workflows on PRs, or GitHub Actions are disabled"
 
 10. **Verify @claude review auto-trigger**:
-   - Wait ~15 seconds (auto-trigger workflows typically fire within 10-20s after PR open)
-   - Run:
-     ```
-     gh pr view <PR_NUMBER> --json comments --jq '[.comments[] | select(.author.login == "claude") | select(.createdAt > "<TRIGGER_ISO>")] | length'
-     ```
-   - If count > 0 → ✅ "Claude review auto-triggered — polling via `/pr-cycle` or `/pr-check`"
-   - If count == 0 → ℹ️ "No auto-trigger detected. Run `/pr-cycle` to trigger manually."
+    - Wait ~15 seconds (auto-trigger workflows typically fire within 10-20s after PR open)
+    - Run:
+      ```
+      bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" latest-after <PR_NUMBER> "<TRIGGER_ISO>"
+      ```
+    - **If output is non-empty** → a review has started. Launch background polling to wait for completion:
+      ```
+      bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" poll <PR_NUMBER> "<TRIGGER_ISO>"
+      ```
+      Use the **Bash tool** with `run_in_background: true`. When it completes, present the review results following the same format as `/pr-cycle` step 10 (numbered issues, own assessment, recommendation).
+    - **If output is empty** → no auto-trigger detected. Inform the user and suggest `/pr-cycle` to trigger manually. Do NOT trigger automatically here — `/pr-create` is about creation; triggering is `/pr-cycle`'s job.
 
 11. **Final summary**:
     ```
     ✅ PR #<N> created: <URL>
 
     CI:     <status>
-    Review: <auto-triggered / not auto-triggered>
+    Review: <auto-triggered, polling in background / not auto-triggered>
 
     Next step:
-    - [if review auto-triggered]   Run `/pr-check` in a minute to see results
-    - [if NOT auto-triggered]      Run `/pr-cycle` to trigger Claude review
+    - [if review auto-triggered]   Review results will appear when polling completes (~1-5 min)
+    - [if NOT auto-triggered]      Run `/pr-cycle` to trigger Claude review manually
     - [if CI failed/missing]       Investigate CI config before pushing more work
     ```
 
