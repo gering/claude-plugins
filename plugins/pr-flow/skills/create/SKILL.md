@@ -1,10 +1,10 @@
 ---
-name: pr-create
+name: create
 description: |
   Creates a new pull request with full readiness verification. Auto-runs
   tests, linter, and build. Checks for stale README, missing version bump,
   outdated changelog, and missing knowledge documentation. Detects rebase
-  needs via /pr-rebase. After creation, verifies CI + @claude review
+  needs via /rebase. After creation, verifies CI + @claude review
   auto-trigger and polls in the background for the first review result.
 
   Use when: user wants to "create a PR", "open a pull request", "ship this
@@ -33,20 +33,20 @@ user_invocable: true
 ## Instructions
 
 0. **Preflight (tooling)**:
-   - Verify `gh` installed and authenticated (see `/pr-cycle` step 0 for exact commands). Stop with clear error if missing.
+   - Verify `gh` installed and authenticated (see `/cycle` step 0 for exact commands). Stop with clear error if missing.
 
 1. **Branch & PR state**:
    - Run: `git branch --show-current`
    - If on `main`/`master`, stop: "You're on the main branch. Create a feature branch first."
    - Run: `gh pr view --json number,url 2>/dev/null`
-   - If a PR already exists, stop: "PR #<N> already exists: <URL>. Use `/pr-cycle` to push updates."
+   - If a PR already exists, stop: "PR #<N> already exists: <URL>. Use `/cycle` to push updates."
    - Detect base branch: `git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||'` (fallback: ask user or default to `main`)
 
-2. **Check if rebase is needed** — delegate to `/pr-rebase`:
-   - Invoke the `/pr-rebase` skill. Since no PR exists yet, it will fall back to upstream tracking or repo default to detect the base branch.
-   - If `/pr-rebase` rebased successfully → continue
+2. **Check if rebase is needed** — delegate to `/rebase`:
+   - Invoke the `/rebase` skill. Since no PR exists yet, it will fall back to upstream tracking or repo default to detect the base branch.
+   - If `/rebase` rebased successfully → continue
    - If user declined the rebase → continue but remember to flag ⚠️ "Branch is N commits behind `<BASE_BRANCH>` (rebase declined)" in the readiness summary (step 4)
-   - If conflicts aborted the rebase → stop this skill; user resolves manually, then re-runs `/pr-create`
+   - If conflicts aborted the rebase → stop this skill; user resolves manually, then re-runs `/create`
 
 3. **Readiness checks — collect a status list**:
    Run each check and collect results into a summary table. **Do NOT stop on failure** — present everything, let the user decide.
@@ -54,7 +54,7 @@ user_invocable: true
    ### 3a. Uncommitted changes
    - Run: `git status --porcelain`
    - If changes exist → ⚠️ "Uncommitted changes — commit before creating PR"
-   - Offer: "Want me to run `/pr-cycle` instead (handles commit + push + review)?" — if yes, abort this skill
+   - Offer: "Want me to run `/cycle` instead (handles commit + push + review)?" — if yes, abort this skill
 
    ### 3b. Unpushed commits (for branch-existence check later)
    - Run: `git log @{u}..HEAD --oneline 2>/dev/null` — fine if it errors (upstream may not exist yet)
@@ -214,8 +214,8 @@ user_invocable: true
       ```
       bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" poll <PR_NUMBER> "<TRIGGER_ISO>"
       ```
-      Use the **Bash tool** with `run_in_background: true`. When it completes, present the review results following the same format as `/pr-cycle` step 10 (numbered issues, own assessment, recommendation).
-    - **If output is empty** → no auto-trigger detected. Inform the user and suggest `/pr-cycle` to trigger manually. Do NOT trigger automatically here — `/pr-create` is about creation; triggering is `/pr-cycle`'s job.
+      Use the **Bash tool** with `run_in_background: true`. When it completes, present the review results following the same format as `/cycle` step 10 (numbered issues, own assessment, recommendation).
+    - **If output is empty** → no auto-trigger detected. Inform the user and suggest `/cycle` to trigger manually. Do NOT trigger automatically here — `/create` is about creation; triggering is `/cycle`'s job.
 
 11. **Final summary**:
     ```
@@ -226,25 +226,25 @@ user_invocable: true
 
     Next step:
     - [if review auto-triggered]   Review results will appear when polling completes (~1-5 min)
-    - [if NOT auto-triggered]      Run `/pr-cycle` to trigger Claude review manually
+    - [if NOT auto-triggered]      Run `/cycle` to trigger Claude review manually
     - [if CI failed/missing]       Investigate CI config before pushing more work
     ```
 
 ## Edge Cases
 
 - `gh` not installed/authenticated → step 0 stops with clear error
-- PR already exists → redirect to `/pr-cycle`
-- Base branch has new commits → handled by `/pr-rebase` (delegated in step 2)
+- PR already exists → redirect to `/cycle`
+- Base branch has new commits → handled by `/rebase` (delegated in step 2)
 - No commits on branch vs. base → stop: "Nothing to PR — branch is identical to <BASE_BRANCH>"
 - User declines to run checks → mark all as "skipped by user" in body, still create PR
 - Linter/tests hang → timeout 5min, mark as ⚠️ skipped, let user decide
 - Repo uses a non-default base (`develop`, `staging`) → ask user if auto-detected base seems wrong
-- `@claude` bot not installed on repo → auto-trigger check returns 0, normal fallback to `/pr-cycle` (which will also fail gracefully)
+- `@claude` bot not installed on repo → auto-trigger check returns 0, normal fallback to `/cycle` (which will also fail gracefully)
 
 ## Notes
 
 - This skill is **interactive** — every expensive check (tests, lint, build) asks first
 - Readiness checks are **advisory**: the user can override and create a draft PR even with failures
 - The generated PR body includes the readiness snapshot so reviewers see what was verified
-- Designed to be run **once** per PR; for subsequent updates use `/pr-cycle`
+- Designed to be run **once** per PR; for subsequent updates use `/cycle`
 - Respects global git/commit conventions (imperative mood, short title, English)

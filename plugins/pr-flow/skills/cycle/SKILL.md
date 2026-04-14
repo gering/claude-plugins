@@ -1,5 +1,5 @@
 ---
-name: pr-cycle
+name: cycle
 description: |
   Runs a full review iteration with the @claude GitHub review bot. Commits
   pending changes (with confirmation), pushes to remote, hides outdated
@@ -36,13 +36,13 @@ user_invocable: true
    - If no PR exists, inform user and suggest: `gh pr create`
    - Store `PR_NUMBER`, `PR_URL`, and `BASE_BRANCH` (from baseRefName) for later use
 
-2. **Check if rebase is needed** — delegate to `/pr-rebase`:
-   - Invoke the `/pr-rebase` skill. It will:
+2. **Check if rebase is needed** — delegate to `/rebase`:
+   - Invoke the `/rebase` skill. It will:
      - Determine the PR's base branch (authoritative source: `gh pr view`)
      - Detect divergence, ask the user for confirmation, execute or skip
      - Abort cleanly on conflicts
-   - Proceed with this skill only if `/pr-rebase` returned cleanly (up-to-date, rebased successfully, or user declined)
-   - If conflicts aborted the rebase: stop this cycle, let the user resolve manually, then re-run `/pr-cycle`
+   - Proceed with this skill only if `/rebase` returned cleanly (up-to-date, rebased successfully, or user declined)
+   - If conflicts aborted the rebase: stop this cycle, let the user resolve manually, then re-run `/cycle`
 
 3. **Handle uncommitted changes**:
    - Run: `git status --porcelain`
@@ -112,7 +112,7 @@ user_invocable: true
 - `gh` not installed or not authenticated → stop with clear error in step 0
 - No uncommitted changes → skip commit, just push + trigger
 - No PR exists → inform user, suggest creating one
-- Base branch has new commits → handled by `/pr-rebase` (delegated in step 2)
+- Base branch has new commits → handled by `/rebase` (delegated in step 2)
 - Branch already up-to-date with remote → skip push, just trigger review
 - Review auto-triggered after push → skip manual trigger, go straight to polling
 - Review times out → agent reports timeout with link to PR

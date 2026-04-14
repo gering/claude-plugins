@@ -1,5 +1,5 @@
 ---
-name: pr-fix
+name: fix
 description: |
   Interactive walkthrough of issues from the latest Claude review. Parses
   the review body into a numbered checklist (with severity labels:
@@ -17,18 +17,18 @@ user_invocable: true
 
 # PR Fix Guided Workflow
 
-> Load the latest Claude review, present issues as a numbered checklist, let the user pick which to address, implement fixes one by one, then hand off to `/pr-cycle` for re-review.
+> Load the latest Claude review, present issues as a numbered checklist, let the user pick which to address, implement fixes one by one, then hand off to `/cycle` for re-review.
 
 ## Instructions
 
 0. **Preflight**:
-   - Verify `gh` is installed and authenticated (see `/pr-cycle` step 0 for exact commands). Stop with clear error if missing.
+   - Verify `gh` is installed and authenticated (see `/cycle` step 0 for exact commands). Stop with clear error if missing.
 
 1. **Identify PR**:
    - Run: `git branch --show-current`
    - If on `main`/`master`, stop: "You're on the main branch. Switch to a feature branch first."
    - Run: `gh pr view --json number,title,url,headRefName`
-   - If no PR, stop: "No open PR on this branch. Run `/pr-cycle` first to create reviews."
+   - If no PR, stop: "No open PR on this branch. Run `/cycle` first to create reviews."
    - Store `PR_NUMBER`.
 
 2. **Fetch latest Claude review**:
@@ -36,7 +36,7 @@ user_invocable: true
      ```
      gh pr view <PR_NUMBER> --json comments --jq '[.comments[] | select(.author.login == "claude") | select(.body | contains("**Claude finished"))] | last | .body'
      ```
-   - If empty, stop: "No completed Claude review found. Run `/pr-cycle` to trigger one."
+   - If empty, stop: "No completed Claude review found. Run `/cycle` to trigger one."
 
 3. **Parse issues**:
    - Split the review body into discrete findings (grouped by file, each with severity if noted)
@@ -84,21 +84,21 @@ user_invocable: true
    ❌ Could not fix <K>: #<list>  (reason: ...)
 
    Next steps:
-   - Run `/pr-cycle` to commit, push, and trigger re-review
-   - Or run `/pr-check` to inspect current state first
+   - Run `/cycle` to commit, push, and trigger re-review
+   - Or run `/check` to inspect current state first
    ```
 
-10. **Do NOT auto-trigger `/pr-cycle`** — hand control back to the user. They may want to make additional changes first.
+10. **Do NOT auto-trigger `/cycle`** — hand control back to the user. They may want to make additional changes first.
 
 ## Edge Cases
 
-- Review comment exists but is still in progress (starts with "Claude Code is working") → stop, ask user to wait or run `/pr-check` to poll
-- Latest review is older than the last push → warn: "The review is stale; the code has changed since. Run `/pr-cycle` for a fresh review."
+- Review comment exists but is still in progress (starts with "Claude Code is working") → stop, ask user to wait or run `/check` to poll
+- Latest review is older than the last push → warn: "The review is stale; the code has changed since. Run `/cycle` for a fresh review."
 - Review body has no parseable issues (just "LGTM") → inform user, no action needed
 - User selects issues that don't exist (e.g. "fix #99") → list valid numbers and ask again
 
 ## Notes
 
 - This skill is **interactive by design** — it never fixes things without user confirmation
-- It explicitly does NOT run `/pr-cycle` automatically; the user stays in control of when to re-push
-- Works standalone: you can run `/pr-fix` any time after a review exists, even days later
+- It explicitly does NOT run `/cycle` automatically; the user stays in control of when to re-push
+- Works standalone: you can run `/fix` any time after a review exists, even days later

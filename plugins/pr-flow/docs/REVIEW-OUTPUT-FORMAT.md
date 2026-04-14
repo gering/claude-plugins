@@ -1,8 +1,8 @@
 # Shared Review Output Format
 
-> Canonical format for presenting Claude review results. Used by `/pr-cycle`
-> (after polling completes), `/pr-check` (for the latest review section), and
-> `/pr-fix` (for the checklist before asking which to fix).
+> Canonical format for presenting Claude review results. Used by `/cycle`
+> (after polling completes), `/check` (for the latest review section), and
+> `/fix` (for the checklist before asking which to fix).
 
 ## Language
 
@@ -87,11 +87,11 @@ Only include if this isn't the first review cycle and previous findings exist:
 
 Pick exactly one:
 
-- **Any 🔴 blocking present** → `Run /pr-fix to work through them, then /pr-cycle again.`
-- **Only 🟡/⚪ findings** → `Address if you want. Otherwise: run /pr-merge when ready.`
-- **Zero findings** → `Ready to merge — run /pr-merge.`
+- **Any 🔴 blocking present** → `Run /fix to work through them, then /cycle again.`
+- **Only 🟡/⚪ findings** → `Address if you want. Otherwise: run /merge when ready.`
+- **Zero findings** → `Ready to merge — run /merge.`
 - **CI failing or merge-blocked** → `Investigate CI failure before proceeding.`
-- **Review is stale** → `Push latest changes and run /pr-cycle for a fresh review.`
+- **Review is stale** → `Push latest changes and run /cycle for a fresh review.`
 
 ## Forbidden formatting patterns
 
@@ -114,4 +114,4 @@ Pick exactly one:
 
 - **Do NOT immediately start fixing anything** — wait for the user to indicate which items to address
 - User may reply with `#N`, `#N, #M`, `#N-M`, `all`, `blocking`, or `skip`
-- If user wants to fix: hand off to `/pr-fix` for the interactive fix flow
+- If user wants to fix: hand off to `/fix` for the interactive fix flow

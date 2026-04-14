@@ -1,5 +1,5 @@
 ---
-name: pr-merge
+name: merge
 description: |
   Merges the current PR safely with exhaustive preflight. Detects merge
   method via repo-allowed settings + historical pattern of last 20 PRs
@@ -29,21 +29,21 @@ user_invocable: true
 1. **Identify PR**:
    - `git branch --show-current` — if on `main`/`master`, stop: "You're on the default branch — nothing to merge."
    - `gh pr view --json number,title,url,state,isDraft,baseRefName,headRefName,mergeable,mergeStateStatus,mergeCommit`
-   - If no PR → stop, suggest `/pr-create`
+   - If no PR → stop, suggest `/create`
    - If state ≠ `OPEN` → stop with state info
    - If `isDraft` → ask: "PR is draft. Mark as ready for review? [y/N]"
      - `y`: `gh pr ready <N>`, continue
      - `n`: stop
    - Store `PR_NUMBER`, `BASE_BRANCH`, `HEAD_BRANCH`.
 
-2. **Rebase check** — delegate to `/pr-rebase`:
-   - Run `/pr-rebase`. It determines the base from the PR itself and handles rebase + conflict abort cleanly.
-   - If a rebase happened: the branch needs to be pushed (with force-with-lease). `/pr-rebase` will have handled the force-push confirmation.
-   - If user declined a needed rebase → stop this skill: "Merge requires up-to-date branch. Re-run `/pr-merge` after resolving."
+2. **Rebase check** — delegate to `/rebase`:
+   - Run `/rebase`. It determines the base from the PR itself and handles rebase + conflict abort cleanly.
+   - If a rebase happened: the branch needs to be pushed (with force-with-lease). `/rebase` will have handled the force-push confirmation.
+   - If user declined a needed rebase → stop this skill: "Merge requires up-to-date branch. Re-run `/merge` after resolving."
 
 3. **Local cleanliness**:
    - `git status --porcelain` — if anything: stop "Commit or stash local changes before merging."
-   - `git log @{u}..HEAD --oneline 2>/dev/null` — if unpushed commits: stop "Push local commits first (`/pr-cycle` handles this)."
+   - `git log @{u}..HEAD --oneline 2>/dev/null` — if unpushed commits: stop "Push local commits first (`/cycle` handles this)."
 
 4. **Refresh PR state** (GitHub recomputes after push/rebase):
    - Wait ~5s if anything was pushed/rebased in step 2
@@ -51,7 +51,7 @@ user_invocable: true
    - Interpret `mergeStateStatus`:
      - `CLEAN` → ✅ ready
      - `HAS_HOOKS` → ✅ ready (hooks will run)
-     - `BEHIND` → ⚠️ base moved again since step 2, re-run `/pr-rebase`
+     - `BEHIND` → ⚠️ base moved again since step 2, re-run `/rebase`
      - `BLOCKED` → ⚠️ required reviews or checks missing (step 5 + 6 will detail)
      - `CONFLICTING` → ❌ stop: "Merge conflicts. Resolve manually (`git merge origin/<BASE>` or `git rebase`)"
      - `UNSTABLE` → ⚠️ CI not green but branch protection allows merge — treat as warning
@@ -73,9 +73,9 @@ user_invocable: true
    - Otherwise → ✅
 
 7. **Open Claude review issues**:
-   - Fetch latest Claude review comment (see `/pr-fix` step 2 for the jq query)
+   - Fetch latest Claude review comment (see `/fix` step 2 for the jq query)
    - If exists AND newer than last push: parse for **blocking** severity issues
-   - If exists BUT older than last push: mark as stale, advise `/pr-cycle` first
+   - If exists BUT older than last push: mark as stale, advise `/cycle` first
    - Count open blocking issues
    - If > 0 → ⚠️ warn explicitly, require explicit confirmation before merging. **Do not silently ignore.**
 
@@ -100,7 +100,7 @@ user_invocable: true
    - Otherwise: `git log --format='%h %s' origin/<BASE>..HEAD`
    - Flag messages that look like work-in-progress: `^(wip|fix|asdf|temp|xxx)\b`, `.{1,5}$` (very short), starts with lowercase non-verb
    - If any found → show list, ask: "Clean up with `git rebase -i` before merging? [y/N]"
-     - `y`: stop this skill, user cleans up, re-runs `/pr-merge`
+     - `y`: stop this skill, user cleans up, re-runs `/merge`
      - `n`: continue with current history
 
 10. **Merge commit / squash message** (for `merge` or `squash`):
@@ -174,8 +174,8 @@ user_invocable: true
 ## Edge Cases
 
 - Branch protection blocks merge → stop, surface exact reason from the GitHub error, never bypass with `--admin`
-- `CONFLICTING` state → stop, instruct manual resolution (don't auto-rebase here — `/pr-rebase` already ran)
-- `UNKNOWN` mergeable state → retry with backoff (10s × 3), then ask user to retry `/pr-merge` later
+- `CONFLICTING` state → stop, instruct manual resolution (don't auto-rebase here — `/rebase` already ran)
+- `UNKNOWN` mergeable state → retry with backoff (10s × 3), then ask user to retry `/merge` later
 - No required checks configured + CI failing → warn but allow (no protection rule blocks it)
 - Historical pattern detection fails (new repo, <5 merged PRs) → fall back to ask user
 - Historical pattern is split (no >80% dominant method) → ask user, show the split

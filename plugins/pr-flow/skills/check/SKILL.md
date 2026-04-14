@@ -1,5 +1,5 @@
 ---
-name: pr-check
+name: check
 description: |
   Read-only status snapshot of the current PR. Shows CI check results
   (passed/failed/pending), human review state (approvals, changes
@@ -28,7 +28,7 @@ user_invocable: true
    - Run: `git branch --show-current`
    - If on `main`/`master`, stop: "You're on the main branch — nothing to check."
    - Run: `gh pr view --json number,title,url,state,isDraft,mergeable,mergeStateStatus,headRefName,baseRefName`
-   - If no PR exists, inform user and stop (suggest `gh pr create` or `/pr-cycle`)
+   - If no PR exists, inform user and stop (suggest `gh pr create` or `/cycle`)
 
 2. **CI status**:
    - Run: `gh pr checks <PR_NUMBER>` (table format is fine)
@@ -49,8 +49,8 @@ user_invocable: true
    - If `body` is non-empty:
      - Extract issue count and summary
      - Show timestamp (how old is it?)
-     - If older than the latest push (`gh pr view <PR_NUMBER> --json commits --jq '.commits | last | .commit.authoredDate'`), mark as **stale** → suggest `/pr-cycle` to refresh
-   - If none, note: "No Claude review yet — run `/pr-cycle` to trigger one"
+     - If older than the latest push (`gh pr view <PR_NUMBER> --json commits --jq '.commits | last | .commit.authoredDate'`), mark as **stale** → suggest `/cycle` to refresh
+   - If none, note: "No Claude review yet — run `/cycle` to trigger one"
 
 5. **Uncommitted local changes**:
    - Run: `git status --porcelain`
@@ -83,14 +83,14 @@ user_invocable: true
    - **Claude review section** — if a Claude review exists, render its findings following the shared format spec at `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md`. Required: header + status + **markdown findings table**. No prose cards, no per-finding headings. See forbidden patterns in the spec.
    - If no Claude review: skip the findings table, just note "No Claude review yet."
 
-8. **Recommendation** — exactly one line, picked per the rules in `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md` (Recommendation section). Adapt to pr-check specific context:
-   - If all green + approved + no local drift: "Ready to merge — run `/pr-merge`"
-   - If stale Claude review or unpushed work: "Run `/pr-cycle` to refresh"
-   - If open issues from last review: "Run `/pr-fix` to work through them"
+8. **Recommendation** — exactly one line, picked per the rules in `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md` (Recommendation section). Adapt to this skill's context:
+   - If all green + approved + no local drift: "Ready to merge — run `/merge`"
+   - If stale Claude review or unpushed work: "Run `/cycle` to refresh"
+   - If open issues from last review: "Run `/fix` to work through them"
    - If CI failing: list the failures and suggest fixing before re-triggering
 
 ## Notes
 
 - This skill is **read-only** — it never commits, pushes, or triggers a review
 - Safe to run repeatedly (e.g. polling during long CI runs)
-- Complements `/pr-cycle` (active loop) and `/pr-fix` (work through issues)
+- Complements `/cycle` (active loop) and `/fix` (work through issues)

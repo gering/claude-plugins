@@ -8,7 +8,7 @@ description: |
 
   Use when: user says "close this task", "cleanup", "aufgabe abschließen",
   "task fertig", "worktree weg", PR has been merged and the task
-  infrastructure is no longer needed. Also invoked by /pr-merge post-merge
+  infrastructure is no longer needed. Also invoked by /merge post-merge
   handoff when a `task/*` branch is detected.
 user_invocable: true
 ---
