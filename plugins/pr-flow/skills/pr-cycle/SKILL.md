@@ -62,39 +62,26 @@ user_invocable: true
 
 6. **Check for auto-triggered review**:
    - Store the current timestamp before checking:
-     - Unix: `date +%s` → TRIGGER_TIMESTAMP
      - ISO: `date -u +%Y-%m-%dT%H:%M:%SZ` → TRIGGER_ISO
    - Wait ~5 seconds after push, then check if a review was already auto-triggered:
      ```
-     gh pr view <PR_NUMBER> --json comments --jq '[.comments[] | select(.author.login == "claude") | select(.createdAt > "<TRIGGER_ISO>")] | length'
+     bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" latest-after <PR_NUMBER> "<TRIGGER_ISO>"
      ```
-   - If a comment exists (count > 0): a review was auto-triggered by the project's CI/webhook config — skip to step 8 (polling)
-   - If no comment: trigger manually in step 7
+   - If output is non-empty: a review was auto-triggered by the project's CI/webhook config — skip to step 8 (polling)
+   - If output is empty: trigger manually in step 7
 
 7. **Trigger Claude review** (only if no auto-trigger detected):
    - Run: `gh pr comment <PR_NUMBER> --body "@claude review"`
 
 8. **Launch background polling via Bash**:
-   - Use the **Bash tool** with `run_in_background: true` to poll for the review comment
-   - This avoids permission issues — background agents cannot use Bash, but background Bash tasks can use `gh` directly since `Bash(gh:*)` is in the allowlist
-   - Run this shell script (substitute `<PR_NUMBER>` and `<TRIGGER_ISO>`):
-     ```bash
-     for i in $(seq 1 20); do
-       sleep 30
-       COMMENT=$(gh pr view <PR_NUMBER> --json comments --jq '[.comments[] | select(.author.login == "claude") | select(.createdAt > "<TRIGGER_ISO>")] | last | .body // empty')
-       if [ -n "$COMMENT" ]; then
-         if echo "$COMMENT" | grep -q "Claude Code is working"; then
-           continue
-         fi
-         if echo "$COMMENT" | grep -q '\*\*Claude finished'; then
-           echo "$COMMENT"
-           exit 0
-         fi
-       fi
-     done
-     echo "TIMEOUT: Review still in progress after 10 minutes. Check manually: <PR_URL>"
-     exit 1
+   - Use the **Bash tool** with `run_in_background: true` to invoke the shared polling script:
      ```
+     bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" poll <PR_NUMBER> "<TRIGGER_ISO>"
+     ```
+   - Default timeout is 20 iterations × 30s = 10 minutes. Override with `--max N --interval S` if needed.
+   - On success: the script prints the review comment body to stdout (exit 0).
+   - On timeout: the script prints "TIMEOUT" to stderr and exits 1 — surface the PR URL to the user.
+   - Background Bash tasks can use `gh` via `Bash(gh:*)` in the allowlist; background agents cannot.
 
 9. **Inform user**:
    ```

@@ -34,8 +34,9 @@ user_invocable: true
    - If a human requested changes, list their open review bodies briefly
 
 4. **Latest Claude review** (if any):
-   - Run: `gh pr view <PR_NUMBER> --json comments --jq '[.comments[] | select(.author.login == "claude")] | last | {createdAt, body}'`
-   - If exists and not hidden:
+   - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" latest <PR_NUMBER> --json`
+   - Parse JSON: `{createdAt, body}`
+   - If `body` is non-empty:
      - Extract issue count and summary
      - Show timestamp (how old is it?)
      - If older than the latest push (`gh pr view <PR_NUMBER> --json commits --jq '.commits | last | .commit.authoredDate'`), mark as **stale** → suggest `/pr-cycle` to refresh
