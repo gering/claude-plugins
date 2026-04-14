@@ -1,6 +1,15 @@
 ---
 name: work-create
-description: Create a new task file from current context and conversation
+description: |
+  Creates a new task markdown file from the current conversation context.
+  Extracts intent, acceptance criteria, affected files, and open questions;
+  generates a kebab-case task name; saves the file to the project's task
+  directory (typically `.claude/tasks/` or `tasks/`) for later resumption.
+
+  Use when: user wants to "create a task", "neuen task anlegen", "track
+  this work", "plan this", "capture what we're about to do", needs to
+  persist work intent before starting (especially in a separate worktree
+  via /work-start). Also "aufgabe anlegen" / "work-create".
 user_invocable: true
 ---
 

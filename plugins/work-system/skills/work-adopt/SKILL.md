@@ -1,6 +1,16 @@
 ---
 name: work-adopt
-description: Adopt an existing branch into the work system with a worktree and task file
+description: |
+  Adopts an existing feature branch into the work system. Creates a
+  worktree for the existing branch (instead of creating a new branch like
+  /work-start does), generates a matching task file from the branch's
+  commits and diff, and wires it into the task directory as if the work
+  had been tracked from the start.
+
+  Use when: user has a branch that was created manually (outside the work
+  system) and wants to retroactively track it, or says "adopt this
+  branch", "bring feature/xyz into the work system", "work-adopt",
+  "vorhandenen branch aufnehmen" / "branch adoptieren".
 user_invocable: true
 ---
 

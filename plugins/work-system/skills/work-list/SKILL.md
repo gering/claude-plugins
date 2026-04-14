@@ -1,6 +1,15 @@
 ---
 name: work-list
-description: Show overview of all tasks, worktrees, and their status
+description: |
+  Displays a consolidated overview of all tasks in the project: task
+  files, associated worktrees, branch state, and PR status (via `gh` if
+  available). Useful as a "what am I working on" dashboard across
+  multiple parallel tasks.
+
+  Use when: user wants to "list tasks", "show all tasks", "what's open",
+  "was läuft gerade", "welche tasks hab ich", "übersicht", needs to pick
+  between several in-flight tasks, or wants to spot stale worktrees that
+  should be closed.
 user_invocable: true
 ---
 

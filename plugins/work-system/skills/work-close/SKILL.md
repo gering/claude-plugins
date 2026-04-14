@@ -1,6 +1,15 @@
 ---
 name: work-close
-description: Clean up after a task is completed — remove worktree, branches, and task file
+description: |
+  Cleans up a completed task. Verifies the task's PR is merged (via `gh`
+  if available), removes the git worktree, deletes the local and remote
+  task branches, and archives or deletes the task markdown file. Refuses
+  to run silently if the PR isn't merged — asks for confirmation first.
+
+  Use when: user says "close this task", "cleanup", "aufgabe abschließen",
+  "task fertig", "worktree weg", PR has been merged and the task
+  infrastructure is no longer needed. Also invoked by /pr-merge post-merge
+  handoff when a `task/*` branch is detected.
 user_invocable: true
 ---
 

@@ -1,6 +1,15 @@
 ---
 name: work-continue
-description: Load context and continue working on the current task in a worktree
+description: |
+  Resumes work on the current task by loading its full context: reads the
+  task markdown file, shows recent commits on the branch, surfaces the
+  current progress, acceptance criteria, and open questions, and primes
+  the session to pick up exactly where work left off.
+
+  Use when: user is back in an existing worktree after a break and wants
+  to "continue", "resume the task", "pick up where I left off", "load
+  context", "wo war ich", "weitermachen", or when Claude needs to
+  re-orient itself in an active worktree before making changes.
 user_invocable: true
 ---
 
