@@ -6,7 +6,7 @@ PR review feedback loop for Claude Code. Commit, push, trigger the `@claude` Git
 
 | Skill | What it does |
 |---|---|
-| `/create` | Readiness checks (rebase, README, version, changelog, knowledge, tests, lint, build) → create PR → verify CI/review auto-trigger |
+| `/open` | Readiness checks (rebase, README, version, changelog, knowledge, tests, lint, build) → create PR → verify CI/review auto-trigger |
 | `/cycle` | Full loop: stage → commit → push → trigger `@claude review` → poll → present structured results |
 | `/check` | Read-only snapshot: CI status, human reviews, latest Claude feedback, merge-readiness verdict |
 | `/fix` | Walk through issues from the latest review as a numbered checklist and implement fixes interactively |
@@ -19,7 +19,7 @@ PR review feedback loop for Claude Code. Commit, push, trigger the `@claude` Git
   make changes
        │
        ▼
-  /create  ──►  PR opened, CI + review auto-triggered (or /cycle)
+  /open  ──►  PR opened, CI + review auto-triggered (or /cycle)
        │
        ▼
   /cycle  ──────►  review comes back with issues

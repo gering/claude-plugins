@@ -5,7 +5,7 @@ description: |
   base authoritatively from `gh pr view` (not the local default), shows
   what's new on base, asks for confirmation, executes with auto-stash
   support, aborts cleanly on conflicts, and warns before any
-  force-with-lease push. Also invoked internally by /create and
+  force-with-lease push. Also invoked internally by /open and
   /cycle.
 
   Use when: user wants to "rebase against main", "update branch with
@@ -23,7 +23,7 @@ user_invocable: true
 
 The base branch is a **property of the PR**, not a local assumption. A branch might be named `feature/foo` but PR'd against `develop`, not `main`. Using the wrong base for the rebase check gives false negatives (branch looks up-to-date but isn't) or false positives (suggesting a rebase against the wrong target).
 
-This skill is also used internally by `/create` (step 2) and `/cycle` (step 2) — run it standalone whenever you want to verify.
+This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) — run it standalone whenever you want to verify.
 
 ## Instructions
 
@@ -106,7 +106,7 @@ This skill is also used internally by `/create` (step 2) and `/cycle` (step 2) �
 
    Replayed N commits. Base moved forward by M commits.
    <if upstream existed> Next: `git push --force-with-lease` when ready.
-   <if used by /create or /cycle> Continuing with the parent skill.
+   <if used by /open or /cycle> Continuing with the parent skill.
    ```
 
 ## Edge Cases
@@ -125,4 +125,4 @@ This skill is also used internally by `/create` (step 2) and `/cycle` (step 2) �
 - This skill **never force-pushes without confirmation** — you stay in control
 - Conflicts → abort + suggest, never auto-resolve
 - Safe to run repeatedly: if no rebase is needed, it's a 2-command no-op
-- Designed to be called both standalone and from `/create` / `/cycle`
+- Designed to be called both standalone and from `/open` / `/cycle`

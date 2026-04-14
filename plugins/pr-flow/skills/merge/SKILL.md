@@ -29,7 +29,7 @@ user_invocable: true
 1. **Identify PR**:
    - `git branch --show-current` — if on `main`/`master`, stop: "You're on the default branch — nothing to merge."
    - `gh pr view --json number,title,url,state,isDraft,baseRefName,headRefName,mergeable,mergeStateStatus,mergeCommit`
-   - If no PR → stop, suggest `/create`
+   - If no PR → stop, suggest `/open`
    - If state ≠ `OPEN` → stop with state info
    - If `isDraft` → ask: "PR is draft. Mark as ready for review? [y/N]"
      - `y`: `gh pr ready <N>`, continue

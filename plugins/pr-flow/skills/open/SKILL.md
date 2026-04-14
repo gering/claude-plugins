@@ -1,5 +1,5 @@
 ---
-name: create
+name: open
 description: |
   Creates a new pull request with full readiness verification. Auto-runs
   tests, linter, and build. Checks for stale README, missing version bump,
@@ -46,7 +46,7 @@ user_invocable: true
    - Invoke the `/rebase` skill. Since no PR exists yet, it will fall back to upstream tracking or repo default to detect the base branch.
    - If `/rebase` rebased successfully → continue
    - If user declined the rebase → continue but remember to flag ⚠️ "Branch is N commits behind `<BASE_BRANCH>` (rebase declined)" in the readiness summary (step 4)
-   - If conflicts aborted the rebase → stop this skill; user resolves manually, then re-runs `/create`
+   - If conflicts aborted the rebase → stop this skill; user resolves manually, then re-runs `/open`
 
 3. **Readiness checks — collect a status list**:
    Run each check and collect results into a summary table. **Do NOT stop on failure** — present everything, let the user decide.
@@ -215,7 +215,7 @@ user_invocable: true
       bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" poll <PR_NUMBER> "<TRIGGER_ISO>"
       ```
       Use the **Bash tool** with `run_in_background: true`. When it completes, present the review results following the same format as `/cycle` step 10 (numbered issues, own assessment, recommendation).
-    - **If output is empty** → no auto-trigger detected. Inform the user and suggest `/cycle` to trigger manually. Do NOT trigger automatically here — `/create` is about creation; triggering is `/cycle`'s job.
+    - **If output is empty** → no auto-trigger detected. Inform the user and suggest `/cycle` to trigger manually. Do NOT trigger automatically here — `/open` is about creation; triggering is `/cycle`'s job.
 
 11. **Final summary**:
     ```
