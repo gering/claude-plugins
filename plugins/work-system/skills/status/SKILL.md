@@ -1,15 +1,15 @@
 ---
-name: work-check
+name: status
 description: |
   Read-only status snapshot of a task. Shows branch state (ahead/behind
   main, unpushed commits), associated PR (open/merged/closed, CI status,
   reviews if `gh` is available), and whether the work is ready for
-  `/work-close`. Does not modify anything.
+  `/close`. Does not modify anything.
 
   Use when: user wants to "check this task", "is this done", "status of
   the task", "was macht task X", "ist das gemerged", needs to know
   whether a task branch is still active or safe to clean up. Also
-  "work-check" / "task status".
+  "status" / "task status".
 user_invocable: true
 ---
 
@@ -66,7 +66,7 @@ user_invocable: true
    • Branch task/fix-calendar was merged and deleted
    • 3 commits mention "calendar bug"
 
-   Recommendation: Delete task file with /work-close
+   Recommendation: Delete task file with /close
    ```
 
    **Partial evidence (in progress)**:
@@ -87,7 +87,7 @@ user_invocable: true
 
    No PRs, branches, or commits found for this task.
 
-   Recommendation: Start with /work-start
+   Recommendation: Start with /kickoff
    ```
 
 5. **Offer actions**:

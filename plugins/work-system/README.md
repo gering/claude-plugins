@@ -5,12 +5,12 @@ Generic task and worktree workflow system for Claude Code. Manage tasks as markd
 ## Workflow
 
 ```
-/work-create  →  /work-start  →  /work-continue  →  /work-check  →  /work-close
+/define  →  /kickoff  →  /continue  →  /status  →  /close
     │                │                  │                  │               │
  Create task    Create worktree    Load context &    Check PR/branch   Clean up
  markdown file  & branch           resume work       status            everything
 
-              /work-adopt
+              /adopt
                   │
            Adopt existing branch
            into the work system
@@ -27,13 +27,13 @@ Generic task and worktree workflow system for Claude Code. Manage tasks as markd
 
 | Command | Description |
 |---------|-------------|
-| `/work-create` | Create a new task (markdown file with Goal/Context/Requirements) |
-| `/work-start` | Start a task in an isolated git worktree |
-| `/work-adopt` | Adopt an existing branch into the work system |
-| `/work-continue` | Resume work on current task, load context |
-| `/work-check` | Check task status (PRs, branches, commits) |
-| `/work-close` | Clean up after merge (worktree, branches, task file) |
-| `/work-list` | Overview of all tasks, worktrees, and status |
+| `/define` | Create a new task (markdown file with Goal/Context/Requirements) |
+| `/kickoff` | Start a task in an isolated git worktree |
+| `/adopt` | Adopt an existing branch into the work system |
+| `/continue` | Resume work on current task, load context |
+| `/status` | Check task status (PRs, branches, commits) |
+| `/close` | Clean up after merge (worktree, branches, task file) |
+| `/list` | Overview of all tasks, worktrees, and status |
 
 ## How It Works
 
@@ -90,13 +90,13 @@ Branches follow the pattern `task/<task-name>`:
 ### 1. Create a task
 
 ```
-> /work-create Add dark mode support
+> /define Add dark mode support
 ```
 
 ### 2. Start working
 
 ```
-> /work-start
+> /kickoff
 ```
 
 Creates a worktree, copies the task file, and shows how to open a new Claude session in it.
@@ -106,7 +106,7 @@ Creates a worktree, copies the task file, and shows how to open a new Claude ses
 ```
 cd .claude/worktrees/add-dark-mode
 claude
-> /work-continue
+> /continue
 ```
 
 Loads the task context, checks dependencies, and shows current progress.
@@ -114,21 +114,21 @@ Loads the task context, checks dependencies, and shows current progress.
 ### 4. Check status
 
 ```
-> /work-check add-dark-mode
+> /status add-dark-mode
 ```
 
 ### 5. Close after merge
 
 ```
-> /work-close
+> /close
 ```
 
 ## Adopting Existing Branches
 
-Already started work on a branch outside the work system? Use `/work-adopt` to bring it in:
+Already started work on a branch outside the work system? Use `/adopt` to bring it in:
 
 ```
-> /work-adopt feature/dark-mode
+> /adopt feature/dark-mode
 ```
 
 This will:
@@ -137,7 +137,7 @@ This will:
 3. Optionally rename the branch to `task/<name>` for consistency
 4. Create a worktree and set everything up
 
-After adoption, the standard workflow applies (`/work-continue`, `/work-check`, `/work-close`).
+After adoption, the standard workflow applies (`/continue`, `/status`, `/close`).
 
 ## Project-Specific Configuration
 

@@ -1,5 +1,5 @@
 ---
-name: work-close
+name: close
 description: |
   Cleans up a completed task. Verifies the task's PR is merged (via `gh`
   if available), removes the git worktree, deletes the local and remote
@@ -22,7 +22,7 @@ user_invocable: true
 1. **Identify the task**:
    - Run: `git branch --show-current`
    - If on a `task/*` branch, extract task name
-   - If on the main branch, run `/work-list` and ask which task to close
+   - If on the main branch, run `/list` and ask which task to close
 
 2. **Verify task is merged** (if `gh` is available):
    - Run: `gh pr list --state merged --head "task/<task-name>" --limit 1 --json number,title,mergedAt,headRefName`
@@ -46,7 +46,7 @@ user_invocable: true
 
 6. **Remove worktree** (if exists):
    - First check for untracked/modified files: `git -C <worktree-path> status --short`
-   - If the only difference is `TASK.md` (untracked, copied by work-start), use `--force` directly:
+   - If the only difference is `TASK.md` (untracked, copied by kickoff), use `--force` directly:
      `git worktree remove <worktree-path> --force`
    - Otherwise try: `git worktree remove <worktree-path>`
    - If fails (uncommitted changes beyond TASK.md):
@@ -84,7 +84,7 @@ user_invocable: true
     - Remote branch deleted (if applicable)
     - Task file removed
 
-    Next: Run `git pull` to sync, then /work-start for next task
+    Next: Run `git pull` to sync, then /kickoff for next task
     ```
 
 ## Safety

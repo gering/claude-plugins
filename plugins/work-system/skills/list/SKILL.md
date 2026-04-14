@@ -1,5 +1,5 @@
 ---
-name: work-list
+name: list
 description: |
   Displays a consolidated overview of all tasks in the project: task
   files, associated worktrees, branch state, and PR status (via `gh` if
@@ -78,10 +78,10 @@ user_invocable: true
 6. **Quick actions**:
    ```
    Quick Actions:
-   • /work-start        — Start a new task
-   • /work-create       — Create a new task
-   • /work-check <name> — Check specific task status
-   • /work-close        — Clean up completed task
+   • /kickoff        — Start a new task
+   • /define       — Create a new task
+   • /status <name> — Check specific task status
+   • /close        — Clean up completed task
    ```
 
 ## Output Format

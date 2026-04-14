@@ -1,15 +1,15 @@
 ---
-name: work-adopt
+name: adopt
 description: |
   Adopts an existing feature branch into the work system. Creates a
   worktree for the existing branch (instead of creating a new branch like
-  /work-start does), generates a matching task file from the branch's
+  /kickoff does), generates a matching task file from the branch's
   commits and diff, and wires it into the task directory as if the work
   had been tracked from the start.
 
   Use when: user has a branch that was created manually (outside the work
   system) and wants to retroactively track it, or says "adopt this
-  branch", "bring feature/xyz into the work system", "work-adopt",
+  branch", "bring feature/xyz into the work system", "adopt",
   "vorhandenen branch aufnehmen" / "branch adoptieren".
 user_invocable: true
 ---
@@ -115,7 +115,7 @@ user_invocable: true
     Next steps:
     1. Open terminal in the worktree directory
     2. Run: claude -n "<task-name>"
-    3. Run: /work-continue
+    3. Run: /continue
 
     Or use this one-liner:
     cd .claude/worktrees/<task-name> && claude -n "<task-name>"
@@ -125,4 +125,4 @@ user_invocable: true
 
 - The original branch is preserved — it's either renamed or checked out as-is
 - The task file is a best-effort draft from commit history — the user should review it
-- After adoption, the standard workflow applies: `/work-continue`, `/work-check`, `/work-close`
+- After adoption, the standard workflow applies: `/continue`, `/status`, `/close`

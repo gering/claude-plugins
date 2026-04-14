@@ -1,5 +1,5 @@
 ---
-name: work-create
+name: define
 description: |
   Creates a new task markdown file from the current conversation context.
   Extracts intent, acceptance criteria, affected files, and open questions;
@@ -9,7 +9,7 @@ description: |
   Use when: user wants to "create a task", "neuen task anlegen", "track
   this work", "plan this", "capture what we're about to do", needs to
   persist work intent before starting (especially in a separate worktree
-  via /work-start). Also "aufgabe anlegen" / "work-create".
+  via /kickoff). Also "aufgabe anlegen" / "define".
 user_invocable: true
 ---
 
@@ -84,14 +84,14 @@ user_invocable: true
    ✅ Task created: tasks/<task-name>.md
 
    Next steps:
-   • Start immediately: /work-start
-   • View all tasks: /work-list
-   • Check status later: /work-check <task-name>
+   • Start immediately: /kickoff
+   • View all tasks: /list
+   • Check status later: /status <task-name>
    ```
 
 8. **Optional — Start immediately**:
    - Ask: "Would you like to start working on this task now?"
-   - If yes, proceed with `/work-start` workflow
+   - If yes, proceed with `/kickoff` workflow
 
 ## Tips
 

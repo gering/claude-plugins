@@ -53,5 +53,5 @@ Each skill runs a preflight check and stops with a clear message if requirements
 
 ## Relationship to other plugins
 
-- **`work-system`**: finish a task with `/work-close`, then `/pr-cycle` for the review loop before merging
+- **`work-system`**: finish a task with `/close`, then `/pr-cycle` for the review loop before merging
 - **`pr-review-toolkit`** (external, Anthropic): local analysis agents — complementary, not required

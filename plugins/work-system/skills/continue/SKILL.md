@@ -1,5 +1,5 @@
 ---
-name: work-continue
+name: continue
 description: |
   Resumes work on the current task by loading its full context: reads the
   task markdown file, shows recent commits on the branch, surfaces the
@@ -22,7 +22,7 @@ user_invocable: true
 1. **Verify we're in a worktree**:
    - Run: `git worktree list`
    - Run: `git branch --show-current`
-   - If on the main branch (not a `task/*` branch), suggest using `/work-start` instead
+   - If on the main branch (not a `task/*` branch), suggest using `/kickoff` instead
    - Extract task name from branch (e.g., `task/fix-calendar` → `fix-calendar`)
 
 2. **Check for TASK.md**:

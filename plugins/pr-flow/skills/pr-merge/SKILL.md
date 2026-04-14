@@ -111,7 +111,7 @@ user_invocable: true
 11. **Post-merge cleanup plan**:
     - Ask: "Delete remote branch after merge? [Y/n]" — default yes unless branch is protected
     - Ask: "Checkout `<BASE>` + pull after merge? [Y/n]" — default yes
-    - Detect `task/*` branch pattern — if matches, offer: "This looks like a `work-system` task. Run `/work-close` after merge to clean up worktree + task file? [Y/n]"
+    - Detect `task/*` branch pattern — if matches, offer: "This looks like a `work-system` task. Run `/close` after merge to clean up worktree + task file? [Y/n]"
     - Detect git worktree: `git worktree list` — if current branch is in a worktree AND not a task/*, offer to remove it
 
 12. **Present final plan**:
@@ -133,7 +133,7 @@ user_invocable: true
     Method:          rebase+merge  (18/20 last PRs used rebase)
     Delete remote:   yes
     Checkout base:   yes, then pull
-    Task cleanup:    /work-close will be offered (branch matches task/*)
+    Task cleanup:    /close will be offered (branch matches task/*)
 
     ⚠️  1 unresolved blocking review issue. Merge anyway?
 
@@ -158,7 +158,7 @@ user_invocable: true
         - Report: "Moved to `<prefix>/<HEAD_BRANCH>` (backup convention detected)"
       - If no backup convention detected → `git branch -d <HEAD_BRANCH>`
         - If `-d` refuses (branch not fully merged, rare after successful PR merge) → report and ask user before `-D`
-    - If task/*: offer `/work-close` (do not auto-run — hand over). Note that `/work-close` will take precedence over the backup handling above.
+    - If task/*: offer `/close` (do not auto-run — hand over). Note that `/close` will take precedence over the backup handling above.
     - If worktree: offer `git worktree remove <path>` (ask first, do not auto-run)
 
 15. **Final summary**:
@@ -168,7 +168,7 @@ user_invocable: true
     ✅ Checked out `main`, pulled latest
 
     Next:
-    - Run `/work-close` to clean up the task worktree  (task/* branch detected)
+    - Run `/close` to clean up the task worktree  (task/* branch detected)
     ```
 
 ## Edge Cases
@@ -189,5 +189,5 @@ user_invocable: true
 - This skill **never** force-merges via `--admin`. If something is red, fix the root cause.
 - Claude blocking issues are **warnings with explicit confirmation**, not hard blocks — the user may have discussed and accepted them already.
 - Merge-method detection uses progressively weaker signals: repo-allowed > historical pattern > user choice. No stored convention — each merge verifies from scratch.
-- Post-merge cleanup hands off to other skills (`/work-close`) rather than duplicating their logic.
+- Post-merge cleanup hands off to other skills (`/close`) rather than duplicating their logic.
 - Safe to re-run: step 1 detects already-merged PRs via `state` field.

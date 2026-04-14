@@ -1,5 +1,5 @@
 ---
-name: work-start
+name: kickoff
 description: |
   Starts work on a task by creating an isolated git worktree and feature
   branch. Picks a task file (interactively or via argument), creates
@@ -10,7 +10,7 @@ description: |
   Use when: user wants to "start working on X", "begin this task",
   "worktree anlegen", "let's actually do this", has a task file ready and
   wants an isolated environment to work in without disturbing main.
-  Also "mit task X starten" / "work-start".
+  Also "mit task X starten" / "kickoff".
 user_invocable: true
 ---
 
@@ -22,11 +22,11 @@ user_invocable: true
 
 1. **Check current location**:
    - Run: `git worktree list`
-   - If this is already a worktree (not first entry), stop and suggest `/work-continue` instead
+   - If this is already a worktree (not first entry), stop and suggest `/continue` instead
 
 2. **Show available tasks**:
    - Run: `ls -1 tasks/ 2>/dev/null || echo "No tasks found"`
-   - If no tasks exist, suggest creating one with `/work-create`
+   - If no tasks exist, suggest creating one with `/define`
    - List all tasks with their first line (title)
    - Ask user which task to work on
 
@@ -76,7 +76,7 @@ user_invocable: true
     Next steps:
     1. Open terminal in the worktree directory
     2. Run: claude -n "<task-name>"
-    3. Run: /work-continue
+    3. Run: /continue
 
     Or use this one-liner:
     cd .claude/worktrees/<task-name> && claude -n "<task-name>"
@@ -87,4 +87,4 @@ user_invocable: true
 - Each worktree is an isolated workspace
 - Multiple Claude instances can work on different tasks simultaneously
 - The main repo stays clean on the main branch
-- Use `/work-close` after PR is merged to clean up
+- Use `/close` after PR is merged to clean up

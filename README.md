@@ -16,7 +16,7 @@ Lightweight, native knowledge management for Claude Code projects. Three layers 
 
 Generic task and worktree workflow system. Manage tasks as markdown files, work in isolated git worktrees, and track progress through the full lifecycle.
 
-**Commands:** `/work-create`, `/work-start`, `/work-continue`, `/work-check`, `/work-close`, `/work-list`
+**Commands:** `/define`, `/kickoff`, `/continue`, `/status`, `/close`, `/list`
 
 [Documentation →](plugins/work-system/)
 
