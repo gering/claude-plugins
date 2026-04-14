@@ -1,6 +1,17 @@
 ---
 name: pr-rebase
-description: Check if the current branch needs a rebase against its PR base branch — ask the user, execute cleanly, and abort on conflicts
+description: |
+  Standalone rebase check against the PR's base branch. Determines the
+  base authoritatively from `gh pr view` (not the local default), shows
+  what's new on base, asks for confirmation, executes with auto-stash
+  support, aborts cleanly on conflicts, and warns before any
+  force-with-lease push. Also invoked internally by /pr-create and
+  /pr-cycle.
+
+  Use when: user wants to "rebase against main", "update branch with
+  latest", "am I behind", "check if rebase needed", "sync with base",
+  has a long-running branch that might need catching up. Also when user
+  says "rebasen" / "auf main aktualisieren" / "ist der branch aktuell?".
 user_invocable: true
 ---
 

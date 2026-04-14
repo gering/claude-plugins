@@ -1,6 +1,17 @@
 ---
 name: pr-fix
-description: Work through issues from the latest Claude review — parse, prioritize, and guide fixes interactively
+description: |
+  Interactive walkthrough of issues from the latest Claude review. Parses
+  the review body into a numbered checklist (with severity labels:
+  blocking/suggestion/nit), lets user pick issues to address by number,
+  range, "all", or severity. Gives own assessment per issue before
+  implementing, applies minimal targeted edits, tracks skipped items.
+
+  Use when: user wants to "fix the review", "address claude's feedback",
+  "work through the issues", "implement the reviewer suggestions", "tackle
+  the review points", has a completed review and wants to resolve findings.
+  Also when user says "fix punkt 1 und 3" / "issues abarbeiten" / "review-
+  findings umsetzen".
 user_invocable: true
 ---
 

@@ -1,6 +1,16 @@
 ---
 name: pr-create
-description: Create a PR after verifying readiness — README, knowledge docs, tests, linter, build — then detect whether CI and @claude review auto-trigger
+description: |
+  Creates a new pull request with full readiness verification. Auto-runs
+  tests, linter, and build. Checks for stale README, missing version bump,
+  outdated changelog, and missing knowledge documentation. Detects rebase
+  needs via /pr-rebase. After creation, verifies CI + @claude review
+  auto-trigger and polls in the background for the first review result.
+
+  Use when: user wants to "create a PR", "open a pull request", "ship this
+  branch", "ready for review", has a feature branch ready to share, or
+  wants readiness verification before opening a PR. Also when user says
+  "mach nen PR auf" / "neuen PR erstellen".
 user_invocable: true
 ---
 

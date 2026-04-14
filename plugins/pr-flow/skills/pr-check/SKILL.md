@@ -1,6 +1,16 @@
 ---
 name: pr-check
-description: Read-only status snapshot of the current PR — CI checks, reviews, mergeable state, and latest Claude feedback
+description: |
+  Read-only status snapshot of the current PR. Shows CI check results
+  (passed/failed/pending), human review state (approvals, changes
+  requested), latest Claude review summary with staleness detection,
+  uncommitted/unpushed local drift, and an overall merge-readiness
+  verdict with recommended next step.
+
+  Use when: user wants to "check PR status", "what's the state", "is it
+  ready to merge", "show CI status", "quick health check", "how's the
+  PR looking", needs status without mutating anything. Also when user
+  says "status?" / "wie sieht's aus?" / "was macht der PR?".
 user_invocable: true
 ---
 
