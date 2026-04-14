@@ -20,7 +20,7 @@ This is a **Claude Code plugin marketplace** (monorepo) containing plugins that 
 
 - **knowledge-system** (v1.1.0) — Knowledge management with three layers: Rules, Knowledge, Memory. Skills: `/init`, `/query`, `/curate`, `/migrate`
 - **work-system** (v1.1.6) — Task and worktree workflow. Skills: `/work-create`, `/work-start`, `/work-adopt`, `/work-continue`, `/work-check`, `/work-close`, `/work-list`
-- **pr-flow** (v1.0.0) — PR review feedback loop. Skills: `/pr-create`, `/pr-cycle`, `/pr-check`, `/pr-fix`, `/pr-rebase`, `/pr-merge`
+- **pr-flow** (v1.0.1) — PR review feedback loop. Skills: `/pr-create`, `/pr-cycle`, `/pr-check`, `/pr-fix`, `/pr-rebase`, `/pr-merge`
 
 ## Plugin Anatomy
 

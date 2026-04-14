@@ -12,6 +12,14 @@ user_invocable: true
 
 - `$ARGUMENTS` - Optional: custom PR title. If omitted, one is generated from commits.
 
+## Execution Principles
+
+**No multiple-choice menus.** This skill must NEVER present the user with alternative options like "(a) do X, (b) do Y, (c) do Z". Either execute the right thing automatically, or stop with a single hard blocker question.
+
+**Auto-resolve warnings where feasible.** If a readiness check surfaces a warning with a clear action (add knowledge entry, auto-fixable linter errors, re-run tests for confirmation), do it automatically during the check phase — do not surface it as a question.
+
+**If everything is green, just proceed.** After all checks and auto-resolutions: if there are zero ❌ blockers and zero ⚠️ warnings, create the PR automatically without asking. Only ask for confirmation when at least one ⚠️ warning remains (something needed judgment). ❌ blockers always stop the skill — never proceed with blockers.
+
 ## Instructions
 
 0. **Preflight (tooling)**:
@@ -86,11 +94,14 @@ user_invocable: true
    - If none detected → ➖ "N/A (no knowledge/convention system detected)"
    - If detected:
      - Check if this branch introduces **new patterns, new conventions, or generalizable fixes** (heuristic: commit messages like "add <new pattern>", "refactor to <new approach>", "fix <recurring bug>", or many similar files changed the same way)
-     - If likely AND the knowledge location was NOT touched on this branch → ⚠️ "Consider documenting this in `<detected-location>`"
-       - If project uses `knowledge-system` specifically, suggest: "run `/curate`"
-       - Otherwise suggest the generic path: "add an entry to `<file>`"
      - If knowledge location WAS touched → ✅ "Conventions documented"
      - If nothing generalizable → ✅ "No new patterns to capture"
+     - If likely AND the knowledge location was NOT touched:
+       - **Auto-update the relevant file** — read the relevant knowledge file, draft the entry based on the branch changes, write the update
+       - If project uses `knowledge-system` specifically → invoke `/curate` automatically with the detected pattern as input
+       - Otherwise → directly edit the most relevant file (closest topical match, or the generic `AGENTS.md`/`CONVENTIONS.md` as fallback)
+       - Result: ✅ "Knowledge updated: `<file>` (added: <short-description>)"
+       - Only fall back to ⚠️ if the update genuinely requires judgment beyond mechanical doc-addition (e.g. the pattern conflicts with existing documented rules)
 
    ### 3g. Tests
    - Detect test command (check in order):
@@ -99,12 +110,10 @@ user_invocable: true
      - `Cargo.toml` → `cargo test`
      - `pyproject.toml` / `pytest.ini` → `pytest`
      - `go.mod` → `go test ./...`
-   - If found: ask user "Run tests? (`<command>`) — [y/N]"
-     - If yes: run it, capture pass/fail
-       - Pass → ✅
-       - Fail → ❌ (show failing tests, do not yet abort)
-       - Timeout after 5 minutes → ⚠️ "Tests still running, skipped"
-     - If no: ➖ "Skipped by user"
+   - If found: **run it automatically** (do not ask). Inform user "Running tests…" so they see the action.
+     - Pass → ✅ "<N> tests passed (<duration>)"
+     - Fail → ❌ (show failing tests — this is a blocker in step 4)
+     - Timeout after 5 minutes → ⚠️ "Tests still running, skipped"
    - If no test command detected → ➖ "N/A (no test command found)"
 
    ### 3h. Linter
@@ -114,8 +123,8 @@ user_invocable: true
      - `Cargo.toml` → `cargo clippy`
      - `ruff.toml` / `pyproject.toml` with ruff → `ruff check`
      - `go.mod` → `go vet ./...`
-   - Same ask-first pattern as tests
-   - Same result categories: ✅ / ❌ / ➖
+   - **Run automatically** (do not ask). If the linter supports auto-fix (`--fix`, `--write`), run that variant first, then re-run to verify clean state.
+   - Result categories: ✅ / ❌ / ➖
 
    ### 3i. Build
    - Detect build command:
@@ -124,35 +133,18 @@ user_invocable: true
      - `Cargo.toml` → `cargo build`
      - `go.mod` → `go build ./...`
    - For plugin/markdown-only projects → ➖ "N/A (no build step)"
-   - Same ask-first pattern
+   - **Run automatically** (do not ask). Result: ✅ / ❌ / ➖
 
-4. **Present readiness summary**:
-   ```
-   Readiness for PR creation:
+4. **Decide based on check results**:
+   - Present the concise status table (all ✅/⚠️/❌/➖ items from step 3) for transparency — this is informational output, not a question.
+   - **All green (zero ❌, zero ⚠️)** → proceed directly to step 6. No confirmation. Just announce: "All green — creating PR." and continue.
+   - **Any ❌ blocker** → stop. Print a single line naming the blocker (file/line/reason). Do not offer a menu. User fixes and re-runs.
+   - **Only ⚠️ warnings remain (no blockers)** → present the table plus title+body preview, then ask **exactly once**: "Create PR? [Y/n]"
+     - `y` (default): continue to step 6
+     - `n`: stop, leave state as-is
+     - No other options. No "fix" branch. No alternatives.
 
-   ✅ Branch up-to-date with <BASE_BRANCH>
-   ✅ No uncommitted changes
-   ⚠️  README may be stale (src/ changed, README.md untouched)
-   ⚠️  Version not bumped (detected feat: suggest minor bump 1.2.0 → 1.3.0)
-   ⚠️  CHANGELOG.md not updated (user-facing changes)
-   ✅ Knowledge system: N/A
-   ✅ Tests passed (42 tests, 1.2s)
-   ❌ Linter: 3 errors in src/foo.ts
-   ➖ Build: N/A
-
-   Blocking issues: linter errors
-   Warnings: README freshness, version bump, changelog entry
-
-   Proceed with PR creation?
-   - [y] yes, create PR anyway
-   - [n] no, fix issues first
-   - [fix] help me fix the blockers/warnings before continuing
-   ```
-
-5. **Handle user decision**:
-   - `y`: continue to step 6
-   - `n`: stop, leave state as-is
-   - `fix`: address the failing checks interactively (similar to `/pr-fix` flow but for tooling output), then loop back to step 3
+5. *(merged into step 4)*
 
 6. **Ensure branch is pushed**:
    - Run: `git push -u origin HEAD` (or `git push` if upstream exists)
@@ -182,7 +174,7 @@ user_invocable: true
 
      🤖 Generated with [Claude Code](https://claude.com/claude-code)
      ```
-   - Show the generated title + body to the user for confirmation/editing before submitting
+   - **Do not ask for confirmation here.** Step 4 already handled the decision (either all-green auto-proceed, or single "[Y/n]" on warnings). Generate the title/body directly per the rules above and continue to step 8.
 
 8. **Create the PR**:
    - Run via HEREDOC:
