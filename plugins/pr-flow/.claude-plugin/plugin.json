@@ -1,0 +1,11 @@
+{
+  "name": "pr-flow",
+  "description": "PR review feedback loop for Claude Code. Create PRs with readiness checks, commit + push + trigger @claude review, inspect status, and work through review issues interactively.",
+  "version": "1.0.0",
+  "author": {
+    "name": "gering"
+  },
+  "repository": "https://github.com/gering/claude-plugins",
+  "license": "MIT",
+  "keywords": ["pr", "pull-request", "review", "github", "workflow", "claude-review"]
+}

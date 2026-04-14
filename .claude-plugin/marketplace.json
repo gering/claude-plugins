@@ -19,6 +19,12 @@
       "source": "./plugins/work-system",
       "description": "Generic task and worktree workflow system for Claude Code. Manage tasks as markdown files, work in isolated git worktrees, and track progress through the full lifecycle.",
       "version": "1.1.6"
+    },
+    {
+      "name": "pr-flow",
+      "source": "./plugins/pr-flow",
+      "description": "PR review feedback loop for Claude Code. Create PRs with readiness checks, commit + push + trigger @claude review, inspect status, and work through review issues interactively.",
+      "version": "1.0.0"
     }
   ]
 }
