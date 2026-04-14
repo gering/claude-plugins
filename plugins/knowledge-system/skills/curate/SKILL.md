@@ -1,6 +1,17 @@
 ---
 name: curate
-description: Store new learnings in project knowledge or rules
+description: |
+  Stores new learnings in the project's knowledge layer. Captures recurring
+  patterns, surprising fixes, architectural decisions, and generalizable
+  lessons discovered while coding. Writes to `.claude/knowledge/` (topical
+  markdown files) for retrievable documentation or `.claude/rules/`
+  (always-active directives) depending on scope.
+
+  Use when: user says "remember this", "save this learning", "curate",
+  "add to knowledge", "capture this pattern", "document this decision",
+  after solving a non-trivial bug or making a judgment call worth
+  preserving. Also "merk dir das" / "in die knowledge aufnehmen" /
+  "als rule speichern".
 user_invocable: true
 ---
 
