@@ -48,30 +48,18 @@ user_invocable: true
      - Reviewer's proposed fix (if given)
 
 4. **Present the checklist**:
-   ```
-   Found <N> issues in the latest Claude review (PR #<N>):
+   - Render findings as a **markdown table** following the shared format spec at `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md`. Required columns: `# | Severity | Location | Finding | My assessment`. No prose cards, no per-finding headings.
+   - Include your own assessment per row (this replaces the separate "Own assessment first" step) — agree/partial/disagree with ≤80 chars reasoning.
+   - After the table, append a single prompt line:
+     ```
+     Which issues do you want to address? (e.g. "1,3", "1-3", "all", "blocking", "skip <N>")
+     ```
 
-   #1  [blocking]   src/foo.ts:42
-       "Empty catch block swallows the error"
-       Fix: log the error or rethrow
-
-   #2  [suggestion] src/bar.ts:17
-       "Magic number 86400 — extract to constant"
-
-   #3  [nit]        README.md:5
-       "Typo: 'recieve' → 'receive'"
-
-   Which issues do you want to address?
-   - Numbers (e.g. "1,3" or "1-3")
-   - "all" for everything
-   - "blocking" for just blocking issues
-   - "skip <N>" to mark as won't-fix (will be noted in next review)
-   ```
-
-5. **Own assessment first** (before implementing):
-   - For each selected issue, briefly state your take: agree / partially agree / disagree and why
-   - If you disagree with a blocking issue, flag it — don't silently implement something you think is wrong
-   - If the user wants to override your assessment, follow their lead
+5. **Honor your table assessment when implementing**:
+   - Your assessments are already in the step-4 table — act on them consistently:
+     - If you marked `Disagree` and user insists on fixing → flag the conflict once, then follow user's lead
+     - If you marked `Agree` → implement the proposed fix
+     - If `Partial agree` → clarify what you'll actually do before editing
 
 6. **Implement fixes one by one**:
    - For each selected issue:

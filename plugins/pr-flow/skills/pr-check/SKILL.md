@@ -61,30 +61,30 @@ user_invocable: true
    - If any, warn: "Local commits not yet pushed"
 
 7. **Present structured summary**:
-   ```
-   PR #<N>: <title>
-   <URL>
+   - **Top section** — status overview in this fixed layout:
+     ```
+     PR #<N>: <title>
+     <URL>
 
-   Branch: <head> → <base>  |  State: <open/merged/closed>  |  Draft: <yes/no>
+     Branch: <head> → <base>  |  State: <open/merged/closed>  |  Draft: <yes/no>
 
-   ── CI ──
-   ✅ 5 passed  ❌ 1 failed  ⏳ 2 running
-   Failed: <check-name> — <reason if available>
+     ── CI ──
+     ✅ 5 passed  ❌ 1 failed  ⏳ 2 running
+     Failed: <check-name> — <reason if available>
 
-   ── Reviews ──
-   Humans: 1 approved, 0 changes requested
-   Claude: last review 2h ago, 3 open issues (stale — new push since)
+     ── Reviews ──
+     Humans: 1 approved, 0 changes requested
+     Claude: last review 2h ago (stale — new push since)
 
-   ── Local ──
-   ⚠️ 2 uncommitted files
-   ⚠️ 1 unpushed commit
+     ── Local ──
+     ⚠️ 2 uncommitted files
+     ⚠️ 1 unpushed commit
+     ```
+   - **Claude review section** — if a Claude review exists, render its findings following the shared format spec at `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md`. Required: header + status + **markdown findings table**. No prose cards, no per-finding headings. See forbidden patterns in the spec.
+   - If no Claude review: skip the findings table, just note "No Claude review yet."
 
-   ── Verdict ──
-   ❌ Not ready: fix failing CI, push local changes, re-trigger review
-   ```
-
-8. **Recommendation**:
-   - If all green + approved + no local drift: "Ready to merge — `gh pr merge`"
+8. **Recommendation** — exactly one line, picked per the rules in `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md` (Recommendation section). Adapt to pr-check specific context:
+   - If all green + approved + no local drift: "Ready to merge — run `/pr-merge`"
    - If stale Claude review or unpushed work: "Run `/pr-cycle` to refresh"
    - If open issues from last review: "Run `/pr-fix` to work through them"
    - If CI failing: list the failures and suggest fixing before re-triggering

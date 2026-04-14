@@ -102,25 +102,10 @@ user_invocable: true
 
 10. **Present review results** (when background Bash task completes):
     - Read the output of the background task (the raw review comment body)
-    - Check CI status: `gh pr checks <PR_NUMBER>`
-      - If any checks failed: include them prominently at the top of the summary with the check name and failure reason
-      - If checks are still running: note this
-      - If all checks passed: briefly confirm
-    - Parse and present a COMPLETE structured summary so the user never needs to open the browser:
-      - Number each issue sequentially (e.g. #1, #2, #3) so the user can reference them easily (e.g. "fix #1 and #3")
-      - List EVERY issue raised, grouped by file, with:
-        - File path and line number(s)
-        - What the reviewer flagged (quote key phrases)
-        - Severity (blocking / suggestion / nit)
-      - Previously raised issues and their status (fixed/remaining)
-      - New issues found in this cycle
-      - Overall verdict: are there blocking issues?
-    - Give your own assessment of each point (agree/disagree, severity, whether it's worth fixing)
-    - End with a recommendation:
-      - If blocking issues: "Run `/pr-fix` to work through them, then `/pr-cycle` again"
-      - If no blocking issues: "Ready to merge? Run `gh pr merge`"
-    - **Do NOT immediately start fixing anything** — discuss with the user first
-    - Wait for the user to decide which points to address
+    - Check CI status: `gh pr checks <PR_NUMBER>` — fold the result into the status line
+    - **Render the output following the shared format spec** at `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md`. Read that file before presenting. Required sections: header, status line, findings **markdown table**, optional previously-raised section, single-line recommendation.
+    - **Do NOT deviate from the table format** — no prose cards, no per-finding headings, no nested bullets. See the "Forbidden formatting patterns" section of the spec.
+    - **Do NOT immediately start fixing anything** — wait for the user to indicate which items to address.
 
 ## Edge Cases
 
