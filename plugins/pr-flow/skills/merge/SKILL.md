@@ -36,8 +36,8 @@ user_invocable: true
      - `n`: stop
    - Store `PR_NUMBER`, `BASE_BRANCH`, `HEAD_BRANCH`.
 
-2. **Rebase check** — delegate to `/rebase`:
-   - Run `/rebase`. It determines the base from the PR itself and handles rebase + conflict abort cleanly.
+2. **Rebase check** — delegate to `/rebase --no-poll`:
+   - Run `/rebase` **with the `--no-poll` flag** (this skill runs in a merge-readiness context where polling would delay the merge — the review, if any, should already have been handled by a prior `/cycle`). It determines the base from the PR itself and handles rebase + conflict abort cleanly.
    - If a rebase happened: the branch needs to be pushed (with force-with-lease). `/rebase` will have handled the force-push confirmation.
    - If user declined a needed rebase → stop this skill: "Merge requires up-to-date branch. Re-run `/merge` after resolving."
 

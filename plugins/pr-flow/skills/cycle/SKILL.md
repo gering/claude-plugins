@@ -36,8 +36,8 @@ user_invocable: true
    - If no PR exists, inform user and suggest: `gh pr create`
    - Store `PR_NUMBER`, `PR_URL`, and `BASE_BRANCH` (from baseRefName) for later use
 
-2. **Check if rebase is needed** — delegate to `/rebase`:
-   - Invoke the `/rebase` skill. It will:
+2. **Check if rebase is needed** — delegate to `/rebase --no-poll`:
+   - Invoke the `/rebase` skill **with the `--no-poll` flag** so it does not poll for reviews itself (this skill handles polling in step 8). It will:
      - Determine the PR's base branch (authoritative source: `gh pr view`)
      - Detect divergence, ask the user for confirmation, execute or skip
      - Abort cleanly on conflicts

@@ -42,8 +42,8 @@ user_invocable: true
    - If a PR already exists, stop: "PR #<N> already exists: <URL>. Use `/cycle` to push updates."
    - Detect base branch: `git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||'` (fallback: ask user or default to `main`)
 
-2. **Check if rebase is needed** — delegate to `/rebase`:
-   - Invoke the `/rebase` skill. Since no PR exists yet, it will fall back to upstream tracking or repo default to detect the base branch.
+2. **Check if rebase is needed** — delegate to `/rebase --no-poll`:
+   - Invoke the `/rebase` skill **with the `--no-poll` flag** (this skill handles post-creation review polling itself in step 10). Since no PR exists yet, `/rebase` falls back to upstream tracking or repo default to detect the base branch.
    - If `/rebase` rebased successfully → continue
    - If user declined the rebase → continue but remember to flag ⚠️ "Branch is N commits behind `<BASE_BRANCH>` (rebase declined)" in the readiness summary (step 4)
    - If conflicts aborted the rebase → stop this skill; user resolves manually, then re-runs `/open`

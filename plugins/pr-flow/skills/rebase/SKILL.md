@@ -17,7 +17,11 @@ user_invocable: true
 
 # PR Rebase Check
 
-> Detect whether the current branch is behind its target/base branch. If yes, show what's new on base, ask for confirmation, and rebase. Abort cleanly on conflicts.
+> Detect whether the current branch is behind its target/base branch. If yes, show what's new on base, ask for confirmation, and rebase. Abort cleanly on conflicts. After a successful force-push (standalone use only), wait for an auto-triggered Claude review and present the result.
+
+## Arguments
+
+- `--no-poll` — Skip the post-push review polling step. Set automatically when this skill is invoked from `/cycle` or `/open` (the parent does its own polling).
 
 ## Why this skill exists
 
@@ -98,16 +102,39 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
    - If the branch has an upstream: warn that a force-push will be needed
      - `git push --force-with-lease` (safer than `--force`)
      - Ask user for confirmation before pushing. **Never force-push without explicit approval.**
-   - If no upstream yet: no push needed, branch is local only
+     - Track whether the push actually happened (`FORCE_PUSHED = true/false`)
+   - If no upstream yet: no push needed, branch is local only (`FORCE_PUSHED = false`)
 
-9. **Final summary**:
-   ```
-   ✅ Rebased `<CURRENT_BRANCH>` onto `<BASE_BRANCH>`
+9. **Wait for auto-triggered review** (standalone only):
+   - **Skip entirely** if any of these are true:
+     - `--no-poll` argument was passed (parent skill /cycle or /open will poll)
+     - `FORCE_PUSHED` is false (no push → no auto-trigger possible)
+     - No PR number known from step 2 (no PR → nothing to review)
+   - Otherwise:
+     - Store `TRIGGER_ISO = $(date -u +%Y-%m-%dT%H:%M:%SZ)` immediately after the force-push
+     - Wait ~15 seconds (auto-trigger workflows fire within 10-20s)
+     - Check for an auto-triggered review:
+       ```
+       bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" latest-after <PR_NUMBER> "<TRIGGER_ISO>"
+       ```
+     - If output is non-empty → a review has started. Launch background polling:
+       ```
+       bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" poll <PR_NUMBER> "<TRIGGER_ISO>"
+       ```
+       Use the **Bash tool** with `run_in_background: true`. When it completes, render the review following `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md`.
+     - If output is empty → no auto-trigger detected. Inform user they can run `/cycle` to trigger a review manually. Do NOT trigger automatically — `/rebase` is a rebase tool, not a review trigger.
 
-   Replayed N commits. Base moved forward by M commits.
-   <if upstream existed> Next: `git push --force-with-lease` when ready.
-   <if used by /open or /cycle> Continuing with the parent skill.
-   ```
+10. **Final summary**:
+    ```
+    ✅ Rebased `<CURRENT_BRANCH>` onto `<BASE_BRANCH>`
+
+    Replayed N commits. Base moved forward by M commits.
+    <if upstream existed and pushed>    Force-pushed to origin.
+    <if upstream existed but not pushed> Next: `git push --force-with-lease` when ready.
+    <if auto-trigger detected>          Review polling in background — results will be presented when complete.
+    <if pushed but no auto-trigger>     No auto-triggered review — run `/cycle` to trigger one.
+    <if used by /open or /cycle>        Continuing with the parent skill.
+    ```
 
 ## Edge Cases
 
