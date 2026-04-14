@@ -1,5 +1,5 @@
 ---
-name: knowledge-migrate
+name: migrate
 description: |
   Migrates a project's legacy ByteRover-based knowledge into the native
   `knowledge-system` layout. Reads existing ByteRover entries, reclassifies

@@ -1,5 +1,5 @@
 ---
-name: knowledge-init
+name: init
 description: |
   Scaffolds the knowledge-system layout in a project: creates
   `.claude/knowledge/` and `.claude/rules/` directories, initial index
@@ -8,8 +8,8 @@ description: |
 
   Use when: user wants to "set up knowledge", "initialize knowledge
   system", "bootstrap .claude/", "start documenting conventions", during
-  new project adoption, or says "knowledge-init" / "knowledge-system
-  aufsetzen" / "knowledge anlegen".
+  new project adoption, or says "init" / "knowledge-system aufsetzen" /
+  "knowledge anlegen".
 user_invocable: true
 ---
 
