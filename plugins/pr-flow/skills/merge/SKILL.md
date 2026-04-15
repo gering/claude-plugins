@@ -20,6 +20,14 @@ user_invocable: true
 
 > Exhaustive preflight (rebase, CI, reviews, open Claude issues, mergeable state), merge-method detection, clean execution, and post-merge cleanup. Refuses to bypass branch protection — root-cause over workaround.
 
+## Execution Principles
+
+**No sanity-check prompts.** When every preflight check is ✅ (or ➖ N/A), execute the merge immediately without a final "Proceed? / Merge ausführen?" confirmation. The user ran `/merge` — that IS the authorization.
+
+**Only ask when a decision is needed.** A prompt is warranted only for: draft-to-ready flip (step 1), rebase confirmation (delegated to `/rebase`), merge-method when ambiguous (step 9), WIP commit cleanup (step 10), and the three-way f/m/a decision when ⚠️ warnings exist (step 13). Cleanup defaults (step 12) apply silently unless something is protected/unusual.
+
+**If ⚠️ warnings exist**, present the three-way prompt in step 13 **exactly once**. Never stack it with additional confirmation questions.
+
 ## Instructions
 
 0. **Preflight**:
@@ -118,11 +126,12 @@ user_invocable: true
     - `merge`: propose default GitHub-generated message OR custom (ask user)
     - `rebase`: no merge message; individual commits land as-is
 
-12. **Post-merge cleanup plan**:
-    - Ask: "Delete remote branch after merge? [Y/n]" — default yes unless branch is protected
-    - Ask: "Checkout `<BASE>` + pull after merge? [Y/n]" — default yes
-    - Detect `task/*` branch pattern — if matches, offer: "This looks like a `work-system` task. Run `/close` after merge to clean up worktree + task file? [Y/n]"
-    - Detect git worktree: `git worktree list` — if current branch is in a worktree AND not a task/*, offer to remove it
+12. **Post-merge cleanup plan** (apply defaults silently — do NOT prompt per option):
+    - Delete remote branch after merge: **default yes** (unless the remote branch is protected; check via `gh api repos/:owner/:name/branches/<HEAD_BRANCH>/protection 2>/dev/null` — if protection exists, default no)
+    - Checkout `<BASE>` + pull after merge: **default yes**
+    - `task/*` branch pattern: detect. If matches, the final summary will suggest `/close` (not auto-run, just a handoff message). No prompt here.
+    - Git worktree (non-task): detect via `git worktree list`. If current branch is in a worktree AND not `task/*`, the final summary will suggest `git worktree remove <path>` as a next step. No prompt here.
+    - Collect the chosen defaults into the merge plan presentation — user sees them in step 13, can still abort by picking `a` if doc warnings exist, or by Ctrl-C.
 
 13. **Present final plan** (with documentation decision if warnings exist):
     ```
@@ -152,8 +161,8 @@ user_invocable: true
     Task cleanup:    /close will be offered (branch matches task/*)
     ```
 
-    - **If `DOC_WARNINGS` is empty** and no other ⚠️ remains: proceed directly to step 14. No confirmation needed.
-    - **If only ⚠️ warnings remain** (doc gaps and/or unresolved Claude issues), ask exactly one prompt:
+    - **If `DOC_WARNINGS` is empty AND no other ⚠️ remains** (all checks ✅ or ➖): **proceed directly to step 14 — do NOT append any prompt.** Not "Proceed? [y/n]", not "Merge ausführen?", not any sanity-check question. The user invoked `/merge`; that is the authorization. Just print the plan table and go.
+    - **If one or more ⚠️ warnings remain** (doc gaps and/or unresolved Claude blocking issues), ask exactly one prompt:
       ```
       How would you like to proceed?
         [f] fix automatically — apply auto-fixable doc updates, commit,
