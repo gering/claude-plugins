@@ -79,7 +79,17 @@ user_invocable: true
    - Count open blocking issues
    - If > 0 → ⚠️ warn explicitly, require explicit confirmation before merging. **Do not silently ignore.**
 
-8. **Detect merge method** (priority order):
+8. **Documentation readiness** (read-only at this stage — mirrors `/open` checks 3c-3f):
+   - Compare branch diff against base: `git diff origin/<BASE_BRANCH>...HEAD --name-only`
+   - **README freshness**: user-visible code changed (`src/`, `lib/`, `plugins/`, `skills/`, public entry points) but no `*.md` files touched → ⚠️ "README may be stale" (manual — cannot auto-write)
+   - **Version bump**: if project versions releases (`package.json`/`plugin.json`/`Cargo.toml`/`pyproject.toml` with version field + git tags or recent bump commits) AND no version field bumped on this branch AND changes look user-facing (feat/fix/breaking from commit messages) → ⚠️ "Version not bumped" with suggestion (patch/minor/major). Auto-fixable.
+   - **Changelog**: if `CHANGELOG.md`/`HISTORY.md`/`.changeset/` exists AND not touched on this branch AND changes are user-facing → ⚠️ "Changelog missing entry". Auto-fixable (draft entry).
+   - **Knowledge/conventions**: detect any knowledge location (`.claude/knowledge/`, `.cursor/rules/`, `AGENTS.md`, `CONVENTIONS.md`, `docs/adr/`, etc.). If new patterns detected (via commit-message heuristic from `/open` step 3f) AND knowledge location not touched → ⚠️ "Knowledge gap". Auto-fixable.
+   - Categorize each finding as **auto-fixable** (version, changelog, knowledge) or **manual** (README).
+   - Collect warnings into `DOC_WARNINGS` — surface them in the final plan (step 13) and handle user decision there.
+   - **Do not mutate anything here** — this is read-only inspection.
+
+9. **Detect merge method** (priority order):
    - **a) Repo allowed methods** — `gh api repos/:owner/:name --jq '{merge: .allow_merge_commit, squash: .allow_squash_merge, rebase: .allow_rebase_merge}'`
      - If only one is true → that's the only option. No question.
    - **b) Historical pattern** — analyze last 20 merged PRs:
@@ -95,7 +105,7 @@ user_invocable: true
      - If <5 merged PRs exist → fall through to (c)
    - **c) Ask user** — list allowed methods and ask. Default candidate ordering: `rebase` > `squash` > `merge`.
 
-9. **Commit hygiene** (only if method is `merge` or `rebase`):
+10. **Commit hygiene** (only if method is `merge` or `rebase`):
    - For `squash`: skip — commits get squashed, messages don't matter individually
    - Otherwise: `git log --format='%h %s' origin/<BASE>..HEAD`
    - Flag messages that look like work-in-progress: `^(wip|fix|asdf|temp|xxx)\b`, `.{1,5}$` (very short), starts with lowercase non-verb
@@ -103,18 +113,18 @@ user_invocable: true
      - `y`: stop this skill, user cleans up, re-runs `/merge`
      - `n`: continue with current history
 
-10. **Merge commit / squash message** (for `merge` or `squash`):
+11. **Merge commit / squash message** (for `merge` or `squash`):
     - `squash`: propose a squash message — default to PR title + body summary
     - `merge`: propose default GitHub-generated message OR custom (ask user)
     - `rebase`: no merge message; individual commits land as-is
 
-11. **Post-merge cleanup plan**:
+12. **Post-merge cleanup plan**:
     - Ask: "Delete remote branch after merge? [Y/n]" — default yes unless branch is protected
     - Ask: "Checkout `<BASE>` + pull after merge? [Y/n]" — default yes
     - Detect `task/*` branch pattern — if matches, offer: "This looks like a `work-system` task. Run `/close` after merge to clean up worktree + task file? [Y/n]"
     - Detect git worktree: `git worktree list` — if current branch is in a worktree AND not a task/*, offer to remove it
 
-12. **Present final plan**:
+13. **Present final plan** (with documentation decision if warnings exist):
     ```
     PR #42: <title>
     <URL>
@@ -129,18 +139,44 @@ user_invocable: true
     ✅ Reviews: 1 approved, 0 changes requested
     ⚠️  Claude review: 1 blocking issue still open (#3 — src/foo.ts:42)
 
+    ── Documentation ──
+    ⚠️  Version not bumped (detected feat: suggest 1.2.3 → 1.3.0)    [auto-fixable]
+    ⚠️  CHANGELOG.md missing entry                                    [auto-fixable]
+    ⚠️  README.md may be stale (src/ changed, docs untouched)         [manual]
+    ✅ Knowledge: internal changes, nothing generalizable
+
     ── Merge plan ──
     Method:          rebase+merge  (18/20 last PRs used rebase)
     Delete remote:   yes
     Checkout base:   yes, then pull
     Task cleanup:    /close will be offered (branch matches task/*)
-
-    ⚠️  1 unresolved blocking review issue. Merge anyway?
-
-    Proceed? [y/n]
     ```
 
-13. **Execute merge**:
+    - **If `DOC_WARNINGS` is empty** and no other ⚠️ remains: proceed directly to step 14. No confirmation needed.
+    - **If only ⚠️ warnings remain** (doc gaps and/or unresolved Claude issues), ask exactly one prompt:
+      ```
+      How would you like to proceed?
+        [f] fix automatically — apply auto-fixable doc updates, commit,
+            hand off to /cycle for push + re-review. You'll run /merge
+            again after the new review cycle.
+        [m] merge anyway — proceed with the warnings as-is (explicit
+            override; doc gaps remain on main)
+        [a] abort — I'll fix manually, run /merge later
+      ```
+    - Handle the response:
+      - `f` (auto-fix path):
+        1. For each **auto-fixable** finding, apply the update directly:
+           - **Version**: bump the detected version field per the suggestion. If multiple files (e.g. plugin.json + marketplace.json + CLAUDE.md), update all in sync.
+           - **Changelog**: draft an entry (Added/Changed/Fixed per detected change type), append under the unreleased section or next version heading.
+           - **Knowledge**: invoke `/curate` when `knowledge-system` is detected, otherwise append a short entry directly to the most relevant knowledge/conventions file.
+        2. **Manual findings** (e.g. README) are NOT auto-fixed — list them explicitly: "Still needs your attention: <list>". Continue anyway; user acknowledged by choosing `f`.
+        3. Stage changes: `git add -A`
+        4. Commit: `git commit -m "docs: update for PR #<N> merge"` (or more specific subject based on what was changed)
+        5. Stop this skill with: "Doc updates committed. Run `/cycle` to push + re-review. Re-run `/merge` when ready."
+      - `m` (merge anyway): proceed to step 14. The doc gaps remain on main — user's explicit choice.
+      - `a` (abort): stop cleanly, leave state as-is.
+
+14. **Execute merge**:
     - Based on method:
       - `rebase`: `gh pr merge <N> --rebase [--delete-branch]`
       - `squash`: `gh pr merge <N> --squash [--delete-branch] --subject "<title>" --body "<body>"`
@@ -148,7 +184,7 @@ user_invocable: true
     - **Never pass `--admin`.** If branch protection blocks the merge: stop and surface the error. Root-cause over workaround.
     - Capture output + exit code
 
-14. **Post-merge actions**:
+15. **Post-merge actions**:
     - If checkout base chosen: `git checkout <BASE> && git pull origin <BASE>`
     - **Local branch handling** — detect backup convention and execute directly (no prompt):
       - Run: `git for-each-ref --format='%(refname:short)' refs/heads/ | grep -E '^(backup|archive|old)/' | head -5`
@@ -161,7 +197,7 @@ user_invocable: true
     - If task/*: offer `/close` (do not auto-run — hand over). Note that `/close` will take precedence over the backup handling above.
     - If worktree: offer `git worktree remove <path>` (ask first, do not auto-run)
 
-15. **Final summary**:
+16. **Final summary**:
     ```
     ✅ Merged PR #42 via rebase
     ✅ Deleted remote branch `feature/foo`
@@ -183,6 +219,8 @@ user_invocable: true
 - Multiple unresolved Claude blocking issues → require explicit `yes-merge-anyway` confirmation, not just `y`
 - User is not a repo admin and PR needs admin merge → stop, explain, don't try `--admin`
 - Backup branch name already exists (previous merge of same name) → append date suffix: `backup/feature-foo-20260414`
+- Project uses no versioning / no changelog / no knowledge system → doc step 8 marks those as ➖ N/A; nothing to warn about
+- Only manual doc warnings (e.g. README) with no auto-fixable ones → `f` option still offered but explained as "only manual items remain — I'll flag them and continue"; user can still choose `m` to accept as-is
 
 ## Notes
 
@@ -191,3 +229,5 @@ user_invocable: true
 - Merge-method detection uses progressively weaker signals: repo-allowed > historical pattern > user choice. No stored convention — each merge verifies from scratch.
 - Post-merge cleanup hands off to other skills (`/close`) rather than duplicating their logic.
 - Safe to re-run: step 1 detects already-merged PRs via `state` field.
+- Documentation readiness (step 8) is **read-only**; auto-fix only happens after the user picks `f` in step 13. This keeps the check cheap if the user wants to skip it with `m`.
+- Auto-fix does not push directly — it commits locally and hands off to `/cycle` so review cycle is preserved as the single place that handles push + review orchestration.
