@@ -38,6 +38,8 @@ See `rules/knowledge-boundaries.md`:
 - Workflow checklist (PR, deploy) → `CLAUDE.md`
 - Detailed feature/architecture → `.claude/knowledge/<category>/<topic>.md`
 
+**CLAUDE.md safeguard:** if the target is `CLAUDE.md`, never write inside the `<!-- BEGIN knowledge-system -->` / `<!-- END knowledge-system -->` block — that region is managed by `/init` and will be regenerated on re-run, so any content placed there is lost. Append above or below the block.
+
 ### 4. Check if an existing file covers this topic
 - For rules: check files in `.claude/rules/`
 - For knowledge: read `.claude/knowledge/_index.md`

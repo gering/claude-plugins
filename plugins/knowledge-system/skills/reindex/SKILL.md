@@ -31,6 +31,7 @@ Run a thorough, cross-cutting QA pass over `.claude/knowledge/` as a background 
 - Check that `.claude/logs/` exists — create it if missing.
 - Read the plugin version from `${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json` (`version` field). You will pass this to the agent so it can stamp `pluginVersion`.
 - Capture today's date as `YYYY-MM-DD` (UTC) — pass this to the agent so the run is tagged with a consistent date.
+- Parse `$ARGUMENTS`: if it contains `--dry-run`, set `{{DRY_RUN}}` to `true`; otherwise `false`. This must be resolved before substitution so the placeholder never lands literally in the agent prompt.
 
 ### 2. Dispatch the background agent
 
@@ -87,9 +88,8 @@ For any knowledge file missing required fields, fill them in:
 - `title`: derive from H1 or filename.
 - `createdAt`: `git log --diff-filter=A --format=%aI -- <file> | tail -1 | cut -dT -f1`. Fallback: {{TODAY}}.
 - `updatedAt`: `git log -1 --format=%cI -- <file> | cut -dT -f1`. Fallback: {{TODAY}}.
-- `pluginVersion`: {{PLUGIN_VERSION}} (always update, even on existing files, since this run touched them).
 
-Always add/update:
+Always add/update on every touched file:
 - `reindexedAt`: {{TODAY}}.
 - `pluginVersion`: {{PLUGIN_VERSION}}.
 
@@ -97,7 +97,7 @@ Date format: `YYYY-MM-DD` only (ISO-8601, date-only, UTC).
 
 ### C. Validate cross-references
 
-For each knowledge file, find markdown links (`[text](path)` or `[text](./path)`) that reference other files inside `.claude/knowledge/`:
+For each knowledge file, find markdown links (`[text](path)`) that reference other files inside `.claude/knowledge/`:
 - If the target file exists → OK.
 - If the target file does not exist → flag as **dead reference** and mark it for the report. Do NOT auto-remove links without user confirmation.
 

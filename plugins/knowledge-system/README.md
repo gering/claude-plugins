@@ -187,9 +187,9 @@ pluginVersion: 1.3.0                 # knowledge-system version at last write
 |-------|-----------|------|
 | `title` | `/curate` | On create or when display name should diverge from filename |
 | `createdAt` | `/curate` (new files), `/reindex` (backfill) | Derived from `git log --diff-filter=A --format=%aI -- <file> \| tail -1` when backfilling |
-| `updatedAt` | `/curate` (on every edit) | Derived from `git log -1 --format=%cI -- <file>` when backfilling |
+| `updatedAt` | `/curate` (every edit), `/reindex` (backfill) | Derived from `git log -1 --format=%cI -- <file>` when backfilling |
 | `reindexedAt` | `/reindex` only | Updated each QA run |
-| `pluginVersion` | `/curate`, `/reindex` | The knowledge-system version at write time |
+| `pluginVersion` | `/curate`, `/reindex` | The knowledge-system version at the last write (content or metadata) |
 
 ### Format rules
 
