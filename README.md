@@ -16,9 +16,17 @@ Lightweight, native knowledge management for Claude Code projects. Three layers 
 
 Generic task and worktree workflow system. Manage tasks as markdown files, work in isolated git worktrees, and track progress through the full lifecycle.
 
-**Commands:** `/define`, `/kickoff`, `/continue`, `/status`, `/close`, `/list`
+**Commands:** `/define`, `/kickoff`, `/adopt`, `/continue`, `/status`, `/close`, `/list`
 
 [Documentation →](plugins/work-system/)
+
+### PR Flow
+
+PR review feedback loop. Create PRs with readiness checks, commit + push + trigger `@claude` review, inspect status, work through review issues interactively, and merge safely with pre-merge documentation checks.
+
+**Commands:** `/open`, `/cycle`, `/check`, `/fix`, `/rebase`, `/merge`
+
+[Documentation →](plugins/pr-flow/)
 
 ## Installation
 
@@ -33,6 +41,7 @@ Generic task and worktree workflow system. Manage tasks as markdown files, work 
 ```
 /plugin install knowledge-system
 /plugin install work-system
+/plugin install pr-flow
 ```
 
 ### 3. Reload plugins
