@@ -8,7 +8,7 @@ A collection of [Claude Code](https://docs.anthropic.com/en/docs/claude-code) pl
 
 Lightweight, native knowledge management for Claude Code projects. Three layers of persistent knowledge: Rules (always active), Knowledge (on demand), and Memory (automatic).
 
-**Commands:** `/init`, `/query`, `/curate`, `/migrate`
+**Commands:** `/init`, `/query`, `/curate`, `/reindex`, `/migrate`
 
 [Documentation →](plugins/knowledge-system/)
 
