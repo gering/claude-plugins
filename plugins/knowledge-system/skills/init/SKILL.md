@@ -139,7 +139,7 @@ Idempotency rule: never duplicate the block. Always replace in place when the ma
 
 ### 5. Optional: ask for project details
 
-Use `AskUserQuestion` sparingly — only if the user did not pass arguments and seems to want customization:
+Ask the user sparingly — only if they did not pass arguments and seem to want customization:
 - Project name (used in description)
 - Primary language/framework (suggests starter rule categories)
 
