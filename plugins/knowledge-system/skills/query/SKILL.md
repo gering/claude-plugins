@@ -40,7 +40,8 @@ Search the project knowledge base for information about architecture, features, 
    - Present the explore agent's findings to the user
    - Mention that this came from code exploration, not documented knowledge
 
-## Design rationale
-- Knowledge agent (Haiku): fast and cheap for indexed knowledge lookup
-- Explore agent (fallback): thorough codebase search when knowledge gaps exist
-- Both run as subagents to keep the main context window clean
+## Model rationale
+
+- **Knowledge agent** runs on **Haiku**. The task is bounded lookup — read the index, pick the relevant files, summarize. No reasoning over ambiguous requirements, no architectural judgment. Haiku delivers this in <2s at ~1/10 the cost of Sonnet/Opus. Since `/query` is invoked often (potentially before every non-trivial change), cost compounds — Haiku keeps it usable.
+- **Explore agent (fallback)** does NOT override the model. Codebase exploration is open-ended: which files to read, what's relevant, when to stop. That needs session-model reasoning quality. It also runs rarely (only when knowledge has a gap), so cost is negligible.
+- **Why subagents, not in-context**: keeps the main context window clean. `/query` can return a dense 5-line answer instead of dragging 10 file contents into the primary session.
