@@ -22,12 +22,14 @@ Store a new pattern, decision, or learning in the project knowledge system.
 
 ## Usage
 `/curate "<description>" [file1 file2 ...]`
+`/curate "<description>" [files...] --origin "PR #42"`   # origin override (used by /backfill-knowledge)
 
 ## Instructions
 
 ### 1. Parse the user's input
 - The quoted string is the **description** of what was learned
-- Any file paths after the description are **reference files**
+- Any file paths after the description (that are NOT preceded by `--origin`) are **reference files**
+- `--origin "<value>"` (optional): overrides the auto-detected origin for `createdFrom` / `updatedFrom`. Reserved for programmatic callers like `/backfill-knowledge` — humans should not need this flag.
 
 ### 2. Read reference files
 If reference files are provided, read them to understand context.
@@ -66,6 +68,10 @@ Note: `reindexedAt` is written by `/reindex` only — do NOT touch it here.
 #### Origin detection (`createdFrom` / `updatedFrom`)
 
 Determine the current origin once at skill start, then stamp it into the right field depending on whether the knowledge file is new or updated.
+
+If `--origin "<value>"` was passed on the command line, use that verbatim and skip the auto-detection below.
+
+Otherwise, auto-detect:
 
 1. Check branch: `git rev-parse --abbrev-ref HEAD`
    - If `main` or `master`: origin = `"session: <today-YYYY-MM-DD>"`. Done.
