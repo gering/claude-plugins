@@ -55,11 +55,23 @@ When writing a knowledge file (under `.claude/knowledge/`), **maintain frontmatt
 title: "<human-readable display name>"
 createdAt: <YYYY-MM-DD>      # ISO-8601 date-only, UTC
 updatedAt: <YYYY-MM-DD>      # ISO-8601 date-only, UTC
+createdFrom: "<origin>"      # see "Origin detection" below
+updatedFrom: "<origin>"      # see "Origin detection" below
 pluginVersion: <x.y.z>       # knowledge-system version
 ---
 ```
 
 Note: `reindexedAt` is written by `/reindex` only — do NOT touch it here.
+
+#### Origin detection (`createdFrom` / `updatedFrom`)
+
+Determine the current origin once at skill start, then stamp it into the right field depending on whether the knowledge file is new or updated.
+
+1. Check branch: `git rev-parse --abbrev-ref HEAD`
+   - If `main` or `master`: origin = `"session: <today-YYYY-MM-DD>"`. Done.
+2. Check for an associated PR: `gh pr view --json number,state 2>/dev/null`
+   - If a PR exists (any state): origin = `"PR #<number>"`
+   - If no PR exists: origin = `"branch: <branch-name>"` — `/reindex` will later upgrade this to `"PR #<N>"` once the branch is merged.
 
 #### Frontmatter maintenance rules
 
@@ -67,12 +79,15 @@ Note: `reindexedAt` is written by `/reindex` only — do NOT touch it here.
 - `title`: derive a short human-readable title from the content (not the filename)
 - `createdAt`: today's date in `YYYY-MM-DD` (UTC)
 - `updatedAt`: same as `createdAt`
+- `createdFrom`: current origin (see above)
+- `updatedFrom`: same as `createdFrom`
 - `pluginVersion`: read from `${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json` (`version` field)
 
 **Existing files with frontmatter (content is being updated):**
 - Update `updatedAt` to today's date
+- Update `updatedFrom` to the current origin
 - Update `pluginVersion` to the current plugin version
-- Leave `title`, `createdAt`, `reindexedAt` unchanged
+- Leave `title`, `createdAt`, `createdFrom`, `reindexedAt` unchanged
 
 **Existing files WITHOUT frontmatter (touched for the first time):**
 Bring them into form before adding new content:
@@ -83,6 +98,8 @@ Bring them into form before adding new content:
   ```
   If the file is uncommitted or git returns nothing, fall back to today's date.
 - `updatedAt`: today's date (we're about to write)
+- `createdFrom`: attempt reconstruction from the first commit's merge context (same logic `/reindex` uses). If that fails, fall back to the current origin.
+- `updatedFrom`: current origin
 - `pluginVersion`: current plugin version
 
 **Rule files** (`.claude/rules/*.md`) use their own lightweight frontmatter (`description`, optional `globs`). Do NOT apply the knowledge frontmatter schema to rules.

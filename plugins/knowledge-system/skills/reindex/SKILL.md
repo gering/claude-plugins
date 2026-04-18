@@ -88,6 +88,14 @@ For any knowledge file missing required fields, fill them in:
 - `title`: derive from H1 or filename.
 - `createdAt`: `git log --diff-filter=A --format=%aI -- <file> | tail -1 | cut -dT -f1`. Fallback: {{TODAY}}.
 - `updatedAt`: `git log -1 --format=%cI -- <file> | cut -dT -f1`. Fallback: {{TODAY}}.
+- `createdFrom`: reconstruct from the first commit that touched the file. Get the SHA with `git log --diff-filter=A --format=%H -- <file> | tail -1`, then resolve to a PR. Use the following cascade, first hit wins:
+  1. **`gh` lookup** (robust across merge, squash, and rebase-merge modes): `gh pr list --search <sha> --state merged --limit 1 --json number --jq '.[0].number // ""'`. GitHub knows which PR a commit belongs to regardless of how it landed. If the query returns a number: write `createdFrom: "PR #<N>"`.
+  2. **Squash-commit suffix** (for repos where `gh` is unavailable or offline): `git log -1 --format=%s <sha>` — if the subject ends with `(#<N>)`, extract `<N>` and write `createdFrom: "PR #<N>"`.
+  3. **Merge-commit subject** (classic GitHub merge mode): scan `git log --merges --first-parent origin/<main> --format='%H %s'` for the commit whose second parent contains `<sha>`; if its subject matches `Merge pull request #([0-9]+)`, use that number.
+  4. **Branch fallback**: if the SHA sits on a named branch other than main and none of the above resolved, write `createdFrom: "branch: <branch-name>"`.
+  5. **Unresolved**: leave the field empty — do NOT guess. A later `/reindex` run may succeed once the branch is merged.
+- `updatedFrom`: same cascade applied to the latest commit that touched the file (`git log -1 --format=%H -- <file>`).
+- If `createdFrom` already holds a `"branch: <name>"` value AND the branch has since been merged to main, **upgrade** the value to `"PR #<N>"` by re-running the cascade. Same upgrade logic for `updatedFrom`.
 
 Always add/update on every touched file:
 - `reindexedAt`: {{TODAY}}.
