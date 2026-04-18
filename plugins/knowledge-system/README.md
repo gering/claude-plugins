@@ -247,7 +247,7 @@ Quoted string with a source prefix so the field is extensible for future origins
 | `"branch: feature/my-work"` | On a branch that has no PR yet (in-progress work). Upgraded to the `PR #N` form by `/reindex` once the branch is merged. |
 | `"session: 2026-04-17"` | Direct edit on main (or outside a branch workflow) — `/curate` always writes this value when invoked on main. Uses the ISO date for uniqueness. |
 
-Reconstructability note: for any committed knowledge file, `git log` + GitHub merge-commit message parsing (`Merge pull request #N`, `(#N)` squash suffix) recovers the PR number in the common case. `/reindex` does this automatically; if the merge context cannot be determined unambiguously, the field stays empty rather than guessing.
+Reconstructability note: for any committed knowledge file, `/reindex` runs a cascade to recover the PR number. Step 1 — `gh pr list --search <sha> --state merged` — is GitHub-aware and resolves merge, squash, and rebase-merge modes uniformly; this is the primary path and handles virtually all online cases. Steps 2–4 are offline fallbacks: squash-commit `(#N)` suffix parsing, classic merge-commit `Merge pull request #N` subject parsing, and a branch-name fallback when the SHA sits on an unmerged branch. If none of the steps yield an unambiguous PR, the field stays empty rather than guessing — a subsequent `/reindex` run can succeed later once the branch is merged.
 
 ### Format rules
 
