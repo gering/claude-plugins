@@ -99,6 +99,7 @@ once per session is enough.
 - Before non-trivial changes to unfamiliar modules: `/query "<question>"` — retrieves relevant entries without dragging full files into context.
 - After discovering a pattern, fix, or decision worth preserving: `/curate "<insight>" [file...]` — stores it in the right layer (rule vs knowledge).
 - When the knowledge base feels stale, indexes drift, or cross-references look wrong: `/reindex` — runs a thorough QA pass (infrequent, Sonnet-1M-backed).
+- When adopting the knowledge system on an existing project (or after a long curation gap): `/backfill-knowledge` — mines merged PR history for significant learnings (features, architecture, major insights) that are missing from the knowledge base. Run `/reindex` first so the idempotency check has up-to-date origin metadata.
 
 ## Layers
 
