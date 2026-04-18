@@ -44,10 +44,12 @@ user_invocable: true
      - `n`: stop
    - Store `PR_NUMBER`, `BASE_BRANCH`, `HEAD_BRANCH`.
 
-2. **Rebase check** — delegate to `/rebase --no-poll`:
-   - Run `/rebase` **with the `--no-poll` flag** (this skill runs in a merge-readiness context where polling would delay the merge — the review, if any, should already have been handled by a prior `/cycle`). It determines the base from the PR itself and handles rebase + conflict abort cleanly.
-   - If a rebase happened: the branch needs to be pushed (with force-with-lease). `/rebase` will have handled the force-push confirmation.
-   - If user declined a needed rebase → stop this skill: "Merge requires up-to-date branch. Re-run `/merge` after resolving."
+2. **Rebase check** — delegate to `/rebase --no-poll --auto`:
+   - Run `/rebase` with **both** `--no-poll` and `--auto`. Rationale:
+     - `--no-poll`: polling would delay the merge — any review should already have been handled by a prior `/cycle`.
+     - `--auto`: the user invoked `/merge`; that invocation authorizes rebase + force-push as preflight. Asking again would be a redundant second prompt.
+   - `/rebase --auto` still aborts cleanly on conflicts (no destructive behavior skipped — only the routine confirmation is skipped).
+   - If `/rebase` aborts due to conflicts → stop this skill: "Merge requires up-to-date branch. Resolve conflicts, then re-run `/merge`."
 
 3. **Local cleanliness**:
    - `git status --porcelain` — if anything: stop "Commit or stash local changes before merging."

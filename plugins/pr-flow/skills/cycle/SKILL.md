@@ -36,13 +36,13 @@ user_invocable: true
    - If no PR exists, inform user and suggest: `gh pr create`
    - Store `PR_NUMBER`, `PR_URL`, and `BASE_BRANCH` (from baseRefName) for later use
 
-2. **Check if rebase is needed** — delegate to `/rebase --no-poll`:
-   - Invoke the `/rebase` skill **with the `--no-poll` flag** so it does not poll for reviews itself (this skill handles polling in step 8). It will:
-     - Determine the PR's base branch (authoritative source: `gh pr view`)
-     - Detect divergence, ask the user for confirmation, execute or skip
-     - Abort cleanly on conflicts
-   - Proceed with this skill only if `/rebase` returned cleanly (up-to-date, rebased successfully, or user declined)
-   - If conflicts aborted the rebase: stop this cycle, let the user resolve manually, then re-run `/cycle`
+2. **Check if rebase is needed** — delegate to `/rebase --no-poll --auto`:
+   - Invoke the `/rebase` skill **with `--no-poll` and `--auto`**:
+     - `--no-poll`: this skill handles review polling itself in step 8.
+     - `--auto`: the user invoked `/cycle`; that invocation authorizes rebase + force-push as preparation. Asking again would be a redundant prompt.
+   - `/rebase` will determine the PR's base branch (authoritative: `gh pr view`), detect divergence, rebase + force-push if needed, and abort cleanly on conflicts.
+   - Proceed with this skill only if `/rebase` returned cleanly (up-to-date or rebased successfully).
+   - If conflicts aborted the rebase: stop this cycle, let the user resolve manually, then re-run `/cycle`.
 
 3. **Handle uncommitted changes**:
    - Run: `git status --porcelain`

@@ -22,6 +22,7 @@ user_invocable: true
 ## Arguments
 
 - `--no-poll` — Skip the post-push review polling step. Set automatically when this skill is invoked from `/cycle` or `/open` (the parent does its own polling).
+- `--auto` — Skip the step-5 confirmation prompt. Proceed as if the user answered `y` — rebase, then force-push if an upstream exists. Used when the parent skill (`/merge`) has already authorized the rebase+push as part of its own invocation. Conflicts still abort cleanly. Stopping conditions (uncommitted changes, missing upstream, etc.) still apply.
 
 ## Why this skill exists
 
@@ -84,6 +85,8 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
    - `d`: run `git log -p HEAD..origin/<BASE_BRANCH>` (paginate for large diffs), then ask again
    - `n`: stop with ⚠️ "Rebase skipped — branch remains N commits behind `<BASE_BRANCH>`"
    - `y`: continue to step 6. The user's `y` authorizes both the rebase AND the subsequent force-push (if `HAS_UPSTREAM`). Do NOT re-ask later.
+
+   **If `--auto` was passed**: skip this prompt entirely. Still print the summary of new commits for transparency, then proceed to step 6 as if the user answered `y`. The parent skill's invocation is the authorization.
 
 6. **Uncommitted changes guard**:
    - Run: `git status --porcelain`
