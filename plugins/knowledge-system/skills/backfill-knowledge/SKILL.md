@@ -62,13 +62,13 @@ Retroactively mine merged PRs for significant, durable learnings. Interactive: p
 
 Skip PRs already represented:
 
-- **From existing knowledge**: grep frontmatter fields only — `createdFrom` and `updatedFrom` — to avoid matching prose mentions like "the pattern emerged in PR #42" in the body. Anchor the PR-number capture directly after the field value prefix so a trailing `session: … PR #99` would not be mis-harvested:
+- **From existing knowledge**: grep frontmatter fields only — `createdFrom` and `updatedFrom` — to avoid matching prose mentions like "the pattern emerged in PR #42" in the body. Use two stages so the PR-number extraction only sees the already-anchored portion, not the rest of the line:
   ```bash
-  grep -rhE '^(createdFrom|updatedFrom):[[:space:]]*"?PR #[0-9]+' .claude/knowledge/ 2>/dev/null \
+  grep -rhoE '^(createdFrom|updatedFrom):[[:space:]]*"?PR #[0-9]+' .claude/knowledge/ 2>/dev/null \
     | grep -oE 'PR #[0-9]+' \
     | sort -u
   ```
-  The first `grep`'s anchor (`^(createdFrom|updatedFrom):[[:space:]]*"?PR #...`) requires the PR-number to immediately follow the field-name prefix, so a pathological value like `createdFrom: "session: 2026-04-17 see PR #99"` will not leak #99 into the processed set.
+  Stage 1's `-o` restricts the match to *just* the anchored prefix (field name + optional quote + `PR #N`); stage 2 then pulls the number from that captured fragment. This blocks both prose leaks (`session: 2026-04-17 see PR #99`) and trailing edits (`createdFrom: "PR #123" # superseded by PR #456` — #456 will not leak).
   Extract numeric set A.
 - **From the log**: parse `.claude/logs/backfill-knowledge.md` (if it exists) for all bulleted PR numbers under the sections "Accepted", "Never", "Skipped — already curated", **and "Skipped — not significant"** — the last one is critical, otherwise every run re-judges every rejected PR and generates the same noise over and over. Extract numeric set B.
 - **Processed set** = A ∪ B. Filter these PRs out of the candidate list before dispatching the agent.
@@ -110,8 +110,9 @@ Prompt the user with the numbered `accepted` list (see "Report format" below) an
 - `y` or `all` → approve all accepted candidates
 - `1,3,5` → approve those numbers
 - `1-4` → approve the inclusive range
+- `1-3,7` / `1,4-6,9` → mixed list+range forms are accepted; the parser expands ranges and unions them with individual numbers
 - `n` or empty → approve nothing (nothing gets curated; nothing goes into the `never`-bucket either; the run still appends a log entry so the already-judged PRs don't get re-judged next time)
-- `never 2,4` → mark those numbers as "never re-propose" in the log. Approves nothing this run. To both approve some and never-mark others, run twice.
+- `never 2,4` / `never 2-3,5` → mark those numbers (same list+range expansion) as "never re-propose" in the log. Approves nothing this run. To both approve some and never-mark others, run twice.
 - `c` → cancel (no log update at all)
 
 ### 7. Curate each approved candidate
