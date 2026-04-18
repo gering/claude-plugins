@@ -39,12 +39,24 @@ user_invocable: true
    - Find worktree for this task (match by branch name `task/<task-name>`)
    - Worktree is typically at `.claude/worktrees/<task-name>` (but verify from `git worktree list` output)
 
-5. **Handle current location**:
+5. **Sync local main with remote** (fast-forward check):
+   - The task's PR was merged on GitHub (step 2) — `origin/<main-branch>` is ahead of local `<main-branch>` until it's pulled. Syncing now avoids a confusing "not fully merged" error in step 7 and leaves the workspace ready for the next task.
+   - Operate against the main repo path identified in step 4 (not the task worktree):
+     - Fetch: `git -C <main-repo-path> fetch origin <main-branch> --quiet`
+     - Behind count: `git -C <main-repo-path> rev-list --count <main-branch>..origin/<main-branch>`
+     - Ahead count: `git -C <main-repo-path> rev-list --count origin/<main-branch>..<main-branch>`
+   - **Behind == 0**: already in sync — proceed silently.
+   - **Behind > 0 AND Ahead == 0**: fast-forward cleanly:
+     `git -C <main-repo-path> merge --ff-only origin/<main-branch>`
+     Log: "main fast-forwarded (<N> commits pulled from origin)".
+   - **Behind > 0 AND Ahead > 0** (divergence — local main has unpushed commits): do NOT auto-pull. Surface a warning with both counts and the suggested command (`git pull --rebase`), then continue cleanup — divergence is a separate concern from closing the task.
+
+6. **Handle current location**:
    - If currently in the worktree being deleted:
      - Warn: "You're in the worktree that will be deleted!"
      - Show: "After cleanup, switch to: <main-repo-path>"
 
-6. **Remove worktree** (if exists):
+7. **Remove worktree** (if exists):
    - First check for untracked/modified files: `git -C <worktree-path> status --short`
    - If the only difference is `TASK.md` (untracked, copied by kickoff), use `--force` directly:
      `git worktree remove <worktree-path> --force`
@@ -54,7 +66,7 @@ user_invocable: true
      - Ask: "Force remove? (uncommitted changes will be lost)"
      - If yes: `git worktree remove <worktree-path> --force`
 
-7. **Delete local branch**:
+8. **Delete local branch**:
    - If a merged PR was confirmed in step 2: use `git branch -D task/<task-name>` directly
      (the `-d` safety check produces false positives with GitHub's rebase-merge strategy,
      where commits are rewritten with new SHAs — the real safety gate is the merged-PR check)
@@ -62,19 +74,19 @@ user_invocable: true
      - If fails (not fully merged): ask "Force delete branch?"
      - If yes: `git branch -D task/<task-name>`
 
-8. **Delete remote branch** (if exists):
+9. **Delete remote branch** (if exists):
    - Run: `git ls-remote --heads origin task/<task-name>`
    - If exists, ask: "Delete remote branch too?"
    - If yes: `git push origin --delete task/<task-name>`
 
-9. **Remove task file**:
-   - Navigate to main repo if needed
-   - Run: `rm tasks/<task-name>.md`
-   - Check if the file was git-tracked: `git status --short tasks/<task-name>.md`
-   - If there is a staged/unstaged change (file was tracked): ask user if they want to commit the removal
-   - If no git change (file was gitignored or untracked): just report "Task file removed", no commit needed
+10. **Remove task file**:
+    - Navigate to main repo if needed
+    - Run: `rm tasks/<task-name>.md`
+    - Check if the file was git-tracked: `git status --short tasks/<task-name>.md`
+    - If there is a staged/unstaged change (file was tracked): ask user if they want to commit the removal
+    - If no git change (file was gitignored or untracked): just report "Task file removed", no commit needed
 
-10. **Final summary**:
+11. **Final summary**:
     ```
     Task '<task-name>' closed!
 
@@ -83,8 +95,9 @@ user_invocable: true
     - Local branch deleted
     - Remote branch deleted (if applicable)
     - Task file removed
+    - main synced with origin (<N> commits pulled)     [if fast-forward happened]
 
-    Next: Run `git pull` to sync, then /kickoff for next task
+    Next: /kickoff for next task
     ```
 
 ## Safety
