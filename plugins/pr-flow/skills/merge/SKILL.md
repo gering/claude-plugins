@@ -81,7 +81,11 @@ user_invocable: true
    - Otherwise → ✅
 
 7. **Open Claude review issues**:
-   - Fetch latest Claude review comment (see `/fix` step 2 for the jq query)
+   - Fetch the latest Claude review comment via the shared helper:
+     ```
+     bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" latest <PR_NUMBER>
+     ```
+     Returns the raw body of the most recent `@claude`-authored comment, or empty if none.
    - If exists AND newer than last push: parse for **blocking** severity issues
    - If exists BUT older than last push: mark as stale, advise `/cycle` first
    - Count open blocking issues
@@ -89,7 +93,7 @@ user_invocable: true
 
 8. **Documentation readiness** (read-only at this stage — mirrors `/open` checks 3c-3f):
    - Compare branch diff against base: `git diff origin/<BASE_BRANCH>...HEAD --name-only`
-   - **README freshness**: user-visible code changed (`src/`, `lib/`, `plugins/`, `skills/`, public entry points) but no `*.md` files touched → ⚠️ "README may be stale" (manual — cannot auto-write)
+   - **README freshness**: user-visible code changed (`src/`, `lib/`, `plugins/`, `skills/`, public entry points) but `README.md` itself was not touched → ⚠️ "README may be stale" (manual — cannot auto-write). Changes to other `*.md` files (CONTRIBUTING, CHANGELOG, etc.) do not count as a README update.
    - **Version bump**: if project versions releases (`package.json`/`plugin.json`/`Cargo.toml`/`pyproject.toml` with version field + git tags or recent bump commits) AND no version field bumped on this branch AND changes look user-facing (feat/fix/breaking from commit messages) → ⚠️ "Version not bumped" with suggestion (patch/minor/major). Auto-fixable.
    - **Changelog**: if `CHANGELOG.md`/`HISTORY.md`/`.changeset/` exists AND not touched on this branch AND changes are user-facing → ⚠️ "Changelog missing entry". Auto-fixable (draft entry).
    - **Knowledge/conventions**: detect any knowledge location (`.claude/knowledge/`, `.cursor/rules/`, `AGENTS.md`, `CONVENTIONS.md`, `docs/adr/`, etc.). If new patterns detected (via commit-message heuristic from `/open` step 3f) AND knowledge location not touched → ⚠️ "Knowledge gap". Auto-fixable.
@@ -117,8 +121,8 @@ user_invocable: true
    - For `squash`: skip — commits get squashed, messages don't matter individually
    - Otherwise: `git log --format='%h %s' origin/<BASE>..HEAD`
    - Flag messages that look like work-in-progress: `^(wip|fix|asdf|temp|xxx)\b`, `.{1,5}$` (very short), starts with lowercase non-verb
-   - If any found → show list, ask: "Clean up with `git rebase -i` before merging? [y/N]"
-     - `y`: stop this skill, user cleans up, re-runs `/merge`
+   - If any found → show list, ask: "Stop so you can clean up history with `git rebase -i`, then re-run `/merge`? [y/N]"
+     - `y`: stop this skill immediately — do NOT run `git rebase -i` from Claude. The user runs it in their own shell, then re-invokes `/merge`.
      - `n`: continue with current history
 
 11. **Merge commit / squash message** (for `merge` or `squash`):

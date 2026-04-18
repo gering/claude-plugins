@@ -48,9 +48,10 @@ user_invocable: true
    - Run: `git status --porcelain`
    - If changes exist:
      - If `$ARGUMENTS` provided, use as commit message
-     - Otherwise, generate a concise commit message based on the changes (stage and show diff first)
-     - ALWAYS ask for confirmation before committing if no `$ARGUMENTS` provided
-     - Stage all changes: `git add -A`
+     - Otherwise, generate a concise commit message based on the changes (show diff first)
+     - Separate **tracked** (modified/deleted) files from **untracked** files — surface the untracked list explicitly in the confirmation prompt so the user can spot accidental additions (`.env`, build artifacts, editor backups) before they get staged
+     - ALWAYS ask for confirmation before committing when no `$ARGUMENTS` provided, including the list of files that will be staged
+     - Stage all changes: `git add -A` — the preceding confirmation step is what makes this safe
      - Commit with the message
    - If no changes, skip to step 4
 

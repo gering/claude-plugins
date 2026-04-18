@@ -214,7 +214,7 @@ user_invocable: true
       ```
       bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" poll <PR_NUMBER> "<TRIGGER_ISO>"
       ```
-      Use the **Bash tool** with `run_in_background: true`. When it completes, present the review results following the same format as `/cycle` step 10 (numbered issues, own assessment, recommendation).
+      Use the **Bash tool** with `run_in_background: true`. When it completes, render the review following the shared format spec at `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md` — read that file before presenting. Required sections: header, status line, findings markdown table, optional previously-raised, single-line recommendation.
     - **If output is empty** → no auto-trigger detected. Inform the user and suggest `/cycle` to trigger manually. Do NOT trigger automatically here — `/open` is about creation; triggering is `/cycle`'s job.
 
 11. **Final summary**:

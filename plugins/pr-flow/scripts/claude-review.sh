@@ -29,6 +29,7 @@ usage() {
 
 require_gh() {
   command -v gh >/dev/null || { echo "gh CLI not installed" >&2; exit 1; }
+  gh auth status >/dev/null 2>&1 || { echo "gh not authenticated — run: gh auth login" >&2; exit 1; }
 }
 
 subcmd_latest() {
@@ -52,12 +53,16 @@ subcmd_latest_after() {
   local as_json=false
   [[ "${3:-}" == "--json" ]] && as_json=true
   require_gh
+  # Strip fractional seconds from .createdAt to match the whole-second
+  # precision of $since (produced by `date -u +%Y-%m-%dT%H:%M:%SZ`). Without
+  # this, a comment created within the same whole second as the trigger
+  # compares lexicographically as earlier ("56.5Z" < "56Z") and is missed.
   if $as_json; then
     gh pr view "$pr" --json comments \
-      --jq "[.comments[] | select(.author.login == \"claude\") | select(.createdAt > \"$since\")] | last | {createdAt: (.createdAt // \"\"), body: (.body // \"\")}"
+      --jq "[.comments[] | select(.author.login == \"claude\") | select((.createdAt | sub(\"\\\\.[0-9]+Z$\"; \"Z\")) > \"$since\")] | last | {createdAt: (.createdAt // \"\"), body: (.body // \"\")}"
   else
     gh pr view "$pr" --json comments \
-      --jq "[.comments[] | select(.author.login == \"claude\") | select(.createdAt > \"$since\")] | last | .body // \"\""
+      --jq "[.comments[] | select(.author.login == \"claude\") | select((.createdAt | sub(\"\\\\.[0-9]+Z$\"; \"Z\")) > \"$since\")] | last | .body // \"\""
   fi
 }
 
@@ -81,8 +86,10 @@ subcmd_poll() {
   for ((i=1; i<=max_iters; i++)); do
     sleep "$interval"
     local body
+    # Strip fractional seconds from .createdAt for whole-second comparison
+    # with $since (see note in subcmd_latest_after).
     body=$(gh pr view "$pr" --json comments \
-      --jq "[.comments[] | select(.author.login == \"claude\") | select(.createdAt > \"$since\")] | last | .body // \"\"")
+      --jq "[.comments[] | select(.author.login == \"claude\") | select((.createdAt | sub(\"\\\\.[0-9]+Z$\"; \"Z\")) > \"$since\")] | last | .body // \"\"")
 
     if [[ -n "$body" ]]; then
       # "Claude Code is working" = in-progress marker; keep polling

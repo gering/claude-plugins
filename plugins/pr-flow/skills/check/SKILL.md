@@ -49,7 +49,7 @@ user_invocable: true
    - If `body` is non-empty:
      - Extract issue count and summary
      - Show timestamp (how old is it?)
-     - If older than the latest push (`gh pr view <PR_NUMBER> --json commits --jq '.commits | last | .commit.authoredDate'`), mark as **stale** → suggest `/cycle` to refresh
+     - If older than the latest push (`gh pr view <PR_NUMBER> --json commits --jq '.commits | last | .commit.committedDate'`), mark as **stale** → suggest `/cycle` to refresh. Use `committedDate` (not `authoredDate`) so a rebase or amend correctly invalidates the prior review.
    - If none, note: "No Claude review yet — run `/cycle` to trigger one"
 
 5. **Uncommitted local changes**:
