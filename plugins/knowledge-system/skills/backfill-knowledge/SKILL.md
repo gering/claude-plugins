@@ -46,6 +46,11 @@ Retroactively mine merged PRs for significant, durable learnings. Interactive: p
 
 ### 2. Build the candidate PR list
 
+**Flag precedence and validation:**
+- `--pr N` wins over everything else. If present, ignore `--last` and `--since` and skip the idempotency-set filter in Step 3 (the user explicitly asked for that single PR — if it was already processed, warn as described in Step 3 and prompt for confirmation).
+- `--last N` and `--since DATE` are mutually exclusive. If both appear, stop with an error: "Pass exactly one of `--last` and `--since`."
+- `--dry-run` combines freely with any of the above.
+
 - Determine the default branch name (main/master) via `git symbolic-ref refs/remotes/origin/HEAD`.
 - Fetch merged PRs:
   - `--pr N`: single PR, skip the list-building step.
@@ -57,14 +62,15 @@ Retroactively mine merged PRs for significant, durable learnings. Interactive: p
 
 Skip PRs already represented:
 
-- **From existing knowledge**: grep frontmatter fields only — `createdFrom` and `updatedFrom` — to avoid matching prose mentions like "the pattern emerged in PR #42" in the body:
+- **From existing knowledge**: grep frontmatter fields only — `createdFrom` and `updatedFrom` — to avoid matching prose mentions like "the pattern emerged in PR #42" in the body. Anchor the PR-number capture directly after the field value prefix so a trailing `session: … PR #99` would not be mis-harvested:
   ```bash
-  grep -rhE '^(createdFrom|updatedFrom):.*PR #[0-9]+' .claude/knowledge/ 2>/dev/null \
+  grep -rhE '^(createdFrom|updatedFrom):[[:space:]]*"?PR #[0-9]+' .claude/knowledge/ 2>/dev/null \
     | grep -oE 'PR #[0-9]+' \
     | sort -u
   ```
+  The first `grep`'s anchor (`^(createdFrom|updatedFrom):[[:space:]]*"?PR #...`) requires the PR-number to immediately follow the field-name prefix, so a pathological value like `createdFrom: "session: 2026-04-17 see PR #99"` will not leak #99 into the processed set.
   Extract numeric set A.
-- **From the log**: parse `.claude/logs/backfill-knowledge.md` (if it exists) for all bulleted PR numbers under "Accepted", "Never", and "Skipped — already curated" sections. Extract numeric set B.
+- **From the log**: parse `.claude/logs/backfill-knowledge.md` (if it exists) for all bulleted PR numbers under the sections "Accepted", "Never", "Skipped — already curated", **and "Skipped — not significant"** — the last one is critical, otherwise every run re-judges every rejected PR and generates the same noise over and over. Extract numeric set B.
 - **Processed set** = A ∪ B. Filter these PRs out of the candidate list before dispatching the agent.
 
 If `--pr N` was passed and N is already in the processed set: warn the user, ask whether to re-process (y) or abort (n).
@@ -80,9 +86,11 @@ Otherwise, use the `Agent` tool with:
 - `description`: `Backfill knowledge — judge PR history`
 - `prompt`: the full instruction block below, with `{{PLUGIN_VERSION}}`, `{{TODAY}}`, `{{PR_LIST}}` (JSON array of numbers), and `{{BASE_BRANCH}}` substituted.
 
+The agent never writes files and never invokes `/curate`, so `--dry-run` does NOT need to be passed into it — the flag only gates steps 7+8 in the outer skill (the `/curate` invocations and the log append). Any future refactor must preserve this invariant.
+
 Inform the user in the channel:
 
-> Backfill started as a background agent. It will read PR #<first>–#<last> (title, body, commits, diff), judge each against the strict significance bar (new features / architecture / major insights only), and come back with a single approval report. Typical run: 2–10 minutes depending on PR count.
+> Backfill started as a background agent. It will read <N> merged PRs (title, body, commits, diff), judge each against the strict significance bar (new features / architecture / major insights only), and come back with a single approval report. Typical run: 2–10 minutes depending on PR count.
 
 Return control. Do not block.
 
@@ -97,23 +105,28 @@ Present it as a single report to the user (see "Report format" below). Then wait
 
 ### 6. Approval and selection
 
-Prompt the user with the numbered `accepted` list and the compressed rejected counts. Accept:
+Prompt the user with the numbered `accepted` list (see "Report format" below) and the compressed rejected counts. Accept exactly one of the following inputs — combined forms like `1,3 never 2,4` are NOT supported and the user is instructed to run the skill twice if they want both kinds of action in one pass:
 
 - `y` or `all` → approve all accepted candidates
 - `1,3,5` → approve those numbers
-- `1-4` → approve range
-- `n` or empty → approve nothing (nothing gets curated; nothing goes into the `never`-bucket either)
-- `never 2,4` → mark those as "never re-propose" in the log and approve nothing else
+- `1-4` → approve the inclusive range
+- `n` or empty → approve nothing (nothing gets curated; nothing goes into the `never`-bucket either; the run still appends a log entry so the already-judged PRs don't get re-judged next time)
+- `never 2,4` → mark those numbers as "never re-propose" in the log. Approves nothing this run. To both approve some and never-mark others, run twice.
 - `c` → cancel (no log update at all)
 
 ### 7. Curate each approved candidate
 
-For each approved candidate, invoke `/curate` with:
-- `"<learning>"` — the one-line learning description from the agent
-- Reference files: the 1–3 most relevant file paths from the PR's diff (the agent provides these in its output)
-- `--origin "PR #<number>"` so `createdFrom` / `updatedFrom` get stamped with the PR reference, not the current branch
+For each approved candidate, invoke `/curate` with the exact shell-argument shape:
 
-Run sequentially (simpler for the user to read the output). If a curate call fails, note it and continue with the rest.
+```
+/curate "<learning>" <ref_file_1> <ref_file_2> <ref_file_3> --origin "PR #<number>"
+```
+
+- `<learning>` — the one-line learning string from the agent's `accepted[].learning` field
+- `<ref_file_*>` — the paths listed in the agent's `accepted[].reference_files` (1–3 entries; all are included)
+- `--origin "PR #<number>"` — ensures `createdFrom` on new files and `updatedFrom` on updated files get stamped with the PR reference, not the current branch
+
+Run sequentially (simpler for the user to read the output). If a curate call fails, note it and continue with the rest — do NOT abort the whole batch.
 
 ### 8. Update the log
 
@@ -184,7 +197,7 @@ For each PR number in the list `{{PR_LIST}}`, fetch:
 
 1. `gh pr view <N> --json number,title,body,mergedAt,author,state,baseRefName,headRefName`
 2. `gh pr view <N> --json commits --jq '[.commits[] | {sha: .oid, headline: .messageHeadline, body: .messageBody}]'`
-3. `gh pr diff <N>` — the full diff. If the diff is very large (>3000 lines), request just the file-level stat with `gh pr diff <N> --name-only` and then read selected hunks via `gh api` as needed.
+3. `gh pr diff <N>` — the full diff. If the diff is very large (>3000 lines), get the touched-file list via `gh pr view <N> --json files --jq '.files[].path'` instead and then read selected hunks via `gh api` as needed. (Note: `gh pr diff` does NOT have a `--name-only` flag; the file list lives on `pr view`.)
 
 Hold all three in mind as you judge.
 
@@ -247,11 +260,13 @@ Backfill candidates — significant knowledge only
    Orders flow through an append-only event log before materialization;
    replay and snapshot semantics guarantee exactly-once effects.
    → create architecture/event-sourced-orders.md
+   Reference files: src/orders/event_log.py, src/orders/replay.py
 
 2. PR #78 — "Migrate internal RPC from REST to gRPC"
    Service communication switched to gRPC; .proto contracts, generated
    clients, phased rollout.
    → create architecture/grpc-internal.md + update deployment/ci-cd.md
+   Reference files: proto/internal.proto, src/clients/grpc.go
 
 Skipped — not significant (<N>): #38, #41, #53, #67, #72, #89, ...
 Skipped — already curated (<N>): #44, #55, ...
@@ -259,7 +274,7 @@ Skipped — already curated (<N>): #44, #55, ...
 Approve all? [y]   Select: [1,3]   Never-for-future: [never 2]   Cancel: [c]
 ```
 
-Keep it scannable — short title quote, 1–2 lines of learning summary, explicit target-file recommendation.
+Keep it scannable: title quote, 1–2 lines of learning summary, explicit target-file recommendation, and the reference files that will be passed to `/curate`. The user needs to see the reference files at approval time — otherwise they cannot predict what gets attached to the knowledge entry.
 
 ## Dry-run mode
 
