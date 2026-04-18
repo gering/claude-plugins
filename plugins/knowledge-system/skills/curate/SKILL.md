@@ -27,9 +27,20 @@ Store a new pattern, decision, or learning in the project knowledge system.
 ## Instructions
 
 ### 1. Parse the user's input
-- The quoted string is the **description** of what was learned
-- Any file paths after the description (that are NOT preceded by `--origin`) are **reference files**
-- `--origin "<value>"` (optional): overrides the auto-detected origin for `createdFrom` / `updatedFrom`. Reserved for programmatic callers like `/backfill-knowledge` — humans should not need this flag.
+
+The invocation has the shape:
+```
+/curate "<description>" [reference_files...] [--origin "<value>"]
+```
+
+Parse rules (apply in this order):
+- The **first quoted string** is the `description` of what was learned.
+- The `--origin` flag is optional and may appear **anywhere** after the description. It consumes exactly one argument — the immediately following quoted string — as its value. All other positional arguments (before `--origin`, between the description and `--origin`, or after the flag's value) are **reference files**.
+- Concrete examples:
+  - `/curate "auth uses JWT" src/auth.ts` → desc=`"auth uses JWT"`, refs=[`src/auth.ts`], origin=auto
+  - `/curate "auth uses JWT" src/auth.ts --origin "PR #42"` → desc=`"auth uses JWT"`, refs=[`src/auth.ts`], origin=`PR #42`
+  - `/curate "auth uses JWT" --origin "PR #42" src/auth.ts src/middleware.ts` → desc=`"auth uses JWT"`, refs=[`src/auth.ts`, `src/middleware.ts`], origin=`PR #42`
+- `--origin "<value>"` overrides the auto-detected origin for `createdFrom` / `updatedFrom`. Reserved for programmatic callers like `/backfill-knowledge` — humans should not need this flag.
 
 ### 2. Read reference files
 If reference files are provided, read them to understand context.
@@ -104,7 +115,7 @@ Bring them into form before adding new content:
   ```
   If the file is uncommitted or git returns nothing, fall back to today's date.
 - `updatedAt`: today's date (we're about to write)
-- `createdFrom`: attempt reconstruction from the first commit's merge context (same logic `/reindex` uses). If that fails, fall back to the current origin.
+- `createdFrom`: attempt reconstruction from the first commit's merge context using the PR-resolution cascade defined canonically in `/reindex` SKILL.md, step B ("createdFrom: reconstruct from the first commit..."). Do NOT reimplement the cascade here — the `/reindex` description is the source of truth, and if the logic ever evolves, only one place needs to change. If the cascade returns unresolved, fall back to the current origin.
 - `updatedFrom`: current origin
 - `pluginVersion`: current plugin version
 

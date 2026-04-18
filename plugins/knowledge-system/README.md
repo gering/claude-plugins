@@ -56,7 +56,7 @@ Lightweight, native knowledge management for Claude Code projects. Build up a pe
 **What it does.** Every `/reindex` run appends a short, bullet-point summary to `.claude/logs/reindex.md`: when it ran, what plugin version, what it changed, why.
 
 ```markdown
-## 2026-04-17 — knowledge-system v1.3.0
+## 2026-04-18 — knowledge-system v1.4.0
 - Rebuilt 12 _index.md entries
 - Backfilled frontmatter: architecture/auth.md (added updatedAt from git)
 - Proposed cross-link: features/billing.md <-> architecture/payments.md
@@ -161,7 +161,7 @@ Once in a while — before a big release, after a refactor, or when things feel 
 Runs a thorough Sonnet-1M pass. You get back a report like:
 
 ```
-Reindex complete (knowledge-system v1.3.0)
+Reindex complete (knowledge-system v1.4.0)
 
 Rebuilt indexes:       12 _index.md files
 Frontmatter backfilled: 3 files (added createdAt/updatedAt from git)
@@ -245,7 +245,7 @@ Quoted string with a source prefix so the field is extensible for future origins
 |-------|------|
 | `"PR #42"` | The edit happened on a merged PR. Preferred form whenever a PR exists. |
 | `"branch: feature/my-work"` | On a branch that has no PR yet (in-progress work). Upgraded to the `PR #N` form by `/reindex` once the branch is merged. |
-| `"session: 2026-04-17"` | Direct edit on main or outside any branch workflow (rare). Uses the ISO date for uniqueness. |
+| `"session: 2026-04-17"` | Direct edit on main (or outside a branch workflow) — `/curate` always writes this value when invoked on main. Uses the ISO date for uniqueness. |
 
 Reconstructability note: for any committed knowledge file, `git log` + GitHub merge-commit message parsing (`Merge pull request #N`, `(#N)` squash suffix) recovers the PR number in the common case. `/reindex` does this automatically; if the merge context cannot be determined unambiguously, the field stays empty rather than guessing.
 
