@@ -75,13 +75,27 @@ user_invocable: true
    • Active worktrees: 2
    ```
 
-6. **Quick actions**:
+6. **Suggested next step** (contextual — pick the single most relevant action based on the state surveyed above):
+   - **≥1 task is "Not Started"** →
+     `▶️  Next: /kickoff <task-name>  — spin up a worktree and start working (or just /kickoff to pick interactively)`
+   - **else, ≥1 task is "Merged" / PR closed but worktree still exists** →
+     `▶️  Next: /close <task-name>  — clean up the merged task`
+   - **else, ≥1 task is "In Progress"** →
+     `▶️  Next: resume with /continue from inside the task worktree`
+   - **else (no tasks at all)** →
+     `▶️  Next: /define  — capture a new task from the current context`
+
+   Print the chosen line as its own highlighted block directly below the summary. Pick exactly one — do not print multiple "Next" lines.
+
+7. **All commands** (reference, always shown):
    ```
-   Quick Actions:
-   • /kickoff        — Start a new task
-   • /define       — Create a new task
-   • /status <name> — Check specific task status
-   • /close        — Clean up completed task
+   Commands:
+   • /define         — Create a new task
+   • /kickoff        — Start a task in a worktree
+   • /adopt          — Adopt an existing branch into the work system
+   • /continue       — Resume the active task
+   • /status <name>  — Check specific task status
+   • /close <name>   — Clean up completed task
    ```
 
 ## Output Format
