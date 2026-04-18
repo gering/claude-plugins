@@ -60,7 +60,15 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
    - If empty → ✅ "Branch is up-to-date with `<BASE_BRANCH>`. No rebase needed." — stop.
    - If non-empty → continue to step 5.
 
-5. **Show what's new and ask**:
+5. **Show what's new and ask** (single confirmation covers rebase + force-push):
+
+   First, determine whether a force-push will follow — check if the branch has an upstream:
+   ```
+   git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null
+   ```
+   Store as `HAS_UPSTREAM` (true if the command succeeds with a non-empty value).
+
+   Then ask:
    ```
    Branch `<CURRENT_BRANCH>` is behind `<BASE_BRANCH>` by N commit(s):
 
@@ -68,14 +76,14 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
      def456 Bump dependency X to 2.3.0
      789aaa Refactor logger init
 
-   Rebase `<CURRENT_BRANCH>` onto `origin/<BASE_BRANCH>`?
-   [y] yes, rebase now
+   Rebase `<CURRENT_BRANCH>` onto `origin/<BASE_BRANCH>`<if HAS_UPSTREAM> and force-push with --force-with-lease</if>?
+   [y] yes, rebase<if HAS_UPSTREAM> + force-push</if>
    [n] no, leave as-is (warning will remain)
    [d] show full diff first before deciding
    ```
    - `d`: run `git log -p HEAD..origin/<BASE_BRANCH>` (paginate for large diffs), then ask again
    - `n`: stop with ⚠️ "Rebase skipped — branch remains N commits behind `<BASE_BRANCH>`"
-   - `y`: continue to step 6
+   - `y`: continue to step 6. The user's `y` authorizes both the rebase AND the subsequent force-push (if `HAS_UPSTREAM`). Do NOT re-ask later.
 
 6. **Uncommitted changes guard**:
    - Run: `git status --porcelain`
@@ -99,11 +107,10 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
        - Ask which the user prefers — do NOT automatically resolve conflicts.
 
 8. **Post-rebase: remote state**:
-   - If the branch has an upstream: warn that a force-push will be needed
-     - `git push --force-with-lease` (safer than `--force`)
-     - Ask user for confirmation before pushing. **Never force-push without explicit approval.**
-     - Track whether the push actually happened (`FORCE_PUSHED = true/false`)
-   - If no upstream yet: no push needed, branch is local only (`FORCE_PUSHED = false`)
+   - If `HAS_UPSTREAM` is true: execute `git push --force-with-lease` directly — the `y` from step 5 already covered this. Do NOT ask again.
+     - Set `FORCE_PUSHED = true` on success.
+     - If the push is rejected (e.g. remote advanced since `y`), stop with the error and suggest re-running `/rebase` — do NOT auto-retry with `--force`.
+   - If `HAS_UPSTREAM` is false: no push needed, branch is local only (`FORCE_PUSHED = false`)
 
 9. **Wait for auto-triggered review** (standalone only):
    - **Skip entirely** if any of these are true:
@@ -149,7 +156,7 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
 
 ## Notes
 
-- This skill **never force-pushes without confirmation** — you stay in control
+- This skill **never force-pushes without confirmation** — but the single `y` in step 5 authorizes both rebase and the subsequent force-push, so you only confirm once
 - Conflicts → abort + suggest, never auto-resolve
 - Safe to run repeatedly: if no rebase is needed, it's a 2-command no-op
 - Designed to be called both standalone and from `/open` / `/cycle`
