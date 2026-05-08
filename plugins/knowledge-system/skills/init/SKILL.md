@@ -154,4 +154,5 @@ Next:
 - Store a first learning: /curate "<insight>"
 - Query knowledge: /query "<question>"
 - Run a QA pass: /reindex
+- Optional: show `[cks rules|knowledge]` in your status line — `/knowledge-system:statusline install`
 ```
