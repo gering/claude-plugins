@@ -1,17 +1,9 @@
 ---
 name: reindex
 description: |
-  Thorough QA pass over the project knowledge base. Dispatches a
-  background agent (Sonnet with large-context window) that rebuilds every
-  `_index.md`, validates and proposes cross-references, backfills missing
-  frontmatter from git history, updates `reindexedAt`, and appends a
-  bullet-point run summary to `.claude/logs/reindex.md`. Intended as an
-  occasional maintenance measure, not a hot-path command.
-
-  Use when: user says "reindex", "run knowledge QA", "clean up knowledge",
-  "check cross-references", "rebuild indexes", "verify knowledge base",
-  before a release, after a large refactor, or periodically every few
-  weeks. Also "knowledge aufräumen" / "index neu bauen" / "QA lauf".
+  Background QA pass: rebuilds indexes, validates cross-refs, backfills
+  frontmatter from git history.
+  Trigger: "reindex", "knowledge QA", "clean up knowledge".
 user_invocable: true
 ---
 

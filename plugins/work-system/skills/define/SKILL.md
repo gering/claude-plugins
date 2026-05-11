@@ -1,15 +1,9 @@
 ---
 name: define
 description: |
-  Creates a new task markdown file from the current conversation context.
-  Extracts intent, acceptance criteria, affected files, and open questions;
-  generates a kebab-case task name; saves the file to the project's task
-  directory (typically `.claude/tasks/` or `tasks/`) for later resumption.
-
-  Use when: user wants to "create a task", "neuen task anlegen", "track
-  this work", "plan this", "capture what we're about to do", needs to
-  persist work intent before starting (especially in a separate worktree
-  via /kickoff). Also "aufgabe anlegen" / "define".
+  Creates a task file from current context: intent, acceptance criteria,
+  affected files, open questions.
+  Trigger: "create a task", "define a task", "capture this work".
 user_invocable: true
 ---
 

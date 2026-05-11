@@ -1,15 +1,8 @@
 ---
 name: status
 description: |
-  Read-only status snapshot of a task. Shows branch state (ahead/behind
-  main, unpushed commits), associated PR (open/merged/closed, CI status,
-  reviews if `gh` is available), and whether the work is ready for
-  `/close`. Does not modify anything.
-
-  Use when: user wants to "check this task", "is this done", "status of
-  the task", "was macht task X", "ist das gemerged", needs to know
-  whether a task branch is still active or safe to clean up. Also
-  "status" / "task status".
+  Read-only task snapshot: branch state, PR, `/close`-readiness.
+  Trigger: "check this task", "task status", "is this merged?".
 user_invocable: true
 ---
 

@@ -1,17 +1,9 @@
 ---
 name: init
 description: |
-  Scaffolds the knowledge-system layout in a project: creates
-  `.claude/knowledge/` and `.claude/rules/` directories with starter files,
-  writes the auto-prime rule, and injects the knowledge index into
-  `CLAUDE.md` as an `@`-reference. Idempotent — safe to re-run on existing
-  projects; regenerates plugin-managed artifacts without touching user
-  content.
-
-  Use when: user wants to "set up knowledge", "initialize knowledge
-  system", "bootstrap .claude/", "start documenting conventions", during
-  new project adoption, or says "init" / "knowledge-system aufsetzen" /
-  "knowledge anlegen".
+  Scaffolds `.claude/knowledge/` + `.claude/rules/`, writes the auto-prime
+  rule, injects the index into `CLAUDE.md`. Idempotent.
+  Trigger: "init knowledge", "set up knowledge system", "bootstrap .claude/".
 user_invocable: true
 ---
 

@@ -1,16 +1,9 @@
 ---
 name: cycle
 description: |
-  Runs a full review iteration with the @claude GitHub review bot. Commits
-  pending changes (with confirmation), pushes to remote, hides outdated
-  previous reviews, triggers @claude review (or detects auto-trigger),
-  polls in the background until completion, and presents structured
-  results with numbered issues grouped by file and severity.
-
-  Use when: user wants to "trigger claude review", "get review feedback",
-  "iterate on the PR", "push and review", "cycle the PR", has made changes
-  to an open PR and wants new feedback. Also when user says "lass claude
-  nochmal drüberschauen" / "review-zyklus" / "push und feedback".
+  Full @claude review iteration: commit, push, trigger, poll, present
+  numbered issues by file + severity.
+  Trigger: "trigger claude review", "cycle the PR", "push and review".
 user_invocable: true
 ---
 

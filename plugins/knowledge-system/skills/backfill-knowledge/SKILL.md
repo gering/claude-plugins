@@ -1,24 +1,9 @@
 ---
 name: backfill-knowledge
 description: |
-  Mines merged PR history on main for significant learnings that have
-  not yet been curated. Dispatches a background agent (Sonnet) that
-  reads each PR's title, body, commit messages, and diff, and judges
-  whether the change introduces a new feature, an architecture change,
-  or a major insight worth preserving. Small bug fixes, refactors,
-  dependency bumps, and typo/chore PRs are explicitly excluded.
-  Survivors return as a single batch report with short learning
-  descriptions and target-file recommendations. User approves by number
-  range, then `/curate` runs on each approved candidate with the PR
-  context as input. Skips PRs already represented in the knowledge base
-  (via `createdFrom` / `updatedFrom` scan and a persistent log).
-
-  Use when: user says "backfill knowledge", "mine PR history", "curate
-  from history", "was fehlt noch im knowledge", "alte PRs kurieren",
-  "knowledge aus alten PRs bauen", wants to bootstrap knowledge on an
-  existing project, or after a long curation gap. Usually paired with
-  `/reindex` first (so existing metadata is up to date for the
-  idempotency check).
+  Mines merged PRs for uncurated learnings: background agent proposes
+  candidates, user approves a range, `/curate` runs per pick.
+  Trigger: "backfill knowledge", "mine PR history", "curate from history".
 user_invocable: true
 ---
 

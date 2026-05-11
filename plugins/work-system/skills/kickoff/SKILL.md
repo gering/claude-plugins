@@ -1,16 +1,9 @@
 ---
 name: kickoff
 description: |
-  Starts work on a task by creating an isolated git worktree and feature
-  branch. Picks a task file (interactively or via argument), creates
-  `task/<name>` branch off main, sets up the worktree under a configurable
-  path (e.g. `../<repo>--claude-worktrees/<name>`), and opens a fresh
-  Claude Code session scoped to it for parallel development.
-
-  Use when: user wants to "start working on X", "begin this task",
-  "worktree anlegen", "let's actually do this", has a task file ready and
-  wants an isolated environment to work in without disturbing main.
-  Also "mit task X starten" / "kickoff".
+  Creates a `task/<name>` branch off main in an isolated worktree and
+  opens a fresh Claude Code session there.
+  Trigger: "start working on X", "kickoff", "create a worktree".
 user_invocable: true
 ---
 

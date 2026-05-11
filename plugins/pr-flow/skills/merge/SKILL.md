@@ -1,18 +1,9 @@
 ---
 name: merge
 description: |
-  Merges the current PR safely with exhaustive preflight. Detects merge
-  method via repo-allowed settings + historical pattern of last 20 PRs
-  (rebase / squash / merge). Verifies CI, human reviews, open Claude
-  blocking issues, mergeable state, and branch protection. Handles
-  backup-convention-aware local branch cleanup (rename to backup/* if
-  convention exists, else delete). Refuses --admin bypass — root-cause
-  over workaround.
-
-  Use when: user wants to "merge the PR", "ship it", "land the PR",
-  "close out the PR", "merge and cleanup", PR is approved and ready to
-  merge. Also when user says "mergen" / "PR abschließen" / "einmerge" /
-  "ready to merge".
+  Merges the PR with preflight (CI, reviews, blocking issues, mergeable
+  state), auto-detects merge method, cleans up branch. No --admin bypass.
+  Trigger: "merge the PR", "ship it", "land the PR".
 user_invocable: true
 ---
 

@@ -1,16 +1,9 @@
 ---
 name: adopt
 description: |
-  Adopts an existing feature branch into the work system. Creates a
-  worktree for the existing branch (instead of creating a new branch like
-  /kickoff does), generates a matching task file from the branch's
-  commits and diff, and wires it into the task directory as if the work
-  had been tracked from the start.
-
-  Use when: user has a branch that was created manually (outside the work
-  system) and wants to retroactively track it, or says "adopt this
-  branch", "bring feature/xyz into the work system", "adopt",
-  "vorhandenen branch aufnehmen" / "branch adoptieren".
+  Adopts an existing branch: creates a worktree and generates a task
+  file from its commits/diff.
+  Trigger: "adopt this branch", "track this branch in the work system".
 user_invocable: true
 ---
 

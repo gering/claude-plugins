@@ -1,15 +1,9 @@
 ---
 name: migrate
 description: |
-  Migrates a project's legacy ByteRover-based knowledge into the native
-  `knowledge-system` layout. Reads existing ByteRover entries, reclassifies
-  each as a rule (always-active) or knowledge (on-demand), and writes to
-  the standard `.claude/` structure.
-
-  Use when: user has an existing ByteRover-based project and wants to
-  "migrate knowledge", "switch to native knowledge system", "move from
-  ByteRover", or says "migrate" / "byterover migrieren" in a knowledge
-  context.
+  Migrates legacy ByteRover knowledge into the native `.claude/`
+  rules/knowledge layout.
+  Trigger: "migrate knowledge", "migrate from byterover".
 user_invocable: true
 ---
 

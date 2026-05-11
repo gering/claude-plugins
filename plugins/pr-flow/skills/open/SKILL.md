@@ -1,16 +1,9 @@
 ---
 name: open
 description: |
-  Creates a new pull request with full readiness verification. Auto-runs
-  tests, linter, and build. Checks for stale README, missing version bump,
-  outdated changelog, and missing knowledge documentation. Detects rebase
-  needs via /rebase. After creation, verifies CI + @claude review
-  auto-trigger and polls in the background for the first review result.
-
-  Use when: user wants to "create a PR", "open a pull request", "ship this
-  branch", "ready for review", has a feature branch ready to share, or
-  wants readiness verification before opening a PR. Also when user says
-  "mach nen PR auf" / "neuen PR erstellen".
+  Creates a PR after readiness checks (tests, lint, build, README,
+  version, changelog, knowledge, rebase), then polls CI + first @claude review.
+  Trigger: "create a PR", "open a pull request", "ready for review".
 user_invocable: true
 ---
 

@@ -1,16 +1,9 @@
 ---
 name: query
 description: |
-  Retrieves relevant project knowledge on demand — architecture overviews,
-  feature specifications, deployment procedures, recurring patterns, and
-  past decisions. Searches `.claude/knowledge/` first, then `.claude/rules/`,
-  surfacing the most relevant entries with file paths for follow-up reading.
-
-  Use when: user asks "how does X work here", "what's the convention for Y",
-  "show me the deployment process", "what do we know about Z", before
-  making non-trivial changes to unfamiliar areas of the codebase, or says
-  "query" / "was weißt du über X" / "wie funktioniert X hier" / "knowledge
-  zu X".
+  Searches `.claude/knowledge/` then `.claude/rules/` and surfaces
+  relevant entries with file paths.
+  Trigger: "how does X work here", "what do we know about X", "knowledge on X".
 user_invocable: true
 ---
 
