@@ -30,6 +30,17 @@ Plugins are purely declarative — no build step, no compiled code. Everything i
 - **Agents** (`.md` in `agents/`): Define sub-agents with model, tools, and memory scope in frontmatter.
 - **Rules** (`.md` in `rules/`): Auto-loaded directives with optional glob patterns for file-scoped activation.
 
+### Skill descriptions: keep them short
+
+Skill `description` frontmatter is loaded into every Claude Code session for activation matching. It counts against `skillListingBudgetFraction` (default 1%) — when the total exceeds the budget, descriptions get truncated and skills may stop matching.
+
+Guidelines:
+- **Aim for ~15–30 words per description** (~150–220 chars). Hard ceiling: 40 words.
+- **Structure:** one short sentence on *what* the skill does + a `Trigger: "...", "...", "..."` line with 2–4 short example phrases.
+- **English only**, even when the user works in another language — keep all source files in English per global conventions.
+- **No feature lists in the description.** Subcommands, edge-case behavior, internal flow — all of that belongs in the `SKILL.md` body, which the model only loads once the skill is invoked.
+- **No "Use when:" prose blocks** — the `Trigger:` line replaces them.
+
 ## Versioning
 
 Plugin versions are tracked in two places that must stay in sync:
