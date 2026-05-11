@@ -4,36 +4,42 @@ description: |
   Manages a `[cks N|M]` block in Claude Code's status line showing
   `.claude/rules/` and `.claude/knowledge/` file counts with dirty-state
   modifiers. Subcommands: install, enable, disable, uninstall, status.
+  Per-project opt-out via `disable`.
   Trigger: "statusline cks", "show/hide cks", "knowledge status indicator".
 user_invocable: true
 ---
 
 # Knowledge System Status Line Integration
 
-> Append `[cks RULES|KNOW]` to Claude Code's status line, with `*mod` / `+untracked` modifiers when files are dirty.
+> Append `[cks RULES|KNOW]` to Claude Code's status line, with `*N` (tracked changes) / `+N` (untracked) modifiers when files are dirty.
 
 ## Arguments
 
-`$ARGUMENTS` — one of: `install`, `enable`, `disable`, `uninstall`, `status` (default: `status`). `install` accepts a trailing `--force` to overwrite a pre-existing manual cks block.
+`$ARGUMENTS` — one of: `install`, `enable`, `disable`, `uninstall`, `status` (default: `status`). `install` accepts a trailing `--force` to overwrite a pre-existing manual cks block or force a downgrade.
 
 ## Output format
 
-`[cks 12|34]` — first column = `.claude/rules/*.md` count, second = `.claude/knowledge/**/*.md` count (excluding `_index.md` / `README.md`). A third column appears when project-level `knowledge/_index.md` exists. Each column may carry `*N` (yellow, modified) and `+N` (green, untracked) suffixes from `git status --porcelain`.
+`[cks 12|34]` — first column = `.claude/rules/**/*.md` count, second = `.claude/knowledge/**/*.md` count (both recursive, excluding `_index.md` / `README.md`). An optional third column appears when project-level `knowledge/_index.md` exists at the repo root (a legacy convention from layouts predating `.claude/knowledge`).
 
-When neither `.claude/rules/` nor `.claude/knowledge/` exists in the project, the block falls back to a dim `cks` placeholder.
+Each column may carry `*N` and `+N` suffixes from `git status --porcelain`:
+- **`*N`** — *tracked changes*: any file under the path that has a non-empty index or worktree status (modified, added, deleted, renamed, copied, unmerged — staged or unstaged). Computed as "all porcelain lines minus untracked".
+- **`+N`** — *untracked*: lines starting with `??`.
+
+When neither `.claude/rules/` nor `.claude/knowledge/` exists in the project, the renderer exits silently with no output. The marker block's `[ -n "$CKS_PLUGIN" ]` guard then leaves `$OUT` unchanged, so unrelated projects show nothing — no dim placeholder, no whitespace artefact.
 
 ## Architecture
 
-- **Renderer** lives in the plugin at `scripts/statusline-cks.sh` (source of truth, versioned via `CKS_STATUSLINE_VERSION=X.Y.Z` header).
-- **Install** copies the renderer to a stable user-global path: `~/.claude/cks-statusline.sh`. The copied file becomes the runtime source for the status line — its path is fixed regardless of where the plugin lives.
+- **Renderer** lives in the plugin at `scripts/statusline-cks.sh` (source of truth). The version is a real bash declaration — `readonly CKS_STATUSLINE_VERSION="X.Y.Z"` — parsed by `install` to gate upgrades.
+- **Install** copies the renderer to a stable user-global path: `~/.claude/cks-statusline.sh`. The copied file becomes the runtime source — its path is fixed regardless of where the plugin lives.
 - **Marker block** in `~/.claude/statusline.sh` calls the stable path. Format:
   ```
   # >>> knowledge-system:cks-statusline >>>
   # ... block ...
   # <<< knowledge-system:cks-statusline <<<
   ```
+- **Host script contract.** The marker block expects the host `statusline.sh` to define an `OUT` variable that accumulates the rendered status line (the marker block appends `$CKS_PLUGIN` to it). The block derives the workspace dir itself via `${DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}` so it works whether or not the host script defines `$DIR`.
 - **Per-project disable sentinel:** `<project>/.claude/.cks-statusline-off`. The renderer checks this first and exits silently when present, so noisy projects can opt out without touching the global setup.
-- **Updates** are version-gated: re-running `install` compares the plugin's `CKS_STATUSLINE_VERSION` against the installed copy and only overwrites on upgrade.
+- **Updates** are version-gated: re-running `install` compares the plugin's `CKS_STATUSLINE_VERSION` against the installed copy and only overwrites on upgrade (`--force` overrides).
 
 ## Instructions
 
@@ -45,7 +51,9 @@ When neither `.claude/rules/` nor `.claude/knowledge/` exists in the project, th
 - `BEGIN_MARKER="# >>> knowledge-system:cks-statusline >>>"`
 - `END_MARKER="# <<< knowledge-system:cks-statusline <<<"`
 - Parse `$ARGUMENTS` (default to `status`). Recognise `install`, `enable`, `disable`, `uninstall`, `status`, plus the `--force` flag for `install`.
-- Helper — extract version from any script path: `grep -m1 '^# CKS_STATUSLINE_VERSION=' "$path" | cut -d= -f2 | tr -d '[:space:]'`. Treat missing as `0.0.0`.
+- Helper — extract version from any script path:
+  `grep -m1 '^readonly CKS_STATUSLINE_VERSION=' "$path" | sed -E 's/.*=[[:space:]]*"?([0-9]+\.[0-9]+\.[0-9]+)"?.*/\1/'`.
+  Validate the result against `^[0-9]+\.[0-9]+\.[0-9]+$`. Treat missing or malformed as `0.0.0`.
 
 ### 1. `status` (default)
 
@@ -59,48 +67,62 @@ End with a hint about which subcommand fits the current state (e.g. "Run `instal
 
 ### 2. `install`
 
-a. **Preflight:**
+a. **Preflight (abort cleanly on each failure):**
    - `STATUSLINE` exists. Else stop: "No `~/.claude/statusline.sh` found. Set up your custom status line first (see `~/.claude/settings.json` → `statusLine.command`)."
    - `SOURCE` exists. Else stop with the resolved path and a hint to reinstall the plugin.
-   - `STATUSLINE` is writable.
+   - `STATUSLINE` is writable. Else stop: "`<STATUSLINE>` is not writable (permissions/ownership?). Fix and re-run."
+   - If `STATUSLINE` is a symlink (`[ -L "$STATUSLINE" ]`): warn — "`<STATUSLINE>` is a symlink to `<readlink target>`. Edits will modify the link target." Proceed unless `--force-no-symlink` is later added (currently informational only).
 
-b. **Copy renderer to stable path** (version-gated):
-   - Read `SRC_VERSION` from `SOURCE` and `DEST_VERSION` from `INSTALLED` (defaulting to `0.0.0` if missing).
-   - Compare via `sort -V` (or simple per-component compare). If `SRC_VERSION > DEST_VERSION` **or** `INSTALLED` is missing: `cp "$SOURCE" "$INSTALLED"` and `chmod +x "$INSTALLED"`. Report `"Renderer updated: <DEST_VERSION> → <SRC_VERSION>"` (or `"Renderer installed at <INSTALLED> (v<SRC_VERSION>)"`).
-   - If equal: report `"Renderer already current (v<SRC_VERSION>)"`, skip copy.
-   - If `DEST_VERSION > SRC_VERSION` (downgrade): warn — "Installed v<DEST> is newer than plugin v<SRC>. Skipping copy. Use `--force` to overwrite." Honour `--force` if passed.
+b. **Copy renderer to stable path** (version-gated, with explicit failure handling):
+   - Read `SRC_VERSION` from `SOURCE` and `DEST_VERSION` from `INSTALLED` (default `0.0.0` when missing or malformed).
+   - Compare via `sort -V`. Cases:
+     - `INSTALLED` missing **or** `SRC_VERSION > DEST_VERSION`: `cp "$SOURCE" "$INSTALLED"` followed by `chmod +x "$INSTALLED"`. **If either command fails**, stop with the stderr — "Failed to install renderer to `<INSTALLED>`: `<error>`. Marker block was not touched." Do **not** proceed to step d.
+     - `SRC_VERSION == DEST_VERSION`: report `"Renderer already current (v<SRC_VERSION>)"`, skip copy.
+     - `DEST_VERSION > SRC_VERSION` (downgrade): warn "Installed v<DEST> is newer than plugin v<SRC>. Skipping copy. Use `--force` to overwrite." Honour `--force` if passed.
 
-c. **Detect existing manual cks block** (only relevant for the marker injection, not the renderer copy):
-   - Grep `STATUSLINE` for `\[cks ` outside the marker block. If found AND marker block absent: warn about duplication, require `--force`.
+c. **Detect existing manual cks block:**
+   - Grep `STATUSLINE` for the regex `\[cks[^]]*\]` (literal `[cks` followed by anything up to `]`) **outside** the marker block range. If found AND marker block absent: warn about duplication, require `--force`.
 
-d. **Inject or refresh marker block:**
-   - Backup once per session: `cp "$STATUSLINE" "${STATUSLINE}.bak-$(date +%s)"`.
-   - If marker block exists: strip it (sed between `BEGIN_MARKER` and `END_MARKER` inclusive) and re-insert. (Lets us refresh content if we ever change the snippet.) Skip the placement logic below — the existing markers define the position.
-   - **Placement priority** (first match wins):
-     1. **User-placed placeholder:** grep for a line matching the regex `^[[:space:]]*#[[:space:]]*\{\{cks\}\}[[:space:]]*$` (literal `# {{cks}}` with optional surrounding whitespace). If found, **replace that line** with the marker block. This is the explicit-placement contract — users put `# {{cks}}` exactly where they want the cks block to appear. Report `"Placed at user-defined position (# {{cks}} placeholder on line N)"`.
-     2. **Auto-detect fallback:** find the last `echo` line that prints `$OUT` (e.g. `echo -e "$OUT"` / `echo "$OUT"` / `printf … "$OUT"`) and insert **before** that line. Report `"Auto-placed before final $OUT echo (line N). Add a # {{cks}} comment if you want a different position."`.
+d. **Inject or refresh marker block** (atomic, restorable):
+   - Compute a session backup path **once**: `BACKUP="${STATUSLINE}.bak-$(date +%s)"`. Run `cp "$STATUSLINE" "$BACKUP"`. From here on, *any* failure between mutations and the final verify restores from `$BACKUP` and aborts.
+   - Count occurrences of `$BEGIN_MARKER` and `$END_MARKER` in `STATUSLINE`. They must be equal (both 0 or both 1).
+     - **Both 1:** verify the BEGIN line number is strictly less than the END line number (otherwise the markers were manually re-ordered and `sed '/BEGIN/,/END/d'` would delete to EOF). If so, strip the existing block (lines between markers, inclusive) and treat the strip point as the insertion target. Skip placement priority below.
+     - **Both 0:** apply placement priority (next bullet).
+     - **Mismatched (0/1, 1/0, any count > 1, or BEGIN line ≥ END line):** stop with `"Marker pair invalid in <STATUSLINE> (<n_begin> BEGIN, <n_end> END, BEGIN@<line>, END@<line>). Resolve manually before re-running install."` Do **not** mutate.
+   - **Placement priority** (first match wins, only when no existing block was found):
+     1. **User-placed placeholder:** grep for the regex `^[[:space:]]*#[[:space:]]*\{\{cks\}\}[[:space:]]*$`. **Count matches first.**
+        - Exactly 1 match: replace that line with the marker block. Report `"Placed at user-defined position (# {{cks}} placeholder on line N)"`.
+        - **>1 match:** stop with `"Multiple # {{cks}} placeholders found (lines N, M, ...). Keep only one and re-run install."` Do **not** mutate.
+        - 0 matches: fall through to step 2.
+     2. **Auto-detect fallback:** find the last line matching `(echo[[:space:]].*\$OUT|printf[[:space:]].*\$OUT)` and insert the marker block immediately **before** it. Report `"Auto-placed before <matched-line> (line N). Add a # {{cks}} comment to your statusline.sh if you want a different position."`. Caveat: this is a heuristic — verify the result and prefer the placeholder for stability.
      3. **Neither found:** stop with guidance — print the marker block snippet and tell the user to either add `# {{cks}}` to their statusline.sh and re-run install, or paste the snippet manually.
-   - Insert the marker block:
+   - **Mutation pattern:** write the new contents to a sibling temp file `${STATUSLINE}.tmp.$$`, then `mv` atomically over `STATUSLINE`. Never edit in place. On `mv` failure: restore from `$BACKUP` and abort.
+   - **Marker block content** (written exactly):
 
      ```bash
      # >>> knowledge-system:cks-statusline >>>
      # Managed by /knowledge-system:statusline. Do not edit between markers —
      # run `/knowledge-system:statusline uninstall` to remove cleanly.
      if [ -x "$HOME/.claude/cks-statusline.sh" ]; then
-       CKS_PLUGIN=$(bash "$HOME/.claude/cks-statusline.sh" "$DIR" 2>/dev/null)
+       _CKS_DIR="${DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
+       CKS_PLUGIN=$(bash "$HOME/.claude/cks-statusline.sh" "$_CKS_DIR" 2>/dev/null)
        [ -n "$CKS_PLUGIN" ] && OUT="$OUT $CKS_PLUGIN"
      fi
      # <<< knowledge-system:cks-statusline <<<
      ```
 
-     Note the path is hard-coded to `$HOME/.claude/cks-statusline.sh` — no plugin-path dependency, survives plugin moves.
+     Notes on the snippet:
+     - The renderer path is hard-coded to `$HOME/.claude/cks-statusline.sh` — no plugin-path dependency, survives plugin moves.
+     - `_CKS_DIR` falls back through `${DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}` so the snippet works with whichever convention the host script uses, with `$PWD` as a final safety net.
+     - The block assumes `$OUT` exists. If the host script uses a differently-named accumulator, the cks block will silently produce nothing visible — see "Edge cases".
 
-e. **Verify:** `bash -n "$STATUSLINE"`. On parse failure: restore from backup, abort with the parser error.
+e. **Verify:** `bash -n "$STATUSLINE"`. On parse failure: `mv "$BACKUP" "$STATUSLINE"` and abort with the parser error.
 
 f. **Confirm:**
    > "✅ Installed.
    > - Renderer: `<INSTALLED>` (v<SRC_VERSION>)
-   > - Marker block: injected into `<STATUSLINE>`
+   > - Marker block: injected into `<STATUSLINE>` (via placeholder / auto-detect)
+   > - Backup: `<BACKUP>`
    > Restart Claude Code (or reload status line) to see `[cks ...]` for projects with `.claude/knowledge` or `.claude/rules`.
    > Tip: silence cks in a noisy project with `/knowledge-system:statusline disable` (run from inside that project)."
 
@@ -122,23 +144,31 @@ f. **Confirm:**
 ### 5. `uninstall`
 
 a. Marker block in `STATUSLINE`:
-   - Backup: `cp "$STATUSLINE" "${STATUSLINE}.bak-$(date +%s)"`.
-   - Strip block between markers (inclusive).
-   - `bash -n "$STATUSLINE"` — restore on failure.
+   - Count `$BEGIN_MARKER` and `$END_MARKER` occurrences first.
+     - **Both 0:** report `"Nothing to uninstall — marker block not found in <STATUSLINE>."` Skip step b's renderer removal? **No — still remove the renderer** (step b) since it's the global asset. But skip the backup and the strip.
+     - **Both 1:** verify the BEGIN line number is strictly less than the END line number (protects against re-ordered markers — `sed '/BEGIN/,/END/d'` would otherwise delete to EOF). Only then proceed.
+     - **Mismatched (1/0, 0/1, any count > 1, or BEGIN line ≥ END line):** stop with `"Marker pair invalid in <STATUSLINE> (<n_begin> BEGIN, <n_end> END, BEGIN@<line>, END@<line>). Resolve manually before re-running uninstall."` Do **not** touch the file.
+   - Compute `BACKUP="${STATUSLINE}.bak-$(date +%s)"`, run `cp "$STATUSLINE" "$BACKUP"`.
+   - Write the stripped contents to `${STATUSLINE}.tmp.$$`, then atomic `mv` over `STATUSLINE`. Restore from `$BACKUP` on any failure.
+   - `bash -n "$STATUSLINE"`: if it fails *and the original passed `bash -n`*, restore from `$BACKUP`; otherwise surface the parse error to the user (the file was already broken before uninstall).
 
-b. Remove the installed renderer: `rm -f "$INSTALLED"`.
+b. Remove the installed renderer: if `[ -e "$INSTALLED" ]`, run `rm "$INSTALLED"` (no `-f` — surface real failures). On error, warn but do not abort uninstall.
 
 c. Per-project sentinels are **not** touched. They remain harmless (no renderer to check them).
 
-d. Confirm: `"✅ Uninstalled. Marker block removed, renderer deleted, backup at <STATUSLINE>.bak-…. Per-project sentinels were left in place."`
+d. Confirm: `"✅ Uninstalled. Marker block removed, renderer deleted, backup at <BACKUP>. Per-project sentinels were left in place."`
 
 ## Edge cases
 
 - User has no custom `~/.claude/statusline.sh` (default Claude Code status line): `install` aborts with guidance. We do not synthesise a status line from scratch.
 - Existing manual `[cks ...]` block: warn and require `--force` to avoid duplicates.
 - Plugin renderer is older than installed (downgrade scenario): skip by default, `--force` overrides.
-- Project has neither `.claude/rules` nor `.claude/knowledge`: renderer prints a dim `cks` placeholder.
-- Project has the disable sentinel: renderer exits with empty output. The marker block then evaluates `[ -n "$CKS_PLUGIN" ]` as false and leaves `$OUT` unchanged — no whitespace artefact.
+- Project has neither `.claude/rules` nor `.claude/knowledge`: renderer exits silently with empty output — no cks marker appears in the status line for that project.
+- Project has the disable sentinel: renderer exits silently. Marker block's `[ -n "$CKS_PLUGIN" ]` guard leaves `$OUT` unchanged.
+- Host `statusline.sh` uses an accumulator variable other than `$OUT` (e.g. `$STATUS`, `$LINE`): the injected snippet appends to `$OUT` which the host then ignores → silent no-op. The auto-detect step searches for `echo … $OUT`, so this case typically gets caught and aborts at placement step 3. If it slips through (e.g. user placed `# {{cks}}` despite differently-named accumulator), they'll see no cks block; documented in step d's snippet notes.
+- `STATUSLINE` is a symlink (managed via stow/chezmoi): install warns but proceeds — edits modify the link target. Users with dotfiles management should expect a diff in their managed repo.
+- Multiple `# {{cks}}` placeholders: install aborts before any mutation (see step d.1).
+- Mismatched `BEGIN`/`END` marker counts (corrupted prior install): install and uninstall both refuse to mutate and ask the user to resolve manually — this protects against catastrophic `sed` deletion.
 
 ## Custom placement
 
@@ -173,5 +203,5 @@ In that case: still run `install` once to copy the renderer into place (and to k
 ## Notes
 
 - Renderer is read-only — never writes to the project. Counts come from `find`; modifier flags from `git status --porcelain`.
-- The version header is the single source of truth for upgrade decisions. When changing the renderer's behaviour, bump `CKS_STATUSLINE_VERSION` in the script header **and** the plugin's `version` in `plugin.json`.
+- The script's `readonly CKS_STATUSLINE_VERSION` line is the single source of truth for upgrade decisions. When changing the renderer's behaviour, bump that version **and** the plugin's `version` in `plugin.json`.
 - `/init` mentions this skill as an optional enhancement.
