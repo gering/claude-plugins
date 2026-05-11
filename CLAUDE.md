@@ -30,6 +30,17 @@ Plugins are purely declarative — no build step, no compiled code. Everything i
 - **Agents** (`.md` in `agents/`): Define sub-agents with model, tools, and memory scope in frontmatter.
 - **Rules** (`.md` in `rules/`): Auto-loaded directives with optional glob patterns for file-scoped activation.
 
+### Context efficiency
+
+Whenever you add or change anything that ends up in a Claude Code session's permanent context — frontmatter descriptions, auto-loaded rule files, `CLAUDE.md` content, status-line output, plugin metadata — actively consider the token cost. Every word here is paid for in *every* session, not just the one that uses the feature.
+
+Default questions before writing:
+- Does this need to be in the always-loaded surface, or can it live in a body/doc that loads on demand?
+- Can the same meaning be expressed in half the words?
+- Is this content duplicated somewhere else that's already loaded?
+
+Err on the side of terse. Detail belongs in the file body the model reads when it actually invokes the skill — not in the activation surface.
+
 ### Skill descriptions: keep them short
 
 Skill `description` frontmatter is loaded into every Claude Code session for activation matching. It counts against `skillListingBudgetFraction` (default 1%) — when the total exceeds the budget, descriptions get truncated and skills may stop matching.
