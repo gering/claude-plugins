@@ -15,6 +15,17 @@ user_invocable: true
 
 - `$ARGUMENTS` - Optional: branch name to adopt
 
+## Critical: never persist a `cd` into the worktree
+
+This skill runs **in the user's main-repo session**. It creates the worktree; the user enters it in a separate terminal/Claude session (see the final step).
+
+The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>` would silently trap the entire session inside the worktree. Rules for every shell command:
+
+- ❌ Never `cd <worktree>` standalone or as `cd <worktree> && …` without a paired `cd` back.
+- ✅ Use `git -C <worktree-path> …` for git operations against the worktree.
+- ✅ Use absolute paths or paths relative to the main repo for `cp`, `mkdir`, `ln -s`.
+- ✅ If a different CWD is genuinely needed, wrap in a subshell: `(cd <worktree-path> && <cmd>)`.
+
 ## Instructions
 
 1. **Check current location**:
@@ -91,27 +102,31 @@ user_invocable: true
    - If branch was renamed: `git worktree add .claude/worktrees/<task-name> task/<task-name>`
    - If branch kept original name: `git worktree add .claude/worktrees/<task-name> <original-branch-name>`
 
-10. **Copy files to worktree**:
+10. **Copy files to worktree** (run from main-repo CWD — no `cd`):
     - Copy task file: `cp tasks/<task-name>.md .claude/worktrees/<task-name>/TASK.md`
     - Copy Claude config if it exists: `cp -r .claude/settings.json .claude/worktrees/<task-name>/.claude/ 2>/dev/null`
 
-11. **Final output**:
+11. **Verify CWD is still in the main repo**:
+    - Run: `pwd` and compare to the main-repo path from step 1's `git worktree list`.
+    - If they differ, **stop and report an error**: "Session CWD drifted into the worktree during adopt — investigate which step ran a persistent `cd`." Do not silently continue.
+
+12. **Final output for the user** (display this block — do *not* execute the `cd`):
     ```
     Branch adopted into work system!
 
     Original branch: <original-branch-name>
-    Task file: tasks/<task-name>.md
-    Worktree: .claude/worktrees/<task-name>
-    Branch: <current-branch-name>
-    Commits: <count> commits ahead of <main-branch>
+    Task file:       tasks/<task-name>.md
+    Worktree:        .claude/worktrees/<task-name>
+    Branch:          <current-branch-name>
+    Commits:         <count> commits ahead of <main-branch>
 
-    Next steps:
-    1. Open terminal in the worktree directory
-    2. Run: claude -n "<task-name>"
-    3. Run: /continue
+    👉 To start working there, open a SEPARATE terminal (not this Claude
+       session — this session stays in the main repo) and run:
 
-    Or use this one-liner:
-    cd .claude/worktrees/<task-name> && claude -n "<task-name>"
+         cd .claude/worktrees/<task-name>
+         claude -n "<task-name>"
+         # then inside the new session:
+         /continue
     ```
 
 ## Remember

@@ -11,6 +11,15 @@ user_invocable: true
 
 > Clean up after a task is completed: verify merge, remove worktree, delete branch and task file
 
+## Critical: never `cd` between repo and worktree
+
+This skill may run from the main repo *or* from inside the worktree being deleted. Bash CWD persists between tool calls, so changing directory mid-flow either traps the session in the worktree (when run from main) or leaves it pointing at a deleted path (when run from inside).
+
+Rules:
+- ❌ Do not `cd <worktree>` or `cd <main-repo>` during this skill.
+- ✅ All operations against either tree go through explicit paths: `git -C <main-repo-path> …`, `git -C <worktree-path> …`, `rm <main-repo-path>/tasks/<task-name>.md`, etc.
+- After deletion, the session's CWD may already be in a now-removed directory — that's the user's problem to fix (a new `cd` in their terminal), not something this skill should "repair" mid-run.
+
 ## Instructions
 
 1. **Identify the task**:
@@ -50,15 +59,15 @@ user_invocable: true
      - Warn: "You're in the worktree that will be deleted!"
      - Show: "After cleanup, switch to: <main-repo-path>"
 
-7. **Remove worktree** (if exists):
+7. **Remove worktree** (if exists) — all commands use explicit paths, never `cd`:
    - First check for untracked/modified files: `git -C <worktree-path> status --short`
    - If the only difference is `TASK.md` (untracked, copied by kickoff), use `--force` directly:
-     `git worktree remove <worktree-path> --force`
-   - Otherwise try: `git worktree remove <worktree-path>`
+     `git -C <main-repo-path> worktree remove <worktree-path> --force`
+   - Otherwise try: `git -C <main-repo-path> worktree remove <worktree-path>`
    - If fails (uncommitted changes beyond TASK.md):
-     - Show `git status` from worktree
+     - Show full status: `git -C <worktree-path> status`
      - Ask: "Force remove? (uncommitted changes will be lost)"
-     - If yes: `git worktree remove <worktree-path> --force`
+     - If yes: `git -C <main-repo-path> worktree remove <worktree-path> --force`
 
 8. **Delete local branch**:
    - If a merged PR was confirmed in step 2: use `git branch -D task/<task-name>` directly
@@ -73,10 +82,9 @@ user_invocable: true
    - If exists, ask: "Delete remote branch too?"
    - If yes: `git push origin --delete task/<task-name>`
 
-10. **Remove task file**:
-    - Navigate to main repo if needed
-    - Run: `rm tasks/<task-name>.md`
-    - Check if the file was git-tracked: `git status --short tasks/<task-name>.md`
+10. **Remove task file** (use the main-repo path from step 4 — do not `cd`):
+    - Run: `rm <main-repo-path>/tasks/<task-name>.md`
+    - Check if the file was git-tracked: `git -C <main-repo-path> status --short tasks/<task-name>.md`
     - If there is a staged/unstaged change (file was tracked): ask user if they want to commit the removal
     - If no git change (file was gitignored or untracked): just report "Task file removed", no commit needed
 

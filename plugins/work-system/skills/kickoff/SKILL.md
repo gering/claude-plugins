@@ -11,6 +11,20 @@ user_invocable: true
 
 > Select a task and create an isolated worktree for parallel development
 
+## Critical: never persist a `cd` into the worktree
+
+This skill runs **in the user's main-repo session**. Its job is to *create* the worktree, not to enter it. The user opens the worktree in a separate terminal/Claude session (see step 11).
+
+Because the Bash tool persists working directory between calls, a bare `cd .claude/worktrees/<task>` would silently trap the entire session inside the worktree — every subsequent `git status`, relative path, or check would target the worktree instead of the main repo. This has caused real user-visible bugs.
+
+**Rules for every shell command in this skill:**
+- ❌ Never run `cd <worktree>` as a standalone command, or `cd <worktree> && …` without a paired `cd -`/`cd <main-repo>` afterwards.
+- ✅ Use `git -C <worktree-path> …` for git operations against the worktree.
+- ✅ Use absolute paths or paths relative to the main repo for `cp`, `mkdir`, `ln -s`, etc.
+- ✅ If a step genuinely needs a different CWD (rare), wrap it in a subshell: `(cd <worktree-path> && <cmd>)` — the CWD change dies with the subshell.
+
+The same rule applies to any project-specific setup the user's `CLAUDE.md` may ask you to perform (symlinks for `data/`, copying credentials, etc.) — translate them into `git -C` / absolute / subshell form before executing.
+
 ## Instructions
 
 1. **Check current location**:
@@ -45,35 +59,44 @@ user_invocable: true
    - Run: `git worktree add .claude/worktrees/<task-name> -b task/<task-name>`
    - If branch already exists, use: `git worktree add .claude/worktrees/<task-name> task/<task-name>`
 
-8. **Copy files to worktree**:
+8. **Copy files to worktree** (run from main-repo CWD — relative paths target the main repo):
    - Copy task file: `cp tasks/<task-name>.md .claude/worktrees/<task-name>/TASK.md`
    - Copy Claude config if it exists: `cp -r .claude/settings.json .claude/worktrees/<task-name>/.claude/ 2>/dev/null`
    - This gives Claude in the worktree access to the task and permissions
+   - Do **not** `cd` into the worktree to perform copies — paths from the main repo work fine.
 
-9. **Symlinks note**:
-   - For large directories like `node_modules`, configure `symlinkDirectories` in `.claude/settings.json`
-   - For project-specific files needed in worktrees (credentials, build configs), add symlink instructions to your project's CLAUDE.md
+9. **Project-specific setup (symlinks, data dirs, etc.)**:
+   - For large directories like `node_modules`, configure `symlinkDirectories` in `.claude/settings.json`.
+   - If the project's `CLAUDE.md` instructs creating symlinks for shared resources (e.g. a `data/` directory), execute them **without a persistent `cd`**. Safe forms:
+     - `ln -s "$(pwd)/data" .claude/worktrees/<task-name>/data` — absolute symlink target, link path relative to main repo.
+     - `(cd .claude/worktrees/<task-name> && ln -s ../../../data data)` — subshell, CWD change dies on close.
+   - Never run `cd .claude/worktrees/<task-name>` as a standalone or trailing-`&&` command. See the "Critical" note at the top of this file.
 
 10. **Load project context** (optional):
     - If `.claude/knowledge/` exists, query the Knowledge Agent: "What are the project patterns and architecture?"
     - Otherwise, check CLAUDE.md and rules for project context
 
-11. **Final instructions**:
+11. **Verify CWD is still in the main repo**:
+    - Run: `pwd` and compare to the main-repo path captured from `git worktree list` in step 1.
+    - If they differ, **stop and report an error**: "Session CWD drifted into the worktree during kickoff — investigate which step ran a persistent `cd`." Do not silently continue; a contaminated session will mislead every subsequent command.
+
+12. **Final instructions for the user** (display this block — it is *not* a command to execute):
     ```
     Worktree created!
 
     Location: .claude/worktrees/<task-name>
-    Branch: task/<task-name>
-    Task file copied to: TASK.md
+    Branch:   task/<task-name>
+    Task file: TASK.md (copied into the worktree)
 
-    Next steps:
-    1. Open terminal in the worktree directory
-    2. Run: claude
-    3. Run: /continue
+    👉 To start working there, open a SEPARATE terminal (not this Claude
+       session — this session stays in the main repo) and run:
 
-    Or use this one-liner:
-    cd .claude/worktrees/<task-name> && claude
+         cd .claude/worktrees/<task-name>
+         claude
+         # then inside the new session:
+         /continue
     ```
+    Do **not** execute the `cd` command yourself — it is for the user's new terminal.
 
 ## Remember
 
