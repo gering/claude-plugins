@@ -45,7 +45,8 @@ When neither `.claude/rules/` nor `.claude/knowledge/` exists in the project, th
 
 ### 0. Resolve paths and parse argument
 
-- `STATUSLINE="${HOME}/.claude/statusline.sh"`
+- `STATUSLINE="${HOME}/.claude/statusline.sh"` (the configured path — may be a symlink)
+- `STATUSLINE_TARGET="$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$STATUSLINE")"` (resolved real path — where we actually read/write). All mutations operate on `STATUSLINE_TARGET` so that atomic `os.replace`/`mv` lands on the same filesystem as the file we replace, and so that symlink-managed setups (stow/chezmoi) produce a diff in the right place.
 - `INSTALLED="${HOME}/.claude/cks-statusline.sh"` (stable runtime path)
 - `SOURCE="${CLAUDE_PLUGIN_ROOT}/scripts/statusline-cks.sh"` (plugin's source of truth)
 - `BEGIN_MARKER="# >>> knowledge-system:cks-statusline >>>"`
@@ -54,6 +55,7 @@ When neither `.claude/rules/` nor `.claude/knowledge/` exists in the project, th
 - Helper — extract version from any script path:
   `grep -m1 '^readonly CKS_STATUSLINE_VERSION=' "$path" | sed -E 's/.*=[[:space:]]*"?([0-9]+\.[0-9]+\.[0-9]+)"?.*/\1/'`.
   Validate the result against `^[0-9]+\.[0-9]+\.[0-9]+$`. Treat missing or malformed as `0.0.0`.
+- **Tooling note.** Use `python3` (available on macOS and all major Linux distros by default) for symlink resolution, file mutation, and post-write verification. Do **not** use `awk -v "$multiline_var"` for marker injection: BSD `awk` on macOS does not allow newlines inside `-v` variables, fails with `newline in string`, and writes an empty result — `mv` then silently overwrites the target with zero bytes (`bash -n ""` passes, so the syntax check does not catch it).
 
 ### 1. `status` (default)
 
@@ -70,8 +72,11 @@ End with a hint about which subcommand fits the current state (e.g. "Run `instal
 a. **Preflight (abort cleanly on each failure):**
    - `STATUSLINE` exists. Else stop: "No `~/.claude/statusline.sh` found. Set up your custom status line first (see `~/.claude/settings.json` → `statusLine.command`)."
    - `SOURCE` exists. Else stop with the resolved path and a hint to reinstall the plugin.
-   - `STATUSLINE` is writable. Else stop: "`<STATUSLINE>` is not writable (permissions/ownership?). Fix and re-run."
-   - If `STATUSLINE` is a symlink (`[ -L "$STATUSLINE" ]`): warn — "`<STATUSLINE>` is a symlink to `<readlink target>`. Edits will modify the link target." Proceed unless `--force-no-symlink` is later added (currently informational only).
+   - **Symlink note (informational):** if `[ -L "$STATUSLINE" ]`, tell the user "`<STATUSLINE>` is a symlink → resolved to `<STATUSLINE_TARGET>`. Edits will modify the link target." Then continue using `STATUSLINE_TARGET` for every check below.
+   - `STATUSLINE_TARGET` is writable. Else stop: "`<STATUSLINE_TARGET>` is not writable (permissions/ownership?). Fix and re-run."
+   - **Executable bit on `STATUSLINE_TARGET`.** Claude Code's runtime exec's the status-line command directly via `execve`, which requires the `+x` bit on the resolved file (not just on the symlink). `bash -n` passes without `+x`, so the bug surfaces only when the actual status line renders. Check `[ -x "$STATUSLINE_TARGET" ]`:
+     - If executable → ok, continue.
+     - If not → auto-fix: `chmod +x "$STATUSLINE_TARGET"`. Report "Set executable bit on `<STATUSLINE_TARGET>` (was missing — would have caused silent statusline failure)." If `chmod` itself fails, stop with the stderr.
 
 b. **Copy renderer to stable path** (version-gated, with explicit failure handling):
    - Read `SRC_VERSION` from `SOURCE` and `DEST_VERSION` from `INSTALLED` (default `0.0.0` when missing or malformed).
@@ -84,19 +89,55 @@ c. **Detect existing manual cks block:**
    - Grep `STATUSLINE` for the regex `\[cks[^]]*\]` (literal `[cks` followed by anything up to `]`) **outside** the marker block range. If found AND marker block absent: warn about duplication, require `--force`.
 
 d. **Inject or refresh marker block** (atomic, restorable):
-   - Compute a session backup path **once**: `BACKUP="${STATUSLINE}.bak-$(date +%s)"`. Run `cp "$STATUSLINE" "$BACKUP"`. From here on, *any* failure between mutations and the final verify restores from `$BACKUP` and aborts.
-   - Count occurrences of `$BEGIN_MARKER` and `$END_MARKER` in `STATUSLINE`. They must be equal (both 0 or both 1).
+   - Compute a session backup path **once**: `BACKUP="${STATUSLINE_TARGET}.bak-$(date +%s)"`. Run `cp "$STATUSLINE_TARGET" "$BACKUP"`. From here on, *any* failure between mutations and the final verify restores from `$BACKUP` and aborts.
+   - Count occurrences of `$BEGIN_MARKER` and `$END_MARKER` in `STATUSLINE_TARGET`. They must be equal (both 0 or both 1).
      - **Both 1:** verify the BEGIN line number is strictly less than the END line number (otherwise the markers were manually re-ordered and `sed '/BEGIN/,/END/d'` would delete to EOF). If so, strip the existing block (lines between markers, inclusive) and treat the strip point as the insertion target. Skip placement priority below.
      - **Both 0:** apply placement priority (next bullet).
-     - **Mismatched (0/1, 1/0, any count > 1, or BEGIN line ≥ END line):** stop with `"Marker pair invalid in <STATUSLINE> (<n_begin> BEGIN, <n_end> END, BEGIN@<line>, END@<line>). Resolve manually before re-running install."` Do **not** mutate.
+     - **Mismatched (0/1, 1/0, any count > 1, or BEGIN line ≥ END line):** stop with `"Marker pair invalid in <STATUSLINE_TARGET> (<n_begin> BEGIN, <n_end> END, BEGIN@<line>, END@<line>). Resolve manually before re-running install."` Do **not** mutate.
    - **Placement priority** (first match wins, only when no existing block was found):
      1. **User-placed placeholder:** grep for the regex `^[[:space:]]*#[[:space:]]*\{\{cks\}\}[[:space:]]*$`. **Count matches first.**
-        - Exactly 1 match: replace that line with the marker block. Report `"Placed at user-defined position (# {{cks}} placeholder on line N)"`.
+        - Exactly 1 match: record its line number as `PLACEHOLDER_LINE`. Then verify ordering — find the line number of the **last** `^[[:space:]]*OUT=` assignment in the file (any form: `OUT="..."`, `OUT="$OUT ..."`, `OUT+=...`). Call this `LAST_OUT_LINE`.
+          - If `PLACEHOLDER_LINE > LAST_OUT_LINE` → ok, replace the placeholder line with the marker block. Report `"Placed at user-defined position (# {{cks}} placeholder on line <PLACEHOLDER_LINE>)"`.
+          - If `PLACEHOLDER_LINE ≤ LAST_OUT_LINE` → stop with `"# {{cks}} placeholder on line <PLACEHOLDER_LINE> is at or before the last $OUT assignment (line <LAST_OUT_LINE>). The injected block does OUT=\"$OUT $CKS_PLUGIN\" — placing it earlier means the subsequent OUT= overwrites it and cks silently disappears. Move the placeholder after line <LAST_OUT_LINE> and re-run install."` Do **not** mutate.
+          - If no `OUT=` line found at all → host script does not use the `$OUT` convention. Stop with `"Could not find any OUT= assignment in <STATUSLINE_TARGET>. The injected block appends to $OUT — your statusline must define it. See the snippet in the SKILL.md for the contract."`
         - **>1 match:** stop with `"Multiple # {{cks}} placeholders found (lines N, M, ...). Keep only one and re-run install."` Do **not** mutate.
         - 0 matches: fall through to step 2.
      2. **Auto-detect fallback:** find the last line matching `(echo[[:space:]].*\$OUT|printf[[:space:]].*\$OUT)` and insert the marker block immediately **before** it. Report `"Auto-placed before <matched-line> (line N). Add a # {{cks}} comment to your statusline.sh if you want a different position."`. Caveat: this is a heuristic — verify the result and prefer the placeholder for stability.
      3. **Neither found:** stop with guidance — print the marker block snippet and tell the user to either add `# {{cks}}` to their statusline.sh and re-run install, or paste the snippet manually.
-   - **Mutation pattern:** write the new contents to a sibling temp file `${STATUSLINE}.tmp.$$`, then `mv` atomically over `STATUSLINE`. Never edit in place. On `mv` failure: restore from `$BACKUP` and abort.
+   - **Mutation pattern (use `python3`, never `awk`).** Compute the new file contents in Python so the multi-line marker block survives intact, then atomically replace the target. Minimal recipe:
+
+     ```bash
+     MARKER=$(cat <<'EOF'
+     # >>> knowledge-system:cks-statusline >>>
+     # Managed by /knowledge-system:statusline. Do not edit between markers —
+     # run `/knowledge-system:statusline uninstall` to remove cleanly.
+     if [ -x "$HOME/.claude/cks-statusline.sh" ]; then
+       _CKS_DIR="${DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
+       CKS_PLUGIN=$(bash "$HOME/.claude/cks-statusline.sh" "$_CKS_DIR" 2>/dev/null)
+       [ -n "$CKS_PLUGIN" ] && OUT="$OUT $CKS_PLUGIN"
+     fi
+     # <<< knowledge-system:cks-statusline <<<
+     EOF
+     )
+     PATH_TARGET="$STATUSLINE_TARGET" MARKER="$MARKER" INSERT_LINE="$INSERT_LINE" \
+       python3 - <<'PY'
+     import os, sys
+     path = os.environ['PATH_TARGET']
+     marker = os.environ['MARKER']
+     insert_line = int(os.environ['INSERT_LINE'])  # 1-based; replace this line with marker
+     lines = open(path).read().splitlines(keepends=True)
+     # replace the placeholder/strip-point line(s) — caller already computed the line range
+     # (single-line replacement for the placeholder/auto-detect path;
+     #  multi-line replacement for the refresh path — pass the start/end line range instead)
+     # See "implementation detail" note below.
+     new_lines = lines[:insert_line-1] + [marker + ("\n" if not marker.endswith("\n") else "")] + lines[insert_line:]
+     tmp = path + f".tmp.{os.getpid()}"
+     with open(tmp, 'w') as f: f.writelines(new_lines)
+     os.replace(tmp, path)  # atomic on same filesystem; PATH_TARGET is already the resolved real path
+     PY
+     ```
+
+     Implementation detail: for the refresh path (existing marker block), pass `START_LINE` and `END_LINE` as separate env vars and replace the closed range `lines[START_LINE-1:END_LINE]` in one slice. For placeholder/auto-detect, replace the single matched line. Do **not** use `awk -v "$MARKER"` — BSD `awk` rejects newlines in `-v` values and silently writes an empty result.
    - **Marker block content** (written exactly):
 
      ```bash
@@ -116,7 +157,11 @@ d. **Inject or refresh marker block** (atomic, restorable):
      - `_CKS_DIR` falls back through `${DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}` so the snippet works with whichever convention the host script uses, with `$PWD` as a final safety net.
      - The block assumes `$OUT` exists. If the host script uses a differently-named accumulator, the cks block will silently produce nothing visible — see "Edge cases".
 
-e. **Verify:** `bash -n "$STATUSLINE"`. On parse failure: `mv "$BACKUP" "$STATUSLINE"` and abort with the parser error.
+e. **Verify** (post-write sanity checks, in this order — restore from `$BACKUP` and abort on the first failure):
+   1. **Non-empty:** `[ -s "$STATUSLINE_TARGET" ]`. A zero-byte file would pass `bash -n` (empty script is valid bash) and silently break the status line. This is the failsafe against a broken mutation step that wrote nothing.
+   2. **Marker count:** exactly one `$BEGIN_MARKER` and one `$END_MARKER` in `STATUSLINE_TARGET`, and `BEGIN line < END line`. Anything else means the mutation produced an inconsistent state.
+   3. **Syntax:** `bash -n "$STATUSLINE_TARGET"`. On parse failure, restore from `$BACKUP` and abort with the parser error.
+   4. **Executable bit retained:** `[ -x "$STATUSLINE_TARGET" ]`. `os.replace` preserves the destination's mode, but check defensively in case the user's editor/linter ran between cp-backup and verify and dropped the bit. If missing, `chmod +x "$STATUSLINE_TARGET"`.
 
 f. **Confirm:**
    > "✅ Installed.
@@ -143,14 +188,18 @@ f. **Confirm:**
 
 ### 5. `uninstall`
 
-a. Marker block in `STATUSLINE`:
+a. Marker block in `STATUSLINE_TARGET` (resolved real path from step 0):
    - Count `$BEGIN_MARKER` and `$END_MARKER` occurrences first.
-     - **Both 0:** report `"Nothing to uninstall — marker block not found in <STATUSLINE>."` Skip step b's renderer removal? **No — still remove the renderer** (step b) since it's the global asset. But skip the backup and the strip.
+     - **Both 0:** report `"Nothing to uninstall — marker block not found in <STATUSLINE_TARGET>."` Skip step b's renderer removal? **No — still remove the renderer** (step b) since it's the global asset. But skip the backup and the strip.
      - **Both 1:** verify the BEGIN line number is strictly less than the END line number (protects against re-ordered markers — `sed '/BEGIN/,/END/d'` would otherwise delete to EOF). Only then proceed.
-     - **Mismatched (1/0, 0/1, any count > 1, or BEGIN line ≥ END line):** stop with `"Marker pair invalid in <STATUSLINE> (<n_begin> BEGIN, <n_end> END, BEGIN@<line>, END@<line>). Resolve manually before re-running uninstall."` Do **not** touch the file.
-   - Compute `BACKUP="${STATUSLINE}.bak-$(date +%s)"`, run `cp "$STATUSLINE" "$BACKUP"`.
-   - Write the stripped contents to `${STATUSLINE}.tmp.$$`, then atomic `mv` over `STATUSLINE`. Restore from `$BACKUP` on any failure.
-   - `bash -n "$STATUSLINE"`: if it fails *and the original passed `bash -n`*, restore from `$BACKUP`; otherwise surface the parse error to the user (the file was already broken before uninstall).
+     - **Mismatched (1/0, 0/1, any count > 1, or BEGIN line ≥ END line):** stop with `"Marker pair invalid in <STATUSLINE_TARGET> (<n_begin> BEGIN, <n_end> END, BEGIN@<line>, END@<line>). Resolve manually before re-running uninstall."` Do **not** touch the file.
+   - Compute `BACKUP="${STATUSLINE_TARGET}.bak-$(date +%s)"`, run `cp "$STATUSLINE_TARGET" "$BACKUP"`.
+   - **Strip via `python3`** (not `sed -i`, not `awk` — same BSD/macOS reasoning as install). Recipe: read lines, delete the closed range `BEGIN_LINE..END_LINE` inclusive, write to a sibling temp file on the same filesystem, then `os.replace` over `STATUSLINE_TARGET`. Restore from `$BACKUP` on any exception.
+   - **Verify** (same post-mutation checks as install step 2e):
+     1. `[ -s "$STATUSLINE_TARGET" ]` non-empty.
+     2. Zero `$BEGIN_MARKER` and zero `$END_MARKER` remaining.
+     3. `bash -n "$STATUSLINE_TARGET"`: if it fails *and the original passed `bash -n`*, restore from `$BACKUP`; otherwise surface the parse error to the user (the file was already broken before uninstall).
+     4. Executable bit still set on `STATUSLINE_TARGET` — `chmod +x` if dropped.
 
 b. Remove the installed renderer: if `[ -e "$INSTALLED" ]`, run `rm "$INSTALLED"` (no `-f` — surface real failures). On error, warn but do not abort uninstall.
 
