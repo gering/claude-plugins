@@ -11,8 +11,10 @@ Run locally before pushing:
     python3 scripts/check-structure.py
 
 Exit code 0 = no errors (warnings allowed), 1 = at least one error.
-Dependencies: python3 stdlib + bash only.
+Dependencies: python3 (3.7+) stdlib + bash only.
 """
+
+from __future__ import annotations
 
 import json
 import re
@@ -63,14 +65,17 @@ def parse_frontmatter(text: str):
     `key: |` block scalars. Block-scalar lines are joined with single spaces.
     Returns a dict, or None if no frontmatter block is present.
     """
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
+    lines = text.lstrip("\ufeff").splitlines()  # tolerate a leading UTF-8 BOM
+    start = next((i for i, ln in enumerate(lines) if ln.strip()), None)
+    if start is None or lines[start].strip() != "---":
         return None
-    end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].strip() == "---"), None
+    )
     if end is None:
         return None
 
-    body = lines[1:end]
+    body = lines[start + 1 : end]
     data: dict[str, str] = {}
     i = 0
     while i < len(body):
@@ -189,7 +194,13 @@ def check_internal_refs():
         text = md.read_text(encoding="utf-8")
         for lineno, line in enumerate(text.splitlines(), 1):
             for m in pattern.finditer(line):
-                ref = m.group(1).lstrip("/")
+                # Drop trailing sentence punctuation the char class can't exclude
+                # (a bare ref ending a prose sentence: "... foo.sh.").
+                ref = m.group(1).lstrip("/").rstrip(".,;:]")
+                # Skip templated/example paths — placeholders and globs are never
+                # literal files (e.g. ${CLAUDE_PLUGIN_ROOT}/skills/<name>/SKILL.md).
+                if not ref or any(c in ref for c in "<>{}*?"):
+                    continue
                 target = plugin_root / ref
                 if not target.exists():
                     err(
@@ -203,11 +214,15 @@ def check_shell_scripts():
     for script in sorted(REPO.rglob("*.sh")):
         if ".git" in script.parts:
             continue
-        result = subprocess.run(
-            ["bash", "-n", str(script)],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                ["bash", "-n", str(script)],
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            err("bash not found on PATH — cannot syntax-check shell scripts")
+            return
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip()
             err(f"{rel(script)}: bash syntax error — {detail}")
