@@ -64,15 +64,15 @@ Skip this step if `_index.md` already exists.
 
 ### 3. Write the usage rule
 
-Read the plugin version from `${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json` (`version` field) and substitute it for `{{VERSION}}` in the marker below. Then write `.claude/rules/knowledge-system-usage.md` with this content (overwrite any existing plugin-managed version):
+Write `.claude/rules/knowledge-system-usage.md` with this **exact** content (overwrite any existing plugin-managed version). The marker carries a **template version** (`template-v1` below) — a counter that is bumped **only when the template content here changes**, independent of the plugin version. `/reindex` reads this same number and flags any project copy whose marker differs. (Maintainer note: when you edit the template below, increment `template-vN` here; that single number is the source of truth `/reindex` compares against.)
 
 ```markdown
 ---
 description: Knowledge system — when to consult/curate, index-load fallback, commands
 ---
 
-<!-- knowledge-system-usage v{{VERSION}} — managed by the plugin; re-run /init to refresh (/reindex flags staleness). -->
-<!-- Safe to delete on uninstall. Remove the version marker above to opt out of refresh checks. -->
+<!-- knowledge-system-usage template-v1 — managed by the plugin; re-run /init to refresh (/reindex flags staleness). -->
+<!-- Safe to delete on uninstall. Delete the marker line above to opt out of staleness checks. -->
 
 # Project Knowledge System
 
@@ -94,15 +94,16 @@ unexpected behavior (look for a documented gotcha first).
 - **Open-ended question** → `/query "<question>"` — a cheap Haiku subagent
   answers without pulling full files into context.
 
-Skip for trivial or self-contained changes, or when you already have the context.
+Be selective — pull only the few relevant entries the index points to, never bulk-read the whole base. Skip for trivial or self-contained changes, or when you already have the context.
 
 ## Curate at key moments
 
 Store a learning with `/curate "<insight>" [file...]` (it picks the right layer
 and maintains frontmatter) when: about to push or open a PR (non-obvious
 patterns, decisions, gotchas in the diff); after a surprising bug fix; the user
-corrects your approach ("always do Y"); or you notice stale knowledge. Capture
-the *why*, not volatile values; skip trivia, secrets, and the obvious.
+corrects your approach ("always do Y"); or you notice stale knowledge (fix it
+promptly — wrong docs mislead a later `/query`). Capture the *why*, not volatile
+values; skip trivia, secrets, and the obvious.
 
 ## Other commands
 
@@ -134,8 +135,8 @@ The block (exact content):
 
 The project's knowledge index is auto-loaded below. Query detailed
 entries with `/query`, store new insights with `/curate`, run a QA pass
-with `/reindex`. See `.claude/rules/knowledge-system-usage.md` for the
-full directives.
+with `/reindex`. See `.claude/rules/knowledge-system-usage.md` for when
+to use each and the full command list.
 
 @.claude/knowledge/_index.md
 <!-- END knowledge-system -->
