@@ -47,8 +47,9 @@ Lightweight, native knowledge management for Claude Code projects. Build up a pe
 - **proactively proposes new cross-links** between files that discuss the same concepts but don't link each other
 - backfills missing `createdAt` / `updatedAt` from git history
 - updates `reindexedAt` and `pluginVersion`
-- flags the managed `knowledge-system-usage.md` when a newer plugin template has shipped (nudges you to re-run `/init`; read-only — never edits `.claude/rules/`)
 - appends a short bullet-point summary to `.claude/logs/reindex.md`
+
+Separately, **before** dispatching that agent, `/reindex` runs a quick foreground, read-only check: if this project's `knowledge-system-usage.md` is on an older template than the plugin currently ships (compared by an integer template version stamped into the file), it nudges you to re-run `/init`. It only flags — it never edits `.claude/rules/`.
 
 **Why a background agent.** A thorough QA pass reads many files and reasons over the whole graph — that's slow. Running it in the foreground would block your session for minutes. As a background agent, you type `/reindex` and keep working; the summary comes back when it's done.
 
