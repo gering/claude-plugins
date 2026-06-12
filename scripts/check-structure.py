@@ -112,17 +112,16 @@ def check_json_and_versions():
     market = load_json(REPO / ".claude-plugin" / "marketplace.json")
 
     plugin_jsons = sorted((REPO / "plugins").glob("*/.claude-plugin/plugin.json"))
-    plugins_by_name: dict[str, dict] = {}
+    manifests: dict[Path, dict] = {}  # resolved path -> parsed plugin.json
     for pj in plugin_jsons:
         data = load_json(pj)
         if data is None:
             continue
+        manifests[pj.resolve()] = data
         plugin_dir = pj.parent.parent  # plugins/<name>/
         name = data.get("name")
         if name != plugin_dir.name:
             err(f"{rel(pj)}: name '{name}' does not match directory '{plugin_dir.name}'")
-        if name:
-            plugins_by_name[name] = data
 
     if not isinstance(market, dict):
         return
@@ -141,8 +140,19 @@ def check_json_and_versions():
         if not pj.exists():
             err(f"marketplace.json: plugin '{name}' source '{source}' has no plugin.json")
             continue
-        plugin_data = plugins_by_name.get(name)
+        # Validate the manifest at the actual `source` — this is what gets
+        # installed. Looking it up by name instead would hide a `source` that
+        # points at the wrong plugin directory.
+        key = pj.resolve()
+        plugin_data = manifests[key] if key in manifests else load_json(pj)
         if plugin_data is None:
+            continue
+        src_name = plugin_data.get("name")
+        if src_name != name:
+            err(
+                f"marketplace.json: plugin '{name}' source '{source}' resolves to "
+                f"a manifest named '{src_name}'"
+            )
             continue
         mv, pv = entry.get("version"), plugin_data.get("version")
         if mv != pv:
