@@ -52,59 +52,23 @@ user_invocable: true
    ### 3b. Unpushed commits (for branch-existence check later)
    - Run: `git log @{u}..HEAD --oneline 2>/dev/null` — fine if it errors (upstream may not exist yet)
 
-   ### 3c. README freshness heuristic
-   - Run: `git diff origin/<BASE_BRANCH>...HEAD --name-only`
-   - If the diff touches user-visible code (`src/`, `lib/`, `plugins/`, `skills/`, public entry points) but NOT `README.md` or `*.md` → ⚠️ "Code changed but docs untouched — README may be stale"
-   - If `README.md` WAS touched → ✅
-   - If only internal changes (tests, configs, refactors) → ➖ "N/A"
+   ### 3c–3f. Documentation readiness (README, version, changelog, knowledge)
+   Run the four documentation-readiness checks defined in the shared spec at
+   `${CLAUDE_PLUGIN_ROOT}/docs/READINESS-CHECKS.md` — **read that file** for
+   the detection signals, the ✅/⚠️/❌/➖ semantics, and the auto-fixable vs.
+   manual classification. Do not re-derive the heuristics here; the spec is
+   canonical.
 
-   ### 3d. Version bump reminder (only if versioning is an established convention)
-   - **First detect whether this project versions releases** — do NOT warn on projects that don't. Signals:
-     - `package.json` has a `version` field AND git log shows prior version bumps (e.g. commits like "bump to 1.2.3", "v1.2.3", or version-field changes in recent history)
-     - `plugin.json` / `pyproject.toml` / `Cargo.toml` / `*.csproj` with a version field that has changed in the last ~10 commits
-     - Git tags following semver (`git tag --sort=-v:refname | head -5`)
-     - `.changeset/` directory, `release-please` config, or similar release-automation
-   - If **no** versioning signal → ➖ "N/A (project does not appear to version releases)"
-   - If versioning is used:
-     - Check whether any version field was bumped on this branch vs. base:
-       `git diff origin/<BASE_BRANCH>...HEAD -- '**/package.json' '**/plugin.json' '**/Cargo.toml' '**/pyproject.toml'`
-     - If version was bumped → ✅ "Version bumped to <new>"
-     - If NOT bumped AND the changes look user-facing (new feature, bug fix, breaking change — inferred from commit messages/diff) → ⚠️ "Version bump may be needed. Detected: <feat|fix|breaking>. Suggest: <patch|minor|major>"
-     - If NOT bumped AND changes are internal only (tests, docs, refactor) → ✅ "No bump needed (internal changes)"
-   - **Monorepo / multi-package awareness**: if multiple version files exist (e.g. this marketplace's `plugin.json` per plugin + root `marketplace.json`), check which one(s) are affected by the diff and remind per-package
-   - Respect any repo-specific semver conventions found in memory/CLAUDE.md (e.g. "patch for small changes, minor for new features")
-
-   ### 3e. Release notes / changelog (only if the project maintains one)
-   - Detect presence: `CHANGELOG.md`, `CHANGELOG`, `HISTORY.md`, `RELEASES.md`, `docs/changelog/`, `.changeset/`
-   - If none exist → ➖ "N/A (no changelog)"
-   - If a changelog exists:
-     - Check whether it was updated on this branch: `git diff origin/<BASE_BRANCH>...HEAD --name-only | grep -iE '(changelog|history|releases|\.changeset/)'`
-     - If updated → ✅ "Changelog updated"
-     - If NOT updated AND changes look user-facing → ⚠️ "Changelog unchanged — add an entry for this PR"
-       - Also suggest the section: did the version bump (2d) indicate `feat` → Added, `fix` → Fixed, `breaking` → Changed/Removed?
-       - If the changelog follows Keep-a-Changelog format (detect by headings), offer: "Want me to draft an entry?"
-     - If internal only → ✅ "No changelog entry needed (internal changes)"
-   - Link 2d ↔ 2e: if version bumped but changelog not, or vice versa, flag the inconsistency explicitly
-
-   ### 3f. Project knowledge / conventions (system-agnostic)
-   - Detect whether the project maintains a place for conventions, rules, or learnings. Any of:
-     - `.claude/knowledge/`, `.claude/rules/` (gering `knowledge-system`)
-     - `.cursor/rules/`, `.cursorrules` (Cursor)
-     - `.github/copilot-instructions.md` (Copilot)
-     - `AGENTS.md`, `CONVENTIONS.md`, `CONTRIBUTING.md`
-     - `docs/adr/`, `docs/decisions/` (ADRs)
-     - `CLAUDE.md` with documented conventions beyond setup
-   - If none detected → ➖ "N/A (no knowledge/convention system detected)"
-   - If detected:
-     - Check if this branch introduces **new patterns, new conventions, or generalizable fixes** (heuristic: commit messages like "add <new pattern>", "refactor to <new approach>", "fix <recurring bug>", or many similar files changed the same way)
-     - If knowledge location WAS touched → ✅ "Conventions documented"
-     - If nothing generalizable → ✅ "No new patterns to capture"
-     - If likely AND the knowledge location was NOT touched:
-       - **Auto-update the relevant file** — read the relevant knowledge file, draft the entry based on the branch changes, write the update
-       - If project uses `knowledge-system` specifically → invoke `/curate` automatically with the detected pattern as input
-       - Otherwise → directly edit the most relevant file (closest topical match, or the generic `AGENTS.md`/`CONVENTIONS.md` as fallback)
-       - Result: ✅ "Knowledge updated: `<file>` (added: <short-description>)"
-       - Only fall back to ⚠️ if the update genuinely requires judgment beyond mechanical doc-addition (e.g. the pattern conflicts with existing documented rules)
+   **Open-specific behavior — auto-resolve in place.** Per the "auto-resolve
+   warnings where feasible" principle (top of this skill), apply each
+   **auto-fixable** fix *immediately during this check phase* rather than
+   surfacing it as a warning:
+   - **Version** → bump the detected field(s) per the spec's suggestion
+   - **Changelog** → draft the entry under the unreleased / next-version heading
+   - **Knowledge** → invoke `/curate` (knowledge-system) or append to the closest knowledge file
+   After resolving, mark the check ✅ "<auto-fixed>". Only **manual** gaps
+   (README staleness) and fixes that genuinely need judgment remain as ⚠️ for
+   step 4.
 
    ### 3g. Tests
    - Detect test command (check in order):

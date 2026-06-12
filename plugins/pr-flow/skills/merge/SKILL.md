@@ -84,15 +84,17 @@ user_invocable: true
    - Count open blocking issues
    - If > 0 → ⚠️ warn explicitly, require explicit confirmation before merging. **Do not silently ignore.**
 
-8. **Documentation readiness** (read-only at this stage — mirrors `/open` checks 3c-3f):
-   - Compare branch diff against base: `git diff origin/<BASE_BRANCH>...HEAD --name-only`
-   - **README freshness**: user-visible code changed (`src/`, `lib/`, `plugins/`, `skills/`, public entry points) but `README.md` itself was not touched → ⚠️ "README may be stale" (manual — cannot auto-write). Changes to other `*.md` files (CONTRIBUTING, CHANGELOG, etc.) do not count as a README update.
-   - **Version bump**: if project versions releases (`package.json`/`plugin.json`/`Cargo.toml`/`pyproject.toml` with version field + git tags or recent bump commits) AND no version field bumped on this branch AND changes look user-facing (feat/fix/breaking from commit messages) → ⚠️ "Version not bumped" with suggestion (patch/minor/major). Auto-fixable.
-   - **Changelog**: if `CHANGELOG.md`/`HISTORY.md`/`.changeset/` exists AND not touched on this branch AND changes are user-facing → ⚠️ "Changelog missing entry". Auto-fixable (draft entry).
-   - **Knowledge/conventions**: detect any knowledge location (`.claude/knowledge/`, `.cursor/rules/`, `AGENTS.md`, `CONVENTIONS.md`, `docs/adr/`, etc.). If new patterns detected (via commit-message heuristic from `/open` step 3f) AND knowledge location not touched → ⚠️ "Knowledge gap". Auto-fixable.
-   - Categorize each finding as **auto-fixable** (version, changelog, knowledge) or **manual** (README).
-   - Collect warnings into `DOC_WARNINGS` — surface them in the final plan (step 13) and handle user decision there.
-   - **Do not mutate anything here** — this is read-only inspection.
+8. **Documentation readiness** (read-only at this stage):
+   - Run the four documentation-readiness checks defined in the shared spec at
+     `${CLAUDE_PLUGIN_ROOT}/docs/READINESS-CHECKS.md` (README freshness, version
+     bump, changelog, knowledge/conventions) — **read that file** for the
+     detection signals, the ✅/⚠️/❌/➖ semantics, and the auto-fixable vs.
+     manual classification.
+   - **Merge-specific behavior — read-only.** **Do not mutate anything here.**
+     Collect each ⚠️ into `DOC_WARNINGS`, tagged with its classification
+     (auto-fixable vs. manual). These surface in the final plan (step 13),
+     where the user's `[f]` choice triggers the actual auto-fix — keeping this
+     step cheap if the user later picks `[m]` to skip it.
 
 9. **Detect merge method** (priority order):
    - **a) Repo allowed methods** — `gh api repos/:owner/:name --jq '{merge: .allow_merge_commit, squash: .allow_squash_merge, rebase: .allow_rebase_merge}'`
