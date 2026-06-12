@@ -74,6 +74,12 @@ If a clear pattern emerges (e.g. 18 of 20 last PRs were squashed), `/merge` sugg
 
 **Why it matters.** Reviews have noise. You skip the nits and fix the blockers. Claude won't run through everything unbidden — you decide.
 
+### Autonomous review loop — converge the PR hands-off
+
+**What it does.** `/cycle --loop` runs the full review cycle in a loop. Each round it fixes every finding it agrees with (including 🟡 suggestions and ⚪ nits), re-pushes, re-triggers the review, and waits — repeating until the reviewer raises nothing it still agrees with. It prints per-round stats (round, total fixes, open disagreements), stops at `--max` rounds (default 10) or whenever you say "stop", and at the end offers to squash all the loop's fix commits into one via `--force-with-lease` so the PR history stays clean (`Apply review-loop fixes (N rounds, M fixes)` instead of 20 noisy commits).
+
+**Why it matters.** Trivial review churn — nits, polish, small suggestions — eats iterations. The loop converges them autonomously while still surfacing (and never silently dropping) anything it disagrees with. Invoking it is the authorization for the autonomous commit/push cycle; only the final squash asks first.
+
 ### Read-only status snapshot
 
 **What it does.** `/check` is a pure read — it never mutates. Surfaces CI state, human approvals, the latest Claude review (with staleness detection), uncommitted/unpushed local drift, and a one-line merge-readiness verdict.
@@ -85,7 +91,7 @@ If a clear pattern emerges (e.g. 18 of 20 last PRs were squashed), `/merge` sugg
 | Skill | What it does |
 |---|---|
 | `/open` | Readiness checks (rebase, README, version, changelog, knowledge, tests, lint, build) → create PR → verify CI/review auto-trigger |
-| `/cycle` | Full loop: stage → commit → push → trigger `@claude review` → poll in background → present structured results |
+| `/cycle` | Full loop: stage → commit → push → trigger `@claude review` → poll in background → present structured results. `--loop` auto-fixes agreed findings and re-cycles until clean |
 | `/check` | Read-only snapshot: CI status, human reviews, latest Claude feedback, merge-readiness verdict |
 | `/fix` | Walk through issues from the latest review as a numbered checklist and implement fixes interactively |
 | `/rebase` | Standalone rebase check against the PR's actual base branch; execute cleanly on confirmation |
@@ -146,6 +152,14 @@ Parses the latest review. You pick:
 
 For each picked item, Claude gives its own take first (may disagree with the reviewer on judgment calls), then implements.
 
+### Converge the review autonomously
+
+```
+> /cycle --loop
+```
+
+Each round fixes everything it agrees with (nits included), re-cycles, and repeats until the review is clean or only disagreements remain — capped at 10 rounds (`--max=20` to raise it). Say "stop" any time. Per-round stats keep you oriented; at the end it offers to squash the fix commits into one.
+
 ### Check status without changing anything
 
 ```
@@ -172,9 +186,9 @@ Each skill runs a preflight check and stops with a clear message if requirements
 
 ## Design principles
 
-- **Interactive by default** — no silent commits, pushes, or fixes without user confirmation
+- **Interactive by default** — no silent commits, pushes, or fixes without user confirmation. The one explicit opt-in exception is `/cycle --loop`: the invocation authorizes the autonomous cycle, and even then the final squash asks first
 - **Read-only where it matters** — `/check` never mutates anything
-- **User stays in control** — `/fix` does not auto-trigger `/cycle`; you decide when to re-push
+- **User stays in control** — `/fix` does not auto-trigger `/cycle`; you decide when to re-push (or hand the wheel to `/cycle --loop` deliberately)
 - **Root cause over workaround** — `/merge` refuses `--admin` bypass. A failing required check is a signal to fix the check, not to skip it
 - **Composable** — skills delegate cleanly (`--no-poll` flags) instead of duplicating logic
 - **Complementary, not duplicative** — for deep local static analysis (silent failures, test coverage, type design), install the `pr-review-toolkit` plugin alongside
