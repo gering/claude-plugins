@@ -58,9 +58,9 @@ If a clear pattern emerges (e.g. 18 of 20 last PRs were squashed), `/merge` sugg
 
 ### Force-push safety
 
-**What it does.** Any force-push inside `/rebase` uses `--force-with-lease`, never `--force`. If the remote advanced since the last fetch (e.g., a teammate pushed), the push fails fast with a clear message.
+**What it does.** Any force-push inside `/rebase` uses `--force-with-lease`, never `--force`. If the remote advanced since the last fetch (e.g., a teammate pushed), the push fails fast with a clear message. Whether `/rebase` asks first depends on risk: when the files changed on base and on the branch don't overlap, it rebases + force-pushes immediately (invoking the skill is the authorization); when files overlap, it presents a selection menu (rebase / show diff / leave as-is) before touching anything.
 
-**Why it matters.** `--force` overwrites teammate commits silently. `--force-with-lease` is the safer default. The skills never bypass it, even under `--no-verify` scenarios — if a hook fails, we investigate, we don't skip.
+**Why it matters.** `--force` overwrites teammate commits silently. `--force-with-lease` is the safer default. And a conflict-free catch-up rebase shouldn't cost a confirmation round-trip — prompts are reserved for cases where judgment is actually needed.
 
 ### Structured review output
 
@@ -186,7 +186,7 @@ Each skill runs a preflight check and stops with a clear message if requirements
 
 ## Design principles
 
-- **Interactive by default** — no silent commits, pushes, or fixes without user confirmation. The one explicit opt-in exception is `/cycle --loop`: the invocation authorizes the autonomous cycle, and even then the final squash asks first
+- **Interactive by default, silent when risk-free** — no silent commits or fixes without user confirmation; decisions are real selection menus, not free-text prompts. Two deliberate exceptions where the invocation itself is the authorization: `/cycle --loop` (autonomous cycle; the final squash still asks) and `/rebase` with zero file overlap (conflict-free catch-up, aborts cleanly if a conflict appears anyway)
 - **Read-only where it matters** — `/check` never mutates anything
 - **User stays in control** — `/fix` does not auto-trigger `/cycle`; you decide when to re-push (or hand the wheel to `/cycle --loop` deliberately)
 - **Root cause over workaround** — `/merge` refuses `--admin` bypass. A failing required check is a signal to fix the check, not to skip it
