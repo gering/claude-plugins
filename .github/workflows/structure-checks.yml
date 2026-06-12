@@ -1,0 +1,19 @@
+name: Structure Checks
+
+# Mechanically verify repository structure invariants on every change.
+# The plugins are declarative Markdown + JSON with no build step, so this is
+# the only automated guard against broken JSON, version drift, and dangling
+# references. See scripts/check-structure.py.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  structure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run structure checks
+        run: python3 scripts/check-structure.py
