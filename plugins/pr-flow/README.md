@@ -46,7 +46,7 @@ If a clear pattern emerges (e.g. 18 of 20 last PRs were squashed), `/merge` sugg
 
 ### Pre-merge documentation check
 
-**What it does.** Before executing a merge, `/merge` runs a readiness pass: checks the README for staleness, verifies a version bump happened if the branch mentions version changes, checks for a changelog entry, checks knowledge-system entries for new patterns. On warnings, it asks: `[f]ix / [m]erge anyway / [a]bort`.
+**What it does.** Before executing a merge, `/merge` runs a readiness pass: checks the README for staleness, verifies a version bump happened if the branch mentions version changes, checks for a changelog entry, checks knowledge-system entries for new patterns. On warnings, it asks: `[f]ix / [m]erge anyway / [a]bort`. The same four checks run pre-PR in `/open` — both skills read their definitions from a **single shared spec** (`docs/READINESS-CHECKS.md`), so the heuristics can't drift apart. Only the stage behavior differs: `/open` auto-resolves fixes in place, `/merge` inspects read-only and defers the fix to the `[f]` choice.
 
 **Why it matters.** The right moment to update docs is at merge time, not "later." The three-way prompt keeps you in the loop without being paternalistic.
 
