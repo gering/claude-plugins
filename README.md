@@ -59,6 +59,16 @@ Plugins update automatically when the marketplace is refreshed. To manually upda
 /reload-plugins
 ```
 
+## Development
+
+Structure invariants (JSON validity, version sync, skill frontmatter, internal
+references, shell syntax) are enforced by CI on every PR. Run the same checks
+locally before pushing:
+
+```
+python3 scripts/check-structure.py
+```
+
 ## License
 
 MIT

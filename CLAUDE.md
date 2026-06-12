@@ -58,7 +58,15 @@ Plugin versions are tracked in two places that must stay in sync:
 1. `plugins/<name>/.claude-plugin/plugin.json` — canonical version
 2. `.claude-plugin/marketplace.json` — marketplace registry version
 
-When bumping a plugin version, update both files.
+When bumping a plugin version, update both files. CI (`scripts/check-structure.py`)
+fails on version drift, so both must match before a PR can merge.
+
+## Structure Checks
+
+`scripts/check-structure.py` mechanically verifies repo invariants (JSON
+validity, version sync, SKILL.md frontmatter + description word budget, internal
+`${CLAUDE_PLUGIN_ROOT}` references, shell syntax). It runs in CI on every PR and
+push to main, and can be run locally before pushing. Keep it green.
 
 ## Project Knowledge System
 - **Rules** (`.claude/rules/`): Always active — coding style, patterns, dos/don'ts
