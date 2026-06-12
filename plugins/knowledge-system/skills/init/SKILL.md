@@ -1,7 +1,7 @@
 ---
 name: init
 description: |
-  Scaffolds `.claude/knowledge/` + `.claude/rules/`, writes the auto-prime
+  Scaffolds `.claude/knowledge/` + `.claude/rules/`, writes the usage
   rule, injects the index into `CLAUDE.md`. Idempotent.
   Trigger: "init knowledge", "set up knowledge system", "bootstrap .claude/".
 user_invocable: true
@@ -9,7 +9,7 @@ user_invocable: true
 
 # Initialize Knowledge System
 
-Scaffold the knowledge system directory structure, the auto-prime rule, and the CLAUDE.md entry.
+Scaffold the knowledge system directory structure, the usage rule, and the CLAUDE.md entry.
 
 ## Usage
 `/init`
@@ -18,7 +18,7 @@ Scaffold the knowledge system directory structure, the auto-prime rule, and the 
 ## What this skill creates
 
 Plugin-managed (regenerated on re-run, safe to delete):
-- `.claude/rules/knowledge-system-usage.md` — always-active directives + index-load fallback
+- `.claude/rules/knowledge-system-usage.md` — index-load fallback + command pointers
 - A wrapped block inside `CLAUDE.md` (markers: `<!-- BEGIN knowledge-system -->` / `<!-- END knowledge-system -->`) that `@`-imports the knowledge index
 
 User content (created empty once, never overwritten afterwards):
@@ -62,43 +62,55 @@ Look for `.claude/knowledge/_index.md`. If it exists, inform the user that the k
 
 Skip this step if `_index.md` already exists.
 
-### 3. Write the auto-prime rule
+### 3. Write the usage rule
 
-Write `.claude/rules/knowledge-system-usage.md` with this exact content (overwrite any existing plugin-managed version):
+Read the plugin version from `${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json` (`version` field) and substitute it for `{{VERSION}}` in the marker below. Then write `.claude/rules/knowledge-system-usage.md` with this content (overwrite any existing plugin-managed version):
 
 ```markdown
 ---
-description: Knowledge-system usage — always-active directives and index-load fallback
+description: Knowledge system — when to consult/curate, index-load fallback, commands
 ---
 
-<!-- This file is managed by the knowledge-system plugin. -->
-<!-- Safe to delete if you uninstall the plugin. Edit freely if you customize. -->
+<!-- knowledge-system-usage v{{VERSION}} — managed by the plugin; re-run /init to refresh (/reindex flags staleness). -->
+<!-- Safe to delete on uninstall. Remove the version marker above to opt out of refresh checks. -->
 
 # Project Knowledge System
 
 ## Auto-load fallback
 
-Your context should already contain the knowledge index, injected via
-`@.claude/knowledge/_index.md` from `CLAUDE.md` on session start.
+The knowledge index is injected via `@.claude/knowledge/_index.md` from
+`CLAUDE.md` on session start. **If you do not see a "Knowledge Index" section
+in your initial context, read `.claude/knowledge/_index.md` once with the Read
+tool** before any `/query`. Once per session is enough — do not re-read.
 
-**If you do not see a "Knowledge Index" section in your initial context,
-read `.claude/knowledge/_index.md` with the Read tool once at the start of
-the session before any `/query`.** Do not re-read on subsequent turns —
-once per session is enough.
+## Consult before diving in
 
-## When to use which command
+Check the index for relevant entries before exploring code when: starting in an
+area untouched this conversation; the user asks "how does X work" (check
+knowledge before grepping); a change affects how components interact; or you hit
+unexpected behavior (look for a documented gotcha first).
 
-- At the start of a working session that will touch real architecture: `/prime` — loads the foundational docs (architecture + overviews) into context, beyond the always-loaded index.
-- Before non-trivial changes to unfamiliar modules: `/query "<question>"` — retrieves relevant entries without dragging full files into context.
-- After discovering a pattern, fix, or decision worth preserving: `/curate "<insight>" [file...]` — stores it in the right layer (rule vs knowledge).
-- When the knowledge base feels stale, indexes drift, or cross-references look wrong: `/reindex` — runs a thorough QA pass (infrequent, Sonnet-1M-backed).
-- When adopting the knowledge system on an existing project (or after a long curation gap): `/backfill-knowledge` — mines merged PR history for significant learnings (features, architecture, major insights) that are missing from the knowledge base. Run `/reindex` first so the idempotency check has up-to-date origin metadata.
+- **Index already names the file** → read it inline; no subagent for a known path.
+- **Open-ended question** → `/query "<question>"` — a cheap Haiku subagent
+  answers without pulling full files into context.
 
-## Layers
+Skip for trivial or self-contained changes, or when you already have the context.
 
-- `.claude/rules/` — always-loaded directives (this file lives here)
-- `.claude/knowledge/` — on-demand detailed knowledge, accessed via `/query`
-- `CLAUDE.md` — project-level guidance, loaded every session
+## Curate at key moments
+
+Store a learning with `/curate "<insight>" [file...]` (it picks the right layer
+and maintains frontmatter) when: about to push or open a PR (non-obvious
+patterns, decisions, gotchas in the diff); after a surprising bug fix; the user
+corrects your approach ("always do Y"); or you notice stale knowledge. Capture
+the *why*, not volatile values; skip trivia, secrets, and the obvious.
+
+## Other commands
+
+- `/prime [topic|--full]` — load foundational docs (architecture + overviews)
+  into context for real architectural work; beyond the always-loaded index.
+- `/reindex` — thorough QA pass when indexes drift or cross-refs look stale.
+- `/backfill-knowledge` — mine merged PR history for missing learnings (run
+  `/reindex` first so the idempotency check has up-to-date origin metadata).
 ```
 
 ### 4. Update CLAUDE.md with the auto-prime block
