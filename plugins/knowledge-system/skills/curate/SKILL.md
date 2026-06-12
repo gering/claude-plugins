@@ -62,10 +62,20 @@ updatedAt: <YYYY-MM-DD>      # ISO-8601 date-only, UTC
 createdFrom: "<origin>"      # see "Origin detection" below
 updatedFrom: "<origin>"      # see "Origin detection" below
 pluginVersion: <x.y.z>       # knowledge-system version
+prime: <true|false>          # see "Prime assessment" below — does /prime load this?
 ---
 ```
 
 Note: `reindexedAt` is written by `/reindex` only — do NOT touch it here.
+
+#### Prime assessment (`prime`)
+
+`prime` marks whether `/prime` should pull this doc into context at session start. It is a foundational-vs-detail judgment:
+
+- `prime: true` — foundational/orienting: architecture, system overviews, cross-cutting flows, the "how it all fits together" docs. Someone new to the project would want this in context before touching code.
+- `prime: false` — narrow detail: a single edge case, one config knob, a localized gotcha. Useful via `/query` on demand, but noise in a broad prime.
+
+When in doubt, lean `false` — `/prime` is meant to load the map, not the whole atlas. Anything under `architecture/` is almost always `prime: true`.
 
 #### Origin detection (`createdFrom` / `updatedFrom`)
 
@@ -90,12 +100,14 @@ Otherwise, auto-detect:
 - `createdFrom`: current origin (see above)
 - `updatedFrom`: same as `createdFrom`
 - `pluginVersion`: read from `${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json` (`version` field)
+- `prime`: assess `true`/`false` per "Prime assessment" above
 
 **Existing files with frontmatter (content is being updated):**
 - Update `updatedAt` to today's date
 - Update `updatedFrom` to the current origin
 - Update `pluginVersion` to the current plugin version
 - Leave `title`, `createdAt`, `createdFrom`, `reindexedAt` unchanged
+- Leave `prime` unchanged if already set (it is a deliberate choice); only add it (via the assessment) if the field is missing
 
 **Existing files WITHOUT frontmatter (touched for the first time):**
 Bring them into form before adding new content:
@@ -109,6 +121,7 @@ Bring them into form before adding new content:
 - `createdFrom`: attempt reconstruction from the first commit's merge context using the PR-resolution cascade defined canonically in `/reindex` SKILL.md, step B ("createdFrom: reconstruct from the first commit..."). Do NOT reimplement the cascade here — the `/reindex` description is the source of truth, and if the logic ever evolves, only one place needs to change. If the cascade returns unresolved, fall back to the current origin.
 - `updatedFrom`: current origin
 - `pluginVersion`: current plugin version
+- `prime`: assess `true`/`false` per "Prime assessment" above
 
 **Rule files** (`.claude/rules/*.md`) use their own lightweight frontmatter (`description`, optional `globs`). Do NOT apply the knowledge frontmatter schema to rules.
 

@@ -29,7 +29,7 @@ Decide where it belongs (see `rules/knowledge-boundaries.md`):
 
 Then:
 1. Check if an existing file already covers the topic (read `.claude/rules/` or `.claude/knowledge/_index.md`)
-2. Update the existing file, or create a new one
+2. Update the existing file, or create a new one — on a new knowledge file, set `prime: true` (foundational/overview) or `prime: false` (narrow detail) so `/prime` knows whether to load it
 3. If a new knowledge file was created, update `.claude/knowledge/_index.md`
 4. Briefly tell the user what you curated and where
 

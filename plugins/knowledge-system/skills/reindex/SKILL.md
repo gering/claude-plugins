@@ -88,6 +88,7 @@ For any knowledge file missing required fields, fill them in:
   5. **Unresolved**: leave the field empty — do NOT guess. A later `/reindex` run may succeed once the branch is merged.
 - `updatedFrom`: same cascade applied to the latest commit that touched the file (`git log -1 --format=%H -- <file>`).
 - **Upgrade path** for stale `"branch: <name>"` values (branch has since been merged): use the same SHAs as for the initial lookup (first commit for `createdFrom`, latest commit for `updatedFrom`) and re-run the cascade. Do NOT use `git log <branch-name>` — the branch may have been deleted after merge, and even if it still exists, the commits of interest are the ones that touched this specific knowledge file.
+- `prime`: if the field is **absent**, assess it and set `true`/`false`. This is a foundational-vs-detail judgment — `true` for architecture, system overviews, and cross-cutting "how it fits together" docs that `/prime` should load at session start; `false` for narrow detail (single edge case, one config knob, localized gotcha). Anything under `architecture/` is almost always `true`; when in doubt, lean `false`. If `prime` is **already present**, leave it untouched — it is a deliberate choice (possibly hand-set), not something to flip.
 
 Always add/update on every touched file:
 - `reindexedAt`: {{TODAY}}.

@@ -88,6 +88,7 @@ once per session is enough.
 
 ## When to use which command
 
+- At the start of a working session that will touch real architecture: `/prime` — loads the foundational docs (architecture + overviews) into context, beyond the always-loaded index.
 - Before non-trivial changes to unfamiliar modules: `/query "<question>"` — retrieves relevant entries without dragging full files into context.
 - After discovering a pattern, fix, or decision worth preserving: `/curate "<insight>" [file...]` — stores it in the right layer (rule vs knowledge).
 - When the knowledge base feels stale, indexes drift, or cross-references look wrong: `/reindex` — runs a thorough QA pass (infrequent, Sonnet-1M-backed).
@@ -153,6 +154,7 @@ Next:
 - Add architecture knowledge: create .claude/knowledge/architecture/overview.md
 - Store a first learning: /curate "<insight>"
 - Query knowledge: /query "<question>"
+- Prime context with the foundational docs: /prime
 - Run a QA pass: /reindex
 - Optional: show `[cks rules|knowledge]` in your status line — `/knowledge-system:statusline install`
 ```

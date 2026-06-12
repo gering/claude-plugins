@@ -8,7 +8,15 @@ Lightweight, native knowledge management for Claude Code projects. Build up a pe
 
 **What it does.** `/init` injects `@.claude/knowledge/_index.md` into your project's `CLAUDE.md`. Claude Code auto-loads `CLAUDE.md` on every session start and expands `@file` references inline — so your knowledge index is in Claude's context before the first prompt. A fallback directive in `.claude/rules/knowledge-system-usage.md` ensures the index still gets loaded (via one-time Read) even if something with the `@` expansion goes wrong.
 
-**Why it matters.** No more "please read CLAUDE.md and skim the codebase first". Claude opens the session already knowing what exists, where, and how it fits together. The first answer is informed.
+**Why it matters.** No more "please read CLAUDE.md and skim the codebase first". Claude opens the session already knowing what exists and where. The first answer is informed.
+
+**Going deeper — `/prime`.** Auto-prime loads only the *index* (what exists). When you're about to do real architectural work, `/prime` reads the *content* of the foundational docs straight into context — the actual map, not just the table of contents. See below.
+
+### `/prime` — load the foundational docs into context on demand
+
+**What it does.** `/prime` reads your architecture and overview docs (everything under `architecture/`, overview-titled files, and anything flagged `prime: true`) directly into the session context — capped by a token budget so it loads the map, not the whole atlas. `/prime <topic>` scopes it to one domain; `/prime --full` loads everything. Unlike `/query` (which uses a subagent to *answer* a question without polluting context), `/prime` deliberately *fills* context — that's the point.
+
+**Why it matters.** Before touching real architecture you want the relevant design in context, not a dozen `/query` round-trips. `/prime` front-loads it in one command. A `prime: true|false` frontmatter flag controls scope: `/curate` assesses it when creating a doc, `/reindex` backfills it where missing, and you can hand-set it any time.
 
 ### Layered by lifecycle, not by folder
 
@@ -106,6 +114,7 @@ Lightweight, native knowledge management for Claude Code projects. Build up a pe
 |---------|-------------|
 | `/init` | Scaffold knowledge system: directories, starter files, auto-prime rule, CLAUDE.md entry |
 | `/query` | Retrieve relevant knowledge on demand — Haiku subagent, sub-second |
+| `/prime` | Load the foundational docs (architecture + overviews) into context on demand; `<topic>` to scope, `--full` for everything |
 | `/curate` | Store a new learning in the right layer; merges with existing entries |
 | `/reindex` | Thorough QA pass: rebuild indexes, validate cross-refs, backfill frontmatter, log |
 | `/backfill-knowledge` | Mine merged PR history for significant learnings (features, architecture, major insights); proposes a batch for approval before curating |
@@ -231,6 +240,7 @@ reindexedAt: 2026-04-17              # set only by /reindex
 createdFrom: "PR #42"                # traceability — where did this entry originate
 updatedFrom: "PR #57"                # traceability — where did the last edit come from
 pluginVersion: 1.4.0                 # knowledge-system version at last write
+prime: true                          # foundational doc → /prime loads it into context
 ---
 ```
 
@@ -245,6 +255,7 @@ pluginVersion: 1.4.0                 # knowledge-system version at last write
 | `createdFrom` | `/curate` (new files), `/reindex` (backfill), `/backfill-knowledge` | Origin of the entry — a PR number, a branch, or a session. Reconstructed from the first commit's merge context when backfilling. |
 | `updatedFrom` | `/curate` (every edit), `/reindex` (backfill), `/backfill-knowledge` | Origin of the last edit. Reconstructed from the latest commit's merge context when backfilling. |
 | `pluginVersion` | `/curate`, `/reindex` | The knowledge-system version at the last write (content or metadata) |
+| `prime` | `/curate` (assess on create), `/reindex` (backfill if missing) | `true` for foundational/overview docs that `/prime` loads into context; `false` for narrow detail. A deliberate choice once set — `/reindex` never flips an existing value. |
 
 ### `createdFrom` / `updatedFrom` format
 
