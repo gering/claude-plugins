@@ -47,6 +47,7 @@ Lightweight, native knowledge management for Claude Code projects. Build up a pe
 - **proactively proposes new cross-links** between files that discuss the same concepts but don't link each other
 - backfills missing `createdAt` / `updatedAt` from git history
 - updates `reindexedAt` and `pluginVersion`
+- flags the managed `knowledge-system-usage.md` when a newer plugin template has shipped (nudges you to re-run `/init`; read-only — never edits `.claude/rules/`)
 - appends a short bullet-point summary to `.claude/logs/reindex.md`
 
 **Why a background agent.** A thorough QA pass reads many files and reasons over the whole graph — that's slow. Running it in the foreground would block your session for minutes. As a background agent, you type `/reindex` and keep working; the summary comes back when it's done.
@@ -112,7 +113,7 @@ Lightweight, native knowledge management for Claude Code projects. Build up a pe
 
 | Command | Description |
 |---------|-------------|
-| `/init` | Scaffold knowledge system: directories, starter files, auto-prime rule, CLAUDE.md entry |
+| `/init` | Scaffold knowledge system: directories, starter files, usage rule, CLAUDE.md entry |
 | `/query` | Retrieve relevant knowledge on demand — Haiku subagent, sub-second |
 | `/prime` | Load the foundational docs (architecture + overviews) into context on demand; `<topic>` to scope, `--full` for everything |
 | `/curate` | Store a new learning in the right layer; merges with existing entries |
@@ -136,7 +137,7 @@ Lightweight, native knowledge management for Claude Code projects. Build up a pe
 `/init` does two things to ensure Claude actually uses the system:
 
 - Injects `@.claude/knowledge/_index.md` into `CLAUDE.md`, wrapped in `<!-- BEGIN knowledge-system -->` / `<!-- END knowledge-system -->` markers. Claude Code auto-loads `CLAUDE.md` every session and expands `@file` references inline — so your knowledge index lives in Claude's context from the start.
-- Writes `.claude/rules/knowledge-system-usage.md`, an always-active rule with usage directives (when to `/query`, when to `/curate`, when to suggest `/reindex`) and a **fallback**: if for any reason the index isn't in context, Claude reads it once via the Read tool. Belt-and-suspenders.
+- Writes `.claude/rules/knowledge-system-usage.md`, a per-project rule that carries the index-load **fallback** (if the index isn't in context, Claude reads it once via the Read tool — belt-and-suspenders), the *when* (when to `/query` vs read inline, when to `/curate`), and a command catalog. It lives in the repo, so the guidance travels with the project — team-shared and plugin-independent.
 
 ## Usage examples
 
@@ -335,7 +336,7 @@ Part of the [gering-plugins](https://github.com/gering/claude-plugins) marketpla
 
 ### Plugin-managed files (safe to remove)
 
-- `.claude/rules/knowledge-system-usage.md` — the always-active directives rule
+- `.claude/rules/knowledge-system-usage.md` — the per-project usage rule (fallback + when-to-query/curate + command catalog)
 - The block inside `CLAUDE.md` wrapped in `<!-- BEGIN knowledge-system -->` and `<!-- END knowledge-system -->` markers
 
 ### User data (remove only if you really want to lose it)

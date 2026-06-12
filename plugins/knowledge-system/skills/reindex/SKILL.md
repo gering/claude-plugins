@@ -22,6 +22,7 @@ Run a thorough, cross-cutting QA pass over `.claude/knowledge/` as a background 
 - Check that `.claude/knowledge/_index.md` exists. If it does not: inform the user that the knowledge system is not initialized and suggest `/init`. Stop.
 - Check that `.claude/logs/` exists — create it if missing.
 - Read the plugin version from `${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json` (`version` field). You will pass this to the agent so it can stamp `pluginVersion`.
+- **Usage-rule staleness check** (foreground, read-only — `/reindex` never writes to `.claude/rules/`): read `.claude/rules/knowledge-system-usage.md` and look for a `knowledge-system-usage vX.Y.Z` marker comment near the top. If that version is older than the plugin version read above, remember a stale-rule nudge for step 3. If the marker is absent (the user removed it to opt out) or the file does not exist, skip silently.
 - Capture today's date as `YYYY-MM-DD` (UTC) — pass this to the agent so the run is tagged with a consistent date.
 - Parse `$ARGUMENTS`: if it contains `--dry-run`, set `{{DRY_RUN}}` to `true`; otherwise `false`. This must be resolved before substitution so the placeholder never lands literally in the agent prompt.
 
@@ -39,6 +40,10 @@ Use the `Agent` tool with:
 Immediately report to the user (in the channel, not as a separate tool call):
 
 > Reindex started as a background agent. It will walk the knowledge base, rebuild indexes, validate and propose cross-references, backfill frontmatter, and append a summary to `.claude/logs/reindex.md`. You'll be notified when the report is ready — typical run: 1–3 minutes.
+
+If the step-1 staleness check flagged the usage rule, append one line (substitute the actual versions):
+
+> ⚠ Your `.claude/rules/knowledge-system-usage.md` is v\<file-version\> but the plugin is v\<plugin-version\>. Re-run `/init` to refresh the managed template — your knowledge files are untouched.
 
 Return control. Do not block.
 
@@ -60,7 +65,7 @@ You are running a thorough QA pass over a Claude Code knowledge base located at 
 
 ## Scope
 
-Operate over every `.md` file under `.claude/knowledge/**`. Do NOT touch files under `.claude/rules/`, `.claude/logs/`, or anywhere else.
+Operate over every `.md` file under `.claude/knowledge/**`. Write only inside `.claude/knowledge/` and to `.claude/logs/reindex.md` (the run log) — do NOT touch `.claude/rules/` or any other path.
 
 ## Tasks
 
