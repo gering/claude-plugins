@@ -15,7 +15,7 @@ user_invocable: true
 
 **No sanity-check prompts.** When every preflight check is ✅ (or ➖ N/A), execute the merge immediately without a final "Proceed? / Merge ausführen?" confirmation. The user ran `/merge` — that IS the authorization.
 
-**Only ask when a decision is needed.** A prompt is warranted only for: draft-to-ready flip (step 1), rebase confirmation (delegated to `/rebase`), merge-method when ambiguous (step 9), WIP commit cleanup (step 10), and the three-way f/m/a decision when ⚠️ warnings exist (step 13). Cleanup defaults (step 12) apply silently unless something is protected/unusual.
+**Only ask when a decision is needed.** A prompt is warranted only for: draft-to-ready flip (step 1), rebase confirmation (delegated to `/rebase`, step 3), merge-method when ambiguous (step 9), WIP commit cleanup (step 10), and the three-way f/m/a decision when ⚠️ warnings exist (step 13). Cleanup defaults (step 12) apply silently unless something is protected/unusual.
 
 **If ⚠️ warnings exist**, present the three-way prompt in step 13 **exactly once**. Never stack it with additional confirmation questions.
 
@@ -140,8 +140,8 @@ user_invocable: true
     <URL>
 
     ── Preflight ──
-    ✅ Branch up-to-date with main
     ✅ Local clean (no uncommitted/unpushed)
+    ✅ Branch up-to-date with main
 
     ── GitHub state ──
     ✅ Mergeable: CLEAN
