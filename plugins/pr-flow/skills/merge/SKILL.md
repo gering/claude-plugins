@@ -35,24 +35,26 @@ user_invocable: true
      - `n`: stop
    - Store `PR_NUMBER`, `BASE_BRANCH`, `HEAD_BRANCH`.
 
-2. **Rebase check** — delegate to `/rebase --no-poll --auto`:
+2. **Local cleanliness** (run BEFORE the rebase — the step-3 rebase must not mutate a dirty tree):
+   - `git status --porcelain` — if anything: stop "Commit or stash local changes before merging (`/cycle` handles commit + push)."
+   - `git log @{u}..HEAD --oneline 2>/dev/null` — if unpushed commits: stop "Push local commits first (`/cycle` handles this)."
+   - Why first: `/rebase --auto` (step 3) auto-stashes a dirty tree and may force-push the rebased branch. If `/merge` rebased+pushed and only then rejected the dirty tree, it would have burned a force-push + CI run for a merge that never happens. Gating cleanliness here means the rebase only runs on a tree `/merge` will actually accept.
+
+3. **Rebase check** — delegate to `/rebase --no-poll --auto`:
    - Run `/rebase` with **both** `--no-poll` and `--auto`. Rationale:
      - `--no-poll`: polling would delay the merge — any review should already have been handled by a prior `/cycle`.
      - `--auto`: the user invoked `/merge`; that invocation authorizes rebase + force-push as preflight. Asking again would be a redundant second prompt.
+   - The working tree is already clean (step 2), so `/rebase --auto` won't stash/pop anything.
    - `/rebase --auto` still aborts cleanly on conflicts (no destructive behavior skipped — only the routine confirmation is skipped).
    - If `/rebase` aborts due to conflicts → stop this skill: "Merge requires up-to-date branch. Resolve conflicts, then re-run `/merge`."
 
-3. **Local cleanliness**:
-   - `git status --porcelain` — if anything: stop "Commit or stash local changes before merging."
-   - `git log @{u}..HEAD --oneline 2>/dev/null` — if unpushed commits: stop "Push local commits first (`/cycle` handles this)."
-
 4. **Refresh PR state** (GitHub recomputes after push/rebase):
-   - Wait ~5s if anything was pushed/rebased in step 2
+   - Wait ~5s if anything was pushed/rebased in step 3
    - Re-run: `gh pr view <N> --json mergeable,mergeStateStatus,reviews`
    - Interpret `mergeStateStatus`:
      - `CLEAN` → ✅ ready
      - `HAS_HOOKS` → ✅ ready (hooks will run)
-     - `BEHIND` → ⚠️ base moved again since step 2, re-run `/rebase`
+     - `BEHIND` → ⚠️ base moved again since step 3, re-run `/rebase`
      - `BLOCKED` → ⚠️ required reviews or checks missing (step 5 + 6 will detail)
      - `CONFLICTING` → ❌ stop: "Merge conflicts. Resolve manually (`git merge origin/<BASE>` or `git rebase`)"
      - `UNSTABLE` → ⚠️ CI not green but branch protection allows merge — treat as warning
