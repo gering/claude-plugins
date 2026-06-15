@@ -87,7 +87,7 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
        - Options:
          1. **Auto-stash** (Recommended) — `git stash push -m 'pr-flow rebase auto-stash'`, remember to pop after the rebase
          2. **Abort** — stop, user commits/stashes manually and re-runs `/rebase`
-     - **`--auto` mode**: auto-stash directly — `git stash push -m 'pr-flow rebase auto-stash'`, remember to pop after the rebase. No prompt: stash+pop is reversible (step 7 pops it whether the rebase succeeds or aborts), and the parent's invocation already authorized the rebase preparation — that is what `--auto` is for. This matters for `/cycle`, which rebases (step 2) *before* committing its pending changes (step 3): a hard stop here would abort the cycle before anything is committed.
+     - **`--auto` mode**: auto-stash directly — `git stash push -m 'pr-flow rebase auto-stash'`, remember to pop after the rebase. No prompt: stash+pop is reversible (step 7 pops it on every `--auto` exit — clean success, conflict-abort, or other failure — and surfaces it if the pop itself conflicts), and the parent's invocation already authorized the rebase preparation — that is what `--auto` is for. This matters for `/cycle`, which rebases (step 2) *before* committing its pending changes (step 3): a hard stop here would abort the cycle before anything is committed.
 
 7. **Execute rebase**:
    - Run: `git rebase origin/<BASE_BRANCH>`
@@ -97,7 +97,7 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
    - **On conflicts** (rebase reports merge conflicts):
      - Run: `git rebase --abort` (branch back to its pre-rebase commit; an auto-stash, if any, is still held — NOT yet popped)
      - ❌ "Rebase conflicts detected. Aborted cleanly — branch is back to its original state."
-     - **`--auto` mode**: if auto-stash was used, `git stash pop` to restore the parent's working tree (the parent expects its changes back). Then report the conflict (list the conflicting files) and stop, returning control to the parent (`/cycle`/`/merge` handle the "rebase aborted" outcome). Do NOT present a menu.
+     - **`--auto` mode**: if auto-stash was used, `git stash pop` to restore the parent's working tree (the parent expects its changes back). If that pop **conflicts**, report it explicitly as a stash-pop conflict (working tree now holds markers) — NOT as a plain "rebase aborted" — so the parent does not `git add -A` over it. Then report the conflicting files and stop, returning control to the parent (`/cycle`/`/merge` handle the outcome). Do NOT present a menu.
      - **Standalone**: do NOT pop an auto-stash yet — a dirty tree would block the options below. List the conflicting files, then ask via the **AskUserQuestion tool** (menu, not free text):
        - **Resolve manually** — run `git rebase origin/<BASE_BRANCH>`, fix conflicts, `git rebase --continue`, then `git stash pop` if an auto-stash is held
        - **Merge instead** — `git merge origin/<BASE_BRANCH>` (creates a merge commit), then `git stash pop` if an auto-stash is held
