@@ -9,12 +9,12 @@ user_invocable: true
 
 # PR Rebase Check
 
-> Detect whether the current branch is behind its target/base branch. If yes, show what's new on base, ask for confirmation, and rebase. Abort cleanly on conflicts. After a successful force-push (standalone use only), wait for an auto-triggered Claude review and present the result.
+> Detect whether the current branch is behind its target/base branch. If yes, show what's new on base, then rebase — proceeding without a prompt when the changed files don't overlap, asking via a menu when they do. Abort cleanly on conflicts. After a successful force-push (standalone use only), wait for an auto-triggered Claude review and present the result.
 
 ## Arguments
 
 - `--no-poll` — Skip the post-push review polling step. Set automatically when this skill is invoked from `/cycle` or `/open` (the parent does its own polling).
-- `--auto` — Skip the step-5 confirmation prompt. Proceed as if the user answered `y` — rebase, then force-push if an upstream exists. Used when the parent skill (`/merge`) has already authorized the rebase+push as part of its own invocation. Conflicts still abort cleanly. Stopping conditions (uncommitted changes, missing upstream, etc.) still apply.
+- `--auto` — Skip the step-5 menu entirely (even when files overlap) — rebase, then force-push if an upstream exists. Used when the parent skill (`/merge`, `/cycle`) has already authorized the rebase+push as part of its own invocation. Conflicts still abort cleanly. Uncommitted changes are auto-stashed and popped afterward (not a stopping condition under `--auto`); other stopping conditions (missing upstream, detached HEAD, etc.) still apply.
 
 ## Why this skill exists
 
@@ -57,18 +57,18 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
 
    Gather the facts first:
    - Upstream: `git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null` → store as `HAS_UPSTREAM` (true if non-empty).
-   - File overlap between both sides since the merge-base:
+   - File overlap between both sides since the merge-base. Pass `--no-renames` so a rename can't hide a conflict: with rename detection on, a base-side rename `foo`→`bar` shows only `bar`, so if the branch edits `foo` the paths miss each other — and a rebase that CAN conflict (when the rename commit also touched those lines) would slip through as "no overlap". `--no-renames` surfaces the old path (`foo` as a delete) so that overlap is caught. This is deliberately conservative: a clean rename git would auto-resolve also gets flagged (an extra menu, never a skipped check). It also pins the result against the user's `diff.renames` config so the classification is deterministic.
      ```
-     comm -12 <(git diff --name-only HEAD...origin/<BASE_BRANCH> | sort) \
-              <(git diff --name-only origin/<BASE_BRANCH>...HEAD | sort)
+     comm -12 <(git diff --no-renames --name-only HEAD...origin/<BASE_BRANCH> | sort) \
+              <(git diff --no-renames --name-only origin/<BASE_BRANCH>...HEAD | sort)
      ```
    - Always print the new-commits summary (from step 4) so the user sees what's coming in.
 
-   **Safe path — overlap is empty:** do NOT prompt. Announce in one line and continue to step 6:
+   **Safe path — overlap is empty:** do NOT prompt (beyond step 6's uncommitted-changes guard, which may still ask in standalone mode). Announce in one line and continue to step 6:
    ```
-   No file overlap with `<BASE_BRANCH>` — rebasing<if HAS_UPSTREAM> + force-push (--force-with-lease)</if> now.
+   No file overlap with `<BASE_BRANCH>` — proceeding with rebase<if HAS_UPSTREAM> + force-push (--force-with-lease)</if>.
    ```
-   Invoking `/rebase` is the authorization for this conflict-free case. Should a conflict occur anyway (rename, semantic), step 7's clean abort still catches it.
+   Invoking `/rebase` is the authorization for this conflict-free case. The actual force-push happens in step 8, after the rebase succeeds — if a conflict surfaces anyway (semantic, or a rename `--no-renames` didn't catch), step 7's clean abort catches it and no force-push occurs.
 
    **Decision path — overlap is non-empty:** a judgment call is needed, so present a real selection menu via the **AskUserQuestion tool** — never a free-text `y/n/d` prompt:
    - Question: "Branch `<CURRENT_BRANCH>` is N commit(s) behind `<BASE_BRANCH>`; M overlapping file(s): <list, truncate at 5>. Rebase<if HAS_UPSTREAM> + force-push</if>?"
@@ -81,12 +81,13 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
 
 6. **Uncommitted changes guard**:
    - Run: `git status --porcelain`
-   - If changes exist, ask via the **AskUserQuestion tool** (menu, not free text):
-     - Question: "Uncommitted changes present — they'd block the rebase. Stash them?"
-     - Options:
-       1. **Auto-stash** (Recommended) — `git stash push -m 'pr-flow rebase auto-stash'`, remember to pop after the rebase
-       2. **Abort** — stop, user commits/stashes manually and re-runs `/rebase`
-   - In `--auto` mode: do NOT stash silently — stop with the error instead (the parent skill surfaces it). Mutating the working tree needs an explicit choice.
+   - If changes exist:
+     - **Standalone**: ask via the **AskUserQuestion tool** (menu, not free text):
+       - Question: "Uncommitted changes present — they'd block the rebase. Stash them?"
+       - Options:
+         1. **Auto-stash** (Recommended) — `git stash push -m 'pr-flow rebase auto-stash'`, remember to pop after the rebase
+         2. **Abort** — stop, user commits/stashes manually and re-runs `/rebase`
+     - **`--auto` mode**: auto-stash directly — `git stash push -m 'pr-flow rebase auto-stash'`, remember to pop after the rebase. No prompt: stash+pop is reversible (step 7 pops it whether the rebase succeeds or aborts), and the parent's invocation already authorized the rebase preparation — that is what `--auto` is for. This matters for `/cycle`, which rebases (step 2) *before* committing its pending changes (step 3): a hard stop here would abort the cycle before anything is committed.
 
 7. **Execute rebase**:
    - Run: `git rebase origin/<BASE_BRANCH>`
@@ -97,16 +98,17 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
      - Run: `git rebase --abort` (clean state restored)
      - If auto-stash was used, `git stash pop` to restore working tree
      - ❌ "Rebase conflicts detected. Aborted cleanly — branch is back to its original state."
-     - List the conflicting files (from the rebase output), then ask via the **AskUserQuestion tool** (menu, not free text):
+     - **`--auto` mode**: do NOT present a menu — just report the conflict and stop, returning control to the parent skill (`/cycle`/`/merge` handle the "rebase aborted on conflicts" outcome themselves). List the conflicting files for context.
+     - **Standalone**: list the conflicting files (from the rebase output), then ask via the **AskUserQuestion tool** (menu, not free text):
        - **Resolve manually** — user runs `git rebase origin/<BASE_BRANCH>`, fixes conflicts, `git rebase --continue` in their own shell; this skill stops here
        - **Merge instead** — `git merge origin/<BASE_BRANCH>` (preserves branch history, creates a merge commit)
        - **Leave as-is** — stop, branch stays behind
-     - Do NOT automatically resolve conflicts, regardless of choice or `--auto`.
+     - Do NOT automatically resolve conflicts, regardless of choice or mode.
 
 8. **Post-rebase: remote state**:
-   - If `HAS_UPSTREAM` is true: execute `git push --force-with-lease` directly — the `y` from step 5 already covered this. Do NOT ask again.
+   - If `HAS_UPSTREAM` is true: execute `git push --force-with-lease` directly — step 5 already authorized this (safe path: the `/rebase` invocation; decision path: option 1; `--auto`: the parent's invocation). Do NOT ask again.
      - Set `FORCE_PUSHED = true` on success.
-     - If the push is rejected (e.g. remote advanced since `y`), stop with the error and suggest re-running `/rebase` — do NOT auto-retry with `--force`.
+     - If the push is rejected (remote advanced since the last fetch), stop with the error and suggest re-running `/rebase` — do NOT auto-retry with `--force`.
    - If `HAS_UPSTREAM` is false: no push needed, branch is local only (`FORCE_PUSHED = false`)
 
 9. **Wait for auto-triggered review** (standalone only):
@@ -153,7 +155,7 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
 
 ## Notes
 
-- **Confirmation model**: zero file overlap → proceed without asking (the `/rebase` invocation is the authorization; conflicts still abort cleanly). Overlap → one menu choice authorizes both rebase and force-push. Decisions are always real selection menus (AskUserQuestion), never free-text prompts
+- **Confirmation model**: zero file overlap → proceed without asking about the rebase itself (the `/rebase` invocation is the authorization; conflicts still abort cleanly). Overlap → one menu choice authorizes both rebase and force-push. The step-6 uncommitted-changes guard is independent of overlap and may still prompt on the safe path (standalone only — under `--auto` it auto-stashes instead of prompting). Decisions are always real selection menus (AskUserQuestion), never free-text prompts
 - Conflicts → abort + suggest, never auto-resolve
 - Safe to run repeatedly: if no rebase is needed, it's a 2-command no-op
 - Designed to be called both standalone and from `/open` / `/cycle`
