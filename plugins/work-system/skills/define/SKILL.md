@@ -11,13 +11,24 @@ user_invocable: true
 
 > Create a new task file from current context and conversation
 
+## Where the task file lands
+
+Task files are a **centralized backlog** on the main worktree, visible to `/kickoff` and `/list`. When `/define` runs from inside a linked worktree, the file must still land in the **main repo's** `tasks/` — otherwise it's isolated on the task branch and lost when `/close` removes the worktree.
+
+Resolve the main repo path once (step 1) and use it for every path below. Never persist a `cd` — Bash CWD leaks across tool calls; use the absolute `<main-repo>` path instead.
+
 ## Arguments
 
 - `$ARGUMENTS` - Optional: brief description of the task
 
 ## Instructions
 
-1. **Gather task information**:
+1. **Resolve the main repo path**:
+   - Run: `git worktree list --porcelain | awk '/^worktree /{print $2; exit}'` → `<main-repo>` (first entry = main worktree).
+   - Run: `git rev-parse --show-toplevel` → current tree.
+   - If they differ, this is a linked-worktree invocation: the task file still goes to `<main-repo>/tasks/`. If they match, `<main-repo>` is the current repo and behavior is unchanged.
+
+2. **Gather task information**:
 
    If `$ARGUMENTS` provided, use as starting point for the task description.
 
@@ -26,19 +37,19 @@ user_invocable: true
    - "Are there specific files or areas of code involved?"
    - "What are the acceptance criteria?"
 
-2. **Generate task name**:
+3. **Generate task name**:
    - Create a kebab-case name from the description
    - Examples:
      - "Fix the calendar date bug" → `fix-calendar-date-bug`
      - "Add dark mode support" → `add-dark-mode-support`
    - Show proposed name and ask for confirmation
 
-3. **Check for duplicates**:
-   - Run: `ls tasks/ 2>/dev/null | grep -i "<keywords>"`
+4. **Check for duplicates**:
+   - Run: `ls "<main-repo>/tasks/" 2>/dev/null | grep -i "<keywords>"`
    - If `gh` is available: `gh pr list --state open --search "<keywords>" --limit 3`
    - If similar tasks exist, show them and ask if user wants to continue
 
-4. **Create task file**:
+5. **Create task file**:
 
    Template:
    ```markdown
@@ -63,27 +74,28 @@ user_invocable: true
    <Any additional context from the conversation>
    ```
 
-5. **Include conversation context**:
+6. **Include conversation context**:
    - If there was relevant discussion, summarize it in the Notes section
    - If specific code or files were mentioned, add them to Relevant Files
    - If errors or bugs were discussed, include error messages
 
-6. **Write the file**:
-   - Path: `tasks/<task-name>.md`
+7. **Write the file**:
+   - Path: `<main-repo>/tasks/<task-name>.md` (absolute — never `cd` into the main repo to write it)
    - Show the content to user for review
    - Ask: "Create this task file?"
 
-7. **Confirm creation**:
+8. **Confirm creation**:
    ```
-   ✅ Task created: tasks/<task-name>.md
+   ✅ Task created: <main-repo>/tasks/<task-name>.md
 
    Next steps:
    • Start immediately: /kickoff
    • View all tasks: /list
    • Check status later: /status <task-name>
    ```
+   - When invoked from a linked worktree, add: "Written to the main repo backlog, not this worktree."
 
-8. **Optional — Start immediately**:
+9. **Optional — Start immediately**:
    - Ask: "Would you like to start working on this task now?"
    - If yes, proceed with `/kickoff` workflow
 
