@@ -39,7 +39,7 @@ Generic task and worktree workflow system for Claude Code. Manage tasks as markd
 
 ### Tasks
 
-Each task is a markdown file in your project's `tasks/` directory:
+Each task is a markdown file in your project's `tasks/` directory. This is a centralized backlog on the main worktree — `/define` always writes there, even when invoked from inside a linked worktree, so tasks stay visible to `/kickoff` and `/list` and survive `/close`:
 
 ```markdown
 # Add Dark Mode Support
