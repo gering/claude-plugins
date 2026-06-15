@@ -45,7 +45,7 @@ Strip the flags first; whatever is left over is the commit message.
 
 3. **Handle uncommitted changes**:
    - Run: `git status --porcelain`
-   - **Guard against an unresolved merge state first**: if any entry carries a conflict status (`UU`, `AA`, `DD`, or any `U`/`U` combination — e.g. a stash-pop conflict from the step-2 rebase restoring your changes onto updated base, or markers you left in the tree), STOP. Do not `git add -A` over conflict markers. Report the conflicted files and tell the user to resolve them, then re-run `/cycle`.
+   - **Guard against an unresolved merge state first**: if any entry carries a conflict status (`UU`, `AA`, `DD`, or any `U`/`U` combination — e.g. markers already in the tree from a merge/rebase/stash-pop you ran yourself before invoking `/cycle`), STOP. Do not `git add -A` over conflict markers. Report the conflicted files and tell the user to resolve them, then re-run `/cycle`. (Note: a stash-pop conflict from the step-2 rebase makes `/rebase` return non-cleanly, so step 2 already stops before here — this guard covers the pre-existing-markers case.)
    - If changes exist:
      - If `$ARGUMENTS` provided, use as commit message
      - Otherwise, generate a concise commit message based on the changes (show diff first)

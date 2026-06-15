@@ -104,7 +104,7 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
        - **Leave as-is** — stop, branch stays behind; if an auto-stash is held, `git stash pop` now to restore the working tree
      - If an auto-stash is held and its pop is deferred to an option above, tell the user explicitly: "Your uncommitted changes are safe in stash `pr-flow rebase auto-stash` — pop them when done."
      - Do NOT automatically resolve conflicts, regardless of choice or mode.
-   - **On any other failure** (non-zero exit that is neither clean success nor a merge conflict — e.g. a leftover `rebase-apply`/`rebase-merge` dir, a rejecting pre-rebase hook, an unreachable base): if a rebase is in progress, `git rebase --abort`; then if auto-stash was used, `git stash pop` so the changes are never stranded; stop with the raw error. **Never leave an auto-stash dangling.**
+   - **On any other failure** (non-zero exit that is neither clean success nor a merge conflict — e.g. a leftover `rebase-apply`/`rebase-merge` dir, a rejecting pre-rebase hook, an unreachable base): if a rebase is in progress, `git rebase --abort`; then if auto-stash was used, `git stash pop` so the changes are never stranded — and if that pop conflicts, surface the stash-pop markers (parent must not `git add -A` over them), same as the other branches; stop with the raw error. **Never leave an auto-stash dangling.**
 
 8. **Post-rebase: remote state**:
    - If `HAS_UPSTREAM` is true: execute `git push --force-with-lease` directly — step 5 already authorized this (safe path: the `/rebase` invocation; decision path: option 1; `--auto`: the parent's invocation). Do NOT ask again.
