@@ -23,10 +23,9 @@ Resolve the main repo path once (step 1) and use it for every path below. Never 
 
 ## Instructions
 
-1. **Resolve the main repo path**:
-   - Run: `git worktree list --porcelain | awk '/^worktree /{print $2; exit}'` → `<main-repo>` (first entry = main worktree).
-   - Run: `git rev-parse --show-toplevel` → current tree.
-   - If they differ, this is a linked-worktree invocation: the task file still goes to `<main-repo>/tasks/`. If they match, `<main-repo>` is the current repo and behavior is unchanged.
+1. **Resolve the main repo path** (shared helper — handles paths with spaces and symlinks):
+   - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path` → `<main-repo>` (the main worktree, where the shared `tasks/` backlog lives).
+   - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" linked` → `main` or `linked`. `linked` = invoked from a worktree (the task file still goes to `<main-repo>/tasks/`); `main` = behavior unchanged.
 
 2. **Gather task information**:
 
@@ -93,7 +92,7 @@ Resolve the main repo path once (step 1) and use it for every path below. Never 
    • View all tasks: /list
    • Check status later: /status <task-name>
    ```
-   - When invoked from a linked worktree, add: "Written to the main repo backlog, not this worktree."
+   - When step 1 reported `linked`, add: "Written to the main repo backlog, not this worktree."
 
 9. **Optional — Start immediately**:
    - Ask: "Would you like to start working on this task now?"
