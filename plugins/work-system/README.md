@@ -143,7 +143,7 @@ After adoption, the standard workflow applies (`/continue`, `/status`, `/close`)
 
 ## Project-Specific Configuration
 
-- **Dependencies**: Auto-detects project type (Node, Python, Rust, Flutter, Go, Ruby) and suggests install commands when dependencies are missing in worktrees.
+- **Dependencies**: Auto-detects project type (Node, Python, Rust, Flutter, Go, Ruby) when dependencies are missing in a worktree, shows the install command, and runs it — pinned to a project-local location (`.venv`, `vendor/bundle`, …), asking first only before any global/system install.
 - **Symlinks**: Configure `symlinkDirectories` in `.claude/settings.json` for large directories that shouldn't be duplicated.
 - **Checks**: Add project-specific build/test/lint commands to your project's `CLAUDE.md`.
 - **Knowledge integration**: If you use the [knowledge-system](../knowledge-system/) plugin, context is automatically loaded when starting or continuing tasks.
