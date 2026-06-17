@@ -43,25 +43,28 @@ user_invocable: true
    | `pubspec.yaml` | `.dart_tool` missing | `flutter pub get` |
    | `Gemfile.lock` | `vendor/bundle` missing | `bundle config set --local path vendor/bundle && bundle install` |
    | `go.sum` | — (module cache is shared) | `go mod download` |
-   | `Cargo.lock` | `target` missing | `cargo build` |
+   | `Cargo.lock` | — (registry cache is shared) | `cargo fetch` |
    | `requirements.txt` | `.venv` missing | `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt` |
 
    Only consider a command when the indicator file exists **and** the missing-check passes:
    where a directory is listed, require it to be absent; a `—` row has no directory gate
-   (run it when the indicator is present — `go mod download` is idempotent if the shared
-   module cache is already populated).
+   (run it when the indicator is present — `go mod download` / `cargo fetch` are idempotent if
+   the shared cache is already populated).
 
-   **Show the command, then run it.** Each command in the table installs into a
-   project-local location — `node_modules`, `target`, `.dart_tool`, `vendor/bundle`,
-   `.venv`, … — so it's safe to run without asking; don't add friction. The two commands
-   whose tools would *otherwise* default to a global/shared store are already pinned local
-   in the table: Python via `.venv`, Ruby via `bundle config set --local path vendor/bundle`.
-   One hard rule:
+   Every command only **fetches dependencies** — none compiles the project (that's why Rust
+   uses `cargo fetch`, not `cargo build`); keep it that way so resume stays fast.
+
+   **Show the command, then run it.** Each command writes into either a project-local location
+   (`node_modules`, `.dart_tool`, `vendor/bundle`, `.venv`, …) or a per-user shared package
+   cache (Go's module cache, Cargo's `~/.cargo` registry), so it's safe to run without asking;
+   don't add friction. The two tools that would *otherwise* default to a global/shared store
+   are pinned local in the table: Python via `.venv`, Ruby via
+   `bundle config set --local path vendor/bundle`. One hard rule:
    - **Never install into the global/system environment.** Don't drop the local-path pinning
      (a bare `pip install` or plain `bundle install` would pollute global site-packages /
      the system gem store). If a detected install can't be redirected to a project-local
      location and would mutate the global/system environment, **show it and ask first**
-     instead of running it. (`go mod download` populates Go's shared module cache by design —
+     instead of running it. (Go's and Cargo's shared package caches are populated by design —
      that's expected, not a global install to guard against.)
 
 4. **Load project context** (optional):
