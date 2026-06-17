@@ -30,38 +30,51 @@ user_invocable: true
      - Files mentioned
      - Key terms for searching
 
-3. **Search for evidence of completion** — weight the signals: a) and b) are
-   authoritative, c) and d) are only weak corroboration (see step 4):
+3. **Search for evidence of completion** — a) and b) are authoritative *when present*;
+   c) and d) corroborate, and become the best available evidence when a)/b) can't run
+   (see step 4 for how they combine):
 
    a) **Check for the task's PR** (if `gh` is available) — strongest signal:
    - Primary, exact-branch match: `gh pr list --state all --head "task/<task-name>" --limit 5 --json number,title,state,mergedAt,url`
    - Only if that returns nothing, fall back to a fuzzy search (may surface unrelated PRs):
      `gh pr list --state all --search "<task-name>" --limit 5 --json number,title,state,mergedAt,url`
-   - Show matching PRs with status; a **merged** PR for `task/<task-name>` means completed.
+   - A **merged** PR for the task branch means completed.
 
    b) **Check the task branch** — second-strongest signal:
-   - Run: `git branch --all --list "*task/<task-name>*"`
-   - If the branch is gone but a merged PR exists → completed and cleaned up.
-   - If the branch exists, check whether it merged into main:
-     `git branch --all --merged <main-branch> --list "*task/<task-name>*"`
-     (detect `<main-branch>` via `git symbolic-ref refs/remotes/origin/HEAD` → fallback `main`/`master`).
+   - Detect `<main-branch>`: `git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||'` (fallback `main`/`master`).
+   - Find the branch — exact task branch, then a broad fallback for `/adopt` branches that
+     kept their original name:
+     `git branch --all --list "*task/<task-name>"` (trailing-anchored, **not**
+     `*task/<task-name>*`, so task `foo` doesn't match sibling `task/foo-bar`); if empty,
+     `git branch --all | grep -i "<task-name>"`.
+   - **Present and merged** — `git branch --all --merged <main-branch> --list "*task/<task-name>"` lists it → merged into main → completed.
+   - **Present but NOT in `--merged`** → *inconclusive*, not proof of "not merged": squash/rebase
+     merges (GitHub's default on many repos) rewrite SHAs so the tip is never an ancestor of
+     main even after merge. Lean on a) or c). (`/close` step 8 handles the same caveat.)
+   - **Absent** → likely completed and cleaned up by `/close`; confirm via a) or c).
 
-   c) **Commit history** (weak signal — corroboration only, do not conclude from this alone):
-   - Run: `git log --all --oneline --grep="<task-name>" | head -10`
-   - A task *name* appearing in a commit message is easy to produce by accident (a WIP
-     commit, an unrelated mention). Treat matches as supporting evidence behind a) and b),
-     never as proof of completion.
+   c) **Commit history** — corroboration, and the *primary* signal when `gh` is unavailable:
+   - Run: `git log <main-branch> --oneline --grep="<task-name>" | head -10` (search merged
+     history of main, not `--all`, so unmerged WIP branches don't count).
+   - A task name in a message is easy to produce by accident, so behind a)/b) it only supports.
+     But when `gh` can't run and the branch is gone, task commits *present in main's history*
+     are the best available completion evidence — report it with lower confidence.
 
    d) **Check mentioned files** (weak signal — if task mentions specific files):
-   - Run: `git log --oneline -- <file-path> | head -5`
-   - Recent changes show *activity*, not completion. Corroboration only.
+   - Run: `git log <main-branch> --oneline -- <file-path> | head -5`
+   - Activity, not completion. Corroboration only.
 
 4. **Analyze and report**:
 
-   Decision rule: only conclude **COMPLETED** when an authoritative signal (3a or 3b)
-   confirms it — a merged PR for `task/<task-name>`, or the task branch merged into the
-   main branch. Commit-message or file-activity matches (3c/3d) on their own are *not*
-   enough; if they're the only signal, report IN PROGRESS / inconclusive instead.
+   Decision rule — combine the signals by confidence:
+   - **COMPLETED (confirmed):** a merged PR for the task branch (3a), or the branch listed by
+     `git branch --merged <main-branch>` (3b).
+   - **COMPLETED (likely, unconfirmed):** `gh` unavailable AND the branch is gone AND task
+     commits appear in `<main-branch>` (3c) — report COMPLETED, noting it's unconfirmed.
+   - **IN PROGRESS:** the branch exists with an open PR (3a), or with local commits and no
+     merge evidence. Never assert "not merged" from `--merged` alone — a branch absent from it
+     may still be squash/rebase-merged; say "merge unconfirmed" and fall through to 3a/3c first.
+   - **NOT STARTED:** no PR, no branch, and no task commits in `<main-branch>`.
 
    **Strong evidence (completed)** — driven by 3a/3b:
    ```

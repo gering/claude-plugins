@@ -77,13 +77,15 @@ Rules:
      - If fails (not fully merged): ask "Force delete branch?"
      - If yes: `git branch -D task/<task-name>`
 
-9. **Delete remote branch** (if exists):
+9. **Delete remote branch**:
    - Run: `git ls-remote --heads origin task/<task-name>`
-   - **If a merged PR was confirmed in step 2**: delete it directly, no prompt —
-     `git push origin --delete task/<task-name>`. The merge already integrated the work,
-     so the remote branch is safe to remove.
-   - **If NO merged PR was found** (manual close): ask "Delete remote branch too?" first;
-     only push the delete on confirmation.
+   - **Returns nothing** → the remote branch is already gone (e.g. the repo auto-deletes head
+     branches on merge); skip this step — nothing to delete, and `--delete` on a missing ref
+     would error.
+   - **Exists AND a merged PR was confirmed in step 2** → delete directly, no prompt:
+     `git push origin --delete task/<task-name>` (the merge already integrated the work).
+   - **Exists, no merged PR** (manual close) → ask "Delete remote branch too?" first; only
+     push the delete on confirmation.
 
 10. **Remove task file** (use the main-repo path from step 4 — do not `cd`):
     - Run: `rm <main-repo-path>/tasks/<task-name>.md`
