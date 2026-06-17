@@ -72,10 +72,14 @@ realpath_of() {
   python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"
 }
 
-# Project dir for per-project sentinel ops. Mirrors the renderer's precedence
-# (DIR first, then CLAUDE_PROJECT_DIR, then cwd) so disable/enable/status target
-# the same directory the injected marker block checks at render time.
-project_dir() { printf '%s' "${DIR:-${CLAUDE_PROJECT_DIR:-$(pwd)}}"; }
+# Project dir for per-project sentinel ops. Uses CLAUDE_PROJECT_DIR (the dir
+# Claude Code sets for the session this runs in), falling back to cwd. We do NOT
+# prefer $DIR here even though the renderer's _CKS_DIR does: at render time $DIR
+# is a host-statusline-local variable, but it is not exported into this script's
+# environment, so honouring it would let a stray shell $DIR silently redirect the
+# sentinel. The rare case where a host sets $DIR to a non-project subdir at
+# render time is an accepted limitation.
+project_dir() { printf '%s' "${CLAUDE_PROJECT_DIR:-$(pwd)}"; }
 
 # Extract X.Y.Z from a script's `readonly CKS_STATUSLINE_VERSION=` line.
 # Missing or malformed → 0.0.0.
@@ -205,9 +209,17 @@ try:
     # Read/write BYTES so the host file's encoding and line endings (CRLF,
     # non-ASCII comments) survive untouched outside the marker region. Text mode
     # would normalize newlines globally and raise UnicodeDecodeError under a C
-    # locale. bytes.splitlines only breaks on \r, \n, \r\n — matching grep -n.
+    # locale.
     with open(path, 'rb') as f:
-        lines = f.read().splitlines(keepends=True)
+        data = f.read()
+    # Split on \n ONLY (keeping the delimiter) so Python's line indices match
+    # grep -n's exactly — grep delimits strictly by \n, whereas
+    # bytes.splitlines() would also break on a lone \r and desync the indices
+    # the bash side computed.
+    segs = data.split(b'\n')
+    lines = [s + b'\n' for s in segs[:-1]]
+    if segs[-1]:
+        lines.append(segs[-1])  # final segment with no trailing newline
     block = []
     if marker:
         b = marker.encode('utf-8')
@@ -219,6 +231,15 @@ try:
     new_lines = lines[:start-1] + block + lines[end:]  # end inclusive
     with open(tmp, 'wb') as f:
         f.writelines(new_lines)
+    # Preserve the host file's permission bits. os.replace swaps in the tmp file
+    # (created with default umask perms), which would otherwise drop +x and any
+    # group/other bits — reducing e.g. 0770 to 0644. ensure_executable re-adds +x
+    # as a net, but copying the full mode keeps group/other bits and avoids a
+    # spurious "was dropped during write" message on every run.
+    try:
+        os.chmod(tmp, os.stat(path).st_mode & 0o7777)
+    except OSError:
+        pass
     os.replace(tmp, path)  # atomic on same filesystem; PATH_TARGET is the real path
 except Exception as e:
     try: os.unlink(tmp)
