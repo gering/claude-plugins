@@ -14,36 +14,24 @@ user_invocable: true
 
 1. **Show active worktrees**:
    - Run: `git worktree list`
-   - Parse output and format nicely:
-   ```
-   📂 Active Worktrees:
-   ┌─────────────────────────────────────────────────────────┐
-   │ Main repo: /path/to/project (main)                     │
-   │ Worktree:  /path/to/project/.claude/worktrees/dark-mode  │
-   │            └─ Branch: task/dark-mode                    │
-   └─────────────────────────────────────────────────────────┘
-   ```
+   - Render as a markdown table under a `## 📂 Active Worktrees` heading:
+
+   | Type | Path | Branch |
+   |------|------|--------|
+   | Main | `/path/to/project` | `main` |
+   | Worktree | `…/.claude/worktrees/dark-mode` | `task/dark-mode` |
 
 2. **List pending tasks**:
    - Run: `ls -1 tasks/*.md 2>/dev/null`
    - For each task file, read first line (title)
    - Check if worktree/branch exists for it
-   ```
-   📋 Pending Tasks:
-   ┌──────────────────────────────────────────────────────────┐
-   │ 1. fix-calendar-bug.md                                  │
-   │    "Fix DST-related date shift in calendar view"        │
-   │    Status: 🔄 In Progress (worktree exists)             │
-   │                                                         │
-   │ 2. add-dark-mode.md                                     │
-   │    "Add dark mode toggle to settings"                   │
-   │    Status: 📋 Not Started                               │
-   │                                                         │
-   │ 3. refactor-notifications.md                            │
-   │    "Refactor notification scheduling"                   │
-   │    Status: 🔍 In Review (PR #45 open)                   │
-   └──────────────────────────────────────────────────────────┘
-   ```
+   - Render as a markdown table under a `## 📋 Tasks` heading:
+
+   | # | Task | Title | Status |
+   |---|------|-------|--------|
+   | 1 | `fix-calendar-bug` | Fix DST-related date shift in calendar view | 🔄 In Progress |
+   | 2 | `add-dark-mode` | Add dark mode toggle to settings | 📋 Not Started |
+   | 3 | `refactor-notifications` | Refactor notification scheduling | 🔍 In Review (PR #45) |
 
 3. **Check for open PRs** (if `gh` is available):
    - Run: `gh pr list --state open --json number,title,headRefName --limit 10`

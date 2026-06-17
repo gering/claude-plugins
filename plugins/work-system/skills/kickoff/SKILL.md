@@ -92,11 +92,12 @@ The same rule applies to any project-specific setup the user's `CLAUDE.md` may a
        session — this session stays in the main repo) and run:
 
          cd .claude/worktrees/<task-name>
-         claude
-         # then inside the new session:
-         /continue
+         claude -n "<task-name>" "/continue"
     ```
-    Do **not** execute the `cd` command yourself — it is for the user's new terminal.
+    `-n "<task-name>"` names the session (shown in `/resume` and the terminal title);
+    the `/continue` initial prompt runs the resume flow (load TASK.md, recent commits,
+    progress) deterministically — both in one launch. Do **not** execute the `cd` command
+    yourself — it is for the user's new terminal.
 
 ## Remember
 
