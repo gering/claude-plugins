@@ -23,20 +23,30 @@ Rules:
 ## Instructions
 
 1. **Identify the task and its branch**:
-   - Run: `git branch --show-current`
-   - If on the main branch, run `/list` and ask which task to close — its branch is then
-     `task/<task-name>` by convention.
-   - Otherwise the current branch **is** the task branch — it may be `task/<name>` from
-     `/kickoff`, or an original name kept by `/adopt`. Derive `<task-name>` by stripping a
-     leading `task/`/`feature/`/`fix/`/`bugfix/`/`hotfix/`/`chore/`/`refactor/` prefix.
-   - **Wherever the steps below write `task/<task-name>`, use this resolved branch** — so an
-     adopted branch that kept its original name is closed correctly, not skipped while the real
-     branch is orphaned.
+   - Detect `<main-branch>`: `git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||'` (fallback `main`/`master`).
+   - **From the worktree** — `git branch --show-current` is **not** `<main-branch>`: that branch
+     **is** the task branch. Set `<task-branch>` to it (it may be `task/<name>` from `/kickoff`,
+     or an original name kept by `/adopt`) and derive `<task-name>` by stripping a leading
+     `task/`/`feature/`/`fix/`/`bugfix/`/`hotfix/`/`chore/`/`refactor/` prefix.
+   - **From the main repo** — on `<main-branch>`: run `/list` and ask which task to close, then
+     resolve `<task-branch>` to the real ref, in order: `task/<task-name>` if it exists
+     (`git rev-parse --verify --quiet task/<task-name>`); else the first match of
+     `git branch --all | grep -i "<task-name>"`; else the branch recorded in
+     `tasks/<task-name>.md` (adopt notes it when the rename was declined).
+   - **Wherever the steps below write `task/<task-name>`, use the resolved `<task-branch>`** — so
+     an adopted branch that kept its original name is closed correctly, not skipped while the
+     real branch is orphaned.
 
-2. **Verify task is merged** (if `gh` is available):
-   - Run: `gh pr list --state merged --head "task/<task-name>" --limit 1 --json number,title,mergedAt,headRefName`
-   - **If merged PR found**: Show details and continue
-   - **If NO merged PR**: Warn user and ask for confirmation before proceeding
+2. **Verify task is merged** — this is the safety gate; never skip it silently:
+   - **If `gh` is available**: `gh pr list --state merged --head "<task-branch>" --limit 1 --json number,title,mergedAt,headRefName`
+     - **Merged PR found**: show details and continue.
+     - **No merged PR**: warn and ask for confirmation before proceeding.
+   - **If `gh` is NOT available**: fall back to a local merge check —
+     `git branch --merged <main-branch> --list "<task-branch>"` (after step 5's fetch, prefer
+     `origin/<main-branch>`). If it lists the branch → treat as merged and continue. Otherwise
+     **warn "merge unverified (`gh` unavailable, and not an ancestor of main — may be
+     squash/rebase-merged)" and ask for confirmation** before any cleanup. Do not let the
+     worktree removal in step 7 run on an unverified merge without this confirmation.
 
 3. **Detect main branch**:
    - Run: `git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||'`
