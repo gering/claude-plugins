@@ -22,10 +22,16 @@ Rules:
 
 ## Instructions
 
-1. **Identify the task**:
+1. **Identify the task and its branch**:
    - Run: `git branch --show-current`
-   - If on a `task/*` branch, extract task name
-   - If on the main branch, run `/list` and ask which task to close
+   - If on the main branch, run `/list` and ask which task to close — its branch is then
+     `task/<task-name>` by convention.
+   - Otherwise the current branch **is** the task branch — it may be `task/<name>` from
+     `/kickoff`, or an original name kept by `/adopt`. Derive `<task-name>` by stripping a
+     leading `task/`/`feature/`/`fix/`/`bugfix/`/`hotfix/`/`chore/`/`refactor/` prefix.
+   - **Wherever the steps below write `task/<task-name>`, use this resolved branch** — so an
+     adopted branch that kept its original name is closed correctly, not skipped while the real
+     branch is orphaned.
 
 2. **Verify task is merged** (if `gh` is available):
    - Run: `gh pr list --state merged --head "task/<task-name>" --limit 1 --json number,title,mergedAt,headRefName`
@@ -43,7 +49,7 @@ Rules:
    - Worktree is typically at `.claude/worktrees/<task-name>` (but verify from `git worktree list` output)
 
 5. **Sync local main with remote** (fast-forward check):
-   - The task's PR was merged on GitHub (step 2) — `origin/<main-branch>` is ahead of local `<main-branch>` until it's pulled. Syncing now avoids a confusing "not fully merged" error in step 7 and leaves the workspace ready for the next task.
+   - The task's PR was merged on GitHub (step 2) — `origin/<main-branch>` is ahead of local `<main-branch>` until it's pulled. Syncing now avoids a confusing "not fully merged" error from `git branch -d` in step 8 and leaves the workspace ready for the next task.
    - Operate against the main repo path identified in step 4 (not the task worktree):
      - Fetch: `git -C <main-repo-path> fetch origin <main-branch> --quiet`
      - Behind count: `git -C <main-repo-path> rev-list --count <main-branch>..origin/<main-branch>`

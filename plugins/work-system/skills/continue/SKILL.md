@@ -85,7 +85,7 @@ user_invocable: true
    <first 3 lines of TASK.md>
 
    Current Status:
-   - Branch: task/<task-name>
+   - Branch: <current branch>
    - Changed files: <count>
    - Commits: <count since branching>
 
