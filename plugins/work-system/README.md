@@ -103,10 +103,12 @@ Creates a worktree, copies the task file, and shows how to open a new Claude ses
 
 ### 3. Continue in the worktree
 
+Open a new Claude session in the worktree — `-n` names the session, and the
+`/continue` initial prompt loads the task context in one step:
+
 ```
 cd .claude/worktrees/add-dark-mode
-claude
-> /continue
+claude -n "add-dark-mode" "/continue"
 ```
 
 Loads the task context, checks dependencies, and shows current progress.

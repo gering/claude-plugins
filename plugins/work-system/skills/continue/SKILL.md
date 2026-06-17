@@ -26,8 +26,8 @@ user_invocable: true
      - Run: `git worktree list` to get main repo path (first entry)
      - Try to read from main repo's `tasks/<task-name>.md`
 
-3. **Install dependencies automatically**:
-   Auto-detect project type and install if dependencies are missing:
+3. **Install dependencies** (detect, then install):
+   Auto-detect the project type when dependencies appear to be missing:
 
    | Indicator | Missing check | Command |
    |-----------|--------------|---------|
@@ -39,10 +39,18 @@ user_invocable: true
    | `Gemfile.lock` | `vendor/bundle` missing | `bundle install` |
    | `go.sum` | — | `go mod download` |
    | `Cargo.lock` | `target` missing | `cargo build` |
-   | `requirements.txt` | `.venv` missing | `pip install -r requirements.txt` |
+   | `requirements.txt` | `.venv` missing | `python -m venv .venv && .venv/bin/pip install -r requirements.txt` |
 
-   Only run if the indicator file exists AND the missing check directory is absent.
-   Run the install command automatically — do NOT ask, just run it and show the result.
+   Only consider a command if the indicator file exists AND the missing-check directory is absent.
+
+   **Show the command, then run it.** Every command above installs into a project-local
+   location (`node_modules`, `target`, `vendor/bundle`, `.venv`, …), so it's safe to run
+   without asking — don't add friction. One hard rule:
+   - **Never install into the global/system environment.** For Python, always use the local
+     `.venv` form in the table — a bare `pip install` would pollute the user's global
+     site-packages. If a detected install can't be redirected to a project-local location
+     and would mutate the global/system environment, **show it and ask first** instead of
+     running it.
 
 4. **Load project context** (optional):
    - If `.claude/knowledge/` exists, query the Knowledge Agent: "What are the project patterns and architecture?"
