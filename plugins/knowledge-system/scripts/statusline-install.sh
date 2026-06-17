@@ -21,7 +21,8 @@
 #
 # python3 is required (symlink resolution + atomic file mutation). BSD awk on
 # macOS rejects newlines in -v values and silently truncates the target, so all
-# multi-line mutation goes through python3 with an atomic os.replace.
+# multi-line mutation goes through python3, reading/writing BYTES so the host's
+# encoding and line endings survive untouched, then an atomic os.replace.
 #
 # set -u (catch unset vars) but NOT -e: the flow relies on grep returning
 # non-zero for "no match" all over the place; errors are handled explicitly.
@@ -35,9 +36,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOURCE="${SCRIPT_DIR}/statusline-cks.sh"             # plugin's renderer source of truth
 BEGIN_MARKER="# >>> knowledge-system:cks-statusline >>>"
 END_MARKER="# <<< knowledge-system:cks-statusline <<<"
+SENTINEL_NAME=".cks-statusline-off"                  # per-project disable sentinel
 
 STATUSLINE_TARGET=""   # resolved real path of STATUSLINE (set by resolve_target)
 BACKUP=""              # session backup path (set by backup_target)
+
+# Marker-pair inspection results (set by inspect_markers).
+MK_NB=0; MK_NE=0; MK_BL=""; MK_EL=""; MK_STATE="absent"
 
 MARKER_BLOCK="$(cat <<'EOF'
 # >>> knowledge-system:cks-statusline >>>
@@ -66,6 +71,11 @@ require_python3() {
 realpath_of() {
   python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"
 }
+
+# Project dir for per-project sentinel ops. Mirrors the renderer's precedence
+# (DIR first, then CLAUDE_PROJECT_DIR, then cwd) so disable/enable/status target
+# the same directory the injected marker block checks at render time.
+project_dir() { printf '%s' "${DIR:-${CLAUDE_PROJECT_DIR:-$(pwd)}}"; }
 
 # Extract X.Y.Z from a script's `readonly CKS_STATUSLINE_VERSION=` line.
 # Missing or malformed → 0.0.0.
@@ -97,24 +107,41 @@ resolve_target() {
 }
 
 backup_target() {
-  BACKUP="${STATUSLINE_TARGET}.bak-$(date +%s)"
-  cp "$STATUSLINE_TARGET" "$BACKUP" || die "Failed to create backup at $BACKUP"
+  # mktemp gives a unique name (sub-second reruns can't collide / clobber).
+  BACKUP=$(mktemp "${STATUSLINE_TARGET}.bak-XXXXXX") \
+    || die "Failed to create a backup file next to $STATUSLINE_TARGET."
+  cp "$STATUSLINE_TARGET" "$BACKUP" || die "Failed to write backup at $BACKUP."
 }
 
-restore_backup() {
-  [ -n "$BACKUP" ] && cp "$BACKUP" "$STATUSLINE_TARGET" 2>/dev/null || true
+# Restore the backup over the target, then die. The restore status is reported
+# truthfully: a failed cp is surfaced loudly instead of a false "restored".
+restore_and_die() {
+  local msg=$1
+  if [ -n "$BACKUP" ] && cp "$BACKUP" "$STATUSLINE_TARGET" 2>/dev/null; then
+    die "$msg Restored $STATUSLINE_TARGET from backup ($BACKUP)."
+  fi
+  die "$msg FAILED to restore from backup ($BACKUP) — $STATUSLINE_TARGET may be in a broken state; restore it by hand."
 }
 
 # Ensure +x on a file; report (never silently). ctx: preflight | post-write.
+# A preflight chmod failure is fatal (Claude Code needs +x to exec); a
+# post-write failure only warns — the marker block is already correctly written.
 ensure_executable() {
   local f=$1 ctx=$2
-  [ -x "$f" ] && return
-  chmod +x "$f" || die "Failed to set executable bit on $f."
-  if [ "$ctx" = "preflight" ]; then
-    printf 'Set executable bit on %s (was missing — would have caused silent statusline failure).\n' "$f"
-  else
-    printf 'Re-set executable bit on %s (was dropped during write).\n' "$f"
+  [ -x "$f" ] && return 0
+  if chmod +x "$f" 2>/dev/null; then
+    if [ "$ctx" = "preflight" ]; then
+      printf 'Set executable bit on %s (was missing — would have caused silent statusline failure).\n' "$f"
+    else
+      printf 'Re-set executable bit on %s (was dropped during write).\n' "$f"
+    fi
+    return 0
   fi
+  if [ "$ctx" = "preflight" ]; then
+    die "Failed to set executable bit on $f. Claude Code needs +x to exec the statusline. Fix permissions and re-run."
+  fi
+  printf 'WARNING: could not set +x on %s after write — the statusline may silently fail until you run: chmod +x %s\n' "$f" "$f" >&2
+  return 0
 }
 
 # Count lines containing a fixed string (0 on missing file / no match).
@@ -127,6 +154,37 @@ count_fixed() {
 # First line number of a fixed string (empty if absent).
 line_of_fixed() {
   grep -nF "$1" "$2" 2>/dev/null | head -1 | cut -d: -f1
+}
+
+# Inspect the marker pair in a file — the single classifier shared by install,
+# uninstall, and status so they can never disagree on what "valid" means.
+# Sets globals: MK_NB/MK_NE (counts), MK_BL/MK_EL (line numbers, only for an
+# ordered pair), MK_STATE ∈ present | absent | invalid. "present" requires
+# exactly one BEGIN, one END, and BEGIN line < END line.
+inspect_markers() {
+  local file=$1
+  MK_NB=$(count_fixed "$BEGIN_MARKER" "$file")
+  MK_NE=$(count_fixed "$END_MARKER" "$file")
+  MK_BL=""; MK_EL=""
+  if [ "$MK_NB" = "1" ] && [ "$MK_NE" = "1" ]; then
+    MK_BL=$(line_of_fixed "$BEGIN_MARKER" "$file")
+    MK_EL=$(line_of_fixed "$END_MARKER" "$file")
+    if [ "$MK_BL" -lt "$MK_EL" ]; then
+      MK_STATE="present"
+    else
+      MK_STATE="invalid"   # markers reordered: deleting BEGIN..END would over-delete
+    fi
+  elif [ "$MK_NB" = "0" ] && [ "$MK_NE" = "0" ]; then
+    MK_STATE="absent"
+  else
+    MK_STATE="invalid"     # mismatched counts (corrupt prior install)
+  fi
+}
+
+# Standard "refuse to mutate" message for an invalid marker pair. arg1 = verb.
+marker_invalid_msg() {
+  printf 'Marker pair invalid in %s (%s BEGIN, %s END, BEGIN@%s, END@%s). Resolve manually before re-running %s.' \
+    "$STATUSLINE_TARGET" "$MK_NB" "$MK_NE" "${MK_BL:-?}" "${MK_EL:-?}" "$1"
 }
 
 # Replace lines START..END (inclusive, 1-based) of STATUSLINE_TARGET with the
@@ -144,14 +202,22 @@ try:
     marker = os.environ.get('MARKER', '')
     start = int(os.environ['START_LINE'])  # 1-based, inclusive
     end = int(os.environ['END_LINE'])      # 1-based, inclusive; start-1 = insert-only
-    lines = open(path).read().splitlines(keepends=True)
+    # Read/write BYTES so the host file's encoding and line endings (CRLF,
+    # non-ASCII comments) survive untouched outside the marker region. Text mode
+    # would normalize newlines globally and raise UnicodeDecodeError under a C
+    # locale. bytes.splitlines only breaks on \r, \n, \r\n — matching grep -n.
+    with open(path, 'rb') as f:
+        lines = f.read().splitlines(keepends=True)
     block = []
     if marker:
+        b = marker.encode('utf-8')
         # MARKER from $() loses its trailing newline; restore one so the block
         # does not collide with the following line.
-        block = [marker + ("\n" if not marker.endswith("\n") else "")]
+        if not b.endswith(b'\n'):
+            b += b'\n'
+        block = [b]
     new_lines = lines[:start-1] + block + lines[end:]  # end inclusive
-    with open(tmp, 'w') as f:
+    with open(tmp, 'wb') as f:
         f.writelines(new_lines)
     os.replace(tmp, path)  # atomic on same filesystem; PATH_TARGET is the real path
 except Exception as e:
@@ -166,7 +232,7 @@ PY
 
 cmd_status() {
   require_python3 status
-  local src_v inst_v="" cmp marker_state="absent" proj
+  local src_v inst_v="" cmp="" proj sentinel
 
   src_v=$(script_version "$SOURCE")
   printf 'cks statusline status\n'
@@ -189,34 +255,43 @@ cmd_status() {
     printf -- '- Installed renderer: missing (%s)\n' "$INSTALLED"
   fi
 
-  if [ -e "$STATUSLINE" ]; then
-    resolve_target
-    local nb ne
-    nb=$(count_fixed "$BEGIN_MARKER" "$STATUSLINE_TARGET")
-    ne=$(count_fixed "$END_MARKER" "$STATUSLINE_TARGET")
-    if [ "$nb" = "1" ] && [ "$ne" = "1" ]; then
-      marker_state="present"
-    elif [ "$nb" = "0" ] && [ "$ne" = "0" ]; then
-      marker_state="absent"
-    else
-      marker_state="INVALID ($nb BEGIN / $ne END — resolve manually)"
-    fi
-    printf -- '- Marker block in %s: %s\n' "$STATUSLINE_TARGET" "$marker_state"
-  else
+  MK_STATE="absent"
+  if [ ! -e "$STATUSLINE" ]; then
     printf -- '- Host statusline: %s not found (set one up, then run install)\n' "$STATUSLINE"
+    MK_STATE="nohost"
+  else
+    resolve_target
+    if [ ! -r "$STATUSLINE_TARGET" ]; then
+      printf -- '- Marker block: cannot read %s (permissions?)\n' "$STATUSLINE_TARGET"
+      MK_STATE="unreadable"
+    else
+      inspect_markers "$STATUSLINE_TARGET"
+      case "$MK_STATE" in
+        present) printf -- '- Marker block in %s: present (lines %s-%s)\n' "$STATUSLINE_TARGET" "$MK_BL" "$MK_EL" ;;
+        absent)  printf -- '- Marker block in %s: absent\n' "$STATUSLINE_TARGET" ;;
+        invalid) printf -- '- Marker block in %s: INVALID (%s BEGIN / %s END — resolve manually)\n' "$STATUSLINE_TARGET" "$MK_NB" "$MK_NE" ;;
+      esac
+    fi
   fi
 
-  proj="${CLAUDE_PROJECT_DIR:-$(pwd)}"
-  if [ -f "$proj/.claude/.cks-statusline-off" ]; then
+  proj=$(project_dir)
+  sentinel="$proj/.claude/$SENTINEL_NAME"
+  if [ -f "$sentinel" ]; then
     printf -- '- Project sentinel: present → cks disabled for %s\n' "$proj"
   else
     printf -- '- Project sentinel: absent → cks enabled for %s\n' "$proj"
   fi
 
-  if [ ! -e "$INSTALLED" ] || [ "$marker_state" = "absent" ]; then
+  if [ "$MK_STATE" = "unreadable" ]; then
+    printf 'Hint: fix read permissions on %s, then re-run status.\n' "$STATUSLINE_TARGET"
+  elif [ "$MK_STATE" = "invalid" ]; then
+    printf 'Hint: marker block is corrupted — run `uninstall` then `install` to reset it.\n'
+  elif [ ! -e "$INSTALLED" ] || [ "$MK_STATE" != "present" ]; then
     printf 'Hint: run `install` to set up the cks status block.\n'
-  elif [ -n "$inst_v" ] && [ "$(version_cmp "$src_v" "$inst_v")" = "newer" ]; then
+  elif [ "$cmp" = "newer" ]; then
     printf 'Hint: run `install` to upgrade the renderer (v%s → v%s).\n' "$inst_v" "$src_v"
+  elif [ "$cmp" = "older" ]; then
+    printf 'Hint: installed renderer (v%s) is newer than the plugin (v%s) — fine; use `install --force` only to downgrade.\n' "$inst_v" "$src_v"
   else
     printf 'Hint: cks is installed and current.\n'
   fi
@@ -310,27 +385,14 @@ $MARKER_BLOCK"
 
 # Post-write sanity checks. Restore from backup and abort on the first failure.
 verify_after_install() {
-  if [ ! -s "$STATUSLINE_TARGET" ]; then
-    restore_backup
-    die "Post-write check failed: $STATUSLINE_TARGET is empty. Restored from backup ($BACKUP)."
-  fi
-  local nb ne bl el err
-  nb=$(count_fixed "$BEGIN_MARKER" "$STATUSLINE_TARGET")
-  ne=$(count_fixed "$END_MARKER" "$STATUSLINE_TARGET")
-  if [ "$nb" != "1" ] || [ "$ne" != "1" ]; then
-    restore_backup
-    die "Post-write check failed: expected one marker pair, found $nb BEGIN / $ne END. Restored from backup ($BACKUP)."
-  fi
-  bl=$(line_of_fixed "$BEGIN_MARKER" "$STATUSLINE_TARGET")
-  el=$(line_of_fixed "$END_MARKER" "$STATUSLINE_TARGET")
-  if [ "$bl" -ge "$el" ]; then
-    restore_backup
-    die "Post-write check failed: BEGIN@$bl not before END@$el. Restored from backup ($BACKUP)."
-  fi
+  [ -s "$STATUSLINE_TARGET" ] \
+    || restore_and_die "Post-write check failed: $STATUSLINE_TARGET is empty."
+  inspect_markers "$STATUSLINE_TARGET"
+  [ "$MK_STATE" = "present" ] \
+    || restore_and_die "Post-write check failed: expected exactly one ordered marker pair, found $MK_NB BEGIN / $MK_NE END."
   if ! bash -n "$STATUSLINE_TARGET" 2>/dev/null; then
-    err=$(bash -n "$STATUSLINE_TARGET" 2>&1 || true)
-    restore_backup
-    die "Post-write check failed: $STATUSLINE_TARGET has a syntax error. Restored from backup ($BACKUP). ($err)"
+    local err; err=$(bash -n "$STATUSLINE_TARGET" 2>&1 || true)
+    restore_and_die "Post-write check failed: $STATUSLINE_TARGET has a syntax error. ($err)"
   fi
   ensure_executable "$STATUSLINE_TARGET" post-write
 }
@@ -356,35 +418,35 @@ cmd_install() {
   copy_renderer
 
   # c/d. Inspect marker pair → refresh, place fresh, or refuse.
-  local nb ne bl el START_LINE END_LINE PLACEMENT_MSG
-  nb=$(count_fixed "$BEGIN_MARKER" "$STATUSLINE_TARGET")
-  ne=$(count_fixed "$END_MARKER" "$STATUSLINE_TARGET")
+  local START_LINE END_LINE PLACEMENT_MSG
+  inspect_markers "$STATUSLINE_TARGET"
+  case "$MK_STATE" in
+    present)
+      START_LINE=$MK_BL
+      END_LINE=$MK_EL
+      PLACEMENT_MSG="refreshed existing marker block (lines ${MK_BL}-${MK_EL})"
+      ;;
+    absent)
+      # Manual cks block + no marker block → duplication risk; require --force.
+      if grep -nE '\[cks[^]]*\]' "$STATUSLINE_TARGET" >/dev/null 2>&1 && [ "$FORCE" -ne 1 ]; then
+        die "Found an existing [cks ...] block in $STATUSLINE_TARGET but no marker block. Installing would duplicate it. Re-run with --force to inject anyway."
+      fi
+      determine_placement
+      ;;
+    invalid)
+      die "$(marker_invalid_msg install)"
+      ;;
+  esac
 
-  if [ "$nb" = "1" ] && [ "$ne" = "1" ]; then
-    bl=$(line_of_fixed "$BEGIN_MARKER" "$STATUSLINE_TARGET")
-    el=$(line_of_fixed "$END_MARKER" "$STATUSLINE_TARGET")
-    [ "$bl" -lt "$el" ] \
-      || die "Marker pair invalid in $STATUSLINE_TARGET ($nb BEGIN, $ne END, BEGIN@$bl, END@$el). Resolve manually before re-running install."
-    START_LINE=$bl
-    END_LINE=$el
-    PLACEMENT_MSG="refreshed existing marker block (lines ${bl}-${el})"
-  elif [ "$nb" = "0" ] && [ "$ne" = "0" ]; then
-    # Manual cks block + no marker block → duplication risk; require --force.
-    if grep -nE '\[cks[^]]*\]' "$STATUSLINE_TARGET" >/dev/null 2>&1 && [ "$FORCE" -ne 1 ]; then
-      die "Found an existing [cks ...] block in $STATUSLINE_TARGET but no marker block. Installing would duplicate it. Re-run with --force to inject anyway."
-    fi
-    determine_placement
-  else
-    bl=$(line_of_fixed "$BEGIN_MARKER" "$STATUSLINE_TARGET")
-    el=$(line_of_fixed "$END_MARKER" "$STATUSLINE_TARGET")
-    die "Marker pair invalid in $STATUSLINE_TARGET ($nb BEGIN, $ne END, BEGIN@${bl:-?}, END@${el:-?}). Resolve manually before re-running install."
-  fi
+  # Failsafe: never hand the Python mutation an empty/garbage line number (catches
+  # a grep misfire before we touch the file). START is 1-based; END may be START-1.
+  case "$START_LINE" in ''|*[!0-9]*|0) die "Internal error: START_LINE='$START_LINE' is not a positive line number (grep misfire). Aborted before mutation." ;; esac
+  case "$END_LINE"   in ''|*[!0-9]*)   die "Internal error: END_LINE='$END_LINE' is not a line number (grep misfire). Aborted before mutation." ;; esac
 
   # e. Mutate atomically, then verify (both restore-on-failure).
   backup_target
   if ! mutate_file "$START_LINE" "$END_LINE" "$MARKER_BLOCK"; then
-    restore_backup
-    die "Marker injection failed; restored $STATUSLINE_TARGET from backup ($BACKUP)."
+    restore_and_die "Marker injection failed."
   fi
   verify_after_install
 
@@ -400,16 +462,16 @@ cmd_install() {
 # ---- enable / disable (per-project) -----------------------------------------
 
 cmd_disable() {
-  local proj="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+  local proj; proj=$(project_dir)
   mkdir -p "$proj/.claude" || die "Failed to create $proj/.claude"
-  touch "$proj/.claude/.cks-statusline-off" || die "Failed to create the disable sentinel in $proj/.claude"
+  touch "$proj/.claude/$SENTINEL_NAME" || die "Failed to create the disable sentinel in $proj/.claude"
   printf '✅ cks disabled for %s. The renderer will skip output here. Re-enable with `enable`.\n' "$proj"
   printf 'Note: this is per-project — other projects keep showing [cks ...].\n'
 }
 
 cmd_enable() {
-  local proj="${CLAUDE_PROJECT_DIR:-$(pwd)}"
-  rm -f "$proj/.claude/.cks-statusline-off" 2>/dev/null || true
+  local proj; proj=$(project_dir)
+  rm -f "$proj/.claude/$SENTINEL_NAME" 2>/dev/null || true
   printf '✅ cks enabled for %s.\n' "$proj"
   printf 'Note: enable does not install the marker block or renderer — run `install` for that.\n'
 }
@@ -419,22 +481,16 @@ cmd_enable() {
 # Post-strip checks. orig_ok=1 means the file parsed cleanly before the strip,
 # so a parse error now is ours → restore. Otherwise the file was already broken.
 verify_after_uninstall() {
-  local orig_ok=$1 nb ne err
-  if [ ! -s "$STATUSLINE_TARGET" ]; then
-    restore_backup
-    die "Post-strip check failed: $STATUSLINE_TARGET is empty. Restored from backup ($BACKUP)."
-  fi
-  nb=$(count_fixed "$BEGIN_MARKER" "$STATUSLINE_TARGET")
-  ne=$(count_fixed "$END_MARKER" "$STATUSLINE_TARGET")
-  if [ "$nb" != "0" ] || [ "$ne" != "0" ]; then
-    restore_backup
-    die "Post-strip check failed: markers still present ($nb BEGIN / $ne END). Restored from backup ($BACKUP)."
-  fi
+  local orig_ok=$1
+  [ -s "$STATUSLINE_TARGET" ] \
+    || restore_and_die "Post-strip check failed: $STATUSLINE_TARGET is empty."
+  inspect_markers "$STATUSLINE_TARGET"
+  [ "$MK_STATE" = "absent" ] \
+    || restore_and_die "Post-strip check failed: markers still present ($MK_NB BEGIN / $MK_NE END)."
   if ! bash -n "$STATUSLINE_TARGET" 2>/dev/null; then
-    err=$(bash -n "$STATUSLINE_TARGET" 2>&1 || true)
+    local err; err=$(bash -n "$STATUSLINE_TARGET" 2>&1 || true)
     if [ "$orig_ok" = "1" ]; then
-      restore_backup
-      die "Post-strip check failed: strip introduced a syntax error. Restored from backup ($BACKUP). ($err)"
+      restore_and_die "Post-strip check failed: strip introduced a syntax error. ($err)"
     fi
     printf 'WARNING: %s still has a syntax error after strip, but it was already broken before uninstall — not restoring. (%s)\n' "$STATUSLINE_TARGET" "$err"
   fi
@@ -447,30 +503,25 @@ cmd_uninstall() {
 
   if [ -e "$STATUSLINE" ]; then
     resolve_target
-    local nb ne bl el orig_ok
-    nb=$(count_fixed "$BEGIN_MARKER" "$STATUSLINE_TARGET")
-    ne=$(count_fixed "$END_MARKER" "$STATUSLINE_TARGET")
-    if [ "$nb" = "0" ] && [ "$ne" = "0" ]; then
-      printf 'Marker block not found in %s — nothing to strip.\n' "$STATUSLINE_TARGET"
-    elif [ "$nb" = "1" ] && [ "$ne" = "1" ]; then
-      bl=$(line_of_fixed "$BEGIN_MARKER" "$STATUSLINE_TARGET")
-      el=$(line_of_fixed "$END_MARKER" "$STATUSLINE_TARGET")
-      [ "$bl" -lt "$el" ] \
-        || die "Marker pair invalid in $STATUSLINE_TARGET ($nb BEGIN, $ne END, BEGIN@$bl, END@$el). Resolve manually before re-running uninstall."
-      orig_ok=0
-      bash -n "$STATUSLINE_TARGET" 2>/dev/null && orig_ok=1
-      backup_target
-      if ! mutate_file "$bl" "$el"; then
-        restore_backup
-        die "Marker strip failed; restored $STATUSLINE_TARGET from backup ($BACKUP)."
-      fi
-      verify_after_uninstall "$orig_ok"
-      removed_block=1
-    else
-      bl=$(line_of_fixed "$BEGIN_MARKER" "$STATUSLINE_TARGET")
-      el=$(line_of_fixed "$END_MARKER" "$STATUSLINE_TARGET")
-      die "Marker pair invalid in $STATUSLINE_TARGET ($nb BEGIN, $ne END, BEGIN@${bl:-?}, END@${el:-?}). Resolve manually before re-running uninstall."
-    fi
+    inspect_markers "$STATUSLINE_TARGET"
+    case "$MK_STATE" in
+      absent)
+        printf 'Marker block not found in %s — nothing to strip.\n' "$STATUSLINE_TARGET"
+        ;;
+      present)
+        local orig_ok=0
+        bash -n "$STATUSLINE_TARGET" 2>/dev/null && orig_ok=1
+        backup_target
+        if ! mutate_file "$MK_BL" "$MK_EL"; then
+          restore_and_die "Marker strip failed."
+        fi
+        verify_after_uninstall "$orig_ok"
+        removed_block=1
+        ;;
+      invalid)
+        die "$(marker_invalid_msg uninstall)"
+        ;;
+    esac
   else
     printf 'No %s found — skipping marker removal.\n' "$STATUSLINE"
   fi
@@ -490,7 +541,7 @@ cmd_uninstall() {
   printf '✅ Uninstalled.\n'
   [ "$removed_block" = "1" ] && printf -- '- Marker block removed from %s (backup: %s)\n' "$STATUSLINE_TARGET" "$BACKUP"
   printf -- '- %s\n' "$renderer_msg"
-  printf -- '- Per-project sentinels (.cks-statusline-off) were left in place.\n'
+  printf -- '- Per-project sentinels (%s) were left in place.\n' "$SENTINEL_NAME"
 }
 
 # ---- argument parsing + dispatch --------------------------------------------
@@ -499,6 +550,8 @@ CMD=""
 FORCE=0
 for arg in "$@"; do
   case "$arg" in
+    "")
+      ;;  # ignore empty tokens (e.g. a quoted empty $ARGUMENTS from the wrapper)
     install|enable|disable|uninstall|status)
       [ -z "$CMD" ] && CMD="$arg" ;;
     --force)
