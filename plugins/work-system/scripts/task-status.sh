@@ -47,20 +47,13 @@ resolve_named_branch() {
   local name="$1" matches first
   RESOLVED_SCOPE="none"; RESOLVED_BRANCH=""; RESOLVED_REF=""; RESOLVED_AMBIGUOUS="no"
   [ -z "$name" ] && return 0
-  # Exact matches first (local, then remote) — never ambiguous.
+  # All EXACT matches first — local then remote — before any fuzzy match, so an
+  # exact remote branch is never shadowed by an unrelated local substring hit.
   if ref_exists "refs/heads/task/$name"; then
     RESOLVED_SCOPE="local"; RESOLVED_BRANCH="task/$name"; RESOLVED_REF="refs/heads/task/$name"; return 0
   fi
   if ref_exists "refs/heads/$name"; then
     RESOLVED_SCOPE="local"; RESOLVED_BRANCH="$name"; RESOLVED_REF="refs/heads/$name"; return 0
-  fi
-  # Fuzzy local substring (clean `--format` output, literal match).
-  matches="$(git branch --list --format='%(refname:short)' | grep -i -F -- "$name" || true)"
-  if [ -n "$matches" ]; then
-    first="$(printf '%s\n' "$matches" | head -n1)"
-    RESOLVED_SCOPE="local"; RESOLVED_BRANCH="$first"; RESOLVED_REF="refs/heads/$first"
-    [ "$(printf '%s\n' "$matches" | grep -c '')" -gt 1 ] && RESOLVED_AMBIGUOUS="yes"
-    return 0
   fi
   if ref_exists "refs/remotes/origin/task/$name"; then
     RESOLVED_SCOPE="remote"; RESOLVED_BRANCH="task/$name"; RESOLVED_REF="refs/remotes/origin/task/$name"; return 0
@@ -68,7 +61,14 @@ resolve_named_branch() {
   if ref_exists "refs/remotes/origin/$name"; then
     RESOLVED_SCOPE="remote"; RESOLVED_BRANCH="$name"; RESOLVED_REF="refs/remotes/origin/$name"; return 0
   fi
-  # Fuzzy remote substring (exclude origin/HEAD).
+  # Then fuzzy substring — local, then remote (clean `--format` output, literal match).
+  matches="$(git branch --list --format='%(refname:short)' | grep -i -F -- "$name" || true)"
+  if [ -n "$matches" ]; then
+    first="$(printf '%s\n' "$matches" | head -n1)"
+    RESOLVED_SCOPE="local"; RESOLVED_BRANCH="$first"; RESOLVED_REF="refs/heads/$first"
+    [ "$(printf '%s\n' "$matches" | grep -c '')" -gt 1 ] && RESOLVED_AMBIGUOUS="yes"
+    return 0
+  fi
   matches="$(git branch --remotes --format='%(refname:short)' | sed 's|^origin/||' \
              | grep -v -x 'HEAD' | grep -i -F -- "$name" || true)"
   if [ -n "$matches" ]; then
@@ -173,14 +173,21 @@ do_assess() {
     commits="$(git log $MAIN_REFS --oneline -F --grep="$TASK_NAME" 2>/dev/null | grep -c '' || true)"
   fi
 
+  # A bare commit-message match only implies completion when the task name is
+  # specific enough not to collide with unrelated history — skip generic words
+  # like "fix"/"api"/"test": require multi-segment kebab, or >= 6 chars.
+  local name_specific="no"
+  case "$TASK_NAME" in *-*) name_specific="yes";; esac
+  [ "${#TASK_NAME}" -ge 6 ] && name_specific="yes"
+
   local verdict confidence
-  if   [ "$pr_state" = "MERGED" ];     then verdict="COMPLETED";   confidence="confirmed"
-  elif [ "$branch_merged" = "yes" ];   then verdict="COMPLETED";   confidence="confirmed"
-  elif [ "$pr_state" = "OPEN" ];       then verdict="IN_PROGRESS"; confidence="confirmed"
-  elif [ "$pr_state" = "CLOSED" ];     then verdict="IN_PROGRESS"; confidence="confirmed"
-  elif [ "$BRANCH_EXISTS" = "yes" ];   then verdict="IN_PROGRESS"; confidence="likely"
-  elif [ "$commits" -gt 0 ];           then verdict="COMPLETED";   confidence="likely"
-  else                                      verdict="NOT_STARTED"; confidence="none"
+  if   [ "$pr_state" = "MERGED" ];                           then verdict="COMPLETED";   confidence="confirmed"
+  elif [ "$branch_merged" = "yes" ];                         then verdict="COMPLETED";   confidence="confirmed"
+  elif [ "$pr_state" = "OPEN" ];                             then verdict="IN_PROGRESS"; confidence="confirmed"
+  elif [ "$pr_state" = "CLOSED" ];                           then verdict="IN_PROGRESS"; confidence="confirmed"
+  elif [ "$BRANCH_EXISTS" = "yes" ];                         then verdict="IN_PROGRESS"; confidence="likely"
+  elif [ "$commits" -gt 0 ] && [ "$name_specific" = "yes" ]; then verdict="COMPLETED";   confidence="likely"
+  else                                                            verdict="NOT_STARTED"; confidence="none"
   fi
 
   print_resolution
