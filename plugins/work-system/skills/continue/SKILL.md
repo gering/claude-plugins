@@ -13,16 +13,15 @@ user_invocable: true
 
 ## Instructions
 
-1. **Verify we're in a worktree, identify the task**:
-   - Run: `git worktree list`
-   - Run: `git branch --show-current`
-   - Detect the main branch: `git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||'` (fallback: `main`/`master`).
-   - If the current branch **is** the main branch, suggest using `/kickoff` instead and stop.
-   - Otherwise treat the current branch as the task branch — it may be `task/<name>` from
-     `/kickoff`, or an original name kept by `/adopt` (which allows declining the rename).
-     Derive the task name by stripping a leading `task/` — or `feature/`, `fix/`, `bugfix/`,
-     `hotfix/`, `chore/`, `refactor/` — prefix:
-     `task/fix-calendar` → `fix-calendar`, `feature/dark-mode` → `dark-mode`.
+1. **Verify we're in a worktree, identify the task** — via the shared helper:
+   - Run: `git worktree list` (confirm this is a linked worktree, not the main repo).
+   - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/task-status.sh" resolve` and read its
+     `key=value` output: `on_main`, `task_name`, `task_branch`, `main_branch`.
+   - If `on_main=yes` (the current branch **is** the main branch), suggest `/kickoff` instead
+     and stop.
+   - Otherwise `<task-branch>` = `task_branch` (the current branch — may be `task/<name>` from
+     `/kickoff` or an original name kept by `/adopt`) and `<task-name>` = `task_name` (the
+     helper already stripped the `task/`/`feature/`/`fix/`/… prefix). Use these below.
 
 2. **Check for TASK.md**:
    - Read `TASK.md` in the current directory
