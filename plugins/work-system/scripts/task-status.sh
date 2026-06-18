@@ -12,10 +12,11 @@
 #
 # Subcommands:
 #   resolve [<task-name>]   Fast, no network. Emits: main_branch, on_main,
-#                           task_name, task_branch, branch_scope, branch_exists.
-#   assess  [<task-name>]   resolve + pr_state, pr_number, pr_url (via gh when
-#                           available), branch_merged, commits_in_main, verdict,
-#                           confidence.
+#                           detached, task_name, task_branch, branch_scope,
+#                           branch_exists, branch_ambiguous.
+#   assess  [<task-name>]   resolve + pr_state, pr_number, pr_url, merge_ref,
+#                           branch_merged, commits_in_main, verdict, confidence
+#                           (PR fields via gh when available).
 #
 # Output: `key=value` lines on stdout (empty value = unknown/none). Callers read
 # the keys they need. Exits 0 on success, 2 on a bad subcommand, non-zero when
@@ -37,26 +38,51 @@ detect_main_branch() {
   printf 'main\n'
 }
 
-# Sets RESOLVED_SCOPE (local|remote|none) and RESOLVED_BRANCH (clean short name,
-# or task/<name> by convention when nothing is found) for a given task name.
-RESOLVED_SCOPE=""; RESOLVED_BRANCH=""
+# Resolve a task name to a branch. Sets RESOLVED_SCOPE (local|remote|none),
+# RESOLVED_BRANCH (clean short name, or task/<name> by convention when nothing
+# is found), RESOLVED_REF (full ref of the resolved branch, or empty), and
+# RESOLVED_AMBIGUOUS (yes when a fuzzy substring match hit more than one branch).
+RESOLVED_SCOPE=""; RESOLVED_BRANCH=""; RESOLVED_REF=""; RESOLVED_AMBIGUOUS="no"
 resolve_named_branch() {
-  local name="$1" b
-  RESOLVED_SCOPE="none"; RESOLVED_BRANCH=""
+  local name="$1" matches first
+  RESOLVED_SCOPE="none"; RESOLVED_BRANCH=""; RESOLVED_REF=""; RESOLVED_AMBIGUOUS="no"
   [ -z "$name" ] && return 0
-  if ref_exists "refs/heads/task/$name"; then RESOLVED_SCOPE="local";  RESOLVED_BRANCH="task/$name"; return 0; fi
-  if ref_exists "refs/heads/$name";      then RESOLVED_SCOPE="local";  RESOLVED_BRANCH="$name";      return 0; fi
-  b="$(git branch --list --format='%(refname:short)' | grep -i -m1 -F -- "$name" || true)"
-  if [ -n "$b" ]; then RESOLVED_SCOPE="local"; RESOLVED_BRANCH="$b"; return 0; fi
-  if ref_exists "refs/remotes/origin/task/$name"; then RESOLVED_SCOPE="remote"; RESOLVED_BRANCH="task/$name"; return 0; fi
-  b="$(git branch --remotes --format='%(refname:short)' | sed 's|^origin/||' | grep -i -m1 -F -- "$name" || true)"
-  if [ -n "$b" ]; then RESOLVED_SCOPE="remote"; RESOLVED_BRANCH="$b"; return 0; fi
+  # Exact matches first (local, then remote) — never ambiguous.
+  if ref_exists "refs/heads/task/$name"; then
+    RESOLVED_SCOPE="local"; RESOLVED_BRANCH="task/$name"; RESOLVED_REF="refs/heads/task/$name"; return 0
+  fi
+  if ref_exists "refs/heads/$name"; then
+    RESOLVED_SCOPE="local"; RESOLVED_BRANCH="$name"; RESOLVED_REF="refs/heads/$name"; return 0
+  fi
+  # Fuzzy local substring (clean `--format` output, literal match).
+  matches="$(git branch --list --format='%(refname:short)' | grep -i -F -- "$name" || true)"
+  if [ -n "$matches" ]; then
+    first="$(printf '%s\n' "$matches" | head -n1)"
+    RESOLVED_SCOPE="local"; RESOLVED_BRANCH="$first"; RESOLVED_REF="refs/heads/$first"
+    [ "$(printf '%s\n' "$matches" | grep -c '')" -gt 1 ] && RESOLVED_AMBIGUOUS="yes"
+    return 0
+  fi
+  if ref_exists "refs/remotes/origin/task/$name"; then
+    RESOLVED_SCOPE="remote"; RESOLVED_BRANCH="task/$name"; RESOLVED_REF="refs/remotes/origin/task/$name"; return 0
+  fi
+  if ref_exists "refs/remotes/origin/$name"; then
+    RESOLVED_SCOPE="remote"; RESOLVED_BRANCH="$name"; RESOLVED_REF="refs/remotes/origin/$name"; return 0
+  fi
+  # Fuzzy remote substring (exclude origin/HEAD).
+  matches="$(git branch --remotes --format='%(refname:short)' | sed 's|^origin/||' \
+             | grep -v -x 'HEAD' | grep -i -F -- "$name" || true)"
+  if [ -n "$matches" ]; then
+    first="$(printf '%s\n' "$matches" | head -n1)"
+    RESOLVED_SCOPE="remote"; RESOLVED_BRANCH="$first"; RESOLVED_REF="refs/remotes/origin/$first"
+    [ "$(printf '%s\n' "$matches" | grep -c '')" -gt 1 ] && RESOLVED_AMBIGUOUS="yes"
+    return 0
+  fi
   RESOLVED_BRANCH="task/$name"   # nothing exists; assume the convention for display
 }
 
 # Sets MAIN_REFS (space-separated refs that actually exist — safe to pass to
-# `git log`) and MERGE_REF (single ref to compare `--merged` against; prefers
-# origin/<main> so a GitHub merge counts before a local pull).
+# `git log`) and MERGE_REF (single ref to compare against; prefers origin/<main>
+# so a GitHub merge counts before a local pull).
 MAIN_REFS=""; MERGE_REF=""
 compute_main_refs() {
   local main="$1" refs=""
@@ -70,37 +96,43 @@ compute_main_refs() {
   MAIN_REFS="${refs:-$main}"
 }
 
-# Sets MAIN_BRANCH, ON_MAIN, TASK_NAME, TASK_BRANCH, BRANCH_SCOPE, BRANCH_EXISTS.
-MAIN_BRANCH=""; ON_MAIN=""; TASK_NAME=""; TASK_BRANCH=""; BRANCH_SCOPE=""; BRANCH_EXISTS=""
+# Sets MAIN_BRANCH, ON_MAIN, DETACHED, TASK_NAME, TASK_BRANCH, TASK_REF,
+# BRANCH_SCOPE, BRANCH_EXISTS (local or remote), BRANCH_AMBIGUOUS.
+MAIN_BRANCH=""; ON_MAIN=""; DETACHED="no"; TASK_NAME=""; TASK_BRANCH=""
+TASK_REF=""; BRANCH_SCOPE=""; BRANCH_EXISTS=""; BRANCH_AMBIGUOUS="no"
 compute_resolution() {
   local name="${1:-}" cur
   MAIN_BRANCH="$(detect_main_branch)"
   cur="$(git branch --show-current 2>/dev/null || true)"
+  DETACHED="no"; BRANCH_AMBIGUOUS="no"
 
   if [ -n "$name" ]; then
     TASK_NAME="$(strip_prefix "$name")"
     resolve_named_branch "$TASK_NAME"
-    TASK_BRANCH="$RESOLVED_BRANCH"; BRANCH_SCOPE="$RESOLVED_SCOPE"; ON_MAIN="no"
-  elif [ -n "$cur" ] && [ "$cur" != "$MAIN_BRANCH" ]; then
-    TASK_BRANCH="$cur"; BRANCH_SCOPE="local"; TASK_NAME="$(strip_prefix "$cur")"; ON_MAIN="no"
+    TASK_BRANCH="$RESOLVED_BRANCH"; BRANCH_SCOPE="$RESOLVED_SCOPE"; TASK_REF="$RESOLVED_REF"
+    BRANCH_AMBIGUOUS="$RESOLVED_AMBIGUOUS"; ON_MAIN="no"
+  elif [ -z "$cur" ]; then
+    # Detached HEAD (or an unborn branch) — no current branch to derive a task from.
+    DETACHED="yes"; ON_MAIN="no"; TASK_NAME=""; TASK_BRANCH=""; TASK_REF=""; BRANCH_SCOPE="none"
+  elif [ "$cur" != "$MAIN_BRANCH" ]; then
+    TASK_BRANCH="$cur"; BRANCH_SCOPE="local"; TASK_REF="refs/heads/$cur"
+    TASK_NAME="$(strip_prefix "$cur")"; ON_MAIN="no"
   else
-    ON_MAIN="yes"; TASK_NAME=""; TASK_BRANCH=""; BRANCH_SCOPE="none"
+    ON_MAIN="yes"; TASK_NAME=""; TASK_BRANCH=""; TASK_REF=""; BRANCH_SCOPE="none"
   fi
 
-  if [ "$BRANCH_SCOPE" = "local" ] && ref_exists "refs/heads/$TASK_BRANCH"; then
-    BRANCH_EXISTS="yes"
-  else
-    BRANCH_EXISTS="no"
-  fi
+  if [ -n "$TASK_REF" ] && ref_exists "$TASK_REF"; then BRANCH_EXISTS="yes"; else BRANCH_EXISTS="no"; fi
 }
 
 print_resolution() {
-  printf 'main_branch=%s\n'   "$MAIN_BRANCH"
-  printf 'on_main=%s\n'       "$ON_MAIN"
-  printf 'task_name=%s\n'     "$TASK_NAME"
-  printf 'task_branch=%s\n'   "$TASK_BRANCH"
-  printf 'branch_scope=%s\n'  "$BRANCH_SCOPE"
-  printf 'branch_exists=%s\n' "$BRANCH_EXISTS"
+  printf 'main_branch=%s\n'      "$MAIN_BRANCH"
+  printf 'on_main=%s\n'          "$ON_MAIN"
+  printf 'detached=%s\n'         "$DETACHED"
+  printf 'task_name=%s\n'        "$TASK_NAME"
+  printf 'task_branch=%s\n'      "$TASK_BRANCH"
+  printf 'branch_scope=%s\n'     "$BRANCH_SCOPE"
+  printf 'branch_exists=%s\n'    "$BRANCH_EXISTS"
+  printf 'branch_ambiguous=%s\n' "$BRANCH_AMBIGUOUS"
 }
 
 do_assess() {
@@ -108,40 +140,47 @@ do_assess() {
   compute_main_refs "$MAIN_BRANCH"
 
   local pr_state="none" pr_number="" pr_url="" out rest
-  if command -v gh >/dev/null 2>&1 && [ -n "$TASK_BRANCH" ]; then
-    out="$(gh pr list --state all --head "$TASK_BRANCH" --limit 1 \
-            --json number,state,url --jq '.[0] | "\(.number)|\(.state)|\(.url)"' 2>/dev/null || true)"
-    if [ -n "$out" ] && [ "$out" != "null" ]; then
-      pr_number="${out%%|*}"; rest="${out#*|}"; pr_state="${rest%%|*}"; pr_url="${rest#*|}"
+  if command -v gh >/dev/null 2>&1; then
+    if [ -n "$TASK_BRANCH" ]; then
+      # `.[0] // empty` → no output when there is no matching PR (avoids the
+      # literal "null|null|null" that `.[0] | ...` would interpolate).
+      out="$(gh pr list --state all --head "$TASK_BRANCH" --limit 1 \
+              --json number,state,url --jq '.[0] // empty | "\(.number)|\(.state)|\(.url)"' 2>/dev/null || true)"
+      if [ -n "$out" ]; then
+        pr_number="${out%%|*}"; rest="${out#*|}"; pr_state="${rest%%|*}"; pr_url="${rest#*|}"
+      fi
     fi
-  elif ! command -v gh >/dev/null 2>&1; then
+  else
     pr_state="nogh"
   fi
 
+  # Merge check works for a local OR remote task ref: is its tip an ancestor of
+  # the merge ref? (origin/<main> when it exists.) Not an ancestor → unknown,
+  # since a squash/rebase merge rewrites SHAs and is never an ancestor.
   local branch_merged="na"
-  if [ "$BRANCH_EXISTS" = "yes" ]; then
-    if git branch --merged "$MERGE_REF" --format='%(refname:short)' 2>/dev/null \
-         | grep -qxF -- "$TASK_BRANCH"; then
+  if [ -n "$TASK_REF" ] && ref_exists "$TASK_REF"; then
+    if git merge-base --is-ancestor "$TASK_REF" "$MERGE_REF" 2>/dev/null; then
       branch_merged="yes"
     else
-      branch_merged="unknown"   # not an ancestor — may be squash/rebase-merged
+      branch_merged="unknown"
     fi
   fi
 
   local commits=0
   if [ -n "$TASK_NAME" ]; then
-    # MAIN_REFS is intentionally unquoted: it is a list of existing refs to search.
-    commits="$(git log $MAIN_REFS --oneline --grep="$TASK_NAME" 2>/dev/null | grep -c '' || true)"
+    # MAIN_REFS is intentionally unquoted: a list of existing refs to search.
+    # -F: match the task name literally, not as a regex.
+    commits="$(git log $MAIN_REFS --oneline -F --grep="$TASK_NAME" 2>/dev/null | grep -c '' || true)"
   fi
 
   local verdict confidence
-  if   [ "$pr_state" = "MERGED" ];                            then verdict="COMPLETED";   confidence="confirmed"
-  elif [ "$branch_merged" = "yes" ];                          then verdict="COMPLETED";   confidence="confirmed"
-  elif [ "$pr_state" = "OPEN" ];                              then verdict="IN_PROGRESS"; confidence="confirmed"
-  elif [ "$BRANCH_EXISTS" = "no" ] && [ "$commits" -gt 0 ];   then verdict="COMPLETED";   confidence="likely"
-  elif [ "$BRANCH_EXISTS" = "yes" ];                          then verdict="IN_PROGRESS"; confidence="likely"
-  elif [ "$commits" -gt 0 ];                                  then verdict="COMPLETED";   confidence="likely"
-  else                                                             verdict="NOT_STARTED"; confidence="none"
+  if   [ "$pr_state" = "MERGED" ];     then verdict="COMPLETED";   confidence="confirmed"
+  elif [ "$branch_merged" = "yes" ];   then verdict="COMPLETED";   confidence="confirmed"
+  elif [ "$pr_state" = "OPEN" ];       then verdict="IN_PROGRESS"; confidence="confirmed"
+  elif [ "$pr_state" = "CLOSED" ];     then verdict="IN_PROGRESS"; confidence="confirmed"
+  elif [ "$BRANCH_EXISTS" = "yes" ];   then verdict="IN_PROGRESS"; confidence="likely"
+  elif [ "$commits" -gt 0 ];           then verdict="COMPLETED";   confidence="likely"
+  else                                      verdict="NOT_STARTED"; confidence="none"
   fi
 
   print_resolution

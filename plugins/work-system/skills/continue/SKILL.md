@@ -16,9 +16,11 @@ user_invocable: true
 1. **Verify we're in a worktree, identify the task** — via the shared helper:
    - Run: `git worktree list` (confirm this is a linked worktree, not the main repo).
    - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/task-status.sh" resolve` and read its
-     `key=value` output: `on_main`, `task_name`, `task_branch`, `main_branch`.
+     `key=value` output: `on_main`, `detached`, `task_name`, `task_branch`, `main_branch`.
    - If `on_main=yes` (the current branch **is** the main branch), suggest `/kickoff` instead
      and stop.
+   - If `detached=yes` (detached HEAD — no current branch), report it and stop: there's no task
+     branch to resume; check out the `task/<name>` branch first.
    - Otherwise `<task-branch>` = `task_branch` (the current branch — may be `task/<name>` from
      `/kickoff` or an original name kept by `/adopt`) and `<task-name>` = `task_name` (the
      helper already stripped the `task/`/`feature/`/`fix/`/… prefix). Use these below.

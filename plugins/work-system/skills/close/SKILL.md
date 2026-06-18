@@ -27,6 +27,11 @@ Rules:
      (`$ARGUMENTS` is the optional task name; empty when run from inside the worktree).
    - **If `on_main=yes` and `task_name` is empty**: run `/list`, ask which task to close, then
      re-run `assess "<chosen-name>"`.
+   - **If `branch_ambiguous=yes`**: the name matched several branches and `task_branch` is only
+     the first. List the candidates (`git branch --all --list "*<task-name>*"`) and ask which to
+     close — never run the destructive steps (7–9) on a fuzzy guess.
+   - **If `detached=yes`** (detached HEAD, no name given): there's no task branch to close — ask
+     for the task name explicitly and re-run.
    - Read the fields: `<task-branch>` = `task_branch` (the resolved real ref — the current branch
      in a worktree, or `task/<name>` / an adopted original name when resolved by name),
      `<task-name>` = `task_name`, `<main-branch>` = `main_branch`, plus `verdict`, `confidence`,
@@ -53,8 +58,13 @@ Rules:
    - Find worktree for this task (match by branch name `task/<task-name>`)
    - Worktree is typically at `.claude/worktrees/<task-name>` (but verify from `git worktree list` output)
 
-5. **Sync local main with remote** (fast-forward check):
-   - The task's PR was merged on GitHub (step 2) — `origin/<main-branch>` is ahead of local `<main-branch>` until it's pulled. Syncing now avoids a confusing "not fully merged" error from `git branch -d` in step 8 and leaves the workspace ready for the next task.
+5. **Sync local main with remote** (fast-forward check) — only when an `origin` remote exists:
+   - **If there is no `origin` remote** (`git remote get-url origin` fails — a purely local repo,
+     where step 2 may have confirmed a local-only ancestor merge): skip this step, there is
+     nothing to fetch.
+   - When the merge landed via a GitHub PR, `origin/<main-branch>` is ahead of local
+     `<main-branch>` until pulled. Syncing now avoids a confusing "not fully merged" error from
+     `git branch -d` in step 8 and leaves the workspace ready for the next task.
    - Operate against the main repo path identified in step 4 (not the task worktree):
      - Fetch: `git -C <main-repo-path> fetch origin <main-branch> --quiet`
      - Behind count: `git -C <main-repo-path> rev-list --count <main-branch>..origin/<main-branch>`

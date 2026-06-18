@@ -23,9 +23,14 @@ user_invocable: true
    - The helper prints `key=value` lines — read: `verdict` (COMPLETED / IN_PROGRESS /
      NOT_STARTED), `confidence` (confirmed / likely / none), `task_name`, `task_branch`,
      `branch_exists`, `branch_merged` (yes / unknown / na), `pr_state` (MERGED / OPEN / CLOSED /
-     none / nogh), `pr_number`, `pr_url`, `commits_in_main`, `main_branch`, `on_main`.
+     none / nogh), `pr_number`, `pr_url`, `commits_in_main`, `main_branch`, `on_main`,
+     `detached`, `branch_ambiguous`.
    - **If `on_main=yes` and `task_name` is empty** (run from the main repo with no argument):
      list the files in `tasks/`, ask which task to check, then re-run `assess "<chosen-name>"`.
+   - **If `detached=yes`**: the worktree is on a detached HEAD — there is no task branch to check.
+     Report that and stop (check out the `task/<name>` branch, or pass a task name explicitly).
+   - **If `branch_ambiguous=yes`**: the name matched several branches and `task_branch` is just
+     the first — note the ambiguity and suggest re-running with the exact name.
 
    The helper owns the parts that are fiddly in prose: it resolves `task_branch` from the
    current branch (or `task/<name>` + fallbacks by name, read via `--format` so no stray
@@ -57,13 +62,15 @@ user_invocable: true
    🔄 Task appears IN PROGRESS
 
    Evidence:
-   • Branch <task_branch> exists
+   • Branch <task_branch> exists                          [only when branch_exists=yes]
    • PR #<pr_number> is open                              [when pr_state=OPEN]
+   • PR #<pr_number> was closed without merging           [when pr_state=CLOSED]
    • Merge unconfirmed (may be squash/rebase-merged)      [when branch_merged=unknown]
 
-   Recommendation: Continue work, or check the PR
+   Recommendation: Continue work, or check/reopen the PR
    ```
-   Never say "not merged" when `branch_merged=unknown` — say "merge unconfirmed".
+   Never say "not merged" when `branch_merged=unknown` — say "merge unconfirmed". Only claim the
+   branch exists when `branch_exists=yes` (a remote-only or already-deleted branch may not).
 
    **`verdict=NOT_STARTED`:**
    ```
