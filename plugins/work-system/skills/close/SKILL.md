@@ -22,35 +22,30 @@ Rules:
 
 ## Instructions
 
-1. **Identify the task and its branch**:
-   - Detect `<main-branch>`: `git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||'` (fallback `main`/`master`).
-   - **From the worktree** — `git branch --show-current` is **not** `<main-branch>`: that branch
-     **is** the task branch. Set `<task-branch>` to it (it may be `task/<name>` from `/kickoff`,
-     or an original name kept by `/adopt`) and derive `<task-name>` by stripping a leading
-     `task/`/`feature/`/`fix/`/`bugfix/`/`hotfix/`/`chore/`/`refactor/` prefix.
-   - **From the main repo** — on `<main-branch>`: run `/list` and ask which task to close, then
-     resolve `<task-branch>` to the real ref, in order: `task/<task-name>` if it exists
-     (`git rev-parse --verify --quiet task/<task-name>`); else the first match of
-     `git branch --all | grep -i "<task-name>"`; else the branch recorded in
-     `tasks/<task-name>.md` (adopt notes it when the rename was declined).
+1. **Identify the task, its branch, and its merge state** — via the shared helper:
+   - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/task-status.sh" assess "$ARGUMENTS"`
+     (`$ARGUMENTS` is the optional task name; empty when run from inside the worktree).
+   - **If `on_main=yes` and `task_name` is empty**: run `/list`, ask which task to close, then
+     re-run `assess "<chosen-name>"`.
+   - Read the fields: `<task-branch>` = `task_branch` (the resolved real ref — the current branch
+     in a worktree, or `task/<name>` / an adopted original name when resolved by name),
+     `<task-name>` = `task_name`, `<main-branch>` = `main_branch`, plus `verdict`, `confidence`,
+     `pr_state`, `pr_number`, `branch_merged`.
    - **Wherever the steps below write `task/<task-name>`, use the resolved `<task-branch>`** — so
-     an adopted branch that kept its original name is closed correctly, not skipped while the
-     real branch is orphaned.
+     an adopted branch that kept its original name is closed correctly, not orphaned.
 
-2. **Verify task is merged** — this is the safety gate; never skip it silently:
-   - **If `gh` is available**: `gh pr list --state merged --head "<task-branch>" --limit 1 --json number,title,mergedAt,headRefName`
-     - **Merged PR found**: show details and continue.
-     - **No merged PR**: warn and ask for confirmation before proceeding.
-   - **If `gh` is NOT available**: fall back to a local merge check —
-     `git branch --merged <main-branch> --list "<task-branch>"` (after step 5's fetch, prefer
-     `origin/<main-branch>`). If it lists the branch → treat as merged and continue. Otherwise
-     **warn "merge unverified (`gh` unavailable, and not an ancestor of main — may be
-     squash/rebase-merged)" and ask for confirmation** before any cleanup. Do not let the
-     worktree removal in step 7 run on an unverified merge without this confirmation.
+2. **Verify the task is merged** — the safety gate; never skip it silently:
+   - **Merge confirmed** (`verdict=COMPLETED` with `confidence=confirmed` — i.e. a merged PR, or
+     the branch is an ancestor of the helper's `<merge-ref>`): show the evidence
+     (`PR #<pr_number>`, or "branch merged into `<main-branch>`") and continue.
+   - **Not confirmed** (open/no PR, `branch_merged=unknown`/`na`, or `gh` unavailable so
+     `pr_state=nogh`): **warn** what is and isn't known — e.g. "merge unconfirmed: no merged PR
+     found / branch is not an ancestor of main (may be squash/rebase-merged, or `gh`
+     unavailable)" — and **ask for confirmation before any cleanup**. Never let the worktree
+     removal (step 7) or branch deletion (step 8) proceed on an unconfirmed merge without it.
 
-3. **Detect main branch**:
-   - Run: `git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||'`
-   - Fall back to checking `git branch --list main master`
+3. **Main branch**: `<main-branch>` was already resolved by the helper in step 1 — reuse it; do
+   not re-detect.
 
 4. **Get worktree info**:
    - Run: `git worktree list`
@@ -86,10 +81,10 @@ Rules:
      - If yes: `git -C <main-repo-path> worktree remove <worktree-path> --force`
 
 8. **Delete local branch**:
-   - If a merged PR was confirmed in step 2: use `git branch -D task/<task-name>` directly
+   - If merge was confirmed in step 2: use `git branch -D task/<task-name>` directly
      (the `-d` safety check produces false positives with GitHub's rebase-merge strategy,
-     where commits are rewritten with new SHAs — the real safety gate is the merged-PR check)
-   - If NO merged PR was found (manual close): try `git branch -d task/<task-name>` first
+     where commits are rewritten with new SHAs — the real safety gate is step 2's merge check)
+   - If merge was not confirmed (manual close): try `git branch -d task/<task-name>` first
      - If fails (not fully merged): ask "Force delete branch?"
      - If yes: `git branch -D task/<task-name>`
 
@@ -98,9 +93,9 @@ Rules:
    - **Returns nothing** → the remote branch is already gone (e.g. the repo auto-deletes head
      branches on merge); skip this step — nothing to delete, and `--delete` on a missing ref
      would error.
-   - **Exists AND a merged PR was confirmed in step 2** → delete directly, no prompt:
+   - **Exists AND merge was confirmed in step 2** → delete directly, no prompt:
      `git push origin --delete task/<task-name>` (the merge already integrated the work).
-   - **Exists, no merged PR** (manual close) → ask "Delete remote branch too?" first; only
+   - **Exists, merge not confirmed** (manual close) → ask "Delete remote branch too?" first; only
      push the delete on confirmation.
 
 10. **Remove task file** (use the main-repo path from step 4 — do not `cd`):
