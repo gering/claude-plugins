@@ -68,7 +68,13 @@ validity, version sync, SKILL.md frontmatter + description word budget, internal
 `${CLAUDE_PLUGIN_ROOT}` references, shell syntax). It runs in CI on every PR and
 push to main, and can be run locally before pushing. Keep it green.
 
+<!-- BEGIN knowledge-system -->
 ## Project Knowledge System
-- **Rules** (`.claude/rules/`): Always active — coding style, patterns, dos/don'ts
-- **Knowledge** (`.claude/knowledge/`): On demand — query with `/query`
-- **Curate**: Use `/curate` to store new learnings after implementing features or fixing bugs
+
+The project's knowledge index is auto-loaded below. Query detailed
+entries with `/query`, store new insights with `/curate`, run a QA pass
+with `/reindex`. See `.claude/rules/knowledge-system-usage.md` for when
+to use each and the full command list.
+
+@.claude/knowledge/_index.md
+<!-- END knowledge-system -->
