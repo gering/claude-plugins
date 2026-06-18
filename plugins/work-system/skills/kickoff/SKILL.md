@@ -61,7 +61,9 @@ The same rule applies to any project-specific setup the user's `CLAUDE.md` may a
 
 8. **Copy files to worktree** (run from main-repo CWD — relative paths target the main repo):
    - Copy task file: `cp tasks/<task-name>.md .claude/worktrees/<task-name>/TASK.md`
-   - Copy Claude config if it exists: `cp -r .claude/settings.json .claude/worktrees/<task-name>/.claude/ 2>/dev/null`
+   - Copy Claude config if present (a fresh worktree has no `.claude/` dir yet, so create it
+     first — otherwise the copy silently no-ops):
+     `[ -f .claude/settings.json ] && mkdir -p .claude/worktrees/<task-name>/.claude && cp .claude/settings.json .claude/worktrees/<task-name>/.claude/`
    - This gives Claude in the worktree access to the task and permissions
    - Do **not** `cd` into the worktree to perform copies — paths from the main repo work fine.
 

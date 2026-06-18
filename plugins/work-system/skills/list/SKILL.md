@@ -23,8 +23,11 @@ user_invocable: true
 
 2. **List pending tasks**:
    - Run: `ls -1 tasks/*.md 2>/dev/null`
-   - For each task file, read first line (title)
-   - Check if worktree/branch exists for it
+   - For each task file: read its first line (title) and resolve its real branch via the shared
+     helper — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/task-status.sh" resolve "<task-name>"` — which
+     reports `task_branch` (this also matches `/adopt` branches that kept a non-`task/` name) and
+     `branch_exists`. Use `task_branch` for the worktree/branch lookup, not a hardcoded
+     `task/<task-name>`.
    - Render as a markdown table under a `## 📋 Tasks` heading:
 
    | # | Task | Title | Status |
@@ -34,8 +37,9 @@ user_invocable: true
    | 3 | `refactor-notifications` | Refactor notification scheduling | 🔍 In Review (PR #45) |
 
 3. **Check for open PRs** (if `gh` is available):
-   - Run: `gh pr list --state open --json number,title,headRefName --limit 10`
-   - Match PRs to tasks by branch name (`task/<task-name>`)
+   - Run once: `gh pr list --state open --json number,title,headRefName --limit 30`
+   - Match each PR to a task by comparing its `headRefName` to that task's resolved `task_branch`
+     (from step 2) — not a hardcoded `task/<task-name>`, so adopted/renamed branches match too.
    - Show PR status for each task
 
 4. **Check for orphaned worktrees**:

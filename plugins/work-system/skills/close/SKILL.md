@@ -28,8 +28,10 @@ Rules:
    - **If `on_main=yes` and `task_name` is empty**: run `/list`, ask which task to close, then
      re-run `assess "<chosen-name>"`.
    - **If `branch_ambiguous=yes`**: the name matched several branches and `task_branch` is only
-     the first. List the candidates (`git branch --all --list "*<task-name>*"`) and ask which to
-     close — never run the destructive steps (7–9) on a fuzzy guess.
+     the first. List the candidates **case-insensitively, matching the helper's own fuzzy rule**
+     — `git branch --all --format='%(refname:short)' | grep -i -F -- "<task-name>"` (a plain
+     `--list "*<task-name>*"` glob is case-sensitive and would hide the colliding branches) — and
+     ask which to close. Never run the destructive steps (7–9) on a fuzzy guess.
    - **If `detached=yes`** (detached HEAD, no name given): there's no task branch to close — ask
      for the task name explicitly and re-run.
    - Read the fields: `<task-branch>` = `task_branch` (the resolved real ref — the current branch
@@ -90,7 +92,9 @@ Rules:
      - Ask: "Force remove? (uncommitted changes will be lost)"
      - If yes: `git -C <main-repo-path> worktree remove <worktree-path> --force`
 
-8. **Delete local branch**:
+8. **Delete local branch** (only if it exists locally):
+   - If `branch_exists=no` (from step 1 — e.g. the task was resolved remote-only, or the local
+     branch was already deleted): skip this step, there is nothing local to delete.
    - If merge was confirmed in step 2: use `git branch -D task/<task-name>` directly
      (the `-d` safety check produces false positives with GitHub's rebase-merge strategy,
      where commits are rewritten with new SHAs — the real safety gate is step 2's merge check)
@@ -98,7 +102,9 @@ Rules:
      - If fails (not fully merged): ask "Force delete branch?"
      - If yes: `git branch -D task/<task-name>`
 
-9. **Delete remote branch**:
+9. **Delete remote branch** (only if there is an `origin` remote):
+   - **If `git remote get-url origin` fails** (purely local repo): skip this step — there is no
+     remote branch to delete (mirrors step 5's guard).
    - Run: `git ls-remote --heads origin task/<task-name>`
    - **Returns nothing** → the remote branch is already gone (e.g. the repo auto-deletes head
      branches on merge); skip this step — nothing to delete, and `--delete` on a missing ref

@@ -50,7 +50,7 @@ user_invocable: true
    Evidence:
    • PR #<pr_number> — <pr_state> (<pr_url>)              [when pr_state=MERGED]
    • Branch <task_branch> merged into <main_branch>       [when branch_merged=yes]
-   • <commits_in_main> commit(s) for "<task_name>" in <main_branch>   [corroborating]
+   • <commits_in_main> commit(s) for "<task_name>" in <main_branch>   [only when commits_in_main>0]
 
    Recommendation: Delete task file with /close
    ```

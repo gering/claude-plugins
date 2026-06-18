@@ -104,7 +104,9 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
 
 10. **Copy files to worktree** (run from main-repo CWD — no `cd`):
     - Copy task file: `cp tasks/<task-name>.md .claude/worktrees/<task-name>/TASK.md`
-    - Copy Claude config if it exists: `cp -r .claude/settings.json .claude/worktrees/<task-name>/.claude/ 2>/dev/null`
+    - Copy Claude config if present (a fresh worktree has no `.claude/` dir yet, so create it
+      first — otherwise the copy silently no-ops):
+      `[ -f .claude/settings.json ] && mkdir -p .claude/worktrees/<task-name>/.claude && cp .claude/settings.json .claude/worktrees/<task-name>/.claude/`
 
 11. **Verify CWD is still in the main repo**:
     - Run: `pwd` and compare to the main-repo path from step 1's `git worktree list`.
