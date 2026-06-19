@@ -1,39 +1,46 @@
 ---
 title: "Status-Line Integration"
 createdAt: 2026-06-18
-updatedAt: 2026-06-18
+updatedAt: 2026-06-19
 createdFrom: "PR #3"
 updatedFrom: "PR #3"
-pluginVersion: 1.7.0
+pluginVersion: 1.8.0
 prime: false
 ---
 
 # Status-Line Integration
 
 How the `/statusline` skill surfaces knowledge-system info (`[cks rules|knowledge]`)
-in the Claude Code status line, and the constraint that shapes its design.
+in the Claude Code status line.
 
-## The constraint
+## The design
 
-A Claude Code plugin **cannot own** the `statusLine.command` setting. That entry
-point can be claimed only once, and it is typically already held by the user's
-own `~/.claude/statusline.sh`. So the skill cannot just install its own command —
-it has to coexist with whatever is already there.
+The status line is owned by the user's own `~/.claude/statusline.sh`. The
+`/statusline` skill does **not** replace it — it requires an existing custom
+status line and coexists with it:
 
-## The pattern
+- **Marker-block injection**: the install step injects a delimited block into
+  the user's existing `~/.claude/statusline.sh` rather than overwriting it.
+  Re-running is idempotent (replace in place between markers); uninstall removes
+  the block. The same install step copies the renderer to
+  `~/.claude/cks-statusline.sh` (version-gated via a `CKS_STATUSLINE_VERSION`
+  line) and is atomic/restorable (session backup + post-write verify).
+- **Standalone renderer**: the installed renderer at `~/.claude/cks-statusline.sh`
+  is independently usable — one arg (workspace dir), an ANSI-coloured block on
+  stdout, no trailing newline. A third-party status-line tool (ccstatusline,
+  CCometixLine, ccusage) can call it directly from its custom-command slot:
+  `bash "$HOME/.claude/cks-statusline.sh" "$DIR"`. (Its source lives in the
+  plugin at `scripts/statusline-cks.sh`.)
+- **Per-project opt-out via sentinel**: a sentinel file disables the segment in
+  a given project, so opt-out is local and needs no global config mutation.
 
-Two-layer design that threads between full-ownership and manual-wrapper:
+## Where the logic lives
 
-- **Marker-block injection**: the skill injects a delimited block into the
-  user's existing `statusline.sh` rather than replacing it. Re-running is
-  idempotent (replace in place between markers); uninstall removes the block.
-- **Standalone renderer** (`statusline-cks.sh`): a separate script that renders
-  just the `[cks …]` segment. Other tools can call it directly, without the
-  marker-block wrapper — the rendering logic is decoupled from the injection
-  mechanism.
-- **Per-project opt-out via sentinel**: a `.cks-statusline-off` file in a
-  project disables the segment there. A filesystem sentinel needs no global
-  config mutation — opt-out is local and self-cleaning.
+All install/enable/disable/uninstall/status logic lives in one deterministic,
+locally-testable script — `plugins/knowledge-system/scripts/statusline-install.sh`
+— and the skill is a thin wrapper that parses the argument, runs the script, and
+relays its output. The script is the source of truth; don't look in the SKILL.md
+prose for the behavior.
 
 ## Why this matters beyond statusline
 

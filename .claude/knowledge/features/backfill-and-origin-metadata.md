@@ -1,10 +1,10 @@
 ---
 title: "Backfill from History & Origin Metadata"
 createdAt: 2026-06-18
-updatedAt: 2026-06-18
+updatedAt: 2026-06-19
 createdFrom: "PR #2"
 updatedFrom: "PR #2"
-pluginVersion: 1.7.0
+pluginVersion: 1.8.0
 prime: false
 ---
 
@@ -36,18 +36,21 @@ Knowledge files record their provenance so a later reader (or `/reindex`) knows
 where the learning originated. The value is one of `"PR #<N>"`,
 `"branch: <name>"`, or `"session: <date>"`.
 
-The **reconstruction cascade** (canonically defined in `/reindex`, step B —
-do not reimplement it elsewhere) resolves a commit SHA to a PR, first hit wins:
+The **reconstruction cascade** resolves a commit SHA to a PR. Its full,
+authoritative definition lives in `/reindex` (step B) — that is the single
+source; do not re-enumerate or reimplement it here. The shape:
 
-1. **`gh pr list --search <sha> --state merged`** — the primary path. GitHub
-   knows which PR a commit belongs to regardless of merge mode (merge, squash,
-   rebase-FF), so this one query covers virtually all online cases.
-2. Squash-commit subject suffix `(#<N>)` — offline fallback.
-3. Further offline fallbacks.
+- **Primary (online):** `gh pr list --search <sha> --state merged`. GitHub knows
+  which PR a commit belongs to regardless of merge mode (merge, squash,
+  rebase-FF), so this covers virtually all online cases.
+- **Offline fallbacks:** parse the commit subject — both the squash suffix
+  `(#<N>)` and the classic merge-commit `Merge pull request #<N>` form — and
+  the branch name, in the order `/reindex` defines.
+- **Don't guess:** if nothing resolves unambiguously, the field is left **empty**
+  rather than filled with a guess.
 
-Key design choice: if no PR resolves unambiguously, the field is left **empty
-rather than guessed**. A `"branch: <name>"` value is upgraded to `"PR #<N>"`
-later by `/reindex` once the branch merges — re-running the cascade on the same
-SHAs, never on the branch name (the branch may be deleted post-merge).
+A `"branch: <name>"` value is upgraded to `"PR #<N>"` later by `/reindex` once
+the branch merges — re-running the cascade on the same SHAs, never on the branch
+name (the branch may be deleted post-merge).
 
 Related: [[skill-design-conventions]] (frontmatter as managed surface).
