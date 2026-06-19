@@ -21,9 +21,13 @@ Plugin-managed (regenerated on re-run, safe to delete):
 - `.claude/rules/knowledge-system-usage.md` — index-load fallback + command pointers
 - A wrapped block inside `CLAUDE.md` (markers: `<!-- BEGIN knowledge-system -->` / `<!-- END knowledge-system -->`) that `@`-imports the knowledge index
 
-User content (created empty once, never overwritten afterwards):
-- `.claude/knowledge/_index.md`
-- `.claude/knowledge/architecture/`, `features/`, `deployment/` (starter domains)
+User content (created once, never overwritten afterwards):
+- `.claude/knowledge/_index.md` — lists the starter domains (Architecture /
+  Features / Deployment) as headings
+
+The domain directories (`architecture/`, `features/`, `deployment/`) are **not**
+scaffolded empty — Git would not track them anyway. Each materializes the first
+time `/curate` or `/migrate` writes a knowledge file into it.
 
 ## Instructions
 
@@ -33,15 +37,15 @@ Look for `.claude/knowledge/_index.md`. If it exists, inform the user that the k
 - **Re-run plugin-managed parts only** (rule file + CLAUDE.md block) — the default
 - **Re-initialize everything** including the knowledge directory structure (only if they really want a clean slate — existing knowledge files are NOT deleted, only the starter `_index.md` is reset)
 
-### 2. Create the directory structure
+### 2. Create the knowledge index
 
-```
-.claude/knowledge/
-  _index.md
-  architecture/
-  features/
-  deployment/
-```
+Create `.claude/knowledge/` and write `_index.md` — the only file scaffolded
+here. Do **not** create empty `architecture/`, `features/`, `deployment/`
+directories: Git does not track empty directories, so they would vanish on the
+first commit and a fresh clone would never see them. The three starter domains
+live as headings inside `_index.md`; each directory materializes the first time
+`/curate` or `/migrate` writes a file into it (the Write tool creates the parent
+directory on demand).
 
 `.claude/knowledge/_index.md` starter template:
 ```markdown
@@ -116,16 +120,24 @@ values; skip trivia, secrets, and the obvious.
 
 ### 4. Update CLAUDE.md with the auto-prime block
 
-Read the existing `CLAUDE.md` (create empty if absent). Locate the block delimited by:
+Read the existing `CLAUDE.md` (create empty if absent). Resolve where the
+managed block goes, in this priority order:
 
-```
-<!-- BEGIN knowledge-system -->
-...
-<!-- END knowledge-system -->
-```
-
-- **If markers exist**: replace everything between them with the fresh block below.
-- **If markers do not exist**: append the block to the end of `CLAUDE.md` (with a leading blank line).
+1. **Markers present** — locate the block delimited by
+   `<!-- BEGIN knowledge-system -->` / `<!-- END knowledge-system -->` and
+   replace everything between them (markers included) with the fresh block
+   below. Stop here — do not also scan for stray unmarked sections.
+2. **No markers, but an unmarked `## Project Knowledge System` section exists** —
+   a hand-written section predating this plugin would otherwise leave a duplicate
+   heading. Absorb it: replace the whole section — from its
+   `## Project Knowledge System` heading line through everything up to (but not
+   including) the next heading at the same or higher level (a line starting with
+   `## ` or `# `), or end of file if none follows — with the marker-wrapped block
+   below. Match the heading on its exact text `## Project Knowledge System` (the
+   heading this block emits); deeper `###` headings inside the section are part
+   of it, not boundaries.
+3. **Neither** — append the block to the end of `CLAUDE.md` (with a leading
+   blank line).
 
 The block (exact content):
 
@@ -142,7 +154,12 @@ to use each and the full command list.
 <!-- END knowledge-system -->
 ```
 
-Idempotency rule: never duplicate the block. Always replace in place when the markers are found.
+Idempotency rules:
+- Never duplicate the block — always replace in place when markers are found.
+- After an absorption (case 2) the block is now marker-wrapped, so a re-run
+  takes case 1 and replaces in place: no second absorption, no duplicate heading.
+- When you absorbed an unmarked section, say so in the report — e.g.
+  `CLAUDE.md (absorbed existing "## Project Knowledge System" section)`.
 
 ### 5. Optional: ask for project details
 
@@ -159,7 +176,6 @@ List created/updated files and a compact next-steps block:
 ```
 Created/updated:
 - .claude/knowledge/_index.md                         (new)
-- .claude/knowledge/{architecture,features,deployment}/  (new)
 - .claude/rules/knowledge-system-usage.md             (updated — plugin-managed)
 - CLAUDE.md                                           (block updated)
 
