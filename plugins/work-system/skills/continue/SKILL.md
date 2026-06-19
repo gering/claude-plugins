@@ -28,9 +28,10 @@ user_invocable: true
 2. **Check for TASK.md**:
    - Read `TASK.md` in the current directory
    - If exists, read and display the task requirements
-   - If missing, check if task file exists in main repo:
-     - Run: `git worktree list` to get main repo path (first entry)
-     - Try to read from main repo's `tasks/<task-name>.md`
+   - If missing, check if the task file exists in the main repo:
+     - Resolve the main repo path robustly (handles paths with spaces — don't hand-parse
+       `git worktree list`): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path`
+     - Try to read from `<main-repo>/tasks/<task-name>.md`
 
 3. **Install dependencies** (detect, then install):
    Auto-detect the project type when dependencies appear to be missing:

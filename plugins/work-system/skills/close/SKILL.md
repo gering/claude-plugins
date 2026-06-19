@@ -27,38 +27,45 @@ Rules:
      (`$ARGUMENTS` is the optional task name; empty when run from inside the worktree).
    - **If `on_main=yes` and `task_name` is empty**: run `/list`, ask which task to close, then
      re-run `assess "<chosen-name>"`.
-   - **If `branch_ambiguous=yes`**: the name matched several branches and `task_branch` is only
-     the first. List the candidates **case-insensitively, matching the helper's own fuzzy rule**
-     — `git branch --all --format='%(refname:short)' | grep -i -F -- "<task-name>"` (a plain
-     `--list "*<task-name>*"` glob is case-sensitive and would hide the colliding branches) — and
-     ask which to close. Never run the destructive steps (7–9) on a fuzzy guess.
    - **If `detached=yes`** (detached HEAD, no name given): there's no task branch to close — ask
      for the task name explicitly and re-run.
+   - **If `branch_exists=no`** (run by name and no real branch matched — resolution is exact-only,
+     so `task_branch` is just the `task/<name>` convention): there is nothing resolved to close.
+     Treat per step 2's verdict (likely NOT_STARTED). If the task lives on an `/adopt`'d branch
+     that kept a non-`task/` name (e.g. `feature/x`), it can't be resolved by name from the main
+     repo (the helper strips known prefixes, then matches only `task/<name>`/`<name>`) — run
+     `/close` from **inside its worktree**, where resolution uses the current branch.
    - Read the fields: `<task-branch>` = `task_branch` (the resolved real ref — the current branch
-     in a worktree, or `task/<name>` / an adopted original name when resolved by name),
-     `<task-name>` = `task_name`, `<main-branch>` = `main_branch`, plus `verdict`, `confidence`,
-     `pr_state`, `pr_number`, `branch_merged`.
+     in a worktree, or an exact `task/<name>` match when resolved by name), `<task-name>` =
+     `task_name`, `<main-branch>` = `main_branch`, plus `verdict`, `confidence`, `pr_state`,
+     `pr_number`, `branch_merged`.
    - **Wherever the steps below write `task/<task-name>`, use the resolved `<task-branch>`** — so
      an adopted branch that kept its original name is closed correctly, not orphaned.
 
-2. **Verify the task is merged** — the safety gate; never skip it silently:
-   - **Merge confirmed** (`verdict=COMPLETED` with `confidence=confirmed` — i.e. a merged PR, or
-     the branch is an ancestor of the helper's `<merge-ref>`): show the evidence
-     (`PR #<pr_number>`, or "branch merged into `<main-branch>`") and continue.
-   - **Not confirmed** (open/no PR, `branch_merged=unknown`/`na`, or `gh` unavailable so
-     `pr_state=nogh`): **warn** what is and isn't known — e.g. "merge unconfirmed: no merged PR
-     found / branch is not an ancestor of main (may be squash/rebase-merged, or `gh`
-     unavailable)" — and **ask for confirmation before any cleanup**. Never let the worktree
-     removal (step 7) or branch deletion (step 8) proceed on an unconfirmed merge without it.
+2. **Verify the task is merged** — the safety gate; never skip it silently. Only a **merged PR**
+   confirms a merge: topology can't tell a real merge from a never-committed branch sitting at
+   main, and a squash/rebase merge rewrites SHAs — so the helper never reports `branch_merged=yes`,
+   and `confidence=confirmed` means exactly `pr_state=MERGED`.
+   - **Merge confirmed** (`verdict=COMPLETED` with `confidence=confirmed`, i.e. `pr_state=MERGED`):
+     show the evidence (`PR #<pr_number>`) and continue.
+   - **Not confirmed** (anything else — open/closed/no PR, `branch_merged=unknown`/`no`/`na`, `gh`
+     unavailable so `pr_state=nogh`, OR any `confidence=likely` verdict including a freshly
+     kicked-off branch still sitting at main): **warn** what is and isn't known — e.g. "merge
+     unconfirmed: no merged PR found (may be squash/rebase-merged, or `gh` unavailable)" — and
+     **ask for confirmation before any cleanup**. Never let the worktree removal (step 7) or
+     branch deletion (step 8) proceed on an unconfirmed merge without it.
 
 3. **Main branch**: `<main-branch>` was already resolved by the helper in step 1 — reuse it; do
    not re-detect.
 
 4. **Get worktree info**:
+   - Resolve the main repo path robustly (handles paths with spaces — don't hand-parse
+     `git worktree list`): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path` →
+     `<main-repo-path>`
    - Run: `git worktree list`
-   - Identify main repo (first entry)
-   - Find worktree for this task (match by branch name `task/<task-name>`)
-   - Worktree is typically at `.claude/worktrees/<task-name>` (but verify from `git worktree list` output)
+   - Find the worktree for this task (match by its branch `<task-branch>`)
+   - Worktree is typically at `<main-repo-path>/.claude/worktrees/<task-name>` (but verify from
+     `git worktree list` output)
 
 5. **Sync local main with remote** (fast-forward check) — only when an `origin` remote exists:
    - **If there is no `origin` remote** (`git remote get-url origin` fails — a purely local repo,
@@ -92,25 +99,27 @@ Rules:
      - Ask: "Force remove? (uncommitted changes will be lost)"
      - If yes: `git -C <main-repo-path> worktree remove <worktree-path> --force`
 
-8. **Delete local branch** (only if it exists locally):
-   - If `branch_exists=no` (from step 1 — e.g. the task was resolved remote-only, or the local
-     branch was already deleted): skip this step, there is nothing local to delete.
-   - If merge was confirmed in step 2: use `git branch -D task/<task-name>` directly
+8. **Delete local branch** (only if it exists *locally*):
+   - If `branch_scope` is not `local` (from step 1 — the task was resolved remote-only, or no
+     branch exists yet): skip this step, there is no local branch to delete. (Gate on
+     `branch_scope`, **not** `branch_exists`: the latter is `yes` for a remote-only resolution
+     too, so `git branch -D` would fail with "branch not found".)
+   - If merge was confirmed in step 2: use `git branch -D <task-branch>` directly
      (the `-d` safety check produces false positives with GitHub's rebase-merge strategy,
      where commits are rewritten with new SHAs — the real safety gate is step 2's merge check)
-   - If merge was not confirmed (manual close): try `git branch -d task/<task-name>` first
+   - If merge was not confirmed (manual close): try `git branch -d <task-branch>` first
      - If fails (not fully merged): ask "Force delete branch?"
-     - If yes: `git branch -D task/<task-name>`
+     - If yes: `git branch -D <task-branch>`
 
 9. **Delete remote branch** (only if there is an `origin` remote):
    - **If `git remote get-url origin` fails** (purely local repo): skip this step — there is no
      remote branch to delete (mirrors step 5's guard).
-   - Run: `git ls-remote --heads origin task/<task-name>`
+   - Run: `git ls-remote --heads origin <task-branch>`
    - **Returns nothing** → the remote branch is already gone (e.g. the repo auto-deletes head
      branches on merge); skip this step — nothing to delete, and `--delete` on a missing ref
      would error.
    - **Exists AND merge was confirmed in step 2** → delete directly, no prompt:
-     `git push origin --delete task/<task-name>` (the merge already integrated the work).
+     `git push origin --delete <task-branch>` (the merge already integrated the work).
    - **Exists, merge not confirmed** (manual close) → ask "Delete remote branch too?" first; only
      push the delete on confirmation.
 
