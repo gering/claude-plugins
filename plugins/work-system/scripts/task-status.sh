@@ -3,19 +3,19 @@
 #
 # Encapsulates the git/gh logic that /status, /close and /continue otherwise
 # carry as drift-prone prose: main-branch detection, task-branch resolution
-# (the current branch when inside a worktree, or task/<name> with fallbacks
-# when given a name), offline-safe main-ref handling, and squash/rebase-aware
-# merge detection. Resolution reads branch names via `--format` so it never
-# trips on the `* `/leading-space prefixes of plain `git branch` output.
+# (the current branch when inside a worktree, or an exact task/<name> ref when
+# given a name), offline-safe main-ref handling, and squash/rebase-aware merge
+# detection. Resolution is exact-only — real refs are checked with
+# `git rev-parse --verify`, the current branch via `git branch --show-current`.
 #
 # Run from inside the repo or any linked worktree — branches/refs are shared.
 #
 # Subcommands:
 #   resolve [<task-name>]   Fast, no network. Emits: main_branch, on_main,
 #                           detached, task_name, task_branch, branch_scope,
-#                           branch_exists, branch_ambiguous.
-#   assess  [<task-name>]   resolve + pr_state, pr_number, pr_url, merge_ref,
-#                           branch_merged, commits_in_main, verdict, confidence
+#                           branch_exists.
+#   assess  [<task-name>]   resolve + pr_state, pr_number, pr_url, branch_merged,
+#                           commits_in_main, verdict, confidence
 #                           (PR fields via gh when available).
 #
 # Output: `key=value` lines on stdout (empty value = unknown/none). Callers read
@@ -38,17 +38,19 @@ detect_main_branch() {
   printf 'main\n'
 }
 
-# Resolve a task name to a branch. Sets RESOLVED_SCOPE (local|remote|none),
-# RESOLVED_BRANCH (clean short name, or task/<name> by convention when nothing
-# is found), RESOLVED_REF (full ref of the resolved branch, or empty), and
-# RESOLVED_AMBIGUOUS (yes when a fuzzy substring match hit more than one branch).
-RESOLVED_SCOPE=""; RESOLVED_BRANCH=""; RESOLVED_REF=""; RESOLVED_AMBIGUOUS="no"
+# Resolve a task name to a branch by EXACT match only. Sets RESOLVED_SCOPE
+# (local|remote|none), RESOLVED_BRANCH (clean short name, or task/<name> by
+# convention when nothing is found), and RESOLVED_REF (full ref, or empty).
+# No fuzzy substring matching: a substring guess could bind an unrelated branch
+# (or even main) and feed /close's destructive steps, so resolution is limited to
+# the four real refs below. An /adopt'd branch that kept a non-task/ name is found
+# via the current worktree branch (see compute_resolution), not by name lookup.
+RESOLVED_SCOPE=""; RESOLVED_BRANCH=""; RESOLVED_REF=""
 resolve_named_branch() {
-  local name="$1" matches first
-  RESOLVED_SCOPE="none"; RESOLVED_BRANCH=""; RESOLVED_REF=""; RESOLVED_AMBIGUOUS="no"
+  local name="$1"
+  RESOLVED_SCOPE="none"; RESOLVED_BRANCH=""; RESOLVED_REF=""
   [ -z "$name" ] && return 0
-  # All EXACT matches first — local then remote — before any fuzzy match, so an
-  # exact remote branch is never shadowed by an unrelated local substring hit.
+  # Exact matches — local then remote.
   if ref_exists "refs/heads/task/$name"; then
     RESOLVED_SCOPE="local"; RESOLVED_BRANCH="task/$name"; RESOLVED_REF="refs/heads/task/$name"; return 0
   fi
@@ -60,22 +62,6 @@ resolve_named_branch() {
   fi
   if ref_exists "refs/remotes/origin/$name"; then
     RESOLVED_SCOPE="remote"; RESOLVED_BRANCH="$name"; RESOLVED_REF="refs/remotes/origin/$name"; return 0
-  fi
-  # Then fuzzy substring — local, then remote (clean `--format` output, literal match).
-  matches="$(git branch --list --format='%(refname:short)' | grep -i -F -- "$name" || true)"
-  if [ -n "$matches" ]; then
-    first="$(printf '%s\n' "$matches" | head -n1)"
-    RESOLVED_SCOPE="local"; RESOLVED_BRANCH="$first"; RESOLVED_REF="refs/heads/$first"
-    [ "$(printf '%s\n' "$matches" | grep -c '')" -gt 1 ] && RESOLVED_AMBIGUOUS="yes"
-    return 0
-  fi
-  matches="$(git branch --remotes --format='%(refname:short)' | sed 's|^origin/||' \
-             | grep -v -x 'HEAD' | grep -i -F -- "$name" || true)"
-  if [ -n "$matches" ]; then
-    first="$(printf '%s\n' "$matches" | head -n1)"
-    RESOLVED_SCOPE="remote"; RESOLVED_BRANCH="$first"; RESOLVED_REF="refs/remotes/origin/$first"
-    [ "$(printf '%s\n' "$matches" | grep -c '')" -gt 1 ] && RESOLVED_AMBIGUOUS="yes"
-    return 0
   fi
   RESOLVED_BRANCH="task/$name"   # nothing exists; assume the convention for display
 }
@@ -97,20 +83,29 @@ compute_main_refs() {
 }
 
 # Sets MAIN_BRANCH, ON_MAIN, DETACHED, TASK_NAME, TASK_BRANCH, TASK_REF,
-# BRANCH_SCOPE, BRANCH_EXISTS (local or remote), BRANCH_AMBIGUOUS.
+# BRANCH_SCOPE, BRANCH_EXISTS (local or remote). BRANCH_EXISTS=yes means the
+# branch was resolved to a real ref (exact name match, or the checked-out worktree
+# branch); =no means nothing matched and task_branch is just the task/<name>
+# convention for display.
 MAIN_BRANCH=""; ON_MAIN=""; DETACHED="no"; TASK_NAME=""; TASK_BRANCH=""
-TASK_REF=""; BRANCH_SCOPE=""; BRANCH_EXISTS=""; BRANCH_AMBIGUOUS="no"
+TASK_REF=""; BRANCH_SCOPE=""; BRANCH_EXISTS=""
 compute_resolution() {
   local name="${1:-}" cur
   MAIN_BRANCH="$(detect_main_branch)"
   cur="$(git branch --show-current 2>/dev/null || true)"
-  DETACHED="no"; BRANCH_AMBIGUOUS="no"
+  DETACHED="no"
 
   if [ -n "$name" ]; then
     TASK_NAME="$(strip_prefix "$name")"
     resolve_named_branch "$TASK_NAME"
-    TASK_BRANCH="$RESOLVED_BRANCH"; BRANCH_SCOPE="$RESOLVED_SCOPE"; TASK_REF="$RESOLVED_REF"
-    BRANCH_AMBIGUOUS="$RESOLVED_AMBIGUOUS"; ON_MAIN="no"
+    if [ "$RESOLVED_SCOPE" != "none" ] && [ "$RESOLVED_BRANCH" = "$MAIN_BRANCH" ]; then
+      # The name resolved to the main branch itself — never a task. Surface like
+      # on_main so /status and /close route to "pick a real task", never letting
+      # the main branch feed /close's destructive worktree/branch deletion.
+      ON_MAIN="yes"; TASK_NAME=""; TASK_BRANCH=""; TASK_REF=""; BRANCH_SCOPE="none"
+    else
+      TASK_BRANCH="$RESOLVED_BRANCH"; BRANCH_SCOPE="$RESOLVED_SCOPE"; TASK_REF="$RESOLVED_REF"; ON_MAIN="no"
+    fi
   elif [ -z "$cur" ]; then
     # Detached HEAD (or an unborn branch) — no current branch to derive a task from.
     DETACHED="yes"; ON_MAIN="no"; TASK_NAME=""; TASK_BRANCH=""; TASK_REF=""; BRANCH_SCOPE="none"
@@ -132,7 +127,6 @@ print_resolution() {
   printf 'task_branch=%s\n'      "$TASK_BRANCH"
   printf 'branch_scope=%s\n'     "$BRANCH_SCOPE"
   printf 'branch_exists=%s\n'    "$BRANCH_EXISTS"
-  printf 'branch_ambiguous=%s\n' "$BRANCH_AMBIGUOUS"
 }
 
 do_assess() {
@@ -154,13 +148,22 @@ do_assess() {
     pr_state="nogh"
   fi
 
-  # Merge check works for a local OR remote task ref: is its tip an ancestor of
-  # the merge ref? (origin/<main> when it exists.) Not an ancestor → unknown,
-  # since a squash/rebase merge rewrites SHAs and is never an ancestor.
-  local branch_merged="na"
+  # Merge state — reported as EVIDENCE ONLY; topology never *confirms* a merge.
+  # A branch whose tip is an ancestor of main may be genuinely (ff / merge-commit)
+  # merged OR just a never-committed branch sitting at/behind main — indistinguishable
+  # without the branch point — and a squash/rebase merge rewrites SHAs so it is never
+  # an ancestor anyway. So only a MERGED PR confirms completion (see the verdict
+  # cascade); branch_merged just labels the topology so callers can word their report:
+  #   na      — no task ref to check
+  #   no      — tip == merge ref: no commits beyond main (fresh / in sync, or fully
+  #             fast-forwarded) — nothing distinct to confirm either way
+  #   unknown — anything else (behind-but-reachable, or a possible squash/rebase merge)
+  local branch_merged="na" task_sha merge_sha
   if [ -n "$TASK_REF" ] && ref_exists "$TASK_REF"; then
-    if git merge-base --is-ancestor "$TASK_REF" "$MERGE_REF" 2>/dev/null; then
-      branch_merged="yes"
+    task_sha="$(git rev-parse "$TASK_REF" 2>/dev/null || true)"
+    merge_sha="$(git rev-parse "$MERGE_REF" 2>/dev/null || true)"
+    if [ -n "$task_sha" ] && [ "$task_sha" = "$merge_sha" ]; then
+      branch_merged="no"
     else
       branch_merged="unknown"
     fi
@@ -180,9 +183,12 @@ do_assess() {
   case "$TASK_NAME" in *-*) name_specific="yes";; esac
   [ "${#TASK_NAME}" -ge 6 ] && name_specific="yes"
 
+  # Only a MERGED PR *confirms* completion. A branch that still exists (with no
+  # merged PR) is always IN_PROGRESS — topology can't prove a merge, so /close must
+  # warn+ask before destroying it. The commits-in-main fallback only fires once the
+  # branch is gone locally AND remotely (work plausibly merged then cleaned up).
   local verdict confidence
   if   [ "$pr_state" = "MERGED" ];                           then verdict="COMPLETED";   confidence="confirmed"
-  elif [ "$branch_merged" = "yes" ];                         then verdict="COMPLETED";   confidence="confirmed"
   elif [ "$pr_state" = "OPEN" ];                             then verdict="IN_PROGRESS"; confidence="confirmed"
   elif [ "$pr_state" = "CLOSED" ];                           then verdict="IN_PROGRESS"; confidence="confirmed"
   elif [ "$BRANCH_EXISTS" = "yes" ];                         then verdict="IN_PROGRESS"; confidence="likely"
@@ -194,7 +200,6 @@ do_assess() {
   printf 'pr_state=%s\n'        "$pr_state"
   printf 'pr_number=%s\n'       "$pr_number"
   printf 'pr_url=%s\n'          "$pr_url"
-  printf 'merge_ref=%s\n'       "$MERGE_REF"
   printf 'branch_merged=%s\n'   "$branch_merged"
   printf 'commits_in_main=%s\n' "$commits"
   printf 'verdict=%s\n'         "$verdict"

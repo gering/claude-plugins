@@ -24,10 +24,16 @@ user_invocable: true
 2. **List pending tasks**:
    - Run: `ls -1 tasks/*.md 2>/dev/null`
    - For each task file: read its first line (title) and resolve its real branch via the shared
-     helper — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/task-status.sh" resolve "<task-name>"` — which
-     reports `task_branch` (this also matches `/adopt` branches that kept a non-`task/` name) and
-     `branch_exists`. Use `task_branch` for the worktree/branch lookup, not a hardcoded
-     `task/<task-name>`.
+     helper — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/task-status.sh" resolve "<task-name>"` — then
+     read `task_branch` and `branch_exists`:
+     - `branch_exists=yes` → the helper matched a real branch (an exact `task/<name>`, or the
+       checked-out worktree branch). Bind the task to `task_branch`; use it for the worktree/
+       branch/PR lookup below.
+     - `branch_exists=no` → no branch for this task yet (`task_branch` is just the convention) →
+       render `📋 Not Started`.
+   - Never assume a hardcoded `task/<task-name>` — always use the resolved `task_branch`.
+   - (An `/adopt`'d branch that kept a non-`task/` name isn't matched by name here — it still
+     surfaces via its worktree in steps 1/4.)
    - Render as a markdown table under a `## 📋 Tasks` heading:
 
    | # | Task | Title | Status |
@@ -38,8 +44,9 @@ user_invocable: true
 
 3. **Check for open PRs** (if `gh` is available):
    - Run once: `gh pr list --state open --json number,title,headRefName --limit 30`
-   - Match each PR to a task by comparing its `headRefName` to that task's resolved `task_branch`
-     (from step 2) — not a hardcoded `task/<task-name>`, so adopted/renamed branches match too.
+   - Match each PR to a task by comparing its `headRefName` to that task's bound `task_branch`
+     (from step 2) — not a hardcoded `task/<task-name>`, so `/adopt`-renamed `task/<name>` branches
+     match too.
    - Show PR status for each task
 
 4. **Check for orphaned worktrees**:

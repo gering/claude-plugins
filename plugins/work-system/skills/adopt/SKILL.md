@@ -41,7 +41,8 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
    - Verify the branch exists: `git rev-parse --verify <branch-name>`
 
 3. **Derive task name**:
-   - Strip common prefixes: `feature/`, `fix/`, `bugfix/`, `hotfix/`, `chore/`, `refactor/`
+   - Strip common prefixes (same set as the shared helper's `strip_prefix`): `task/`, `feature/`,
+     `fix/`, `bugfix/`, `hotfix/`, `chore/`, `refactor/`
    - Convert to kebab-case if needed
    - Examples:
      - `feature/dark-mode` → `dark-mode`
