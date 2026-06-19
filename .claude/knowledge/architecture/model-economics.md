@@ -1,10 +1,10 @@
 ---
 title: "Model Economics: Picking the Model per Skill"
 createdAt: 2026-06-18
-updatedAt: 2026-06-18
+updatedAt: 2026-06-19
 createdFrom: "branch: task/dogfood-knowledge-system"
 updatedFrom: "branch: task/dogfood-knowledge-system"
-pluginVersion: 1.7.0
+pluginVersion: 1.8.0
 prime: true
 ---
 

@@ -1,10 +1,10 @@
 ---
 title: "CI Structure Checks"
 createdAt: 2026-06-18
-updatedAt: 2026-06-18
+updatedAt: 2026-06-19
 createdFrom: "PR #6"
 updatedFrom: "PR #6"
-pluginVersion: 1.7.0
+pluginVersion: 1.8.0
 prime: false
 ---
 
@@ -21,11 +21,13 @@ The script groups its checks into four functions:
 
 1. **JSON validity + version sync** — every `plugin.json` / `marketplace.json`
    parses, and each plugin's version matches between the two. Version drift is a
-   hard error, so it acts as a merge gate (see [[version-sync]]).
+   hard error, so it acts as a merge gate (the two-file version rule itself is
+   documented in CLAUDE.md's "Versioning" section).
 2. **SKILL.md frontmatter** — required fields present, and the `description`
-   word budget: **>40 words is an error, >30 a warning**. Enforced mechanically
-   because an over-budget description gets silently truncated in sessions and
-   can stop matching its triggers (see [[skill-design-conventions]]).
+   word budget (thresholds live in the script's `DESC_WORDS_*` constants).
+   Enforced mechanically because an over-budget description gets silently
+   truncated in sessions and can stop matching its triggers (see
+   [[skill-design-conventions]]).
 3. **Internal `${CLAUDE_PLUGIN_ROOT}` references** — paths referenced in skills
    actually exist, catching dangling cross-references.
 4. **Shell script syntax** — bundled `.sh` files parse.
@@ -38,4 +40,4 @@ compiler. This check closes the most common failure class (broken JSON, version
 drift, dangling refs, budget violations) cheaply and mechanically. Keep it green;
 it runs on every PR and push to main.
 
-Related: [[version-sync]], [[skill-design-conventions]].
+Related: [[skill-design-conventions]].

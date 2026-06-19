@@ -1,10 +1,10 @@
 ---
 title: "Skill Design Conventions & Context Economy"
 createdAt: 2026-06-18
-updatedAt: 2026-06-18
+updatedAt: 2026-06-19
 createdFrom: "branch: task/dogfood-knowledge-system"
 updatedFrom: "PR #8"
-pluginVersion: 1.7.0
+pluginVersion: 1.8.0
 prime: true
 ---
 
@@ -30,17 +30,12 @@ preference.
 
 ## The conventions
 
-- **Length:** aim for ~15–30 words per description (~150–220 chars). Hard
-  ceiling ~40 words.
-- **Structure:** one short sentence on *what* the skill does, then a
-  `Trigger: "...", "...", "..."` line with 2–4 short example phrases. The
-  `Trigger:` line replaces any prose "Use when:" block — it is what the matcher
-  keys on.
-- **English only**, even when the user works in another language — all source
-  files stay in English per project convention.
-- **No feature lists in the description.** Subcommands, flags, edge-case
-  behavior, internal flow all belong in the `SKILL.md` body, loaded only once
-  the skill is invoked.
+The concrete rules — description length budget, the `Trigger:`-line structure,
+English-only, no feature lists in the description — are stated as the
+always-loaded source of truth in CLAUDE.md's "Skill descriptions: keep them
+short" section. They are deliberately **not** restated here: a second copy in an
+on-demand doc only drifts from the always-loaded one. This file captures the
+*why* and the mechanism (above and below); CLAUDE.md is the checklist.
 
 ## How to apply
 
