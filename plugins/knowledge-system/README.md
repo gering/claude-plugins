@@ -114,7 +114,7 @@ Separately, **before** dispatching that agent, `/reindex` runs a quick foregroun
 
 | Command | Description |
 |---------|-------------|
-| `/init` | Scaffold knowledge system: directories, starter files, usage rule, CLAUDE.md entry |
+| `/init` | Scaffold knowledge system: `_index.md`, usage rule, CLAUDE.md entry (absorbs a pre-existing unmarked section) |
 | `/query` | Retrieve relevant knowledge on demand — Haiku subagent, sub-second |
 | `/prime` | Load the foundational docs (architecture + overviews) into context on demand; `<topic>` to scope, `--full` for everything |
 | `/curate` | Store a new learning in the right layer; merges with existing entries |
