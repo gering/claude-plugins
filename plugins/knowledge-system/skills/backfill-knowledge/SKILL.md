@@ -220,6 +220,9 @@ Rules for `target_recommendation`:
 Rules for `learning`:
 - 1–2 sentences. What *durable* knowledge does this PR encode? Not "what did this PR change" — what will a future developer need to know?
 - Specific, not vague. "Adds caching" is not a learning. "Caches are keyed by (tenant_id, resource_id); TTL 60s; invalidated on writes via Redis pub/sub" is a learning.
+- **Source-grounded**: every concrete claim in the `learning` (file paths, counts, names, behaviors, thresholds) must be supported by the diff, commit messages, or PR body you actually read — not inferred from the title or assumed from convention. Do not assert specifics you did not see.
+- **Flag inference vs. fact**: if you are inferring rather than stating something you directly observed, hedge it explicitly ("appears to…", "likely…") or drop it. Prefer omitting an unverifiable detail over stating it as fact.
+- **Reject the unsourced**: if a PR's significance can only be asserted from its title/metadata — the diff and body don't substantiate a durable, specific learning — do not accept it; reject as `insufficient-context`.
 
 Rules for `reference_files`:
 - 1–3 source file paths from the PR that best represent the change. Used by `/curate` to anchor the knowledge entry.
