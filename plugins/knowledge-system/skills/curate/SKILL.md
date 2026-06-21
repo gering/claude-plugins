@@ -44,9 +44,25 @@ See `rules/knowledge-boundaries.md`:
 
 **CLAUDE.md safeguard:** if the target is `CLAUDE.md`, never write inside the `<!-- BEGIN knowledge-system -->` / `<!-- END knowledge-system -->` block — that region is managed by `/init` and will be regenerated on re-run, so any content placed there is lost. Append above or below the block.
 
-### 4. Check if an existing file covers this topic
-- For rules: check files in `.claude/rules/`
-- For knowledge: read `.claude/knowledge/_index.md`
+### 4. Check for existing coverage (dedup)
+
+Before writing, check whether this learning is already covered — in the target
+layer **and** in the always-loaded surfaces. Storing a second copy of
+always-loaded content is pure cost: it is paid for in every session and drifts
+out of sync with the original.
+
+- **Target layer:**
+  - For rules: scan files in `.claude/rules/`.
+  - For knowledge: read `.claude/knowledge/_index.md` (and open the closest-looking file).
+- **Always-loaded surfaces** (these are already in your context this session — check what you can see):
+  - `CLAUDE.md` at the project root — its content loads into every session.
+  - `.claude/rules/*.md` — auto-loaded directives.
+  - The memory index (`MEMORY.md`) — if the learning is about how the *user* wants to work, it belongs in memory, not here.
+
+On overlap, do **not** write a second copy. Instead:
+- Store only the **non-duplicative delta** (the part that is genuinely new), or
+- Store a short pointer to the authoritative location, or
+- If it is already fully covered always-loaded, write nothing and say so.
 
 ### 5. Update or create the target file
 
@@ -61,7 +77,7 @@ createdAt: <YYYY-MM-DD>      # ISO-8601 date-only, UTC
 updatedAt: <YYYY-MM-DD>      # ISO-8601 date-only, UTC
 createdFrom: "<origin>"      # see "Origin detection" below
 updatedFrom: "<origin>"      # see "Origin detection" below
-pluginVersion: <x.y.z>       # knowledge-system version
+pluginVersion: <x.y.z>       # read fresh from plugin.json at curation time
 prime: <true|false>          # see "Prime assessment" below — does /prime load this?
 ---
 ```
@@ -99,13 +115,13 @@ Otherwise, auto-detect:
 - `updatedAt`: same as `createdAt`
 - `createdFrom`: current origin (see above)
 - `updatedFrom`: same as `createdFrom`
-- `pluginVersion`: read from `${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json` (`version` field)
+- `pluginVersion`: read **fresh** from `${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json` (`version` field) at write time — never reuse a value seen earlier in the session, so a long session can't stamp a stale version
 - `prime`: assess `true`/`false` per "Prime assessment" above
 
 **Existing files with frontmatter (content is being updated):**
 - Update `updatedAt` to today's date
 - Update `updatedFrom` to the current origin
-- Update `pluginVersion` to the current plugin version
+- Update `pluginVersion` to the current plugin version (read fresh from plugin.json, as above)
 - Leave `title`, `createdAt`, `createdFrom`, `reindexedAt` unchanged
 - Leave `prime` unchanged if already set (it is a deliberate choice); only add it (via the assessment) if the field is missing
 
@@ -120,16 +136,17 @@ Bring them into form before adding new content:
 - `updatedAt`: today's date (we're about to write)
 - `createdFrom`: attempt reconstruction from the first commit's merge context using the PR-resolution cascade defined canonically in `/reindex` SKILL.md, step B ("createdFrom: reconstruct from the first commit..."). Do NOT reimplement the cascade here — the `/reindex` description is the source of truth, and if the logic ever evolves, only one place needs to change. If the cascade returns unresolved, fall back to the current origin.
 - `updatedFrom`: current origin
-- `pluginVersion`: current plugin version
+- `pluginVersion`: current plugin version (read fresh from plugin.json, as above)
 - `prime`: assess `true`/`false` per "Prime assessment" above
 
 **Rule files** (`.claude/rules/*.md`) use their own lightweight frontmatter (`description`, optional `globs`). Do NOT apply the knowledge frontmatter schema to rules.
 
 ### 6. Content quality checks (before writing)
 
-- **No volatile values**: Don't hardcode version numbers, counts, or thresholds that change with the code. Describe the pattern instead (e.g., "version is incremented on schema changes" not "version = 11").
+- **Grounding gate (most important)**: every concrete claim — file paths, counts, flag/skill names, "which skill does what", thresholds, cascades — must be grounded in a reference file **actually read this run** (step 2) or in what verifiably just happened in this session. Do NOT assert specifics from memory or from a diff summary. If you can't point to where a claim came from, read the source to confirm it or leave it out. This is the single biggest source of curated-knowledge defects.
+- **Prefer linking over restating mutable specifics**: flag lists, option tables, thresholds, command cascades, exact counts, and version numbers live in a SKILL.md / script / config and *will* drift. Link to the authoritative source (e.g. "see `path/to/SKILL.md` step N") instead of copying it. Restate only the durable shape ("resolution uses a first-hit cascade"), never the mutable detail or current snapshot.
 - **No security-sensitive details**: Don't document API keys, secrets, or auth internals in plaintext. Describe the approach without exposing specifics.
-- **Prefer patterns over snapshots**: Describe *how things work*, not *current exact values*. Values change — patterns persist.
+- **Link format**: knowledge cross-references use markdown links `[text](relative/path.md)`, knowledge → knowledge only. Do **not** use `[[wikilinks]]` (that is the memory system's convention, not used in knowledge files).
 
 ### 7. Update `_index.md`
 If a new knowledge file was created → add an entry to the corresponding `_index.md` (or `.claude/knowledge/_index.md` root index).

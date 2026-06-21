@@ -62,7 +62,7 @@ Return control. Do not block.
 The user will be notified automatically. When they bring the result back into the conversation (or ask about it), surface:
 - The run summary (what changed, what was proposed, any warnings)
 - Pointer to `.claude/logs/reindex.md` for the appended entry
-- If the agent flagged **proposed cross-links** or **duplicates to review**, ask whether the user wants to act on them interactively
+- If the agent flagged **proposed cross-links**, **duplicates**, **possibly-stale / restated-source entries**, or **link-convention issues**, ask whether the user wants to act on them interactively
 
 ---
 
@@ -111,11 +111,16 @@ Always add/update on every touched file:
 
 Date format: `YYYY-MM-DD` only (ISO-8601, date-only, UTC).
 
-### C. Validate cross-references
+### C. Validate cross-references & link convention
 
-For each knowledge file, find markdown links (`[text](path)`) that reference other files inside `.claude/knowledge/`:
-- If the target file exists → OK.
-- If the target file does not exist → flag as **dead reference** and mark it for the report. Do NOT auto-remove links without user confirmation.
+**Convention (authoritative):** cross-references *between knowledge entries* use markdown links `[text](relative/path.md)` and resolve **knowledge → knowledge only**. `[[wikilinks]]` are the memory system's convention and are not used in knowledge files. (Links from a knowledge file out to *source code* in the repo are fine and expected — this convention governs links *between knowledge entries*, not anchors to code.)
+
+For each knowledge file:
+- Find markdown links (`[text](path)`) that point at another file inside `.claude/knowledge/`:
+  - Target exists → OK.
+  - Target missing → flag as **dead reference**. Do NOT auto-remove without user confirmation.
+- Flag any `[[wikilink]]` syntax as **wrong link style** (should be a markdown link) for the report.
+- Flag any knowledge→knowledge cross-reference that **dangles across the layer boundary** — an entry linking into `.claude/rules/` or at `CLAUDE.md` as if it were a peer entry. Those layers are always-loaded and addressed differently; cross-refs should stay inside the knowledge layer. Surface for review (do not auto-remove).
 
 ### D. Propose new cross-references
 
@@ -131,7 +136,20 @@ Use judgment: do not over-propose. Only suggest links that would meaningfully he
 
 If two files cover nearly the same topic (>70% content overlap), flag them as **duplicate candidates** in the report. Do NOT auto-merge.
 
-### F. Write the run log
+Also check each knowledge file against the **always-loaded surfaces** (`CLAUDE.md`, `.claude/rules/*.md`): if an entry duplicates content that is already always-loaded, flag it as a **duplicate-of-always-loaded** candidate — the knowledge copy is redundant and will drift. Report; do not auto-remove.
+
+### F. Detect stale & restated content
+
+Two staleness signals — flag for the report, never auto-edit:
+
+- **Stale vs. source**: for each knowledge file, identify the source files it references (markdown links pointing outside `.claude/knowledge/`, plus repo paths named in the prose). For each such source, compare its last-change date to the knowledge file's `updatedAt`:
+  ```bash
+  git log -1 --format=%cI -- <source> | cut -dT -f1   # source last changed
+  ```
+  If the source changed *after* `updatedAt`, the entry's claims may no longer hold. Flag as **possibly stale** (entry → source → "source changed <date>, entry last updated <date>"). This is a heuristic, not proof — surface for human review.
+- **Verbatim restatement**: if an entry copies a mutable specific from a source (a flag list, an option table, a command cascade, an exact count) close to verbatim, that content will drift out of sync. Flag as **restates source — link instead** (entry → what was copied → which source it should link to).
+
+### G. Write the run log
 
 Append a new heading to `.claude/logs/reindex.md`:
 
@@ -140,16 +158,20 @@ Append a new heading to `.claude/logs/reindex.md`:
 - Rebuilt N _index.md entries
 - Backfilled frontmatter on M files (list key ones)
 - Validated X cross-references, Y dead references flagged
+- Link-convention issues: P (wrong style / cross-layer)
 - Proposed Z new cross-links (see report)
 - Flagged W duplicate candidates (see report)
+- Flagged S possibly-stale + R restated-source entries (see report)
 - <short line of overall assessment>
 ```
+
+Omit a bullet whose count is 0.
 
 Create `.claude/logs/reindex.md` if it does not exist — start it with the heading `# Reindex Log` followed by the first run entry.
 
 In dry-run mode, do NOT write the log — only report what would have been written.
 
-### G. Final report
+### H. Final report
 
 Return a structured summary to the caller:
 
@@ -157,8 +179,11 @@ Return a structured summary to the caller:
 - `_index.md` files rebuilt: M
 - Frontmatter fields backfilled: list of (file → fields)
 - Dead references: list (file → broken link)
+- Link-convention issues: list (file → wrong-style `[[...]]` or cross-layer link)
 - Proposed cross-links: list of (file A ↔ file B, one-line rationale)
-- Duplicate candidates: list of (file A ↔ file B, one-line reason)
+- Duplicate candidates: list of (file A ↔ file B, one-line reason; mark always-loaded dups)
+- Possibly-stale entries: list (entry → source → dates)
+- Restated-source entries: list (entry → what to replace with a link)
 - Overall: "clean" / "some maintenance applied" / "review needed"
 
 Keep the report tight — bullet points, no prose walls.

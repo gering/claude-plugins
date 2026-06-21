@@ -29,7 +29,7 @@ Lightweight, native knowledge management for Claude Code projects. Build up a pe
 
 ### `/curate` — capture without ceremony
 
-**What it does.** `/curate "the auth middleware validates JWT before routing" src/middleware/auth.ts`. Claude decides the target layer (rule vs knowledge vs CLAUDE.md), finds overlapping entries, merges instead of duplicating, and updates the index. Frontmatter (`updatedAt`, `pluginVersion`) is maintained automatically.
+**What it does.** `/curate "the auth middleware validates JWT before routing" src/middleware/auth.ts`. Claude decides the target layer (rule vs knowledge vs CLAUDE.md), finds overlapping entries, merges instead of duplicating, and updates the index. Frontmatter (`updatedAt`, `pluginVersion`) is maintained automatically. A grounding gate keeps it honest: every concrete claim must come from a file read this run, dedup extends to the always-loaded surfaces (CLAUDE.md, rules, memory), and mutable specifics are linked to their source rather than copied.
 
 **Why it matters.** The barrier to storing a learning is one line. You actually capture what you know instead of losing it in chat history. Days later, `/query` finds it.
 
@@ -43,8 +43,9 @@ Lightweight, native knowledge management for Claude Code projects. Build up a pe
 
 **What it does.** `/reindex` dispatches a **background agent** (Sonnet with the 1M-context window) that walks the entire knowledge base and:
 - rebuilds every `_index.md`
-- validates cross-references (linked files still exist, paths still correct)
+- validates cross-references (linked files still exist, paths still correct, markdown-link convention, no cross-layer dangling)
 - **proactively proposes new cross-links** between files that discuss the same concepts but don't link each other
+- **flags staleness** — entries whose source changed since they were last updated, and prose that restates a source verbatim instead of linking it
 - backfills missing `createdAt` / `updatedAt` from git history
 - updates `reindexedAt` and `pluginVersion`
 - appends a short bullet-point summary to `.claude/logs/reindex.md`
