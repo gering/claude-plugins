@@ -4,6 +4,7 @@
 - `architecture/skill-design-conventions.md` — Context economy as design principle; description budget + `skillListingBudgetFraction`; Trigger-line format
 - `architecture/skill-composition.md` — Flag contracts (`--no-poll`/`--auto`), shared scripts, format contracts, soft coupling
 - `architecture/model-economics.md` — Which model per skill and why (Haiku/Sonnet/session-model)
+- `architecture/idempotent-scaffolding.md` — Scaffolding into shared user files: absorb pre-existing unmarked sections; create dirs lazily (no empty/`.gitkeep` dirs)
 
 ## Features
 - `features/backfill-and-origin-metadata.md` — `/backfill-knowledge` significance bar + origin-reconstruction cascade
