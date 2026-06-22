@@ -57,7 +57,7 @@ out of sync with the original.
 - **Always-loaded surfaces** (these are already in your context this session — check what you can see):
   - `CLAUDE.md` at the project root — its content loads into every session.
   - `.claude/rules/*.md` — auto-loaded directives.
-  - The memory index (`MEMORY.md`) — if the learning is about how the *user* wants to work, it belongs in memory, not here.
+  - The memory index already loaded in this session (if any) — if the learning is about how the *user* wants to work, it belongs in memory, not here.
 
 On overlap, do **not** write a second copy. Instead:
 - Store only the **non-duplicative delta** (the part that is genuinely new), or
@@ -146,7 +146,7 @@ Bring them into form before adding new content:
 - **Grounding gate (most important)**: every concrete claim — file paths, counts, flag/skill names, "which skill does what", thresholds, cascades — must be grounded in a reference file **actually read this run** (step 2) or in what verifiably just happened in this session. Do NOT assert specifics from memory or from a diff summary. If you can't point to where a claim came from, read the source to confirm it or leave it out. This is the single biggest source of curated-knowledge defects.
 - **Prefer linking over restating mutable specifics**: flag lists, option tables, thresholds, command cascades, exact counts, and version numbers live in a SKILL.md / script / config and *will* drift. Link to the authoritative source (e.g. "see `path/to/SKILL.md` step N") instead of copying it. Restate only the durable shape ("resolution uses a first-hit cascade"), never the mutable detail or current snapshot.
 - **No security-sensitive details**: Don't document API keys, secrets, or auth internals in plaintext. Describe the approach without exposing specifics.
-- **Link format**: knowledge cross-references use markdown links `[text](relative/path.md)`, knowledge → knowledge only. Do **not** use `[[wikilinks]]` (that is the memory system's convention, not used in knowledge files).
+- **Link format**: *cross-references between knowledge entries* use markdown links `[text](relative/path.md)`, knowledge → knowledge only — never `[[wikilinks]]` (memory's convention). Linking out to source code / a SKILL.md (the bullet above) and pointing at an always-loaded source (step 4) are both fine; the knowledge → knowledge rule only governs links *between entries*. See `/reindex` task C for the authoritative statement.
 
 ### 7. Update `_index.md`
 If a new knowledge file was created → add an entry to the corresponding `_index.md` (or `.claude/knowledge/_index.md` root index).
