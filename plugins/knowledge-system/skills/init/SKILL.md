@@ -9,7 +9,7 @@ user_invocable: true
 
 # Initialize Knowledge System
 
-Scaffold the knowledge system directory structure, the usage rule, and the CLAUDE.md entry.
+Scaffold the knowledge index, the usage rule, and the CLAUDE.md entry.
 
 ## Usage
 `/init`
@@ -21,7 +21,7 @@ Plugin-managed (regenerated on re-run, safe to delete):
 - `.claude/rules/knowledge-system-usage.md` — index-load fallback + command pointers
 - A wrapped block inside `CLAUDE.md` (markers: `<!-- BEGIN knowledge-system -->` / `<!-- END knowledge-system -->`) that `@`-imports the knowledge index
 
-User content (created once, never overwritten afterwards):
+User content (created once; preserved on re-run, reset only on explicit re-initialize):
 - `.claude/knowledge/_index.md` — lists the starter domains (Architecture /
   Features / Deployment) as headings
 
@@ -35,7 +35,7 @@ time `/curate` or `/migrate` writes a knowledge file into it.
 
 Look for `.claude/knowledge/_index.md`. If it exists, inform the user that the knowledge system is already set up. Ask whether to:
 - **Re-run plugin-managed parts only** (rule file + CLAUDE.md block) — the default
-- **Re-initialize everything** including the knowledge directory structure (only if they really want a clean slate — existing knowledge files are NOT deleted, only the starter `_index.md` is reset)
+- **Re-initialize everything** — reset the starter `_index.md` to the template (only for a clean slate; existing knowledge files under `.claude/knowledge/` are NOT deleted)
 
 ### 2. Create the knowledge index
 
@@ -64,7 +64,7 @@ directory on demand).
 <!-- Example: - `deployment/ci-cd.md` — CI/CD pipeline and release process -->
 ```
 
-Skip this step if `_index.md` already exists.
+Skip this step if `_index.md` already exists — unless the user chose **Re-initialize everything** in step 1, in which case overwrite it with the template above.
 
 ### 3. Write the usage rule
 
@@ -171,7 +171,7 @@ Skip if the user passed an argument or seems to want a quick setup.
 
 ### 6. Report what was done
 
-List created/updated files and a compact next-steps block:
+List created/updated files and a compact next-steps block. Annotate each line with what actually happened — `(new)` on first init, `(reset)` when re-initialized, and `(block updated)` or `(absorbed existing section)` for CLAUDE.md:
 
 ```
 Created/updated:
