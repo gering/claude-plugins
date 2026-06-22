@@ -75,7 +75,7 @@ You are running a thorough QA pass over a Claude Code knowledge base located at 
 
 ## Scope
 
-Analyze every `.md` file under `.claude/knowledge/**`. **Write** only inside `.claude/knowledge/` and to `.claude/logs/reindex.md` (the run log) — never write to `.claude/rules/`, `CLAUDE.md`, or any other path. **Reading** other files is allowed and sometimes required: tasks C, E, and F read `CLAUDE.md`, `.claude/rules/*.md`, and referenced source files for comparison — that is read-only and never modifies them.
+Analyze every `.md` file under `.claude/knowledge/**`. **Write** only inside `.claude/knowledge/` and to `.claude/logs/reindex.md` (the run log) — never write to `.claude/rules/`, `CLAUDE.md`, or any other path. **Reading** other files is allowed and sometimes required — e.g. task E reads `CLAUDE.md` / `.claude/rules/*.md` to detect duplicate-of-always-loaded, and task F reads referenced source files to check their dates. Such reads are read-only and never modify those paths.
 
 ## Tasks
 
@@ -160,7 +160,7 @@ Append a new heading to `.claude/logs/reindex.md`:
 - Wrong-style links (stray `[[wikilinks]]`): P
 - Proposed Z new cross-links (see report)
 - Flagged W duplicate candidates (see report)
-- Flagged S possibly-stale + R restated-source entries (see report)
+- Flagged S possibly-stale, U unresolved-source, R restated-source entries (see report)
 - <short line of overall assessment>
 ```
 

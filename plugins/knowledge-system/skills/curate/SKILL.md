@@ -134,7 +134,7 @@ Bring them into form before adding new content:
   ```
   If the file is uncommitted or git returns nothing, fall back to today's date.
 - `updatedAt`: today's date (we're about to write)
-- `createdFrom`: attempt reconstruction from the first commit's merge context using the PR-resolution cascade defined canonically in `/reindex` SKILL.md, step B ("createdFrom: reconstruct from the first commit..."). Do NOT reimplement the cascade here — the `/reindex` description is the source of truth, and if the logic ever evolves, only one place needs to change. If the cascade returns unresolved, fall back to the current origin.
+- `createdFrom`: attempt reconstruction from the first commit's merge context using the PR-resolution cascade defined canonically in `/reindex` SKILL.md, task B ("createdFrom: reconstruct from the first commit..."). Do NOT reimplement the cascade here — the `/reindex` description is the source of truth, and if the logic ever evolves, only one place needs to change. If the cascade returns unresolved, fall back to the current origin.
 - `updatedFrom`: current origin
 - `pluginVersion`: current plugin version (read fresh from plugin.json, as above)
 - `prime`: assess `true`/`false` per "Prime assessment" above
