@@ -28,9 +28,12 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
 
 ## Instructions
 
-1. **Check current location**:
-   - Run: `git worktree list`
-   - If this is already a worktree (not first entry), stop and explain this command should be run from the main repo
+1. **Check current location** (shared helper — robust against paths with spaces and symlinks):
+   - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" linked` → `main` or `linked`.
+     If `linked`, this is already a worktree — stop and explain this command should be run from
+     the main repo.
+   - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path` → `<main-repo>` — capture
+     it for the CWD-drift check in step 11.
 
 2. **Select branch**:
    - If `$ARGUMENTS` provided, use as branch name
@@ -110,7 +113,7 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
       `[ -f .claude/settings.json ] && mkdir -p .claude/worktrees/<task-name>/.claude && cp .claude/settings.json .claude/worktrees/<task-name>/.claude/`
 
 11. **Verify CWD is still in the main repo**:
-    - Run: `pwd` and compare to the main-repo path from step 1's `git worktree list`.
+    - Run: `pwd` and compare to the `<main-repo>` path captured by the helper in step 1.
     - If they differ, **stop and report an error**: "Session CWD drifted into the worktree during adopt — investigate which step ran a persistent `cd`." Do not silently continue.
 
 12. **Final output for the user** (display this block — do *not* execute the `cd`):
