@@ -1,9 +1,9 @@
 ---
 title: "Idempotent Scaffolding into Shared User Files"
 createdAt: 2026-06-21
-updatedAt: 2026-06-21
+updatedAt: 2026-06-22
 createdFrom: "branch: task/harden-init-scaffolding"
-updatedFrom: "branch: task/harden-init-scaffolding"
+updatedFrom: "PR #14"
 pluginVersion: 1.8.0
 prime: true
 ---
@@ -51,6 +51,18 @@ demand). Keep the domains discoverable as **headings in an index file** rather
 than as empty folders. A `.gitkeep` is the alternative but it's clutter that
 needs its own idempotency guard (don't double-add on re-run) and lingers once
 real content lands — lazy creation avoids both.
+
+## Never overwrite user content — delegate reconciliation, don't duplicate it
+
+A re-run must refresh only the plugin-managed parts and leave user-authored
+files untouched. A "re-initialize everything" reset that blanks the index is a
+footgun — it discards the user's curated entries. And building an "add the
+missing, prune the stale" reconciler into the scaffolder duplicates logic the
+maintenance command already owns: `/reindex` rebuilds `_index.md` from the files
+on disk (adds missing entries, drops deleted ones). So when scaffolded content
+can drift out of sync with reality, **point at the dedicated reconciler instead
+of reimplementing it or resetting destructively**. Removing the special case
+beats adding one.
 
 See [[skill-composition]] for the marker/format-contract mechanics these blocks
 rely on.
