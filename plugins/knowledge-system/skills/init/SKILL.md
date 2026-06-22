@@ -21,7 +21,7 @@ Plugin-managed (regenerated on re-run, safe to delete):
 - `.claude/rules/knowledge-system-usage.md` — index-load fallback + command pointers
 - A wrapped block inside `CLAUDE.md` (markers: `<!-- BEGIN knowledge-system -->` / `<!-- END knowledge-system -->`) that `@`-imports the knowledge index
 
-User content (created once; preserved on re-run, reset only on explicit re-initialize):
+User content (created once, never overwritten — rebuild the index with `/reindex`, not `/init`):
 - `.claude/knowledge/_index.md` — lists the starter domains (Architecture /
   Features / Deployment) as headings
 
@@ -33,9 +33,13 @@ time `/curate` or `/migrate` writes a knowledge file into it.
 
 ### 1. Check if already initialized
 
-Look for `.claude/knowledge/_index.md`. If it exists, inform the user that the knowledge system is already set up. Ask whether to:
-- **Re-run plugin-managed parts only** (rule file + CLAUDE.md block) — the default
-- **Re-initialize everything** — reset the starter `_index.md` to the template (only for a clean slate; existing knowledge files under `.claude/knowledge/` are NOT deleted)
+Look for `.claude/knowledge/_index.md`. If it exists, the knowledge system is
+already set up: refresh **only** the plugin-managed parts (the usage rule + the
+CLAUDE.md block) and leave `_index.md` and every knowledge file untouched —
+`/init` never overwrites user content. If the index itself looks stale or out of
+sync with the files on disk, point the user to `/reindex`, which rebuilds
+`_index.md` from the actual files (adds missing entries, drops entries for
+deleted files).
 
 ### 2. Create the knowledge index
 
@@ -64,7 +68,7 @@ directory on demand).
 <!-- Example: - `deployment/ci-cd.md` — CI/CD pipeline and release process -->
 ```
 
-Skip this step if `_index.md` already exists — unless the user chose **Re-initialize everything** in step 1, in which case overwrite it with the template above.
+Skip this step if `_index.md` already exists — `/init` never overwrites it. To rebuild the index from the files on disk, use `/reindex`.
 
 ### 3. Write the usage rule
 
@@ -171,7 +175,7 @@ Skip if the user passed an argument or seems to want a quick setup.
 
 ### 6. Report what was done
 
-List created/updated files and a compact next-steps block. Annotate each line with what actually happened — `(new)` on first init, `(reset)` when re-initialized, and `(block updated)` or `(absorbed existing section)` for CLAUDE.md:
+List created/updated files and a compact next-steps block. Annotate each line with the real action — `_index.md (new)` on first init (omit it on a re-run, where it stays untouched); `CLAUDE.md` per its step-4 outcome (`(block added)`, `(block updated)`, or `(absorbed existing section)`). The example below is illustrative:
 
 ```
 Created/updated:
