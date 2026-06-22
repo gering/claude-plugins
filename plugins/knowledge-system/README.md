@@ -316,7 +316,7 @@ The `never`-bucket is persistent — subsequent runs skip those PRs silently.
 
 ## Roadmap (Phase 2)
 
-- **`/audit`** — semantic QA beyond `/reindex`: duplicate detection, stale content flagging, volatile-value scan, knowledge-gap analysis per code directory.
+- **`/audit`** — semantic QA beyond `/reindex`: volatile-value scan and knowledge-gap analysis per code directory. (Duplicate detection and stale-content flagging now ship in `/reindex`.)
 - **ADR category** — `.claude/knowledge/decisions/` with numbered, immutable Architecture Decision Records. Detection heuristic in `/curate` routes decision-shaped insights there automatically. ADRs bring their own status semantics (`proposed` / `accepted` / `superseded`).
 - **`.claude/docs/`** — optional authoritative reference folder that `/query` consults with higher priority than accumulated knowledge.
 - **Query ranking** — `/query` uses recency and reference count to rank when many entries match.

@@ -152,7 +152,7 @@ Bring them into form before adding new content:
 If a new knowledge file was created → add an entry to the corresponding `_index.md` (or `.claude/knowledge/_index.md` root index).
 
 ### 8. Report what was stored
-One-line confirmation: file path created/updated, layer (rule vs knowledge vs CLAUDE.md), and which frontmatter fields were set.
+One-line confirmation: file path created/updated, layer (rule vs knowledge vs CLAUDE.md), and which frontmatter fields were set. If step 4 resolved to writing nothing (already fully covered always-loaded), say that instead and name where it is already covered — do not invent a file path.
 
 ## Why this runs in-context (not as agent)
 
