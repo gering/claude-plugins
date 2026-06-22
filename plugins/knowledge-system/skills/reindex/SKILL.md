@@ -75,7 +75,7 @@ You are running a thorough QA pass over a Claude Code knowledge base located at 
 
 ## Scope
 
-Operate over every `.md` file under `.claude/knowledge/**`. Write only inside `.claude/knowledge/` and to `.claude/logs/reindex.md` (the run log) — do NOT touch `.claude/rules/` or any other path.
+Analyze every `.md` file under `.claude/knowledge/**`. **Write** only inside `.claude/knowledge/` and to `.claude/logs/reindex.md` (the run log) — never write to `.claude/rules/`, `CLAUDE.md`, or any other path. **Reading** other files is allowed and sometimes required: tasks C, E, and F read `CLAUDE.md`, `.claude/rules/*.md`, and referenced source files for comparison — that is read-only and never modifies them.
 
 ## Tasks
 
@@ -113,14 +113,13 @@ Date format: `YYYY-MM-DD` only (ISO-8601, date-only, UTC).
 
 ### C. Validate cross-references & link convention
 
-**Convention (authoritative):** cross-references *between knowledge entries* use markdown links `[text](relative/path.md)` and resolve **knowledge → knowledge only**. `[[wikilinks]]` are the memory system's convention and are not used in knowledge files. (Links from a knowledge file out to *source code* in the repo are fine and expected — this convention governs links *between knowledge entries*, not anchors to code.)
+**Convention (authoritative):** *cross-references between knowledge entries* use markdown links `[text](relative/path.md)` and resolve **knowledge → knowledge only**. `[[wikilinks]]` are the memory system's convention and are not used in knowledge files. Two other link kinds are legitimate and must NOT be flagged: a link out to *source code* in the repo (it anchors a claim), and a **pointer to an always-loaded source** (`CLAUDE.md` / `.claude/rules/…`) that `/curate` writes instead of duplicating always-loaded content.
 
 For each knowledge file:
-- Find markdown links (`[text](path)`) that point at another file inside `.claude/knowledge/`:
-  - Target exists → OK.
-  - Target missing → flag as **dead reference**. Do NOT auto-remove without user confirmation.
+- Find markdown links (`[text](path)`):
+  - Target exists (a knowledge entry, a source file, or an always-loaded surface) → OK.
+  - Target missing → flag as **dead reference** — this also covers a cross-layer pointer whose target was moved or deleted. Do NOT auto-remove without user confirmation.
 - Flag any `[[wikilink]]` syntax as **wrong link style** (should be a markdown link) for the report.
-- Flag any knowledge→knowledge cross-reference that **dangles across the layer boundary** — an entry linking into `.claude/rules/` or at `CLAUDE.md` as if it were a peer entry. Those layers are always-loaded and addressed differently; cross-refs should stay inside the knowledge layer. Surface for review (do not auto-remove).
 
 ### D. Propose new cross-references
 
@@ -142,11 +141,11 @@ Also check each knowledge file against the **always-loaded surfaces** (`CLAUDE.m
 
 Two staleness signals — flag for the report, never auto-edit:
 
-- **Stale vs. source**: for each knowledge file, identify the source files it references (markdown links pointing outside `.claude/knowledge/`, plus repo paths named in the prose). For each such source, compare its last-change date to the knowledge file's `updatedAt`:
+- **Stale vs. source**: for each knowledge file, identify the source files it references (markdown links pointing outside `.claude/knowledge/`, plus repo paths named in the prose). **Resolve each reference to a repo-root-relative path first** — a markdown link is relative to the knowledge file's own directory, so `../../src/x.ts` from `.claude/knowledge/features/` must be normalized before lookup. Then compare the source's last-change date to the knowledge file's `updatedAt`:
   ```bash
-  git log -1 --format=%cI -- <source> | cut -dT -f1   # source last changed
+  git log -1 --format=%cI -- <repo-relative-source> | cut -dT -f1   # source last changed
   ```
-  If the source changed *after* `updatedAt`, the entry's claims may no longer hold. Flag as **possibly stale** (entry → source → "source changed <date>, entry last updated <date>"). This is a heuristic, not proof — surface for human review.
+  If this returns empty (path doesn't resolve, untracked, or renamed), do NOT silently drop it — record the reference as an **unresolved source** so a wrong path surfaces instead of masking a stale entry. If the source changed *after* `updatedAt`, the entry's claims may no longer hold: flag as **possibly stale** (entry → source → "source changed <date>, entry last updated <date>"). Heuristic, not proof — surface for human review.
 - **Verbatim restatement**: if an entry copies a mutable specific from a source (a flag list, an option table, a command cascade, an exact count) close to verbatim, that content will drift out of sync. Flag as **restates source — link instead** (entry → what was copied → which source it should link to).
 
 ### G. Write the run log
@@ -158,7 +157,7 @@ Append a new heading to `.claude/logs/reindex.md`:
 - Rebuilt N _index.md entries
 - Backfilled frontmatter on M files (list key ones)
 - Validated X cross-references, Y dead references flagged
-- Link-convention issues: P (wrong style / cross-layer)
+- Wrong-style links (stray `[[wikilinks]]`): P
 - Proposed Z new cross-links (see report)
 - Flagged W duplicate candidates (see report)
 - Flagged S possibly-stale + R restated-source entries (see report)
@@ -179,10 +178,11 @@ Return a structured summary to the caller:
 - `_index.md` files rebuilt: M
 - Frontmatter fields backfilled: list of (file → fields)
 - Dead references: list (file → broken link)
-- Link-convention issues: list (file → wrong-style `[[...]]` or cross-layer link)
+- Wrong-style links: list (file → stray `[[wikilink]]`)
 - Proposed cross-links: list of (file A ↔ file B, one-line rationale)
 - Duplicate candidates: list of (file A ↔ file B, one-line reason; mark always-loaded dups)
 - Possibly-stale entries: list (entry → source → dates)
+- Unresolved source refs: list (entry → reference that didn't resolve)
 - Restated-source entries: list (entry → what to replace with a link)
 - Overall: "clean" / "some maintenance applied" / "review needed"
 

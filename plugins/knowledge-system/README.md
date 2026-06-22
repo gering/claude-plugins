@@ -43,7 +43,7 @@ Lightweight, native knowledge management for Claude Code projects. Build up a pe
 
 **What it does.** `/reindex` dispatches a **background agent** (Sonnet with the 1M-context window) that walks the entire knowledge base and:
 - rebuilds every `_index.md`
-- validates cross-references (linked files still exist, paths still correct, markdown-link convention, no cross-layer dangling)
+- validates cross-references (links resolve, markdown-link convention, flags stray `[[wikilinks]]`)
 - **proactively proposes new cross-links** between files that discuss the same concepts but don't link each other
 - **flags staleness** — entries whose source changed since they were last updated, and prose that restates a source verbatim instead of linking it
 - backfills missing `createdAt` / `updatedAt` from git history
