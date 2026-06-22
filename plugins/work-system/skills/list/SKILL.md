@@ -13,8 +13,9 @@ user_invocable: true
 ## Instructions
 
 1. **Show active worktrees**:
-   - Run: `git worktree list`
-   - Render as a markdown table under a `## 📂 Active Worktrees` heading:
+   - Run: `git worktree list` — git lists the **main** worktree first, then each linked one.
+   - Render as a markdown table under a `## 📂 Active Worktrees` heading; the first row is `Main`,
+     the rest are `Worktree`:
 
    | Type | Path | Branch |
    |------|------|--------|

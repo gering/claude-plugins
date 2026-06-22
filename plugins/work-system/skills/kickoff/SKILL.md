@@ -27,9 +27,11 @@ The same rule applies to any project-specific setup the user's `CLAUDE.md` may a
 
 ## Instructions
 
-1. **Check current location**:
-   - Run: `git worktree list`
-   - If this is already a worktree (not first entry), stop and suggest `/continue` instead
+1. **Check current location** (shared helper — robust against paths with spaces and symlinks):
+   - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" linked` → `main` or `linked`.
+     If `linked`, this is already a worktree — stop and suggest `/continue` instead.
+   - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path` → `<main-repo>` — capture
+     it for the CWD-drift check in step 11.
 
 2. **Show available tasks**:
    - Run: `ls -1 tasks/ 2>/dev/null || echo "No tasks found"`
@@ -79,7 +81,7 @@ The same rule applies to any project-specific setup the user's `CLAUDE.md` may a
     - Otherwise, check CLAUDE.md and rules for project context
 
 11. **Verify CWD is still in the main repo**:
-    - Run: `pwd` and compare to the main-repo path captured from `git worktree list` in step 1.
+    - Run: `pwd` and compare to the `<main-repo>` path captured by the helper in step 1.
     - If they differ, **stop and report an error**: "Session CWD drifted into the worktree during kickoff — investigate which step ran a persistent `cd`." Do not silently continue; a contaminated session will mislead every subsequent command.
 
 12. **Final instructions for the user** (display this block — it is *not* a command to execute):
