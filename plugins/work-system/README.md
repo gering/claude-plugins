@@ -155,22 +155,25 @@ worktree as its cwd, and starts the task there for you:
 ### `/close` tears down the task's tab
 
 Once a task is merged, `/close` runs its usual cleanup (worktree, branch, task
-file) and then closes that task's herdr **tab** too. It finds the tab by cwd — no
-state file — looking it up *before* removing the worktree. Two entry points:
+file) and then closes that task's herdr **tab** too. It identifies the tab by
+matching the pane's cwd (no persisted layout file) *before* removing the worktree,
+and decides self-close vs. a different-tab close by pane id. Two entry points:
 
 - **From the main session** (the usual case): `/close <task>` closes the
   worktree's tab directly — a different tab, so nothing self-terminates.
 - **From inside the worktree tab**: Claude cannot close its own tab, only exit
   cleanly. So `/close` focuses the main tab and arms a **detached `/exit`** that
-  fires the moment the turn ends — Claude exits cleanly, its tab auto-closes, and
-  you land back in the main session, hands-free. (The exit is delivered to an idle
-  prompt, not mid-turn; injecting into a busy TUI is unreliable.) If herdr
-  injection isn't available it instead asks you to press **Ctrl+D**.
+  fires once the turn ends — Claude exits cleanly, its tab auto-closes, and
+  you land back in the main session, hands-free. (The injector polls until the
+  prompt is idle before delivering the exit; injecting into a busy TUI is
+  unreliable.) If herdr injection isn't available it instead asks you to press
+  **Ctrl+D**.
 
-A `SessionEnd` hook ships with the plugin as a backup for the self-close path: it
-closes the tab on a clean exit, but only when `/close` armed a per-pane marker, so
-it never fires on an ordinary session exit. All of this lives in the tested
-`scripts/herdr-teardown.sh`; see `skills/close/SKILL.md` step 12 for the flow.
+For the self-close path a `SessionEnd` hook ships with the plugin as a backup: it
+closes the tab on a clean exit, but only when `/close` wrote a short-lived per-pane
+marker file (under `$HOME/.cache`), so it never fires on an ordinary session exit.
+All of this lives in the tested `scripts/herdr-teardown.sh`; see
+`skills/close/SKILL.md` step 12 for the flow.
 
 ## Adopting Existing Branches
 

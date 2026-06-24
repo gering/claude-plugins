@@ -21,27 +21,37 @@ tears down).
 
 ## Design decisions
 
-- **Find the tab by cwd, before removing the worktree.** `herdr pane list` exposes
-  each pane's `cwd`/`tab_id`; the worktree tab is the pane whose `cwd` == the
-  worktree path. This lookup MUST run *before* `git worktree remove` — afterwards
-  the cwd points at a deleted path and never matches. Match on `cwd` (always
-  present), not `foreground_cwd` (absent on idle panes).
-- **`WT_TAB == $HERDR_TAB_ID` is the self-close discriminator.** If the worktree's
-  tab id equals the running session's own tab, `/close` is running *inside* the tab
-  being removed (Scenario B, self-close); otherwise it's a different tab (Scenario
-  A, e.g. the main session). Scenario A closes the tab directly (`herdr tab close`);
-  Scenario B cannot — Claude can't close its own tab, only exit.
+- **Find the tab by cwd (realpath), before removing the worktree.** `herdr pane
+  list` exposes each pane's `cwd`/`tab_id`; the worktree tab is the pane whose cwd
+  resolves to the worktree path. Compare by `realpath` on both sides — herdr stores
+  the *resolved* cwd, so on macOS a `/tmp`→`/private/tmp` (or symlinked `/Users`)
+  worktree path would never string-match and the whole teardown would silently
+  no-op. This lookup MUST run *before* `git worktree remove` — afterwards the cwd
+  points at a deleted path. Match on `cwd` (always present), not `foreground_cwd`
+  (absent on idle panes).
+- **Decide self-close by pane id, not `$HERDR_TAB_ID`.** Compare the worktree tab
+  to *this session's own tab*, resolved from `$HERDR_PANE_ID` (`own-tab`). Equal →
+  Scenario B (self-close, Claude can only exit, not close its own tab); different →
+  Scenario A (a different tab, close it directly). Do **not** key the decision on
+  `$HERDR_TAB_ID`: if it's empty/unset, an equality test misclassifies a self-close
+  as Scenario A and `herdr tab close` then kills the live session's own tab
+  mid-turn (corrupt transcript). If the own tab can't be resolved, skip the auto
+  teardown rather than guess.
 - **Plugins ship the `SessionEnd` hook — no settings.json injection.** A plugin's
   `hooks/hooks.json` (in the plugin root, NOT `.claude-plugin/`) auto-merges with
   user hooks on install; the command may use `${CLAUDE_PLUGIN_ROOT}` and **inherits
   the session's env** (so `HERDR_PANE_ID`/`HERDR_TAB_ID` are visible). This is
   unlike the status line, which can't be plugin-owned and needs marker-block
-  injection (see [[statusline-integration]]).
-- **The hook is conditional via a per-pane marker.** `/close` (Scenario B) writes a
-  marker keyed by `$HERDR_PANE_ID` (containing the tab to close); the hook closes
-  that tab only when the marker exists, so it is a no-op on every ordinary session
-  exit. Marker lives under `$HOME/.cache` (stable across the pane's processes),
-  not `$TMPDIR` (per-process on macOS).
+  injection (see [[statusline-integration]]). Note CI: `check-structure.py` must
+  scan `hooks/*.json` for `${CLAUDE_PLUGIN_ROOT}` refs too, else a renamed script
+  breaks the hook while CI stays green.
+- **The hook is conditional via a short-lived per-pane marker.** `/close` (Scenario
+  B) writes a marker keyed by `$HERDR_PANE_ID` (a `<timestamp> <tab>` pair); the
+  hook closes that tab only when a *fresh* marker exists — a stale one (the user
+  never did the clean exit, or a herdr restart reused the pane id) is dropped
+  without closing. Marker lives under a **fixed** `$HOME/.cache` — not
+  `$XDG_CACHE_HOME` (may diverge between the /close shell and the hook's env), not
+  `$TMPDIR` (per-process on macOS) — so /close and the hook always agree on the path.
 
 ## Gotcha: there is exactly one way to exit Claude's TUI from outside
 
@@ -65,10 +75,14 @@ cleanly from another process:
   inside a shell pane), where exiting drops back to the shell and the tab survives.
 - **Self-close injects onto an idle prompt, never mid-turn.** `/close` is itself a
   turn; injecting `/exit` while Claude is busy is unreliable. The helper's `self-exit`
-  arms a **detached** injector (`nohup … & disown`) that sleeps a few seconds — past
-  the turn's end — then runs `inject-exit` against its own pane, landing `/exit` on
-  the now-idle prompt (the state proven to exit cleanly). `nohup` keeps it alive past
-  the launching turn. This sidesteps mid-turn delivery entirely and needs no
+  arms a **detached** injector (`nohup … & disown`) that **polls the pane's
+  `agent_status` until it leaves `working`** (the launching turn has ended) and only
+  then runs `inject-exit` against its own pane, landing `/exit` on the now-idle
+  prompt (the state proven to exit cleanly). Polling beats a fixed `sleep N` timer,
+  which fires mid-turn whenever the closing turn outlasts the guess. `nohup` keeps
+  the injector alive past the launching turn; the args are passed positionally to an
+  internal subcommand (no `bash -c "<interpolated>"`, which would double-eval an
+  unusual pane id). This sidesteps mid-turn delivery entirely and needs no
   `--dangerously-skip-permissions` agent to test.
 
 Related: [[herdr-kickoff-automation]], [[skill-composition]] (helper-script single
