@@ -87,10 +87,13 @@ The same rule applies to any project-specific setup the user's `CLAUDE.md` may a
 12. **Launch the worktree session** — automate it inside herdr, otherwise show
     the manual block.
 
-    Detect herdr: automate **only** when `[ "${HERDR_ENV:-}" = "1" ]` **and**
-    `command -v herdr` succeeds. If `HERDR_ENV` is set but any herdr command below
-    fails (broken/missing socket), fall back to the manual block — never leave the
-    user without a way to start the session.
+    Detect herdr: automate **only** when `[ "${HERDR_ENV:-}" = "1" ]`, a non-empty
+    `$HERDR_WORKSPACE_ID`, and both `command -v herdr` and `command -v python3`
+    succeed. (An empty `--workspace` would drop the tab into the *focused*
+    workspace — which may be an unrelated project; `python3` parses the pane id.)
+    If any of these is missing, or a herdr command below fails (broken/missing
+    socket → empty `$pane`), fall back to the manual block — never leave the user
+    without a way to start the session.
 
     **a) Inside herdr — open a named tab that auto-continues:**
 
@@ -107,57 +110,40 @@ The same rule applies to any project-specific setup the user's `CLAUDE.md` may a
     WORKTREE="<main-repo>/.claude/worktrees/<task-name>"   # absolute path
     LABEL="<short sidebar label, e.g. close-herdr>"
 
-    pane=$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" \
-             --cwd "$WORKTREE" --label "$LABEL" --no-focus \
-           | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])')
-    # If tab create failed (empty pane id → broken socket), fall back to the
-    # manual block instead of continuing.
-    herdr agent rename "$pane" "$LABEL"
+    # Spawn Claude as argv (no shell, no typed keystrokes): herdr names the agent
+    # "$LABEL" and execs `claude` directly. The pane id is result.agent.pane_id.
+    pane=$(herdr agent start "$LABEL" --workspace "$HERDR_WORKSPACE_ID" \
+             --cwd "$WORKTREE" --no-focus -- claude -n "$LABEL" "/continue" \
+           | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["agent"]["pane_id"])')
 
-    # Wait until the fresh pane's shell actually runs commands before launching
-    # Claude. A brand-new pane may still be sourcing rc files, or be sitting on an
-    # interactive startup prompt (e.g. oh-my-zsh's "update? [Y/n]") — either would
-    # swallow the launch keystrokes (a lost leading char turns `claude …` into
-    # `laude …`: command not found). The sentinel's output `herdr-ready-ok` differs
-    # from its echoed command text, so the match fires only once the shell has
-    # executed it.
-    for _ in 1 2 3 4 5; do
-      herdr pane send-keys "$pane" Enter            # dismiss a stray [Y/n]; harmless at a prompt
-      herdr pane run "$pane" "printf 'herdr-%s-ok\n' ready"
-      herdr wait output "$pane" --match "herdr-ready-ok" --timeout 3000 >/dev/null 2>&1 && break
-    done
-
-    herdr pane run "$pane" "claude -n \"$LABEL\" \"/continue\""
+    # Empty pane id → a herdr call failed: show the manual block (b) instead.
+    # Otherwise relocate the agent into its own background tab (one tab per task).
+    [ -n "$pane" ] && herdr pane move "$pane" --new-tab --label "$LABEL" --no-focus
     ```
 
     Line by line:
-    - `herdr tab create … --workspace "$HERDR_WORKSPACE_ID"` opens a new tab in the
-      **same** workspace. `--workspace` is mandatory: without it the tab lands in
-      the *focused* workspace, which may be an unrelated project. `--cwd` sets the
-      **new** pane's cwd to the worktree — it does **not** change the kickoff
-      session's CWD (so the "never persistent cd" rule above is respected).
+    - `herdr agent start "$LABEL" … -- claude -n "$LABEL" "/continue"` launches
+      Claude as **argv** — herdr execs the `claude` binary directly instead of
+      typing a command into a freshly spawned shell. That structurally removes the
+      keystroke race a new interactive shell would otherwise create (no rc-file
+      delay, no oh-my-zsh `[Y/n]` prompt eating the leading character), so no
+      readiness handshake is needed. The `<name>` argument names the herdr agent
+      immediately (the sidebar shows it at once), `-n "$LABEL"` names the real
+      Claude session, and `/continue` is the launch prompt — Claude runs it on
+      startup.
+    - `--workspace "$HERDR_WORKSPACE_ID"` keeps the agent in the **same** workspace;
+      `--cwd "$WORKTREE"` sets the new pane's cwd to the worktree — it does **not**
+      change the kickoff session's CWD (the "never persistent cd" rule above holds);
       `--no-focus` keeps the kickoff session in front.
-    - the pane id is read from `result.root_pane.pane_id`.
-    - `herdr agent rename "$pane" "$LABEL"` sets an immediate, deterministic
-      herdr-side label, so the sidebar names the task the instant the tab opens —
-      even during the second or two while Claude boots. (`herdr agent rename
-      "$pane" --clear` reverts it.)
-    - the `for` loop is a **readiness handshake**: it makes the new pane echo a
-      sentinel and waits for that sentinel's *output* before launching Claude, so
-      a slow shell init or an interactive startup prompt can't swallow the launch
-      keystrokes. (Verified failure mode: without it, oh-my-zsh's update prompt ate
-      the leading `c`, leaving `laude … : command not found`.)
-    - `herdr pane run "$pane" "claude -n \"$LABEL\" \"/continue\""` runs the
-      **same** launch command as the manual block, just delivered into the new
-      pane: `-n "$LABEL"` names the real Claude session (which propagates into
-      the OSC title herdr reads), and the `/continue` initial prompt runs the
-      resume flow on startup. Because `/continue` is the launch prompt — not an
-      injected keystroke — there is no ready-match to wait for and no timeout to
-      handle: Claude runs it itself once it is input-ready.
+    - `herdr agent start` first lands the agent as a split in the **caller's** tab,
+      so `herdr pane move "$pane" --new-tab --label "$LABEL" --no-focus` relocates
+      it into its own background tab — one clear tab per task in the sidebar.
+    - the pane id comes from `result.agent.pane_id`; an empty value means a herdr
+      call failed, so the `[ -n "$pane" ]` guard skips the move and routes to the
+      manual block.
 
-    If `herdr tab create` fails (broken/missing socket → empty `$pane`), fall back
-    to showing the manual block below instead of running the rest. On success,
-    report where the task is running:
+    If `$pane` is empty (herdr unreachable despite the gate), show the manual block
+    below instead. On success, report where the task is running:
     ```
     Worktree created and launched in herdr!
 
