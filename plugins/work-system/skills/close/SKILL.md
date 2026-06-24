@@ -95,9 +95,12 @@ Rules:
      after removal its cwd points at a deleted path and the match is impossible:
      `WT_TAB=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-teardown.sh" worktree-tab "$HERDR_WORKSPACE_ID" "<worktree-path>")`
      The helper re-checks every herdr prerequisite (socket, `python3`, workspace id) and
-     exits non-zero printing nothing if it cannot match — so an empty/failed `WT_TAB`
-     means "no herdr tab to tear down": skip the herdr step (12) entirely and close
-     exactly as today.
+     exits non-zero printing nothing if it cannot match. An empty `WT_TAB` **outside**
+     herdr means "nothing to tear down" — skip step 12 and close exactly as today. An
+     empty `WT_TAB` **while** `HERDR_ENV=1` means the tab couldn't be located by cwd
+     (e.g. the pane's cwd drifted off the worktree root): don't pretend it was handled —
+     add a line to the final summary like "herdr: couldn't locate this task's tab
+     automatically — close it by hand if it's still open," then skip step 12.
      Then capture **this session's own tab** so self-close is decided by pane id, not
      the possibly-empty `$HERDR_TAB_ID`:
      `OWN_TAB=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-teardown.sh" own-tab "$HERDR_WORKSPACE_ID" "$HERDR_PANE_ID")`
