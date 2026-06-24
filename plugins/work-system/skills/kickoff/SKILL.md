@@ -84,7 +84,92 @@ The same rule applies to any project-specific setup the user's `CLAUDE.md` may a
     - Run: `pwd` and compare to the `<main-repo>` path captured by the helper in step 1.
     - If they differ, **stop and report an error**: "Session CWD drifted into the worktree during kickoff — investigate which step ran a persistent `cd`." Do not silently continue; a contaminated session will mislead every subsequent command.
 
-12. **Final instructions for the user** (display this block — it is *not* a command to execute):
+12. **Launch the worktree session** — automate it inside herdr, otherwise show
+    the manual block.
+
+    Detect herdr: automate **only** when `[ "${HERDR_ENV:-}" = "1" ]` **and**
+    `command -v herdr` succeeds. If `HERDR_ENV` is set but any herdr command below
+    fails (broken/missing socket), fall back to the manual block — never leave the
+    user without a way to start the session.
+
+    **a) Inside herdr — open a named tab that auto-continues:**
+
+    Derive a short, sidebar-friendly label from the task name — drop filler words
+    (`automate`, `in`, …) so it reads punchy (e.g. `automate-close-in-herdr` →
+    `close-herdr`); hard-cap at ~32 chars with `…`. The **same** `LABEL` names the
+    tab, the herdr agent, and the Claude session, so the sidebar shows one clear
+    name per task. (The `task/<task-name>` branch is unchanged, so `/continue`
+    still resolves the task correctly inside the worktree.) The worktree path is
+    absolute: `<main-repo>/.claude/worktrees/<task-name>` (`<main-repo>` was
+    captured by the helper in step 1). Then run:
+
+    ```sh
+    WORKTREE="<main-repo>/.claude/worktrees/<task-name>"   # absolute path
+    LABEL="<short sidebar label, e.g. close-herdr>"
+
+    pane=$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" \
+             --cwd "$WORKTREE" --label "$LABEL" --no-focus \
+           | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])')
+    # If tab create failed (empty pane id → broken socket), fall back to the
+    # manual block instead of continuing.
+    herdr agent rename "$pane" "$LABEL"
+
+    # Wait until the fresh pane's shell actually runs commands before launching
+    # Claude. A brand-new pane may still be sourcing rc files, or be sitting on an
+    # interactive startup prompt (e.g. oh-my-zsh's "update? [Y/n]") — either would
+    # swallow the launch keystrokes (a lost leading char turns `claude …` into
+    # `laude …`: command not found). The sentinel's output `herdr-ready-ok` differs
+    # from its echoed command text, so the match fires only once the shell has
+    # executed it.
+    for _ in 1 2 3 4 5; do
+      herdr pane send-keys "$pane" Enter            # dismiss a stray [Y/n]; harmless at a prompt
+      herdr pane run "$pane" "printf 'herdr-%s-ok\n' ready"
+      herdr wait output "$pane" --match "herdr-ready-ok" --timeout 3000 >/dev/null 2>&1 && break
+    done
+
+    herdr pane run "$pane" "claude -n \"$LABEL\" \"/continue\""
+    ```
+
+    Line by line:
+    - `herdr tab create … --workspace "$HERDR_WORKSPACE_ID"` opens a new tab in the
+      **same** workspace. `--workspace` is mandatory: without it the tab lands in
+      the *focused* workspace, which may be an unrelated project. `--cwd` sets the
+      **new** pane's cwd to the worktree — it does **not** change the kickoff
+      session's CWD (so the "never persistent cd" rule above is respected).
+      `--no-focus` keeps the kickoff session in front.
+    - the pane id is read from `result.root_pane.pane_id`.
+    - `herdr agent rename "$pane" "$LABEL"` sets an immediate, deterministic
+      herdr-side label, so the sidebar names the task the instant the tab opens —
+      even during the second or two while Claude boots. (`herdr agent rename
+      "$pane" --clear` reverts it.)
+    - the `for` loop is a **readiness handshake**: it makes the new pane echo a
+      sentinel and waits for that sentinel's *output* before launching Claude, so
+      a slow shell init or an interactive startup prompt can't swallow the launch
+      keystrokes. (Verified failure mode: without it, oh-my-zsh's update prompt ate
+      the leading `c`, leaving `laude … : command not found`.)
+    - `herdr pane run "$pane" "claude -n \"$LABEL\" \"/continue\""` runs the
+      **same** launch command as the manual block, just delivered into the new
+      pane: `-n "$LABEL"` names the real Claude session (which propagates into
+      the OSC title herdr reads), and the `/continue` initial prompt runs the
+      resume flow on startup. Because `/continue` is the launch prompt — not an
+      injected keystroke — there is no ready-match to wait for and no timeout to
+      handle: Claude runs it itself once it is input-ready.
+
+    If `herdr tab create` fails (broken/missing socket → empty `$pane`), fall back
+    to showing the manual block below instead of running the rest. On success,
+    report where the task is running:
+    ```
+    Worktree created and launched in herdr!
+
+    Tab:      <LABEL>   (workspace <HERDR_WORKSPACE_ID>, opened in the background)
+    Location: .claude/worktrees/<task-name>
+    Branch:   task/<task-name>
+
+    The new tab is already running `claude … /continue`. Switch to it to work there.
+    ```
+
+    **b) Outside herdr — manual instructions** (display this block — it is *not* a
+    command to execute):
     ```
     Worktree created!
 

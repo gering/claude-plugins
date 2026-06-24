@@ -14,7 +14,7 @@ Lightweight, native knowledge management for Claude Code projects. Three layers 
 
 ### Work System
 
-Generic task and worktree workflow system. Manage tasks as markdown files, work in isolated git worktrees, and track progress through the full lifecycle.
+Generic task and worktree workflow system. Manage tasks as markdown files, work in isolated git worktrees, and track progress through the full lifecycle. Inside a [herdr](plugins/work-system/#herdr-integration) session, `/kickoff` auto-opens a named tab with the worktree as cwd, starts Claude, and runs `/continue` for you.
 
 **Commands:** `/define`, `/kickoff`, `/adopt`, `/continue`, `/status`, `/close`, `/list`
 
