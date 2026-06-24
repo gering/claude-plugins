@@ -1,0 +1,17 @@
+{
+  "description": "Closes the herdr tab of a task that ran /close from inside its own worktree tab. The handler is a no-op unless /close armed a per-pane self-close marker, so it never fires on an ordinary session exit.",
+  "hooks": {
+    "SessionEnd": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/herdr-teardown.sh\" on-session-end",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

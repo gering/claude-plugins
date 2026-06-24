@@ -10,6 +10,7 @@
 - `features/backfill-and-origin-metadata.md` — `/backfill-knowledge` significance bar + origin-reconstruction cascade
 - `features/statusline-integration.md` — Status-line segment: plugins can't own `statusLine.command`; marker-block injection
 - `features/herdr-kickoff-automation.md` — `/kickoff` in herdr: argv-launch via `herdr-launch.sh` (race-free), named tab per task
+- `features/herdr-close-automation.md` — `/close` in herdr: cwd-tab teardown, plugin SessionEnd hook, the one TUI-exit primitive, detached self-exit onto idle
 
 ## Deployment
 - `deployment/ci-structure-checks.md` — `check-structure.py` as the single automated guard for a build-less repo
