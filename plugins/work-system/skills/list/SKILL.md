@@ -59,6 +59,9 @@ user_invocable: true
    ```
 
 5. **Summary statistics**:
+   - Archived count: `find tasks/archive -maxdepth 1 -type f -name '*.md' ! -name '_index.md' 2>/dev/null | wc -l | tr -d ' '`
+     — closed tasks moved aside by `/close` (the non-recursive `tasks/*.md` glob in step 2
+     already excludes them). Omit the line when the count is 0.
    ```
    📊 Summary:
    • Total tasks: 3
@@ -66,6 +69,7 @@ user_invocable: true
    • Ready for review: 1
    • Not started: 1
    • Active worktrees: 2
+   • Archived: 7 (tasks/archive/)
    ```
 
 6. **Suggested next step** (contextual — pick the single most relevant action based on the state surveyed above):

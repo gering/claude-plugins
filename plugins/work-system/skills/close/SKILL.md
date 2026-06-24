@@ -17,7 +17,7 @@ This skill may run from the main repo *or* from inside the worktree being delete
 
 Rules:
 - ❌ Do not `cd <worktree>` or `cd <main-repo>` during this skill.
-- ✅ All operations against either tree go through explicit paths: `git -C <main-repo-path> …`, `git -C <worktree-path> …`, `rm <main-repo-path>/tasks/<task-name>.md`, etc.
+- ✅ All operations against either tree go through explicit paths: `git -C <main-repo-path> …`, `git -C <worktree-path> …`, `bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" archive <main-repo-path> …`, etc.
 - After deletion, the session's CWD may already be in a now-removed directory — that's the user's problem to fix (a new `cd` in their terminal), not something this skill should "repair" mid-run.
 
 ## Instructions
@@ -143,11 +143,39 @@ Rules:
    - **Exists, merge not confirmed** (manual close) → ask "Delete remote branch too?" first; only
      push the delete on confirmation.
 
-10. **Remove task file** (use the main-repo path from step 4 — do not `cd`):
-    - Run: `rm <main-repo-path>/tasks/<task-name>.md`
-    - Check if the file was git-tracked: `git -C <main-repo-path> status --short tasks/<task-name>.md`
-    - If there is a staged/unstaged change (file was tracked): ask user if they want to commit the removal
-    - If no git change (file was gitignored or untracked): just report "Task file removed", no commit needed
+10. **Archive the task file** (use the main-repo path from step 4 — do not `cd`):
+    Move it into `tasks/archive/` with a closed-stamp instead of deleting it, so the
+    finished-task context (goal, acceptance criteria, shipping PR) survives — `tasks/` is
+    untracked by design, so a deleted task would otherwise be gone for good. The helper
+    builds the stamp, suffixes the filename on a name collision (never clobbers), appends a
+    one-line `tasks/archive/_index.md` entry, and reports whether the archive is committable.
+    - **Merge confirmed** (step 2, `pr_number` is set) — fetch the merge commit for the stamp
+      (best-effort; omit `--sha` when empty), then archive with the PR:
+      ```sh
+      SHA=$(gh pr view <pr_number> --json mergeCommit --jq '.mergeCommit.oid' 2>/dev/null)
+      bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" archive <main-repo-path> <task-name> <task-branch> --pr <pr_number> --sha "$SHA"
+      ```
+    - **Manual close** (no merged PR) — archive without `--pr`; the stamp records
+      "closed manually (no merged PR)":
+      ```sh
+      bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" archive <main-repo-path> <task-name> <task-branch>
+      ```
+    - **Helper exits 3** ("no task file"): nothing to archive (the file was never created) —
+      note it in the summary and continue; not a failure.
+    - Read the helper's `key=value` output (`archived_path`, `collision`, `tracked`):
+      - **`tracked=yes`** (archive is *not* gitignored — `tasks/` is tracked in this project):
+        the move is a committable change. Show `git -C <main-repo-path> status --short tasks/`
+        and ask whether to commit the archive. If yes, stage only the archive (never a blanket
+        `tasks/`, which would sweep in pending task files):
+        ```sh
+        git -C <main-repo-path> add tasks/archive/
+        git -C <main-repo-path> add -A -- "tasks/<task-name>.md" 2>/dev/null || true
+        git -C <main-repo-path> commit -m "Archive task <task-name>"
+        ```
+      - **`tracked=no`** (archive is local-only, mirroring a deliberately-untracked `tasks/`):
+        no commit — just report.
+    - Report: "Task file archived to `<archived_path>`" (add "(name existed — suffixed)" when
+      `collision=yes`).
 
 11. **Final summary**:
     ```
@@ -157,7 +185,7 @@ Rules:
     - Worktree removed
     - Local branch deleted
     - Remote branch deleted (if applicable)
-    - Task file removed
+    - Task file archived → tasks/archive/<name>.md
     - main synced with origin (<N> commits pulled)     [if fast-forward happened]
     - herdr tab closed (if run inside a herdr session — see step 12)
 

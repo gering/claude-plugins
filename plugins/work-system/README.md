@@ -32,7 +32,7 @@ Generic task and worktree workflow system for Claude Code. Manage tasks as markd
 | `/adopt` | Adopt an existing branch into the work system |
 | `/continue` | Resume work on current task, load context |
 | `/status` | Check task status (PRs, branches, commits) |
-| `/close` | Clean up after merge (worktree, branches, task file) |
+| `/close` | Clean up after merge (worktree, branches; archives the task file) |
 | `/list` | Overview of all tasks, worktrees, and status |
 
 ## How It Works
@@ -124,6 +124,13 @@ Loads the task context, checks dependencies, and shows current progress.
 ```
 > /close
 ```
+
+Instead of deleting the task file, `/close` **archives** it to
+`tasks/archive/<name>.md` with a closed-stamp (date, shipping PR + merge commit,
+branch) and appends a one-line entry to `tasks/archive/_index.md` — a queryable
+record of finished work. The archive inherits whatever `tasks/` does: gitignored
+`tasks/` keeps it local-only; a tracked `tasks/` makes the move committable
+(`/close` asks before committing). `/list` shows the archived count in its summary.
 
 ## herdr integration
 
