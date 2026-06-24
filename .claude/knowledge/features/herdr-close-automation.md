@@ -76,10 +76,13 @@ cleanly from another process:
 - **Self-close injects onto an idle prompt, never mid-turn.** `/close` is itself a
   turn; injecting `/exit` while Claude is busy is unreliable. The helper's `self-exit`
   arms a **detached** injector (`nohup … & disown`) that **polls the pane's
-  `agent_status` until it leaves `working`** (the launching turn has ended) and only
-  then runs `inject-exit` against its own pane, landing `/exit` on the now-idle
-  prompt (the state proven to exit cleanly). Polling beats a fixed `sleep N` timer,
-  which fires mid-turn whenever the closing turn outlasts the guess. `nohup` keeps
+  `agent_status` until a confirmed `idle`/`done`** (the launching turn has ended) and
+  only then runs `inject-exit`, landing `/exit` on the now-idle prompt (the state
+  proven to exit cleanly). Polling beats a fixed `sleep N` timer, which fires
+  mid-turn whenever the closing turn outlasts the guess. Critically it injects
+  *only* on a confirmed idle status — a transient `herdr pane list` failure yields
+  empty output, which must be retried, **not** mistaken for idle (that would inject
+  mid-turn); a vanished pane or a never-idle timeout injects nothing. `nohup` keeps
   the injector alive past the launching turn; the args are passed positionally to an
   internal subcommand (no `bash -c "<interpolated>"`, which would double-eval an
   unusual pane id). This sidesteps mid-turn delivery entirely and needs no

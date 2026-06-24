@@ -68,24 +68,33 @@ set -eu
 # hide the marker; not $TMPDIR, which is per-process on macOS), so /close and the
 # hook always resolve the same path.
 MARKER_TTL=3600   # seconds; a marker older than this is stale → never auto-close
-marker_dir() { printf '%s/.cache/work-system/herdr' "$HOME"; }
+# Fail if $HOME is empty/unset so we never write/read a rootless `/.cache/...`
+# the /close shell and the hook wouldn't agree on.
+marker_dir() { [ -n "${HOME:-}" ] || return 1; printf '%s/.cache/work-system/herdr' "$HOME"; }
 marker_file() {
-  local pane="${1:-${HERDR_PANE_ID:-}}"
+  local pane="${1:-${HERDR_PANE_ID:-}}" dir
   [ -n "$pane" ] || return 1
+  dir="$(marker_dir)" || return 1
   pane="${pane//\//_}"   # sanitize: never build a path component from a raw id
-  printf '%s/self-close-%s' "$(marker_dir)" "$pane"
+  printf '%s/self-close-%s' "$dir" "$pane"
 }
 
 require_herdr() { command -v herdr >/dev/null 2>&1 || { echo "herdr not on PATH" >&2; exit 1; }; }
 
 # Extract a tab_id from `herdr pane list` JSON on stdin.
 #   argv: <target-cwd> [--first] [--exclude <tab>]   (cwd matched by realpath)
-# Prints the tab of the first pane whose realpath(cwd) == realpath(target); with
-# --first, falls back to the first pane whose tab != --exclude. Empty on no match
-# or malformed JSON.
+# Prints the tab of the first pane whose realpath(cwd) == realpath(target), honoring
+# --exclude even on that primary match; with --first, falls back to the first pane
+# whose tab != --exclude. An empty/whitespace target never matches (realpath("")
+# would resolve to the process cwd). Empty output on no match or malformed JSON.
 extract_tab='import sys, json, os
+def norm(p):
+    if not p or not p.strip():
+        return ""
+    p2 = p.rstrip("/") or "/"   # all-slashes path stays root, never collapses to ""
+    return os.path.realpath(p2)
 args = sys.argv[1:]
-target = os.path.realpath(args[0].rstrip("/")) if args else ""
+target = norm(args[0]) if args else ""
 rest = args[1:]
 fallback = "--first" in rest
 exclude = ""
@@ -96,11 +105,12 @@ try:
     panes = json.load(sys.stdin)["result"]["panes"]
 except Exception:
     sys.exit(0)
-for p in panes:
-    cwd = p.get("cwd") or ""
-    if cwd and os.path.realpath(cwd.rstrip("/")) == target:
-        print(p.get("tab_id") or "")
-        sys.exit(0)
+if target:
+    for p in panes:
+        t = p.get("tab_id") or ""
+        if t and t != exclude and norm(p.get("cwd") or "") == target:
+            print(t)
+            sys.exit(0)
 if fallback:
     for p in panes:
         t = p.get("tab_id") or ""
@@ -108,29 +118,34 @@ if fallback:
             print(t)
             sys.exit(0)'
 
-# Extract the tab_id of the pane whose pane_id == argv[0]. Empty on no match.
+# Extract the tab_id of the pane whose pane_id == argv[0]. Empty pid never matches.
 extract_pane_tab='import sys, json
 pid = sys.argv[1] if len(sys.argv) > 1 else ""
 try:
     panes = json.load(sys.stdin)["result"]["panes"]
 except Exception:
     sys.exit(0)
-for p in panes:
-    if p.get("pane_id") == pid:
-        print(p.get("tab_id") or "")
-        sys.exit(0)'
+if pid:
+    for p in panes:
+        if p.get("pane_id") == pid:
+            print(p.get("tab_id") or "")
+            sys.exit(0)'
 
-# Extract the agent_status of the pane whose pane_id == argv[0]. Empty if gone.
+# Print the agent_status of the pane whose pane_id == argv[0]; "__gone__" if the
+# (valid) list has no such pane. An empty pid is treated as gone. Lets the poller
+# tell "pane vanished" apart from "list call failed" (which yields no stdout).
 extract_status='import sys, json
 pid = sys.argv[1] if len(sys.argv) > 1 else ""
 try:
     panes = json.load(sys.stdin)["result"]["panes"]
 except Exception:
     sys.exit(0)
-for p in panes:
-    if p.get("pane_id") == pid:
-        print(p.get("agent_status") or "")
-        sys.exit(0)'
+if pid:
+    for p in panes:
+        if p.get("pane_id") == pid:
+            print(p.get("agent_status") or "")
+            sys.exit(0)
+print("__gone__")'
 
 # herdr pane list for a workspace (empty ws → unscoped). Empty string on failure.
 pane_list() {
@@ -146,6 +161,7 @@ lookup_tab() {
   command -v python3 >/dev/null 2>&1 || { echo "python3 not on PATH" >&2; return 1; }
   local ws="$1" target="$2"; shift 2
   local json tab
+  [ -n "$target" ] || { echo "empty target path — refusing to match" >&2; return 1; }
   json="$(pane_list "$ws")"
   [ -n "$json" ] || { echo "herdr pane list returned nothing" >&2; return 1; }
   tab="$(printf '%s' "$json" | python3 -c "$extract_tab" "$target" "$@" 2>/dev/null || true)"
@@ -208,28 +224,36 @@ case "$cmd" in
     echo "self-exit armed for $pane (fires once this turn goes idle)" >&2
     ;;
   __delayed-inject)
-    # Internal (detached): poll until the pane leaves the 'working' state, then
-    # inject /exit. Bounded so a never-idle pane can't hang; fire-and-forget.
+    # Internal (detached): wait for THIS session to go idle (its turn ended), then
+    # inject /exit. Inject ONLY on a confirmed idle/done — a transient `herdr pane
+    # list` failure (empty output) is retried, never mistaken for idle, so /exit is
+    # never delivered into a busy TUI. A vanished pane (`__gone__`) or a never-idle
+    # timeout injects nothing; the armed marker + SessionEnd hook + manual Ctrl+D
+    # remain the close path. Bounded so it can't hang; fire-and-forget.
     pane="${2:-}"; ws="${3:-}"
     [ -n "$pane" ] || exit 0
     command -v herdr   >/dev/null 2>&1 || exit 0
     command -v python3 >/dev/null 2>&1 || exit 0
     i=0
-    while [ $i -lt 40 ]; do
-      st="$(pane_list "$ws" | python3 -c "$extract_status" "$pane" 2>/dev/null || true)"
-      case "$st" in idle|done|"") break ;; esac
+    while [ $i -lt 60 ]; do
+      json="$(pane_list "$ws")"
+      if [ -z "$json" ]; then sleep 0.5 2>/dev/null || true; i=$((i + 1)); continue; fi
+      st="$(printf '%s' "$json" | python3 -c "$extract_status" "$pane" 2>/dev/null || true)"
+      case "$st" in
+        idle|done) bash "$0" inject-exit "$pane" >/dev/null 2>&1 || true; exit 0 ;;
+        __gone__)  exit 0 ;;   # pane already gone — nothing to exit
+      esac
       sleep 0.5 2>/dev/null || true
       i=$((i + 1))
     done
-    bash "$0" inject-exit "$pane" >/dev/null 2>&1 || true
-    exit 0
+    exit 0   # never confirmed idle → do NOT inject mid-turn; backups handle the close
     ;;
   arm-self-close)
     [ $# -eq 2 ] || { echo "usage: ${0##*/} arm-self-close <tab-id>" >&2; exit 2; }
-    mf="$(marker_file)" || { echo "HERDR_PANE_ID not set — cannot arm self-close" >&2; exit 1; }
-    mkdir -p "$(marker_dir)"
+    mf="$(marker_file)" || { echo "cannot resolve marker path (HERDR_PANE_ID / HOME unset)" >&2; exit 1; }
+    mkdir -p "$(dirname "$mf")"
     printf '%s %s\n' "$(date +%s 2>/dev/null || echo 0)" "$2" > "$mf"
-    echo "armed self-close for pane ${HERDR_PANE_ID} → tab $2" >&2
+    echo "armed self-close for pane ${HERDR_PANE_ID:-?} → tab $2" >&2
     ;;
   on-session-end)
     # Drain the hook's JSON stdin so Claude's write never SIGPIPEs us; skip when
@@ -238,17 +262,29 @@ case "$cmd" in
     mf="$(marker_file 2>/dev/null)" || exit 0
     [ -f "$mf" ] || exit 0
     read -r stamp tab < "$mf" 2>/dev/null || { rm -f "$mf" 2>/dev/null || true; exit 0; }
-    rm -f "$mf" 2>/dev/null || true
-    [ -n "$tab" ] || exit 0
-    # Honor only a fresh marker: a stale one (the user never performed the clean
-    # exit, then exits much later, or a herdr restart reused this pane id) must
-    # not close whatever tab now holds the recorded id.
+    [ -n "$tab" ] || { rm -f "$mf" 2>/dev/null || true; exit 0; }
+    # Close only a VERIFIABLY FRESH marker: require a usable timestamp on both
+    # sides and an in-window, non-negative age. If staleness can't be bounded
+    # (date unavailable so stamp/now is 0, clock skew, or older than the TTL — the
+    # user never did the clean exit, or a herdr restart reused this pane id), drop
+    # it WITHOUT closing, so we never close whatever tab now holds the recorded id.
     now="$(date +%s 2>/dev/null || echo 0)"
     case "$stamp" in ''|*[!0-9]*) stamp=0 ;; esac
-    if [ "$now" -gt 0 ] && [ "$stamp" -gt 0 ] && [ $((now - stamp)) -gt "$MARKER_TTL" ]; then
-      exit 0
+    case "$now"   in ''|*[!0-9]*) now=0 ;; esac
+    fresh=no
+    if [ "$now" -gt 0 ] && [ "$stamp" -gt 0 ]; then
+      age=$((now - stamp))
+      [ "$age" -ge 0 ] && [ "$age" -le "$MARKER_TTL" ] && fresh=yes
     fi
-    command -v herdr >/dev/null 2>&1 && herdr tab close "$tab" >/dev/null 2>&1 || true
+    if [ "$fresh" = yes ] && command -v herdr >/dev/null 2>&1; then
+      # Close before removing the marker, with one retry, so a transient herdr
+      # hiccup doesn't silently leak the finished task's tab.
+      herdr tab close "$tab" >/dev/null 2>&1 || {
+        sleep 0.3 2>/dev/null || true
+        herdr tab close "$tab" >/dev/null 2>&1 || true
+      }
+    fi
+    rm -f "$mf" 2>/dev/null || true
     exit 0
     ;;
   *)
