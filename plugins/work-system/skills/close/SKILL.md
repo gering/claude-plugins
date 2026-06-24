@@ -38,7 +38,7 @@ Rules:
    - Read the fields: `<task-branch>` = `task_branch` (the resolved real ref — the current branch
      in a worktree, or an exact `task/<name>` match when resolved by name), `<task-name>` =
      `task_name`, `<main-branch>` = `main_branch`, plus `verdict`, `confidence`, `pr_state`,
-     `pr_number`, `branch_merged`.
+     `pr_number`, `merge_sha` (the merge commit, used by step 10's archive stamp), `branch_merged`.
    - **Wherever the steps below write `task/<task-name>`, use the resolved `<task-branch>`** — so
      an adopted branch that kept its original name is closed correctly, not orphaned.
 
@@ -149,11 +149,10 @@ Rules:
     untracked by design, so a deleted task would otherwise be gone for good. The helper
     builds the stamp, suffixes the filename on a name collision (never clobbers), appends a
     one-line `tasks/archive/_index.md` entry, and reports whether the archive is committable.
-    - **Merge confirmed** (step 2, `pr_number` is set) — fetch the merge commit for the stamp
-      (best-effort; omit `--sha` when empty), then archive with the PR:
+    - **Merge confirmed** (step 2, `pr_number` is set) — archive with the PR and the merge
+      commit from step 1's `merge_sha` (the stamp omits the SHA automatically when it's empty):
       ```sh
-      SHA=$(gh pr view <pr_number> --json mergeCommit --jq '.mergeCommit.oid' 2>/dev/null)
-      bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" archive <main-repo-path> <task-name> <task-branch> --pr <pr_number> --sha "$SHA"
+      bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" archive <main-repo-path> <task-name> <task-branch> --pr <pr_number> --sha "<merge_sha>"
       ```
     - **Manual close** (no merged PR) — archive without `--pr`; the stamp records
       "closed manually (no merged PR)":
@@ -162,18 +161,18 @@ Rules:
       ```
     - **Helper exits 3** ("no task file"): nothing to archive (the file was never created) —
       note it in the summary and continue; not a failure.
-    - Read the helper's `key=value` output (`archived_path`, `collision`, `tracked`):
-      - **`tracked=yes`** (archive is *not* gitignored — `tasks/` is tracked in this project):
-        the move is a committable change. Show `git -C <main-repo-path> status --short tasks/`
-        and ask whether to commit the archive. If yes, stage only the archive (never a blanket
-        `tasks/`, which would sweep in pending task files):
+    - Read the helper's `key=value` output (`archived_path`, `collision`, `committable`):
+      - **`committable=yes`** (archive is *not* gitignored — committable in this project; covers
+        both a tracked `tasks/` and an untracked-by-omission one): the move is a committable
+        change. Show `git -C <main-repo-path> status --short tasks/archive/ tasks/<task-name>.md`
+        (scoped — not the whole `tasks/`, which would surface unrelated pending tasks) and ask
+        whether to commit the archive. If yes, stage precisely via the helper, then commit:
         ```sh
-        git -C <main-repo-path> add tasks/archive/
-        git -C <main-repo-path> add -A -- "tasks/<task-name>.md" 2>/dev/null || true
+        bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" stage <main-repo-path> <task-name> <archived_path>
         git -C <main-repo-path> commit -m "Archive task <task-name>"
         ```
-      - **`tracked=no`** (archive is local-only, mirroring a deliberately-untracked `tasks/`):
-        no commit — just report.
+      - **`committable=no`** (archive is gitignored — local-only, mirroring a deliberately-ignored
+        `tasks/`): no commit — just report.
     - Report: "Task file archived to `<archived_path>`" (add "(name existed — suffixed)" when
       `collision=yes`).
 
@@ -185,7 +184,7 @@ Rules:
     - Worktree removed
     - Local branch deleted
     - Remote branch deleted (if applicable)
-    - Task file archived → tasks/archive/<name>.md
+    - Task file archived → <archived_path>     [the helper's actual path, e.g. tasks/archive/<name>-2.md on a collision]
     - main synced with origin (<N> commits pulled)     [if fast-forward happened]
     - herdr tab closed (if run inside a herdr session — see step 12)
 

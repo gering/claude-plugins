@@ -27,19 +27,23 @@ logic belongs in a tested script, not SKILL.md prose). See also [[skill-composit
 
 ## Design decisions
 
-- **Adaptive tracking, no `.gitignore` surgery.** The archive inherits whatever
-  `tasks/` does: the helper checks `git check-ignore` on the archive path and
-  reports `tracked=yes/no`. Gitignored `tasks/` → the archived file is ignored too
-  (local-only); a tracked/committable `tasks/` → the move is a committable change.
-  This was the central open question — resolved by making behavior *follow the
-  project* rather than hardcoding committed-vs-local.
+- **Adaptive committability, no `.gitignore` surgery.** The archive inherits
+  whatever `tasks/` does: the helper checks `git check-ignore` on the archive path
+  and reports `committable=yes/no`. Gitignored `tasks/` → the archived file is
+  ignored too (local-only); otherwise the move is a committable change. The key is
+  named `committable`, not `tracked`, on purpose: "not ignored" ≠ "git-tracked", so
+  an untracked-by-omission `tasks/` still reports `committable=yes` (the project
+  opts task files into git on first archive). This was the central open question —
+  resolved by making behavior *follow the project* rather than hardcoding it.
 - **The script never commits; `/close` asks first.** Honoring the
-  never-commit-without-approval rule, `archive-task.sh` only does the filesystem
-  move + index append and reports committability. When `tracked=yes`, `/close`
-  prompts, then stages **only** `tasks/archive/` plus the one removed file — never a
-  blanket `git add tasks/`, which would sweep in unrelated *pending* task files.
-  Staging the removal uses `git add -A -- "tasks/<name>.md" 2>/dev/null || true` so
-  it's a no-op (not an error) when the original was untracked-by-omission.
+  never-commit-without-approval rule, `archive-task.sh archive` only does the
+  filesystem move + index append. When `committable=yes`, `/close` prompts, then
+  calls `archive-task.sh stage` — which stages **only** the new file, `_index.md`,
+  and the original's removal (a `git add -A` no-op for an untracked-by-omission
+  original), never a blanket `git add tasks/` that would sweep in unrelated
+  *pending* task files. Keeping the staging in the tested `stage` subcommand (not
+  SKILL.md prose) holds the precise-scoping rule where it can't drift; the commit
+  itself, which needs approval, stays in `/close`.
 - **Never clobber on a name collision.** A re-close of the same task name suffixes
   the archived file `-2`, `-3`, … rather than overwriting a prior archive; a fresh
   `_index.md` line is appended either way, so every close is recorded.
