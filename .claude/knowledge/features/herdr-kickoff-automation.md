@@ -10,13 +10,20 @@ prime: false
 
 # herdr /kickoff Automation
 
-Inside a herdr session (`HERDR_ENV=1` + the `herdr` CLI on `PATH`), `/kickoff`
-replaces its manual "open a terminal yourself" block with an automated tab launch.
-Exact commands live in `plugins/work-system/skills/kickoff/SKILL.md` step 12 — this
-entry captures the durable design and one non-obvious gotcha.
+Inside a herdr session, `/kickoff` replaces its manual "open a terminal yourself"
+block with an automated tab launch. The launch lives in one shared, testable
+helper — `plugins/work-system/scripts/herdr-launch.sh` (called from
+`skills/kickoff/SKILL.md` step 12) — which is the source of truth; this entry
+captures the durable design and one non-obvious gotcha.
 
 ## Design decisions
 
+- **Encapsulate the launch in a script, not skill prose.** The deterministic
+  sequence (gate → `agent start` → robust pane-id parse → `pane move` → exit code)
+  lives in `herdr-launch.sh` so it can be `bash`-tested and reused (e.g. by a
+  future `/adopt` automation), per the project's helper-script convention and the
+  "prose skill logic drifts" memory. The skill only derives the label and branches
+  on the helper's `moved=yes|no` / exit code.
 - **Spawn Claude as argv, never type it into a shell.** The launch is
   `herdr agent start "<label>" … -- claude -n "<label>" "/continue"`, which execs
   the `claude` binary directly. The `-- argv` form sidesteps the interactive shell
