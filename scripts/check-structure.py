@@ -195,18 +195,28 @@ def check_skill_frontmatter():
 
 
 def check_internal_refs():
-    """Every ${CLAUDE_PLUGIN_ROOT}/<path> referenced in a plugin must exist."""
+    """Every ${CLAUDE_PLUGIN_ROOT}/<path> referenced in a plugin must exist.
+
+    Scans Markdown (skills, READMEs) *and* the hook manifests (hooks/*.json),
+    where the same reference appears inside the command string — so a renamed or
+    moved script is caught even when only the hook points at it, not just the
+    SKILL.md prose.
+    """
     pattern = re.compile(r"\$\{CLAUDE_PLUGIN_ROOT\}(/[^\s\"'`)>,]+)")
-    for md in sorted((REPO / "plugins").rglob("*.md")):
+    files = sorted((REPO / "plugins").rglob("*.md")) + sorted(
+        (REPO / "plugins").glob("*/hooks/*.json")
+    )
+    for src in files:
         # Plugin root = plugins/<name>/ — first two path components under plugins/.
-        parts = md.relative_to(REPO / "plugins").parts
+        parts = src.relative_to(REPO / "plugins").parts
         plugin_root = REPO / "plugins" / parts[0]
-        text = md.read_text(encoding="utf-8")
+        text = src.read_text(encoding="utf-8")
         for lineno, line in enumerate(text.splitlines(), 1):
             for m in pattern.finditer(line):
                 # Drop trailing sentence punctuation the char class can't exclude
-                # (a bare ref ending a prose sentence: "... foo.sh.").
-                ref = m.group(1).lstrip("/").rstrip(".,;:]")
+                # (a bare ref "... foo.sh."), plus a trailing backslash from a
+                # JSON-escaped quote (`"…/foo.sh\""` → ref ends with `\`).
+                ref = m.group(1).lstrip("/").rstrip(".,;:]\\")
                 # Skip templated/example paths — placeholders and globs are never
                 # literal files (e.g. ${CLAUDE_PLUGIN_ROOT}/skills/<name>/SKILL.md).
                 if not ref or any(c in ref for c in "<>{}*?"):
@@ -214,7 +224,7 @@ def check_internal_refs():
                 target = plugin_root / ref
                 if not target.exists():
                     err(
-                        f"{rel(md)}:{lineno}: references "
+                        f"{rel(src)}:{lineno}: references "
                         f"${{CLAUDE_PLUGIN_ROOT}}/{ref} which does not exist"
                     )
 

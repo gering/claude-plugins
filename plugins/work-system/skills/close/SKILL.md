@@ -97,10 +97,16 @@ Rules:
      The helper re-checks every herdr prerequisite (socket, `python3`, workspace id) and
      exits non-zero printing nothing if it cannot match — so an empty/failed `WT_TAB`
      means "no herdr tab to tear down": skip the herdr step (12) entirely and close
-     exactly as today. Also record whether this is a **self-close**: `SELF=yes` when
-     `WT_TAB` equals `$HERDR_TAB_ID` (you are *inside* the tab being removed), else
-     `SELF=no`. Reading the tab id does not remove anything — the actual teardown is
-     step 12, after cleanup.
+     exactly as today.
+     Then capture **this session's own tab** so self-close is decided by pane id, not
+     the possibly-empty `$HERDR_TAB_ID`:
+     `OWN_TAB=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-teardown.sh" own-tab "$HERDR_WORKSPACE_ID" "$HERDR_PANE_ID")`
+     Classify: `SELF=yes` when `WT_TAB` and `OWN_TAB` are both non-empty and **equal**
+     (you are *inside* the tab being removed); `SELF=no` when both are non-empty and
+     differ. If `OWN_TAB` is empty (this session's tab couldn't be resolved), do **not**
+     guess a scenario — step 12 will skip the automatic teardown and just name the tab
+     for the user; guessing risks `close-tab` killing the live session's own tab
+     mid-turn. Reading ids removes nothing — the teardown itself is step 12, after cleanup.
    - First check for untracked/modified files: `git -C <worktree-path> status --short`
    - If the only difference is `TASK.md` (untracked, copied by kickoff), use `--force` directly:
      `git -C <main-repo-path> worktree remove <worktree-path> --force`
@@ -157,29 +163,40 @@ Rules:
 
 12. **Tear down the herdr tab** — only when step 7 captured a non-empty `WT_TAB`
     (you are in a herdr session and the task had a tab). Outside herdr, or when no
-    tab matched, `/close` is already done — stop here. Route **every** herdr call
-    through the shared helper (single source of truth); never inline `herdr …`.
+    tab matched, `/close` is already done — stop here. **Only proceed if the cleanup
+    above (steps 7–10) actually completed**: if any step stopped for a confirmation
+    you haven't resolved, or you aborted, do **not** run any teardown below
+    (*especially* never `self-exit`) — leave the session alive so the user can act.
+    Route **every** herdr call through the shared helper; never inline `herdr …`.
 
-    **Scenario A — `SELF=no`** (you're in a *different* tab, normally the main
-    session): close the worktree tab directly — a different tab, so no self-kill:
+    **If `OWN_TAB` was empty in step 7** (this session's tab couldn't be resolved):
+    skip the automatic close and just report "herdr: close the task's tab
+    (`$WT_TAB`) yourself" — never run `close-tab`/`self-exit` on a guess (it could
+    kill the live session's own tab mid-turn).
+
+    **Scenario A — `SELF=no`** (`WT_TAB` ≠ `OWN_TAB`; you're in a *different* tab,
+    normally the main session): close the worktree tab directly — a different tab, so
+    no self-kill:
     ```sh
     bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-teardown.sh" close-tab "$WT_TAB"
     ```
     Report: "herdr: closed the task's tab (`$WT_TAB`)." Done. (The idle task-agent
     in that tab dies with it — fine, the task is merged and cleaned up.)
 
-    **Scenario B — `SELF=yes`** (`/close` was run from *inside* the worktree tab):
-    Claude cannot close its own tab, only **exit cleanly**; the plugin's `SessionEnd`
-    hook (`hooks/hooks.json` → `herdr-teardown.sh on-session-end`) closes the tab on
-    that exit, but only because the marker below opts this session in. Order matters —
-    run this **after** the step-11 summary is printed (nothing after the exit runs):
-    1. Resolve the main tab (so the user lands there, not on a dead tab):
+    **Scenario B — `SELF=yes`** (`WT_TAB` == `OWN_TAB`; `/close` was run from *inside*
+    the worktree tab): Claude cannot close its own tab, only **exit cleanly**; the
+    plugin's `SessionEnd` hook (`hooks/hooks.json` → `herdr-teardown.sh
+    on-session-end`) closes the tab on that exit, but only because the marker below
+    opts this session in. Order matters — run this **after** the step-11 summary is
+    printed (nothing after the exit runs):
+    1. Resolve the main tab, **excluding this dying tab** so the fallback never
+       focuses it:
        ```sh
-       MAIN_TAB=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-teardown.sh" main-tab "$HERDR_WORKSPACE_ID" "<main-repo-path>")
+       MAIN_TAB=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-teardown.sh" main-tab "$HERDR_WORKSPACE_ID" "<main-repo-path>" "$OWN_TAB")
        ```
-    2. Arm the self-close marker (the hook reads it for *this* pane on exit):
+    2. Arm the self-close marker (records **this** tab to close on the clean exit):
        ```sh
-       bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-teardown.sh" arm-self-close "$HERDR_TAB_ID"
+       bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-teardown.sh" arm-self-close "$WT_TAB"
        ```
     3. Focus the main tab (skip if `MAIN_TAB` is empty):
        ```sh
@@ -189,17 +206,17 @@ Rules:
        (after the step-11 summary is printed), arm a detached injector that exits
        this session once the turn ends:
        ```sh
-       bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-teardown.sh" self-exit "$HERDR_PANE_ID"
+       bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-teardown.sh" self-exit "$HERDR_PANE_ID" "$HERDR_WORKSPACE_ID"
        ```
-       `self-exit` returns immediately and waits (detached) for this turn to finish —
-       so the `/exit` lands when Claude is back at an **idle** prompt, the state in
-       which it exits cleanly (verified live). It deliberately does **not** inject
-       mid-turn: `herdr pane run "/exit"` does nothing to Claude's TUI and `ctrl+d`
+       `self-exit` returns immediately and the detached injector **polls until this
+       session goes idle** (the turn ends) before injecting — so the `/exit` lands on
+       an **idle** prompt, the state in which it exits cleanly (verified live), never
+       mid-turn. (`herdr pane run "/exit"` does nothing to Claude's TUI and `ctrl+d`
        doesn't exit either — only `send-text "/exit"` + `Return` onto an idle prompt
-       works, which is exactly what the detached injector does. Claude's clean exit
-       **auto-closes** its (root-pane) tab; the marker + `SessionEnd` hook from steps
-       2 are the backup for sessions whose tab does not auto-close (e.g. Claude
-       launched inside a shell pane).
+       works, which is what the injector does.) Claude's clean exit **auto-closes**
+       its (root-pane) tab; the marker + `SessionEnd` hook from step 2 are the backup
+       for sessions whose tab does not auto-close (e.g. Claude launched inside a
+       shell pane).
        - **B-hook (fallback):** if `self-exit` can't run (`herdr` injection
          unavailable / non-zero exit), do **not** inject — tell the user: "Cleanup
          done, main tab focused — press **Ctrl+D** (or type `/exit`) to close this
