@@ -128,12 +128,12 @@ Loads the task context, checks dependencies, and shows current progress.
 ## herdr integration
 
 When you run the work system inside a **herdr** session (herdr is a terminal
-multiplexer for AI coding agents), `/kickoff` automates the terminal juggling
-you'd otherwise do by hand. It activates when `HERDR_ENV=1`, a herdr workspace id
-is set, and both `herdr` and `python3` are on `PATH`; if any prerequisite is
-missing or the socket is unreachable it falls back to the manual block, so you're
-never left without a way to start. Outside herdr, every skill behaves exactly as
-documented above.
+multiplexer for AI coding agents), `/kickoff` and `/close` automate the terminal
+juggling you'd otherwise do by hand — `/kickoff` opens the task's tab, `/close`
+tears it down. They activate when `HERDR_ENV=1`, a herdr workspace id is set, and
+both `herdr` and `python3` are on `PATH`; if any prerequisite is missing or the
+socket is unreachable they fall back to the plain, herdr-free behaviour, so you're
+never left stranded. Outside herdr, every skill behaves exactly as documented above.
 
 ### `/kickoff` opens a named tab
 
@@ -151,6 +151,26 @@ worktree as its cwd, and starts the task there for you:
   detection sees, and `/continue` loads the task context automatically on startup.
 - The new tab opens in the background (`--no-focus`), so your kickoff session
   stays in front; switch to the tab when you're ready to work there.
+
+### `/close` tears down the task's tab
+
+Once a task is merged, `/close` runs its usual cleanup (worktree, branch, task
+file) and then closes that task's herdr **tab** too. It finds the tab by cwd — no
+state file — looking it up *before* removing the worktree. Two entry points:
+
+- **From the main session** (the usual case): `/close <task>` closes the
+  worktree's tab directly — a different tab, so nothing self-terminates.
+- **From inside the worktree tab**: Claude cannot close its own tab, only exit
+  cleanly. So `/close` focuses the main tab and arms a **detached `/exit`** that
+  fires the moment the turn ends — Claude exits cleanly, its tab auto-closes, and
+  you land back in the main session, hands-free. (The exit is delivered to an idle
+  prompt, not mid-turn; injecting into a busy TUI is unreliable.) If herdr
+  injection isn't available it instead asks you to press **Ctrl+D**.
+
+A `SessionEnd` hook ships with the plugin as a backup for the self-close path: it
+closes the tab on a clean exit, but only when `/close` armed a per-pane marker, so
+it never fires on an ordinary session exit. All of this lives in the tested
+`scripts/herdr-teardown.sh`; see `skills/close/SKILL.md` step 12 for the flow.
 
 ## Adopting Existing Branches
 
