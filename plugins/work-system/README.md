@@ -125,6 +125,29 @@ Loads the task context, checks dependencies, and shows current progress.
 > /close
 ```
 
+## herdr integration
+
+When you run the work system inside a **herdr** session (herdr is a terminal
+multiplexer for AI coding agents; detected via `HERDR_ENV=1` and the `herdr` CLI
+on `PATH`), the skills automate the terminal juggling that you'd otherwise do by
+hand. Outside herdr, every skill behaves exactly as documented above.
+
+### `/kickoff` opens a named tab
+
+Inside herdr, `/kickoff` doesn't just create the worktree and print manual
+instructions — it opens a new herdr **tab** in the *same* workspace, with the
+worktree as its cwd, and starts the task there for you:
+
+- The tab is **named after the task**, so the herdr sidebar shows one entry per
+  task instead of a wall of identical `claude` agents.
+- The tab launches `claude -n "<task>" "/continue"` — the session is named after
+  the task (which propagates into the title herdr reads for agent-state
+  detection), and `/continue` loads the task context automatically.
+- The new tab opens in the background (`--no-focus`), so your kickoff session
+  stays in front; switch to the tab when you're ready to work there.
+- If herdr is unreachable despite `HERDR_ENV` (e.g. a stale socket), `/kickoff`
+  falls back to the manual block — you're never left without a way to start.
+
 ## Adopting Existing Branches
 
 Already started work on a branch outside the work system? Use `/adopt` to bring it in:
