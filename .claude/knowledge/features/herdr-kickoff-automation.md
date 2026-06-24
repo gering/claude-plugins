@@ -17,43 +17,42 @@ entry captures the durable design and one non-obvious gotcha.
 
 ## Design decisions
 
-- **Launch with the initial prompt, don't inject keystrokes.** The new pane runs
-  `claude -n "<label>" "/continue"` — the *same* command the manual block prints.
-  Passing `/continue` as the launch prompt makes Claude run the resume flow itself
-  once input-ready, so there is **no** `herdr wait`/ready-match and **no** timeout
-  fallback to maintain. This superseded an earlier sketch that booted bare `claude`,
-  waited for a ready string, then injected `/rename` + `/continue`.
-- **One `LABEL` for tab, herdr agent, and session.** `--label`, `herdr agent rename`
-  (immediate, deterministic — covers the boot gap before Claude's title updates),
-  and `claude -n` all use one short, sidebar-friendly name. The `task/<name>` branch
-  is untouched, so `/continue` still resolves the task from the branch inside the
-  worktree.
-- **`--workspace "$HERDR_WORKSPACE_ID"` is mandatory.** Without it the tab lands in
-  the *focused* workspace, which may be an unrelated project. `--no-focus` keeps the
-  kickoff session in front.
-- **Graceful fallback.** A missing/broken socket despite `HERDR_ENV` degrades to the
+- **Spawn Claude as argv, never type it into a shell.** The launch is
+  `herdr agent start "<label>" … -- claude -n "<label>" "/continue"`, which execs
+  the `claude` binary directly. The `-- argv` form sidesteps the interactive shell
+  entirely, so there is no keystroke race against shell startup (see the gotcha
+  below) and no readiness handshake to maintain. `-n` names the real session and
+  `/continue` is the launch prompt, run on startup.
+- **`agent start` splits the caller's tab → move it out.** `herdr agent start`
+  (without `--tab`) lands the agent as a split pane in the *invoking* tab, so a
+  second step `herdr pane move "<pane>" --new-tab --label "<label>"` relocates it
+  into its own background tab — one tab per task. The pane id comes from the start
+  call's `result.agent.pane_id` (parsed with `python3`; `herdr pane move` does **not**
+  accept an agent name as target — verified).
+- **One short `LABEL` for agent name + session.** `agent start "<label>"` (immediate,
+  deterministic sidebar label) and `claude -n "<label>"` use one short,
+  sidebar-friendly name (filler words like `automate`/`in` dropped). The `task/<name>`
+  branch is untouched, so `/continue` still resolves the task from the branch.
+- **Detection gate.** Automate only when `HERDR_ENV=1`, `$HERDR_WORKSPACE_ID` is
+  non-empty (an empty `--workspace` lands the tab in the *focused*, possibly
+  unrelated, workspace), and both `herdr` and `python3` are on `PATH`. `--no-focus`
+  keeps the kickoff session in front; any failure (empty `$pane`) degrades to the
   unchanged manual block — never block kickoff on herdr.
 
 ## Gotcha: input into a fresh pane races shell startup
 
+This is *why* the launch uses argv-exec, not `herdr pane run` / typed keystrokes.
 Sending a command into a *just-created* pane can lose keystrokes: the pane's shell
 may still be sourcing rc files, or sitting on an interactive startup prompt that
-consumes the input. **Verified failure:** oh-my-zsh's "update? [Y/n]" prompt ate the
-leading `c` of `claude`, leaving `laude … : command not found`, so Claude never
-started and herdr reported the agent as `unknown`.
+consumes the input. **Verified failure:** an earlier `tab create` + `pane run
+"claude …"` implementation lost the leading `c` to oh-my-zsh's "update? [Y/n]"
+prompt, leaving `laude … : command not found`, so Claude never started and herdr
+reported the agent as `unknown`. A sentinel-handshake before typing works but is
+fragile (the sentinel can re-match stale scrollback). The robust fix is to not type
+into a shell at all: `herdr agent start … -- <argv>` execs the binary directly.
 
-Fix — a **readiness handshake** before the real launch (safe: it never types into a
-running Claude, because Claude is sent only after the shell confirms it executes
-commands):
-1. `herdr pane send-keys "$pane" Enter` — dismiss a stray `[Y/n]`; harmless at a prompt.
-2. Echo a sentinel whose **output** differs from its echoed command text
-   (e.g. `printf 'herdr-%s-ok\n' ready` → `herdr-ready-ok`), then `herdr wait output
-   --match` on the output string — matching the output, not the command echo, proves
-   the shell actually ran it.
-3. Only then send `claude -n "<label>" "/continue"`.
-
-This generalizes: any "type a command into a freshly spawned pane/terminal"
-automation has the same race; the sentinel handshake is the portable fix.
+Generalizes: when a multiplexer offers both "type into a pane's shell" and "exec
+argv" launch paths, prefer argv — it has no race against shell init.
 
 Related: [skill-composition](../architecture/skill-composition.md) (kickoff softly
 drives `/continue` across a process boundary). The "never persistent `cd`" footgun
