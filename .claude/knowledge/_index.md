@@ -9,7 +9,7 @@
 ## Features
 - `features/backfill-and-origin-metadata.md` — `/backfill-knowledge` significance bar + origin-reconstruction cascade
 - `features/statusline-integration.md` — Status-line segment: plugins can't own `statusLine.command`; marker-block injection
-- `features/herdr-kickoff-automation.md` — `/kickoff` in herdr: `agent start -- claude` argv-launch + `pane move --new-tab` (race-free vs typing into a shell), one LABEL for agent/session
+- `features/herdr-kickoff-automation.md` — `/kickoff` in herdr: argv-launch via `herdr-launch.sh` (race-free), named tab per task
 
 ## Deployment
 - `deployment/ci-structure-checks.md` — `check-structure.py` as the single automated guard for a build-less repo

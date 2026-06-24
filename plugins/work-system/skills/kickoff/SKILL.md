@@ -89,61 +89,41 @@ The same rule applies to any project-specific setup the user's `CLAUDE.md` may a
 
     Detect herdr: automate **only** when `[ "${HERDR_ENV:-}" = "1" ]`, a non-empty
     `$HERDR_WORKSPACE_ID`, and both `command -v herdr` and `command -v python3`
-    succeed. (An empty `--workspace` would drop the tab into the *focused*
-    workspace — which may be an unrelated project; `python3` parses the pane id.)
-    If any of these is missing, or a herdr command below fails (broken/missing
-    socket → empty `$pane`), fall back to the manual block — never leave the user
-    without a way to start the session.
+    succeed. Otherwise show the manual block (b). (The launch helper re-checks
+    these and exits non-zero if it cannot automate, so a broken socket degrades
+    gracefully too.)
 
     **a) Inside herdr — open a named tab that auto-continues:**
 
     Derive a short, sidebar-friendly label from the task name — drop filler words
     (`automate`, `in`, …) so it reads punchy (e.g. `automate-close-in-herdr` →
-    `close-herdr`); hard-cap at ~32 chars with `…`. The **same** `LABEL` names the
-    tab, the herdr agent, and the Claude session, so the sidebar shows one clear
-    name per task. (The `task/<task-name>` branch is unchanged, so `/continue`
-    still resolves the task correctly inside the worktree.) The worktree path is
-    absolute: `<main-repo>/.claude/worktrees/<task-name>` (`<main-repo>` was
-    captured by the helper in step 1). Then run:
+    `close-herdr`), hard-cap ~32 chars. This `LABEL` names the herdr agent, the
+    tab, and the Claude session; the `task/<task-name>` branch is unchanged, so
+    `/continue` still resolves the task inside the worktree. The worktree path is
+    absolute (`<main-repo>/.claude/worktrees/<task-name>`, with `<main-repo>` from
+    step 1). Then call the shared launch helper:
 
     ```sh
     WORKTREE="<main-repo>/.claude/worktrees/<task-name>"   # absolute path
     LABEL="<short sidebar label, e.g. close-herdr>"
-
-    # Spawn Claude as argv (no shell, no typed keystrokes): herdr names the agent
-    # "$LABEL" and execs `claude` directly. The pane id is result.agent.pane_id.
-    pane=$(herdr agent start "$LABEL" --workspace "$HERDR_WORKSPACE_ID" \
-             --cwd "$WORKTREE" --no-focus -- claude -n "$LABEL" "/continue" \
-           | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["agent"]["pane_id"])')
-
-    # Empty pane id → a herdr call failed: show the manual block (b) instead.
-    # Otherwise relocate the agent into its own background tab (one tab per task).
-    [ -n "$pane" ] && herdr pane move "$pane" --new-tab --label "$LABEL" --no-focus
+    bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-launch.sh" "$LABEL" "$WORKTREE" "$HERDR_WORKSPACE_ID"
     ```
 
-    Line by line:
-    - `herdr agent start "$LABEL" … -- claude -n "$LABEL" "/continue"` launches
-      Claude as **argv** — herdr execs the `claude` binary directly instead of
-      typing a command into a freshly spawned shell. That structurally removes the
-      keystroke race a new interactive shell would otherwise create (no rc-file
-      delay, no oh-my-zsh `[Y/n]` prompt eating the leading character), so no
-      readiness handshake is needed. The `<name>` argument names the herdr agent
-      immediately (the sidebar shows it at once), `-n "$LABEL"` names the real
-      Claude session, and `/continue` is the launch prompt — Claude runs it on
-      startup.
-    - `--workspace "$HERDR_WORKSPACE_ID"` keeps the agent in the **same** workspace;
-      `--cwd "$WORKTREE"` sets the new pane's cwd to the worktree — it does **not**
-      change the kickoff session's CWD (the "never persistent cd" rule above holds);
-      `--no-focus` keeps the kickoff session in front.
-    - `herdr agent start` first lands the agent as a split in the **caller's** tab,
-      so `herdr pane move "$pane" --new-tab --label "$LABEL" --no-focus` relocates
-      it into its own background tab — one clear tab per task in the sidebar.
-    - the pane id comes from `result.agent.pane_id`; an empty value means a herdr
-      call failed, so the `[ -n "$pane" ]` guard skips the move and routes to the
-      manual block.
+    The helper spawns Claude as **argv** (`herdr agent start … -- claude -n
+    "$LABEL" "/continue"`) — execing the binary directly instead of typing into a
+    fresh shell, which structurally avoids the shell-startup keystroke race — then
+    moves the agent into its own background tab. It is the **single source of
+    truth** for the launch (robust JSON parsing, graceful fallback, exit codes);
+    do not re-implement the herdr commands inline. Branch on its result:
+    - **exit 0 with `moved=yes`** → the task is running in its own background tab
+      (`tab=<id>`). Report success (template below).
+    - **exit 0 with `moved=no`** → Claude started but the tab move failed, so it is
+      running as a split in *this* session's tab — tell the user it's here, not in
+      a new tab.
+    - **non-zero exit** → the helper could not automate (herdr/python3 missing,
+      broken socket, or no pane id). Show the manual block (b).
 
-    If `$pane` is empty (herdr unreachable despite the gate), show the manual block
-    below instead. On success, report where the task is running:
+    Success report (fill `Tab` from the helper's `tab=` line):
     ```
     Worktree created and launched in herdr!
 
@@ -172,7 +152,9 @@ The same rule applies to any project-specific setup the user's `CLAUDE.md` may a
     `-n "<task-name>"` names the session (shown in `/resume` and the terminal title);
     the `/continue` initial prompt runs the resume flow (load TASK.md, recent commits,
     progress) deterministically — both in one launch. Do **not** execute the `cd` command
-    yourself — it is for the user's new terminal.
+    yourself — it is for the user's new terminal. (Inside herdr, path (a) instead names
+    the session after the shortened sidebar `LABEL`, so the same task can show a shorter
+    name in `/resume` than this manual form.)
 
 ## Remember
 
