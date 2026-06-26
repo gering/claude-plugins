@@ -14,8 +14,8 @@
 #   resolve [<task-name>]   Fast, no network. Emits: main_branch, on_main,
 #                           detached, task_name, task_branch, branch_scope,
 #                           branch_exists.
-#   assess  [<task-name>]   resolve + pr_state, pr_number, pr_url, merge_sha,
-#                           branch_merged, commits_in_main, verdict, confidence
+#   assess  [<task-name>]   resolve + pr_state, pr_number, pr_url, branch_merged,
+#                           commits_in_main, verdict, confidence
 #                           (PR fields via gh when available).
 #
 # Output: `key=value` lines on stdout (empty value = unknown/none). Callers read
@@ -133,22 +133,18 @@ do_assess() {
   compute_resolution "${1:-}"
   compute_main_refs "$MAIN_BRANCH"
 
-  # pr_merge_sha is named distinctly from the topology `merge_sha` (the MERGE_REF
-  # tip) computed below — they are different SHAs and must not collide.
-  local pr_state="none" pr_number="" pr_url="" pr_merge_sha="" out rest
+  local pr_state="none" pr_number="" pr_url="" out rest
   if command -v gh >/dev/null 2>&1; then
     if [ -n "$TASK_BRANCH" ]; then
       # `.[0] // empty` → no output when there is no matching PR (avoids the
-      # literal "null|null|null" that `.[0] | ...` would interpolate). mergeCommit
-      # is null until the PR is merged, then carries the merge commit (squash/rebase
-      # included) — /close stamps the archive with it, so no second `gh` round-trip.
+      # literal "null|null|null" that `.[0] | ...` would interpolate). Kept to the
+      # minimal, widely-supported field set: the merge SHA for /close's archive
+      # stamp is fetched separately (best-effort), so this safety-critical pr_state
+      # lookup never depends on an optional json field an older gh might not know.
       out="$(gh pr list --state all --head "$TASK_BRANCH" --limit 1 \
-              --json number,state,url,mergeCommit \
-              --jq '.[0] // empty | "\(.number)|\(.state)|\(.url)|\(.mergeCommit.oid // "")"' 2>/dev/null || true)"
+              --json number,state,url --jq '.[0] // empty | "\(.number)|\(.state)|\(.url)"' 2>/dev/null || true)"
       if [ -n "$out" ]; then
-        pr_number="${out%%|*}"; rest="${out#*|}"
-        pr_state="${rest%%|*}"; rest="${rest#*|}"
-        pr_url="${rest%%|*}"; pr_merge_sha="${rest#*|}"
+        pr_number="${out%%|*}"; rest="${out#*|}"; pr_state="${rest%%|*}"; pr_url="${rest#*|}"
       fi
     fi
   else
@@ -207,7 +203,6 @@ do_assess() {
   printf 'pr_state=%s\n'        "$pr_state"
   printf 'pr_number=%s\n'       "$pr_number"
   printf 'pr_url=%s\n'          "$pr_url"
-  printf 'merge_sha=%s\n'       "$pr_merge_sha"
   printf 'branch_merged=%s\n'   "$branch_merged"
   printf 'commits_in_main=%s\n' "$commits"
   printf 'verdict=%s\n'         "$verdict"

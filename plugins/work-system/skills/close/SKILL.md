@@ -38,7 +38,7 @@ Rules:
    - Read the fields: `<task-branch>` = `task_branch` (the resolved real ref — the current branch
      in a worktree, or an exact `task/<name>` match when resolved by name), `<task-name>` =
      `task_name`, `<main-branch>` = `main_branch`, plus `verdict`, `confidence`, `pr_state`,
-     `pr_number`, `merge_sha` (the merge commit, used by step 10's archive stamp), `branch_merged`.
+     `pr_number`, `branch_merged`.
    - **Wherever the steps below write `task/<task-name>`, use the resolved `<task-branch>`** — so
      an adopted branch that kept its original name is closed correctly, not orphaned.
 
@@ -149,10 +149,13 @@ Rules:
     untracked by design, so a deleted task would otherwise be gone for good. The helper
     builds the stamp, suffixes the filename on a name collision (never clobbers), appends a
     one-line `tasks/archive/_index.md` entry, and reports whether the archive is committable.
-    - **Merge confirmed** (step 2, `pr_number` is set) — archive with the PR and the merge
-      commit from step 1's `merge_sha` (the stamp omits the SHA automatically when it's empty):
+    - **Merge confirmed** (step 2, `pr_number` is set) — fetch the merge commit for the stamp
+      (best-effort and separate from step 1's `assess`, so an older `gh` lacking the
+      `mergeCommit` field only loses the SHA, never the merge gate; the stamp omits the SHA
+      automatically when `$SHA` is empty), then archive with the PR:
       ```sh
-      bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" archive <main-repo-path> <task-name> <task-branch> --pr <pr_number> --sha "<merge_sha>"
+      SHA=$(gh pr view <pr_number> --json mergeCommit --jq '.mergeCommit.oid' 2>/dev/null)
+      bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" archive <main-repo-path> <task-name> <task-branch> --pr <pr_number> --sha "$SHA"
       ```
     - **Manual close** (no merged PR) — archive without `--pr`; the stamp records
       "closed manually (no merged PR)":
@@ -166,10 +169,12 @@ Rules:
         both a tracked `tasks/` and an untracked-by-omission one): the move is a committable
         change. Show `git -C <main-repo-path> status --short tasks/archive/ tasks/<task-name>.md`
         (scoped — not the whole `tasks/`, which would surface unrelated pending tasks) and ask
-        whether to commit the archive. If yes, stage precisely via the helper, then commit:
+        whether to commit the archive. If yes, stage precisely via the helper, then commit —
+        chained so the commit only runs when staging succeeded (a stage failure must not let
+        an unrelated already-staged change be committed under this message):
         ```sh
-        bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" stage <main-repo-path> <task-name> <archived_path>
-        git -C <main-repo-path> commit -m "Archive task <task-name>"
+        bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" stage <main-repo-path> <task-name> <archived_path> && \
+          git -C <main-repo-path> commit -m "Archive task <task-name>"
         ```
       - **`committable=no`** (archive is gitignored — local-only, mirroring a deliberately-ignored
         `tasks/`): no commit — just report.

@@ -47,8 +47,10 @@ archive() {
   local pr="" sha=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --pr)  pr="${2:-}";  shift 2 || shift ;;
-      --sha) sha="${2:-}"; shift 2 || shift ;;
+      # Require a value: a bare trailing `--pr` must error, not silently fall
+      # through to a "closed manually" stamp on a genuinely merged task.
+      --pr)  [ $# -ge 2 ] || { echo "--pr needs a value" >&2; exit 2; }; pr="$2";  shift 2 ;;
+      --sha) [ $# -ge 2 ] || { echo "--sha needs a value" >&2; exit 2; }; sha="$2"; shift 2 ;;
       *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
   done
@@ -94,19 +96,27 @@ archive() {
   [ -n "$title" ] || title="$safe"
 
   # Write the stamped copy to a temp file, then mv it into place — atomic, so an
-  # interrupted write (disk full / signal) never leaves a truncated archive that
-  # the collision loop would later orphan as a real-looking file. The original is
-  # dropped only once the archive is safely in place.
+  # interrupted write (disk full / signal) never leaves a truncated archive the
+  # collision loop would later orphan as a real-looking file. On a write failure
+  # the temp is removed and we abort with the source still intact. The original is
+  # dropped only AFTER the index records the archive, so a failed index write also
+  # leaves the source intact (/close re-runnable) — never a moved-but-unrecorded
+  # archive with the original gone.
   local tmp="$dest.tmp.$$"
-  { printf '%s\n\n' "$stamp"; cat "$src"; } > "$tmp"
+  if ! { printf '%s\n\n' "$stamp"; cat "$src"; } > "$tmp"; then
+    rm -f "$tmp" 2>/dev/null || true
+    echo "failed to write archive $dest" >&2
+    exit 1
+  fi
   mv "$tmp" "$dest"
-  rm -f "$src"
 
   # Append-only overview log; seed a header when first created. The identifier is
   # the actual archived basename, so a -2/-3 collision entry maps back to its file.
   local index="$tasks_dir/archive/_index.md"
   [ -f "$index" ] || printf '# Archived tasks\n\n' > "$index"
   printf -- '- %s · %s · %s — %s\n' "$date" "$mid" "$base_noext" "$title" >> "$index"
+
+  rm -f "$src"
 
   # Committable iff the archive path is NOT gitignored (it inherits tasks/'s ignore
   # status). NOTE: "not ignored" ≠ "git-tracked": an untracked-by-omission tasks/

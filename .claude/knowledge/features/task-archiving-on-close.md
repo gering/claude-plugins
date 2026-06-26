@@ -50,8 +50,11 @@ logic belongs in a tested script, not SKILL.md prose). See also [[skill-composit
 - **Form: both file + log.** The full task file is preserved (move + stamp) *and* a
   condensed `_index.md` line gives a scannable overview — chosen over either alone.
 - **Stamp carries merge provenance.** Date · PR + short merge SHA · branch for a
-  merged close (the SHA fetched best-effort via `gh pr view … mergeCommit`), or
-  "closed manually (no merged PR)" otherwise. Exact format lives in the script.
+  merged close, or "closed manually (no merged PR)" otherwise. The SHA is fetched
+  best-effort via a *separate* `gh pr view … mergeCommit` — deliberately not folded
+  into `task-status.sh assess`'s PR lookup, so an older `gh` lacking the
+  `mergeCommit` json field only loses the cosmetic SHA, never the safety-critical
+  `pr_state` merge gate. Exact format lives in the script.
 
 `/list` surfaces an archived count in its summary; the pending glob stays the
 non-recursive `tasks/*.md`, which already excludes `tasks/archive/`. The "never
