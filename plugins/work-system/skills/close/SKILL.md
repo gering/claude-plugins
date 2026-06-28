@@ -169,13 +169,28 @@ Rules:
         both a tracked `tasks/` and an untracked-by-omission one): the move is a committable
         change. Show `git -C <main-repo-path> status --short tasks/archive/ tasks/<task-name>.md`
         (scoped — not the whole `tasks/`, which would surface unrelated pending tasks) and ask
-        whether to commit the archive. If yes, stage precisely via the helper, then commit —
-        chained so the commit only runs when staging succeeded (a stage failure must not let
-        an unrelated already-staged change be committed under this message):
-        ```sh
-        bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" stage <main-repo-path> <task-name> <archived_path> && \
-          git -C <main-repo-path> commit -m "Archive task <task-name>"
-        ```
+        **once**: "Commit the archived task file to `<main-branch>` and push? [y/n]" — one
+        approval covers both (the archive is metadata, and pushing is what keeps local
+        `<main-branch>` from diverging). If yes:
+        1. **Stage + commit** — chained so the commit only runs when staging succeeded (a stage
+           failure must not let an unrelated already-staged change be committed under this message):
+           ```sh
+           bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" stage <main-repo-path> <task-name> <archived_path> && \
+             git -C <main-repo-path> commit -m "Archive task <task-name>"
+           ```
+        2. **Push it as a clean fast-forward** — *only when an `origin` remote exists* (mirror
+           step 9's guard; a purely local repo just keeps the commit). Step 5 already
+           fast-forwarded local `<main-branch>` to `origin/<main-branch>`, so the archive commit
+           sits exactly one commit on top — a clean ff for origin:
+           ```sh
+           git -C <main-repo-path> push origin <main-branch>
+           ```
+           - **Success** → `origin/<main-branch>` advances and local stays in sync, so no future
+             `/close` ever sees divergence from accumulated archive commits.
+           - **Failure** (protected `<main-branch>`, offline, or a pre-existing divergence that
+             makes the push non-fast-forward) → **do not abort `/close`** and **never
+             force-push**; the archive stays committed locally. Report: "archive committed
+             locally — `<main-branch>` couldn't be pushed (protected/offline?); push it when ready."
       - **`committable=no`** (archive is gitignored — local-only, mirroring a deliberately-ignored
         `tasks/`): no commit — just report.
     - Report: "Task file archived to `<archived_path>`" (add "(name existed — suffixed)" when

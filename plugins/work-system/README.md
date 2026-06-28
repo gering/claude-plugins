@@ -129,8 +129,10 @@ Instead of deleting the task file, `/close` **archives** it to
 `tasks/archive/<name>.md` with a closed-stamp (date, shipping PR + merge commit,
 branch) and appends a one-line entry to `tasks/archive/_index.md` — a queryable
 record of finished work. The archive inherits whatever `tasks/` does: gitignored
-`tasks/` keeps it local-only; a tracked `tasks/` makes the move committable
-(`/close` asks before committing). `/list` shows the archived count in its summary.
+`tasks/` keeps it local-only; otherwise the move is committable and `/close` asks
+once to commit **and** fast-forward-push it to `main` (so local `main` never
+diverges; a failed push just leaves the commit local). `/list` shows the archived
+count in its summary.
 
 ## herdr integration
 

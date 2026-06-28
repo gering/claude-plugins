@@ -44,6 +44,15 @@ logic belongs in a tested script, not SKILL.md prose). See also [[skill-composit
   *pending* task files. Keeping the staging in the tested `stage` subcommand (not
   SKILL.md prose) holds the precise-scoping rule where it can't drift; the commit
   itself, which needs approval, stays in `/close`.
+- **Commit + fast-forward push, so `main` never diverges.** The archive commit
+  lands on the main repo's `main`; left local+unpushed it would diverge from
+  `origin/main` and break the *next* `/close`'s `--ff-only` sync (step 5). So the
+  single approval covers commit **and** push: step 5 already ff'd local `main` to
+  `origin/main`, the archive commit sits one commit on top (clean ff), and `/close`
+  pushes it. Push failure (protected/offline/pre-existing divergence) is non-fatal —
+  the commit stays local with a "push when ready" note; never a force-push. The
+  archive is metadata (a moved markdown file), so a direct ff-push to `main` is
+  appropriate and bypasses no meaningful review.
 - **Never clobber on a name collision.** A re-close of the same task name suffixes
   the archived file `-2`, `-3`, … rather than overwriting a prior archive; a fresh
   `_index.md` line is appended either way, so every close is recorded.
