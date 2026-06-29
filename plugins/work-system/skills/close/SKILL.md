@@ -184,14 +184,25 @@ Rules:
         ```sh
         bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" commit-push <main-repo-path> <task-name> <archived_path> <main-branch>
         ```
-        Report from its `result=`:
+        Report from its `result=` (and `archive_committed=` on the committed-* results — when
+        `no`, the archive is gitignored and the commit recorded only the source file's removal,
+        so say "task file removal committed; archive kept local (gitignored)" rather than
+        claiming the archive itself was committed):
         - `committed-pushed` → "archive committed to `<main-branch>` and pushed".
-        - `committed-local` (`reason=no-origin`/`push-failed`) → "archive committed locally —
-          push `<main-branch>` when ready" (a protected/offline/origin-moved push is non-fatal;
-          if `push-failed`, a `git pull --rebase` may be needed before the manual push).
+        - `committed-local` →
+          - `reason=no-origin`/`push-failed` → "archive committed locally — push `<main-branch>`
+            when ready" (protected/offline/origin-moved is non-fatal; `push-failed` may need a
+            `git pull --rebase` before the manual push).
+          - `reason=unpushed-history` → "archive committed locally; NOT pushed because
+            `<main-branch>` has other unpushed commits — push them yourself when ready" (the
+            archive-scoped approval deliberately won't publish unrelated local work).
         - `commit-failed` → the staged archive could not be committed (a rejecting pre-commit
           hook, GPG-signing misconfig, locked index). Report "archive staged but commit failed —
           resolve the git error and commit manually"; do not claim it was committed.
+        - `archive-not-staged` → the archived file didn't reach the index (lost/moved file, or a
+          mismatched `archived_path`), so the helper committed nothing — report "the archive file
+          at `<archived_path>` could not be staged; it was NOT committed — check it before relying
+          on the record"; do not claim success.
         - `wrong-branch` (`current=…`) → the main repo is checked out on another branch, so the
           helper did **not** stage or commit; report "archive file is on disk (uncommitted); main
           repo is on `<current>`, not `<main-branch>` — commit it onto `<main-branch>` yourself".

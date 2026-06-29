@@ -55,10 +55,14 @@ logic belongs in a tested script, not SKILL.md prose). See also [[skill-composit
   `/close`'s `--ff-only` sync (step 5). So the one approval covers commit **and**
   push: step 5 already ff'd local `main` to `origin/main`, the commit sits one
   commit on top (clean ff), and `commit-push` pushes it (`result=committed-pushed`).
-  Push failure (protected/offline/pre-existing divergence) or no origin is non-fatal
-  — `result=committed-local`, the commit stays put; never a force-push. The archive
-  is metadata (a moved markdown file), so a direct ff-push to `main` is appropriate
-  and bypasses no meaningful review.
+  Critically the push is **scoped to that single commit**: it only pushes when the
+  archive commit is the *sole* commit ahead of `origin/<main>` (ahead == 1) — if the
+  user has other unpushed commits on `main`, `git push` would publish them too under
+  this archive-only approval, so it declines (`reason=unpushed-history`) and leaves
+  them. Push failure (protected/offline/origin-moved) or no origin is likewise
+  non-fatal — `result=committed-local`, the commit stays put; never a force-push.
+  The archive is metadata (a moved markdown file), so a direct ff-push of just that
+  one commit to `main` is appropriate and bypasses no meaningful review.
 - **Never clobber on a name collision.** A re-close of the same task name suffixes
   the archived file `-2`, `-3`, … rather than overwriting a prior archive; a fresh
   `_index.md` line is appended either way, so every close is recorded.

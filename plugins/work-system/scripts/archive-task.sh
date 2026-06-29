@@ -40,8 +40,12 @@
 #   collision=no | yes
 #   committable=yes | no   (yes = a git change to commit — archive not gitignored,
 #                           OR the source file was tracked)
-# `commit-push` output: result=committed-pushed | committed-local [reason=…] |
-#   commit-failed | nothing-to-commit | wrong-branch [current=…].
+# `commit-push` output: result=committed-pushed | committed-local [reason=no-origin|
+#   push-failed|unpushed-history] | commit-failed | archive-not-staged |
+#   nothing-to-commit | wrong-branch [current=…]. The committed-* results also emit
+#   archive_committed=yes|no (no = a gitignored archive whose commit recorded only
+#   the source removal). Pushes only when the archive commit is the sole one ahead
+#   of origin/<main-branch>, never sweeping unrelated unpushed commits onto it.
 # Exit 0 on success; 2 on a usage error; 3 when the task file does not exist.
 set -eu
 
@@ -179,8 +183,10 @@ commit_push() {
   # would sweep in unrelated pending task files): the archived file and _index.md
   # only when not gitignored (`git add` errors on an ignored path), and the
   # original's removal only when it was tracked.
+  local archive_ignored=no
+  if git -C "$repo" check-ignore -q "$archived"; then archive_ignored=yes; fi
   local paths=()
-  git -C "$repo" check-ignore -q "$archived"               || paths+=("$archived")
+  if [ "$archive_ignored" = no ]; then paths+=("$archived"); fi
   git -C "$repo" check-ignore -q "tasks/archive/_index.md" || paths+=("tasks/archive/_index.md")
   if git -C "$repo" ls-files --error-unmatch -- "$src_rel" >/dev/null 2>&1; then paths+=("$src_rel"); fi
   [ "${#paths[@]}" -eq 0 ] && { echo "result=nothing-to-commit"; return 0; }
@@ -190,12 +196,26 @@ commit_push() {
   # the valid source-deletion too. Then commit ONLY the paths that actually carry a
   # staged change — a pathspec commit, so unrelated pre-staged work is never swept
   # in, and a bad/empty element is simply absent from the commit.
-  local p staged=()
+  local p staged=() archive_committed=no
   for p in "${paths[@]}"; do
     git -C "$repo" add -A -- "$p" 2>/dev/null || true
-    git -C "$repo" diff --cached --quiet -- "$p" || staged+=("$p")
+    if ! git -C "$repo" diff --cached --quiet -- "$p"; then
+      staged+=("$p")
+      if [ "$p" = "$archived" ]; then archive_committed=yes; fi
+    fi
   done
   [ "${#staged[@]}" -eq 0 ] && { echo "result=nothing-to-commit"; return 0; }
+
+  # Integrity guard: when the archive file WAS meant to be committed (not ignored)
+  # but failed to stage (lost/moved/stale archived_path), do NOT report success —
+  # committing only the source deletion would erase the task from history with no
+  # archived replacement in git. Unstage what we staged (leave the index as we found
+  # it, so nothing half-staged lingers) and surface it so /close can warn instead.
+  if [ "$archive_ignored" = no ] && [ "$archive_committed" = no ]; then
+    git -C "$repo" reset -q HEAD -- "${staged[@]}" 2>/dev/null || true
+    echo "result=archive-not-staged"
+    return 0
+  fi
 
   # A non-zero exit here (these paths DO have staged changes) is a REAL failure — a
   # rejecting pre-commit hook, GPG signing misconfig, locked index — NOT an empty
@@ -205,15 +225,26 @@ commit_push() {
     return 0
   fi
 
-  git -C "$repo" remote get-url origin >/dev/null 2>&1 || { printf 'result=committed-local\nreason=no-origin\n'; return 0; }
+  # archive_committed lets /close word the outcome honestly: =no means a gitignored
+  # archive whose commit recorded only the source removal (the archive stays local).
+  git -C "$repo" remote get-url origin >/dev/null 2>&1 || { printf 'result=committed-local\nreason=no-origin\narchive_committed=%s\n' "$archive_committed"; return 0; }
 
-  # Step 5 already fast-forwarded local <main-branch> to origin/<main-branch>, so
-  # the archive commit sits one commit on top — a clean ff. Never force-push; a
-  # rejected push (offline, protected, or origin moved since step 5) is non-fatal.
+  # Push ONLY when our archive commit is the SOLE commit ahead of origin/<main-branch>
+  # (step 5 ff'd local <main-branch> to origin, so ahead should be exactly 1). If the
+  # user had other unpushed commits on <main-branch>, pushing the whole branch would
+  # publish them under this archive-scoped approval — leave them for the user.
+  local ahead; ahead="$(git -C "$repo" rev-list --count "origin/$mainbr..$mainbr" 2>/dev/null || echo unknown)"
+  if [ "$ahead" != "1" ]; then
+    printf 'result=committed-local\nreason=unpushed-history\narchive_committed=%s\n' "$archive_committed"
+    return 0
+  fi
+
+  # Clean fast-forward. Never force-push; a rejected push (offline, protected, or
+  # origin moved since step 5) is non-fatal.
   if git -C "$repo" push origin "$mainbr" >/dev/null 2>&1; then
-    echo "result=committed-pushed"
+    printf 'result=committed-pushed\narchive_committed=%s\n' "$archive_committed"
   else
-    printf 'result=committed-local\nreason=push-failed\n'
+    printf 'result=committed-local\nreason=push-failed\narchive_committed=%s\n' "$archive_committed"
   fi
 }
 
