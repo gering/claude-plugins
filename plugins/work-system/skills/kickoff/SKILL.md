@@ -34,13 +34,14 @@ The same rule applies to any project-specific setup the user's `CLAUDE.md` may a
      it for the CWD-drift check in step 11.
 
 2. **Show available tasks**:
-   - Run: `find tasks -maxdepth 1 -type f -name '*.md' 2>/dev/null || echo "No tasks found"`
-     — `find` (not an `ls tasks/*.md` glob, which lists the whole cwd under bash `nullglob`
-     when there are no matches) lists only top-level pending task files and excludes the
-     `tasks/archive/` directory `/close` creates.
-   - If no tasks exist, suggest creating one with `/define`
-   - List all tasks with their first line (title); the task name is the basename minus `.md`
-   - Ask user which task to work on
+   - Run: `find tasks -maxdepth 1 -type f -name '*.md' 2>/dev/null` — `find` (not an
+     `ls tasks/*.md` glob, which lists the whole cwd under bash `nullglob` when there are no
+     matches) lists only top-level pending task files and excludes the `tasks/archive/`
+     directory `/close` creates.
+   - **If the output is empty** (note: `find` exits 0 even with no matches, so don't rely on a
+     `||` fallback): there are no pending tasks — suggest creating one with `/define` and stop.
+   - Otherwise list each task with its first line (title); the task name is the basename minus
+     `.md`. Ask the user which task to work on.
 
 3. **Read selected task**:
    - Read the task file from `tasks/<task-name>.md`

@@ -115,25 +115,28 @@ archive() {
   fi
   mv "$tmp" "$dest"
 
-  # Append-only overview log; seed a header when first created. The identifier is
-  # the actual archived basename, so a -2/-3 collision entry maps back to its file.
-  # If the index write fails, roll the moved archive back so a re-run stays clean
-  # (no orphaned, unrecorded archive) and the source is still intact below.
-  local index="$tasks_dir/archive/_index.md"
-  if [ ! -f "$index" ]; then
-    printf '# Archived tasks\n\n' > "$index" || { rm -f "$dest" 2>/dev/null || true; echo "failed to seed $index" >&2; exit 1; }
-  fi
-  if ! printf -- '- %s · %s · %s — %s\n' "$date" "$mid" "$base_noext" "$title" >> "$index"; then
+  # Remove the original BEFORE recording the index, rolling the moved archive back
+  # if the remove fails (immutable/locked source, read-only parent). This keeps the
+  # state clean and /close re-runnable — and crucially avoids ever leaving the
+  # source on disk next to a committable archive, which commit-push would otherwise
+  # turn into a pushed DUPLICATE of both. The non-zero exit is surfaced by /close
+  # (step 10's exit≠3 branch); the source is intact, nothing else was changed.
+  if ! rm -f "$src"; then
     rm -f "$dest" 2>/dev/null || true
-    echo "failed to write $index" >&2
+    echo "failed to remove original $src — archive rolled back" >&2
     exit 1
   fi
 
-  # Drop the original. Non-fatal: the archive + index already succeeded, so a
-  # remove failure (read-only parent, locked file) must NOT abort with no output —
-  # it would leave a duplicate AND starve the SKILL of the archived_path it parses.
-  # Warn and continue; the lingering source is the user's to clean up.
-  rm -f "$src" || echo "warning: archived to $dest but could not remove original $src" >&2
+  # Append-only overview log; seed a header when first created. The identifier is
+  # the actual archived basename, so a -2/-3 collision entry maps back to its file.
+  # Best-effort: the archived file itself is the record, so a failed index write
+  # (disk full) costs only the one-line log entry, not the archive — warn, continue.
+  local index="$tasks_dir/archive/_index.md"
+  if [ ! -f "$index" ]; then
+    printf '# Archived tasks\n\n' > "$index" 2>/dev/null || echo "warning: could not seed $index" >&2
+  fi
+  printf -- '- %s · %s · %s — %s\n' "$date" "$mid" "$base_noext" "$title" >> "$index" 2>/dev/null \
+    || echo "warning: archived $dest but could not record it in $index" >&2
 
   # committable = there is a git change worth committing: the new archive file is
   # not gitignored, OR the source was a TRACKED file (its removal is a real change
@@ -182,18 +185,22 @@ commit_push() {
   if git -C "$repo" ls-files --error-unmatch -- "$src_rel" >/dev/null 2>&1; then paths+=("$src_rel"); fi
   [ "${#paths[@]}" -eq 0 ] && { echo "result=nothing-to-commit"; return 0; }
 
-  git -C "$repo" add -A -- "${paths[@]}" 2>/dev/null || true
-  if git -C "$repo" diff --cached --quiet -- "${paths[@]}"; then
-    echo "result=nothing-to-commit"
-    return 0
-  fi
+  # Stage each path INDEPENDENTLY: `git add -A a b` aborts wholesale on one
+  # non-matching element (e.g. a stale archived_path), which would silently drop
+  # the valid source-deletion too. Then commit ONLY the paths that actually carry a
+  # staged change — a pathspec commit, so unrelated pre-staged work is never swept
+  # in, and a bad/empty element is simply absent from the commit.
+  local p staged=()
+  for p in "${paths[@]}"; do
+    git -C "$repo" add -A -- "$p" 2>/dev/null || true
+    git -C "$repo" diff --cached --quiet -- "$p" || staged+=("$p")
+  done
+  [ "${#staged[@]}" -eq 0 ] && { echo "result=nothing-to-commit"; return 0; }
 
-  # Commit ONLY these paths — a pathspec commit leaves any unrelated pre-staged
-  # work in the index, never publishing it under the "Archive task" message. A
-  # non-zero exit here (we know the paths have staged changes) is a REAL failure —
-  # a rejecting pre-commit hook, GPG signing misconfig, locked index — NOT an
-  # empty commit; surface it instead of masking it as "nothing-to-commit".
-  if ! git -C "$repo" commit -m "Archive task $safe" -- "${paths[@]}" >/dev/null 2>&1; then
+  # A non-zero exit here (these paths DO have staged changes) is a REAL failure — a
+  # rejecting pre-commit hook, GPG signing misconfig, locked index — NOT an empty
+  # commit; surface it instead of masking it as "nothing-to-commit".
+  if ! git -C "$repo" commit -m "Archive task $safe" -- "${staged[@]}" >/dev/null 2>&1; then
     echo "result=commit-failed"
     return 0
   fi
