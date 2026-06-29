@@ -166,6 +166,10 @@ Rules:
       ```
     - **Helper exits 3** ("no task file"): nothing to archive (the file was never created) —
       note it in the summary and continue; not a failure.
+    - **Helper exits non-zero (other than 3)** — a real write/index failure (disk full, etc.).
+      The source task file is left intact (the helper rolls back). Do **not** claim the task
+      file was archived: surface the helper's stderr and say "archiving failed — task file left
+      at `tasks/<task-name>.md`"; the rest of the cleanup (worktree/branch) already happened.
     - Read the helper's `key=value` output (`archived_path`, `collision`, `committable`):
       - **`committable=yes`** (there is a git change to commit — the archive isn't gitignored,
         or the original task file was tracked so its removal needs recording): show
@@ -183,10 +187,14 @@ Rules:
         Report from its `result=`:
         - `committed-pushed` → "archive committed to `<main-branch>` and pushed".
         - `committed-local` (`reason=no-origin`/`push-failed`) → "archive committed locally —
-          push `<main-branch>` when ready" (a protected/offline/diverged push is non-fatal).
+          push `<main-branch>` when ready" (a protected/offline/origin-moved push is non-fatal;
+          if `push-failed`, a `git pull --rebase` may be needed before the manual push).
+        - `commit-failed` → the staged archive could not be committed (a rejecting pre-commit
+          hook, GPG-signing misconfig, locked index). Report "archive staged but commit failed —
+          resolve the git error and commit manually"; do not claim it was committed.
         - `wrong-branch` (`current=…`) → the main repo is checked out on another branch, so the
-          helper did **not** commit; report "archive staged on disk; main repo is on `<current>`,
-          not `<main-branch>` — commit it onto `<main-branch>` yourself".
+          helper did **not** stage or commit; report "archive file is on disk (uncommitted); main
+          repo is on `<current>`, not `<main-branch>` — commit it onto `<main-branch>` yourself".
         - `nothing-to-commit` → just report the archive (below); no commit was needed.
       - **`committable=no`** (no git change to commit — `tasks/` is gitignored, or the main repo
         isn't a git repo): local-only — just report.

@@ -15,29 +15,33 @@
 #
 # CWD-safe: every path is explicit, the script never `cd`s (see cwd-safety rule).
 #
+# Task names are flattened (slashes → dashes) everywhere a source/dest path is
+# built: /define and /adopt write flat kebab files (an adopted feature/foo/bar →
+# tasks/foo-bar.md) while task-status.sh keeps inner slashes (foo/bar), so the
+# lookup must flatten to match.
+#
 # Subcommands:
 #   archive <main-repo-path> <task-name> <task-branch> [--pr <n>] [--sha <sha>]
-#       Move <main-repo>/tasks/<task-name>.md → tasks/archive/<name>.md with a
-#       stamp line, and append an _index.md line. With --pr the stamp records a
-#       merged PR (and --sha its merge commit, shortened — an empty or literal
-#       "null" sha is treated as no-sha); without --pr it records a manual close.
-#       A slash-bearing name is flattened to a single archive filename; on a name
-#       collision the file is suffixed -2, -3, … (never clobbered); a fresh
-#       _index.md line keyed to the actual archived basename is appended either way.
+#       Move <main-repo>/tasks/<name>.md → tasks/archive/<name>.md with a stamp,
+#       and append an _index.md line. With --pr the stamp records a merged PR (and
+#       --sha its merge commit, shortened — an empty or literal "null" sha = no
+#       sha); without --pr it records a manual close. On a name collision the file
+#       is suffixed -2, -3, … (never clobbered).
 #   commit-push <main-repo-path> <task-name> <archived-rel-path> <main-branch>
 #       After /close's user approval: stage exactly the archive change (the new
 #       file when not gitignored, _index.md, and the original's removal when
-#       tracked — never a blanket `git add tasks/`), commit it onto <main-branch>,
-#       and fast-forward push to origin. Refuses if the main repo isn't on
-#       <main-branch>. Never force-pushes; push failure is non-fatal.
+#       tracked — never a blanket `git add tasks/`), commit ONLY those paths (a
+#       pathspec commit, so unrelated pre-staged work is never swept in), and
+#       fast-forward push to origin. Refuses if the main repo isn't on
+#       <main-branch>. Never force-pushes.
 #
-# `archive` output: key=value lines on stdout (paths relative to the main repo) —
+# `archive` output: key=value lines (paths relative to the main repo) —
 #   archived_path=tasks/archive/<name>[-N].md
 #   collision=no | yes
-#   committable=yes | no   (yes = there is a git change to commit — the archive is
-#                           not gitignored, OR the source file was tracked)
+#   committable=yes | no   (yes = a git change to commit — archive not gitignored,
+#                           OR the source file was tracked)
 # `commit-push` output: result=committed-pushed | committed-local [reason=…] |
-#   nothing-to-commit | wrong-branch [current=…].
+#   commit-failed | nothing-to-commit | wrong-branch [current=…].
 # Exit 0 on success; 2 on a usage error; 3 when the task file does not exist.
 set -eu
 
@@ -60,17 +64,14 @@ archive() {
     esac
   done
 
+  # Flatten slashes (see header) so the SOURCE lookup matches the flat kebab file,
+  # and the archive filename is always flat (no un-created tasks/archive/<sub>/).
+  local safe="${name//\//-}"
   local tasks_dir="$repo/tasks"
-  local src="$tasks_dir/$name.md"
+  local src="$tasks_dir/$safe.md"
   [ -f "$src" ] || { echo "no task file at $src" >&2; exit 3; }
 
   mkdir -p "$tasks_dir/archive"
-
-  # Flatten any slashes (a multi-segment task name — e.g. from an adopted
-  # feature/a/b branch whose prefix-strip leaves "a/b") so the archive filename is
-  # always flat. Otherwise dest would point into an un-created tasks/archive/<sub>/
-  # and the write would fail mid-/close, after the worktree/branch are already gone.
-  local safe="${name//\//-}"
 
   # Collision-free destination: never clobber a prior archive of the same name.
   local dest="$tasks_dir/archive/$safe.md" collision="no" n=2
@@ -128,7 +129,11 @@ archive() {
     exit 1
   fi
 
-  rm -f "$src"
+  # Drop the original. Non-fatal: the archive + index already succeeded, so a
+  # remove failure (read-only parent, locked file) must NOT abort with no output —
+  # it would leave a duplicate AND starve the SKILL of the archived_path it parses.
+  # Warn and continue; the lingering source is the user's to clean up.
+  rm -f "$src" || echo "warning: archived to $dest but could not remove original $src" >&2
 
   # committable = there is a git change worth committing: the new archive file is
   # not gitignored, OR the source was a TRACKED file (its removal is a real change
@@ -137,7 +142,7 @@ archive() {
   if git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
     if ! git -C "$repo" check-ignore -q "tasks/archive/$base"; then
       committable="yes"
-    elif git -C "$repo" ls-files --error-unmatch -- "tasks/$name.md" >/dev/null 2>&1; then
+    elif git -C "$repo" ls-files --error-unmatch -- "tasks/$safe.md" >/dev/null 2>&1; then
       committable="yes"
     fi
   fi
@@ -164,24 +169,40 @@ commit_push() {
     return 0
   fi
 
-  # Stage precisely (never a blanket `git add tasks/`): the archived file only when
-  # it isn't gitignored (`git add` errors on an ignored path), the index likewise,
-  # and the original's removal (a no-op for an untracked-by-omission file).
-  git -C "$repo" check-ignore -q "$archived"                || git -C "$repo" add -- "$archived" 2>/dev/null || true
-  git -C "$repo" check-ignore -q "tasks/archive/_index.md"  || git -C "$repo" add -- "tasks/archive/_index.md" 2>/dev/null || true
-  git -C "$repo" add -A -- "tasks/$name.md" 2>/dev/null || true
+  local safe="${name//\//-}"
+  local src_rel="tasks/$safe.md"
 
-  if git -C "$repo" diff --cached --quiet; then
+  # Build the EXACT pathspec to commit (never a blanket `git add tasks/`, which
+  # would sweep in unrelated pending task files): the archived file and _index.md
+  # only when not gitignored (`git add` errors on an ignored path), and the
+  # original's removal only when it was tracked.
+  local paths=()
+  git -C "$repo" check-ignore -q "$archived"               || paths+=("$archived")
+  git -C "$repo" check-ignore -q "tasks/archive/_index.md" || paths+=("tasks/archive/_index.md")
+  if git -C "$repo" ls-files --error-unmatch -- "$src_rel" >/dev/null 2>&1; then paths+=("$src_rel"); fi
+  [ "${#paths[@]}" -eq 0 ] && { echo "result=nothing-to-commit"; return 0; }
+
+  git -C "$repo" add -A -- "${paths[@]}" 2>/dev/null || true
+  if git -C "$repo" diff --cached --quiet -- "${paths[@]}"; then
     echo "result=nothing-to-commit"
     return 0
   fi
 
-  git -C "$repo" commit -m "Archive task $name" >/dev/null 2>&1 || { echo "result=nothing-to-commit"; return 0; }
+  # Commit ONLY these paths — a pathspec commit leaves any unrelated pre-staged
+  # work in the index, never publishing it under the "Archive task" message. A
+  # non-zero exit here (we know the paths have staged changes) is a REAL failure —
+  # a rejecting pre-commit hook, GPG signing misconfig, locked index — NOT an
+  # empty commit; surface it instead of masking it as "nothing-to-commit".
+  if ! git -C "$repo" commit -m "Archive task $safe" -- "${paths[@]}" >/dev/null 2>&1; then
+    echo "result=commit-failed"
+    return 0
+  fi
 
   git -C "$repo" remote get-url origin >/dev/null 2>&1 || { printf 'result=committed-local\nreason=no-origin\n'; return 0; }
 
   # Step 5 already fast-forwarded local <main-branch> to origin/<main-branch>, so
-  # the archive commit sits one commit on top — a clean ff. Never force-push.
+  # the archive commit sits one commit on top — a clean ff. Never force-push; a
+  # rejected push (offline, protected, or origin moved since step 5) is non-fatal.
   if git -C "$repo" push origin "$mainbr" >/dev/null 2>&1; then
     echo "result=committed-pushed"
   else

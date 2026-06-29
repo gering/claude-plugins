@@ -42,12 +42,14 @@ logic belongs in a tested script, not SKILL.md prose). See also [[skill-composit
   + appends the index. When `committable=yes`, `/close` asks **once** ("commit and
   push?") and then delegates the entire stage→commit→push to `archive-task.sh
   commit-push` — kept out of SKILL.md prose so the multi-step git logic can't drift
-  (the project's prose-drift lesson). It stages **only** the new file (when not
-  ignored), `_index.md`, and the original's removal — never a blanket `git add
-  tasks/` that would sweep in unrelated *pending* task files. It **refuses to commit
-  when the main repo isn't on `<main-branch>`** (`main_branch` is just the default
-  branch *name*; the working tree may have another branch checked out) — reporting
-  `result=wrong-branch` rather than landing the commit on the wrong branch.
+  (the project's prose-drift lesson). Two correctness guards earned in review:
+  it commits with an explicit **pathspec** (`git commit -- <archive> <index>
+  <removal>`), so unrelated work the user happened to `git add` is never swept into
+  the "Archive task" commit and pushed; and a non-zero commit exit is reported as
+  `result=commit-failed` (rejecting hook / GPG / locked index), not silently masked
+  as `nothing-to-commit`. It also **refuses to commit when the main repo isn't on
+  `<main-branch>`** (`main_branch` is just the default branch *name*; the working
+  tree may have another branch checked out) — reporting `result=wrong-branch`.
 - **Commit + fast-forward push, so `main` never diverges.** Left local+unpushed the
   archive commit would diverge `main` from `origin/main` and break the *next*
   `/close`'s `--ff-only` sync (step 5). So the one approval covers commit **and**
