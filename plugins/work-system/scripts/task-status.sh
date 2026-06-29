@@ -137,7 +137,10 @@ do_assess() {
   if command -v gh >/dev/null 2>&1; then
     if [ -n "$TASK_BRANCH" ]; then
       # `.[0] // empty` → no output when there is no matching PR (avoids the
-      # literal "null|null|null" that `.[0] | ...` would interpolate).
+      # literal "null|null|null" that `.[0] | ...` would interpolate). Kept to the
+      # minimal, widely-supported field set: the merge SHA for /close's archive
+      # stamp is fetched separately (best-effort), so this safety-critical pr_state
+      # lookup never depends on an optional json field an older gh might not know.
       out="$(gh pr list --state all --head "$TASK_BRANCH" --limit 1 \
               --json number,state,url --jq '.[0] // empty | "\(.number)|\(.state)|\(.url)"' 2>/dev/null || true)"
       if [ -n "$out" ]; then

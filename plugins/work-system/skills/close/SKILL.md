@@ -9,7 +9,7 @@ user_invocable: true
 
 # Close Completed Task
 
-> Clean up after a task is completed: verify merge, remove worktree, delete branch and task file
+> Clean up after a task is completed: verify merge, remove worktree, delete branch, archive the task file
 
 ## Critical: never `cd` between repo and worktree
 
@@ -17,7 +17,7 @@ This skill may run from the main repo *or* from inside the worktree being delete
 
 Rules:
 - ❌ Do not `cd <worktree>` or `cd <main-repo>` during this skill.
-- ✅ All operations against either tree go through explicit paths: `git -C <main-repo-path> …`, `git -C <worktree-path> …`, `rm <main-repo-path>/tasks/<task-name>.md`, etc.
+- ✅ All operations against either tree go through explicit paths: `git -C <main-repo-path> …`, `git -C <worktree-path> …`, `bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" archive <main-repo-path> …`, etc.
 - After deletion, the session's CWD may already be in a now-removed directory — that's the user's problem to fix (a new `cd` in their terminal), not something this skill should "repair" mid-run.
 
 ## Instructions
@@ -143,11 +143,74 @@ Rules:
    - **Exists, merge not confirmed** (manual close) → ask "Delete remote branch too?" first; only
      push the delete on confirmation.
 
-10. **Remove task file** (use the main-repo path from step 4 — do not `cd`):
-    - Run: `rm <main-repo-path>/tasks/<task-name>.md`
-    - Check if the file was git-tracked: `git -C <main-repo-path> status --short tasks/<task-name>.md`
-    - If there is a staged/unstaged change (file was tracked): ask user if they want to commit the removal
-    - If no git change (file was gitignored or untracked): just report "Task file removed", no commit needed
+10. **Archive the task file** (use the main-repo path from step 4 — do not `cd`):
+    Move it into `tasks/archive/` with a closed-stamp instead of deleting it, so the
+    finished-task context (goal, acceptance criteria, shipping PR) survives — `tasks/` is
+    untracked by design, so a deleted task would otherwise be gone for good. The helper
+    builds the stamp, suffixes the filename on a name collision (never clobbers), appends a
+    one-line `tasks/archive/_index.md` entry, and reports whether the archive is committable.
+    - **Merge confirmed** (step 2, `pr_number` is set) — fetch the merge commit for the stamp
+      (best-effort and separate from step 1's `assess`, so an older `gh` lacking the
+      `mergeCommit` field only loses the SHA, never the merge gate). Anchor `gh` to the main
+      repo via a subshell `cd` (not a persistent one — see the cwd rule), since by this step the
+      session's cwd may be the just-removed worktree; `// empty` keeps a null mergeCommit from
+      printing the literal "null":
+      ```sh
+      SHA=$( ( cd <main-repo-path> && gh pr view <pr_number> --json mergeCommit --jq '.mergeCommit.oid // empty' ) 2>/dev/null )
+      bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" archive <main-repo-path> <task-name> <task-branch> --pr <pr_number> --sha "$SHA"
+      ```
+    - **Manual close** (no merged PR) — archive without `--pr`; the stamp records
+      "closed manually (no merged PR)":
+      ```sh
+      bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" archive <main-repo-path> <task-name> <task-branch>
+      ```
+    - **Helper exits 3** ("no task file"): nothing to archive (the file was never created) —
+      note it in the summary and continue; not a failure.
+    - **Helper exits non-zero (other than 3)** — a real write/index failure (disk full, etc.).
+      The source task file is left intact (the helper rolls back). Do **not** claim the task
+      file was archived: surface the helper's stderr and say "archiving failed — task file left
+      at `tasks/<task-name>.md`"; the rest of the cleanup (worktree/branch) already happened.
+    - Read the helper's `key=value` output (`archived_path`, `collision`, `committable`):
+      - **`committable=yes`** (there is a git change to commit — the archive isn't gitignored,
+        or the original task file was tracked so its removal needs recording): show
+        `git -C <main-repo-path> status --short tasks/archive/ tasks/<task-name>.md` (scoped — not
+        the whole `tasks/`, which would surface unrelated pending tasks) and ask **once**:
+        "Commit the archived task file to `<main-branch>` and push? [y/n]" — one approval covers
+        both (the archive is metadata, and the push is what keeps local `<main-branch>` from
+        diverging and breaking the next `/close`'s step-5 sync). If yes, delegate the whole
+        stage→commit→fast-forward-push to the helper (all the git-stateful steps live there, not
+        here, so they can't drift; step 5 already synced local `<main-branch>`, so its commit is
+        a clean ff for origin — it never force-pushes):
+        ```sh
+        bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" commit-push <main-repo-path> <task-name> <archived_path> <main-branch>
+        ```
+        Report from its `result=` (and `archive_committed=` on the committed-* results — when
+        `no`, the archive is gitignored and the commit recorded only the source file's removal,
+        so say "task file removal committed; archive kept local (gitignored)" rather than
+        claiming the archive itself was committed):
+        - `committed-pushed` → "archive committed to `<main-branch>` and pushed".
+        - `committed-local` →
+          - `reason=no-origin`/`push-failed` → "archive committed locally — push `<main-branch>`
+            when ready" (protected/offline/origin-moved is non-fatal; `push-failed` may need a
+            `git pull --rebase` before the manual push).
+          - `reason=unpushed-history` → "archive committed locally; NOT pushed because
+            `<main-branch>` has other unpushed commits — push them yourself when ready" (the
+            archive-scoped approval deliberately won't publish unrelated local work).
+        - `commit-failed` → the staged archive could not be committed (a rejecting pre-commit
+          hook, GPG-signing misconfig, locked index). Report "archive staged but commit failed —
+          resolve the git error and commit manually"; do not claim it was committed.
+        - `archive-not-staged` → the archived file didn't reach the index (lost/moved file, or a
+          mismatched `archived_path`), so the helper committed nothing — report "the archive file
+          at `<archived_path>` could not be staged; it was NOT committed — check it before relying
+          on the record"; do not claim success.
+        - `wrong-branch` (`current=…`) → the main repo is checked out on another branch, so the
+          helper did **not** stage or commit; report "archive file is on disk (uncommitted); main
+          repo is on `<current>`, not `<main-branch>` — commit it onto `<main-branch>` yourself".
+        - `nothing-to-commit` → just report the archive (below); no commit was needed.
+      - **`committable=no`** (no git change to commit — `tasks/` is gitignored, or the main repo
+        isn't a git repo): local-only — just report.
+    - Report: "Task file archived to `<archived_path>`" (add "(name existed — suffixed)" when
+      `collision=yes`).
 
 11. **Final summary**:
     ```
@@ -157,7 +220,7 @@ Rules:
     - Worktree removed
     - Local branch deleted
     - Remote branch deleted (if applicable)
-    - Task file removed
+    - Task file archived → <archived_path>     [the helper's actual path, e.g. tasks/archive/<name>-2.md on a collision]
     - main synced with origin (<N> commits pulled)     [if fast-forward happened]
     - herdr tab closed (if run inside a herdr session — see step 12)
 
