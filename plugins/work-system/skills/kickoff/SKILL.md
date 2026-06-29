@@ -34,9 +34,11 @@ The same rule applies to any project-specific setup the user's `CLAUDE.md` may a
      it for the CWD-drift check in step 11.
 
 2. **Show available tasks**:
-   - Run: `ls -1 tasks/ 2>/dev/null || echo "No tasks found"`
+   - Run: `ls -1 tasks/*.md 2>/dev/null || echo "No tasks found"` — the non-recursive `*.md`
+     glob lists only pending task files and excludes the `tasks/archive/` directory `/close`
+     creates (matching `/list` and `/adopt`).
    - If no tasks exist, suggest creating one with `/define`
-   - List all tasks with their first line (title)
+   - List all tasks with their first line (title); the task name is the basename minus `.md`
    - Ask user which task to work on
 
 3. **Read selected task**:

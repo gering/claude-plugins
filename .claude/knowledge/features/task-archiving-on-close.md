@@ -28,31 +28,35 @@ logic belongs in a tested script, not SKILL.md prose). See also [[skill-composit
 ## Design decisions
 
 - **Adaptive committability, no `.gitignore` surgery.** The archive inherits
-  whatever `tasks/` does: the helper checks `git check-ignore` on the archive path
-  and reports `committable=yes/no`. Gitignored `tasks/` → the archived file is
-  ignored too (local-only); otherwise the move is a committable change. The key is
-  named `committable`, not `tracked`, on purpose: "not ignored" ≠ "git-tracked", so
-  an untracked-by-omission `tasks/` still reports `committable=yes` (the project
-  opts task files into git on first archive). This was the central open question —
-  resolved by making behavior *follow the project* rather than hardcoding it.
-- **The script never commits; `/close` asks first.** Honoring the
-  never-commit-without-approval rule, `archive-task.sh archive` only does the
-  filesystem move + index append. When `committable=yes`, `/close` prompts, then
-  calls `archive-task.sh stage` — which stages **only** the new file, `_index.md`,
-  and the original's removal (a `git add -A` no-op for an untracked-by-omission
-  original), never a blanket `git add tasks/` that would sweep in unrelated
-  *pending* task files. Keeping the staging in the tested `stage` subcommand (not
-  SKILL.md prose) holds the precise-scoping rule where it can't drift; the commit
-  itself, which needs approval, stays in `/close`.
-- **Commit + fast-forward push, so `main` never diverges.** The archive commit
-  lands on the main repo's `main`; left local+unpushed it would diverge from
-  `origin/main` and break the *next* `/close`'s `--ff-only` sync (step 5). So the
-  single approval covers commit **and** push: step 5 already ff'd local `main` to
-  `origin/main`, the archive commit sits one commit on top (clean ff), and `/close`
-  pushes it. Push failure (protected/offline/pre-existing divergence) is non-fatal —
-  the commit stays local with a "push when ready" note; never a force-push. The
-  archive is metadata (a moved markdown file), so a direct ff-push to `main` is
-  appropriate and bypasses no meaningful review.
+  whatever `tasks/` does: the helper reports `committable=yes/no`. Gitignored
+  `tasks/` → the archived file is ignored too (local-only); otherwise the move is a
+  committable change. The key is named `committable`, not `tracked`, on purpose:
+  "not ignored" ≠ "git-tracked", so an untracked-by-omission `tasks/` still reports
+  `committable=yes` (the project opts task files into git on first archive). It also
+  reports `yes` when the archive path *is* ignored but the **source** file was
+  tracked — its removal is a real change that must still be committed, not left
+  dangling. This was the central open question — resolved by making behavior
+  *follow the project* rather than hardcoding it.
+- **All git-stateful work is in `commit-push`, gated by `/close`.** Honoring the
+  never-commit-without-approval rule, `archive-task.sh archive` only moves the file
+  + appends the index. When `committable=yes`, `/close` asks **once** ("commit and
+  push?") and then delegates the entire stage→commit→push to `archive-task.sh
+  commit-push` — kept out of SKILL.md prose so the multi-step git logic can't drift
+  (the project's prose-drift lesson). It stages **only** the new file (when not
+  ignored), `_index.md`, and the original's removal — never a blanket `git add
+  tasks/` that would sweep in unrelated *pending* task files. It **refuses to commit
+  when the main repo isn't on `<main-branch>`** (`main_branch` is just the default
+  branch *name*; the working tree may have another branch checked out) — reporting
+  `result=wrong-branch` rather than landing the commit on the wrong branch.
+- **Commit + fast-forward push, so `main` never diverges.** Left local+unpushed the
+  archive commit would diverge `main` from `origin/main` and break the *next*
+  `/close`'s `--ff-only` sync (step 5). So the one approval covers commit **and**
+  push: step 5 already ff'd local `main` to `origin/main`, the commit sits one
+  commit on top (clean ff), and `commit-push` pushes it (`result=committed-pushed`).
+  Push failure (protected/offline/pre-existing divergence) or no origin is non-fatal
+  — `result=committed-local`, the commit stays put; never a force-push. The archive
+  is metadata (a moved markdown file), so a direct ff-push to `main` is appropriate
+  and bypasses no meaningful review.
 - **Never clobber on a name collision.** A re-close of the same task name suffixes
   the archived file `-2`, `-3`, … rather than overwriting a prior archive; a fresh
   `_index.md` line is appended either way, so every close is recorded.

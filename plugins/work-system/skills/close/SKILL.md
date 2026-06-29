@@ -9,7 +9,7 @@ user_invocable: true
 
 # Close Completed Task
 
-> Clean up after a task is completed: verify merge, remove worktree, delete branch and task file
+> Clean up after a task is completed: verify merge, remove worktree, delete branch, archive the task file
 
 ## Critical: never `cd` between repo and worktree
 
@@ -151,10 +151,12 @@ Rules:
     one-line `tasks/archive/_index.md` entry, and reports whether the archive is committable.
     - **Merge confirmed** (step 2, `pr_number` is set) — fetch the merge commit for the stamp
       (best-effort and separate from step 1's `assess`, so an older `gh` lacking the
-      `mergeCommit` field only loses the SHA, never the merge gate; the stamp omits the SHA
-      automatically when `$SHA` is empty), then archive with the PR:
+      `mergeCommit` field only loses the SHA, never the merge gate). Anchor `gh` to the main
+      repo via a subshell `cd` (not a persistent one — see the cwd rule), since by this step the
+      session's cwd may be the just-removed worktree; `// empty` keeps a null mergeCommit from
+      printing the literal "null":
       ```sh
-      SHA=$(gh pr view <pr_number> --json mergeCommit --jq '.mergeCommit.oid' 2>/dev/null)
+      SHA=$( ( cd <main-repo-path> && gh pr view <pr_number> --json mergeCommit --jq '.mergeCommit.oid // empty' ) 2>/dev/null )
       bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" archive <main-repo-path> <task-name> <task-branch> --pr <pr_number> --sha "$SHA"
       ```
     - **Manual close** (no merged PR) — archive without `--pr`; the stamp records
@@ -165,34 +167,29 @@ Rules:
     - **Helper exits 3** ("no task file"): nothing to archive (the file was never created) —
       note it in the summary and continue; not a failure.
     - Read the helper's `key=value` output (`archived_path`, `collision`, `committable`):
-      - **`committable=yes`** (archive is *not* gitignored — committable in this project; covers
-        both a tracked `tasks/` and an untracked-by-omission one): the move is a committable
-        change. Show `git -C <main-repo-path> status --short tasks/archive/ tasks/<task-name>.md`
-        (scoped — not the whole `tasks/`, which would surface unrelated pending tasks) and ask
-        **once**: "Commit the archived task file to `<main-branch>` and push? [y/n]" — one
-        approval covers both (the archive is metadata, and pushing is what keeps local
-        `<main-branch>` from diverging). If yes:
-        1. **Stage + commit** — chained so the commit only runs when staging succeeded (a stage
-           failure must not let an unrelated already-staged change be committed under this message):
-           ```sh
-           bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" stage <main-repo-path> <task-name> <archived_path> && \
-             git -C <main-repo-path> commit -m "Archive task <task-name>"
-           ```
-        2. **Push it as a clean fast-forward** — *only when an `origin` remote exists* (mirror
-           step 9's guard; a purely local repo just keeps the commit). Step 5 already
-           fast-forwarded local `<main-branch>` to `origin/<main-branch>`, so the archive commit
-           sits exactly one commit on top — a clean ff for origin:
-           ```sh
-           git -C <main-repo-path> push origin <main-branch>
-           ```
-           - **Success** → `origin/<main-branch>` advances and local stays in sync, so no future
-             `/close` ever sees divergence from accumulated archive commits.
-           - **Failure** (protected `<main-branch>`, offline, or a pre-existing divergence that
-             makes the push non-fast-forward) → **do not abort `/close`** and **never
-             force-push**; the archive stays committed locally. Report: "archive committed
-             locally — `<main-branch>` couldn't be pushed (protected/offline?); push it when ready."
-      - **`committable=no`** (archive is gitignored — local-only, mirroring a deliberately-ignored
-        `tasks/`): no commit — just report.
+      - **`committable=yes`** (there is a git change to commit — the archive isn't gitignored,
+        or the original task file was tracked so its removal needs recording): show
+        `git -C <main-repo-path> status --short tasks/archive/ tasks/<task-name>.md` (scoped — not
+        the whole `tasks/`, which would surface unrelated pending tasks) and ask **once**:
+        "Commit the archived task file to `<main-branch>` and push? [y/n]" — one approval covers
+        both (the archive is metadata, and the push is what keeps local `<main-branch>` from
+        diverging and breaking the next `/close`'s step-5 sync). If yes, delegate the whole
+        stage→commit→fast-forward-push to the helper (all the git-stateful steps live there, not
+        here, so they can't drift; step 5 already synced local `<main-branch>`, so its commit is
+        a clean ff for origin — it never force-pushes):
+        ```sh
+        bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" commit-push <main-repo-path> <task-name> <archived_path> <main-branch>
+        ```
+        Report from its `result=`:
+        - `committed-pushed` → "archive committed to `<main-branch>` and pushed".
+        - `committed-local` (`reason=no-origin`/`push-failed`) → "archive committed locally —
+          push `<main-branch>` when ready" (a protected/offline/diverged push is non-fatal).
+        - `wrong-branch` (`current=…`) → the main repo is checked out on another branch, so the
+          helper did **not** commit; report "archive staged on disk; main repo is on `<current>`,
+          not `<main-branch>` — commit it onto `<main-branch>` yourself".
+        - `nothing-to-commit` → just report the archive (below); no commit was needed.
+      - **`committable=no`** (no git change to commit — `tasks/` is gitignored, or the main repo
+        isn't a git repo): local-only — just report.
     - Report: "Task file archived to `<archived_path>`" (add "(name existed — suffixed)" when
       `collision=yes`).
 
