@@ -137,21 +137,24 @@ if pid:
             print(p.get("tab_id") or "")
             sys.exit(0)'
 
-# Print the agent_status of the pane whose pane_id == argv[0]; "__gone__" if the
-# (valid) list has no such pane. An empty pid is treated as gone. Lets the poller
-# tell "pane vanished" apart from "list call failed" (which yields no stdout).
+# Print the agent_status of the pane whose pane_id == argv[0]; "__gone__" ONLY when a
+# POPULATED list has no such pane (the pane really vanished). An empty pid, or an
+# empty-but-valid panes array, prints nothing — same as a failed list call — so the
+# poller keeps polling instead of mistaking a transient empty list (e.g. just after a
+# herdr restart while panes repopulate) for a vanished pane and bailing without ever
+# injecting /exit (the silent orphan this guards, mirroring extract_tab_present).
 extract_status='import sys, json
 pid = sys.argv[1] if len(sys.argv) > 1 else ""
 try:
     panes = json.load(sys.stdin)["result"]["panes"]
 except Exception:
     sys.exit(0)
-if pid:
+if pid and panes:
     for p in panes:
         if p.get("pane_id") == pid:
             print(p.get("agent_status") or "")
             sys.exit(0)
-print("__gone__")'
+    print("__gone__")'
 
 # Print present|gone for whether any pane still has tab_id == argv[0]; prints
 # "unverified" on malformed JSON, an empty tab arg, OR an empty panes array. The
@@ -169,7 +172,7 @@ except Exception:
 if not tab or not panes:
     print("unverified"); sys.exit(0)
 for p in panes:
-    if (p.get("tab_id") or "") == tab:
+    if str(p.get("tab_id") or "") == tab:   # coerce: a numeric tab_id must still match its str argv
         print("present"); sys.exit(0)
 print("gone")'
 
@@ -229,15 +232,15 @@ case "$cmd" in
     else lookup_tab "$2" "$3" --first; fi
     ;;
   close-tab)
-    # Scenario A: close the tab, then CONFIRM it's gone — a bare `herdr tab close`
-    # can report success yet leave the tab (the orphan this whole feature exists to
-    # prevent). Poll the status a few times: re-issue the close while it's still
-    # present, retry the read on a transient `unverified`, then re-read once more
-    # after the loop so a close that lands on the LAST iteration isn't misreported
-    # as `still-open`. Prints closed|still-open|unverified and ALWAYS exits 0 — no
-    # require_herdr (that would exit 1 with empty stdout, and /close's caller only
-    # branches on the three words). So /close names the tab for a manual close
-    # instead of silently orphaning it.
+    # Scenario A: close the tab ONCE, then CONFIRM it's gone — a bare `herdr tab
+    # close` can report success yet leave the tab (the orphan this whole feature
+    # exists to prevent). Poll the status until `gone`, retrying the read on a
+    # transient `unverified`. We deliberately do NOT re-issue the close in the loop:
+    # if herdr recycled the now-closed tab id onto a fresh tab, a second `tab close`
+    # would kill that unrelated live tab — and a close that genuinely didn't take is
+    # surfaced as `still-open` so /close names it for a manual close anyway. Prints
+    # closed|still-open|unverified and ALWAYS exits 0 (no require_herdr — that would
+    # exit 1 with empty stdout, and /close's caller only branches on the three words).
     [ $# -ge 2 ] && [ $# -le 3 ] || { echo "usage: ${0##*/} close-tab <tab-id> [workspace]" >&2; exit 2; }
     tab="$2"; ws="${3:-${HERDR_WORKSPACE_ID:-}}"
     herdr tab close "$tab" >/dev/null 2>&1 || true   # best-effort (no-op if herdr absent)
@@ -248,19 +251,12 @@ case "$cmd" in
     fi
     st=unverified
     k=0
-    while [ $k -lt 4 ]; do
+    while [ $k -lt 5 ]; do
       st="$(tab_status "$ws" "$tab")"
-      case "$st" in
-        gone)    break ;;                                          # confirmed closed
-        present) herdr tab close "$tab" >/dev/null 2>&1 || true ;; # still there — close again
-        *)       : ;;                                              # unverified — retry the read
-      esac
-      sleep 0.3 2>/dev/null || true
+      if [ "$st" = gone ]; then break; fi   # confirmed closed
+      sleep 0.3 2>/dev/null || true         # 'present' (async close in flight) or 'unverified' → re-read
       k=$((k + 1))
     done
-    # Verify a close issued on the final iteration (the loop reads at the top, so the
-    # last re-issue would otherwise leave $st at the pre-close 'present').
-    if [ "$st" != gone ]; then st="$(tab_status "$ws" "$tab")"; fi
     case "$st" in
       gone)    echo closed ;;
       present) echo still-open ;;

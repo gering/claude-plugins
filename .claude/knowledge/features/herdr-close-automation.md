@@ -54,10 +54,12 @@ tears down).
   `$TMPDIR` (per-process on macOS) — so /close and the hook always agree on the path.
 - **Tear down, then verify — or name the tab (1.5.1).** A teardown must confirm its
   own effect or hand the user an explicit fallback; it must never *report* a close it
-  didn't observe. So `close-tab` (Scenario A) now closes **and re-checks** the tab is
-  gone (re-checking a few times, re-issuing the close while still present), returning
-  `closed|still-open|unverified` via the `tab_status` helper (`present|gone|unverified`);
-  /close names the tab for a manual close on anything but `closed`. Scenario B's self-close fires *asynchronously* after the turn
+  didn't observe. So `close-tab` (Scenario A) now closes **once** and then polls until
+  the tab is gone (it does *not* re-issue the close — herdr may recycle the closed tab
+  id onto a fresh tab, so a second `tab close` could kill an unrelated live one),
+  returning `closed|still-open|unverified` via the `tab_status` helper
+  (`present|gone|unverified`); /close names the tab for a manual close on anything but
+  `closed`. Scenario B's self-close fires *asynchronously* after the turn
   and **cannot be confirmed in-turn**, so /close step 12 *always* appends "close by
   hand: `<tab-id>`" — turning a silent idle orphan into a visible, actionable line.
 

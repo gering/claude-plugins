@@ -170,8 +170,9 @@ and decides self-close vs. a different-tab close by pane id. Two entry points:
 
 - **From the main session** (the usual case): `/close <task>` closes the
   worktree's tab directly — a different tab, so nothing self-terminates. It then
-  **verifies** the tab is gone; if a close didn't take it names the tab so you can
-  close it by hand rather than leaving a silent orphan.
+  **verifies** the tab is gone; if the close didn't take — or herdr couldn't be
+  re-queried to confirm it — it names the tab so you can close it by hand rather
+  than leaving a silent orphan.
 - **From inside the worktree tab**: Claude cannot close its own tab, only exit
   cleanly. So `/close` focuses the main tab and arms a **detached `/exit`** that
   fires once the turn ends — Claude exits cleanly, its tab auto-closes, and
