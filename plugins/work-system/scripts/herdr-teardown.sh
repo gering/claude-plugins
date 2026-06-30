@@ -32,7 +32,12 @@
 #       can focus it before a self-close. Falls back to the workspace's first
 #       pane *other than* exclude-tab (the self tab) so the user is never focused
 #       onto the dying tab. Exit 1 only when unreachable or no candidate pane.
-#   close-tab <tab-id>          Run `herdr tab close <tab-id>` (Scenario A).
+#   close-tab <tab-id> [workspace]
+#                               Scenario A: close the tab ONCE, then VERIFY it is
+#                               gone (polls until gone; does NOT re-issue the close).
+#                               Prints one of closed|still-open|unverified on stdout
+#                               (always exit 0, even with herdr absent) so /close can
+#                               name the tab for a manual close instead of orphaning it.
 #   focus-tab <tab-id>          Run `herdr tab focus <tab-id>`.
 #   inject-exit <pane-id>       Feed a clean `/exit` into a Claude TUI pane:
 #                               `send-text "/exit"` then `send-keys Return`. NOTE
@@ -131,21 +136,47 @@ if pid:
             print(p.get("tab_id") or "")
             sys.exit(0)'
 
-# Print the agent_status of the pane whose pane_id == argv[0]; "__gone__" if the
-# (valid) list has no such pane. An empty pid is treated as gone. Lets the poller
-# tell "pane vanished" apart from "list call failed" (which yields no stdout).
+# Print the agent_status of the pane whose pane_id == argv[0]; "__gone__" ONLY when a
+# POPULATED list has no such pane (the pane really vanished). An empty pid, or an
+# empty-but-valid panes array, prints nothing — same as a failed list call — so the
+# poller keeps polling instead of mistaking a transient empty list (e.g. just after a
+# herdr restart while panes repopulate) for a vanished pane and bailing without ever
+# injecting /exit (the silent orphan this guards, mirroring extract_tab_present).
 extract_status='import sys, json
 pid = sys.argv[1] if len(sys.argv) > 1 else ""
 try:
     panes = json.load(sys.stdin)["result"]["panes"]
 except Exception:
     sys.exit(0)
-if pid:
+if pid and panes:
     for p in panes:
         if p.get("pane_id") == pid:
             print(p.get("agent_status") or "")
             sys.exit(0)
-print("__gone__")'
+    print("__gone__")'
+
+# Print present|gone for whether any pane still has tab_id == argv[0]; prints
+# "unverified" on malformed JSON, an empty tab arg, OR an empty panes array. The
+# empty-array case matters: a transiently empty-but-valid list (e.g. just after a
+# herdr restart while panes repopulate) must NOT read as "gone", or close-tab would
+# falsely report a still-open tab as closed — the silent orphan this feature
+# prevents. Never claim "gone" we did not actually observe. Lets /close confirm a
+# teardown.
+extract_tab_present='import sys, json
+tab = sys.argv[1] if len(sys.argv) > 1 else ""
+try:
+    panes = json.load(sys.stdin)["result"]["panes"]
+except Exception:
+    print("unverified"); sys.exit(0)
+if not tab or not panes:
+    print("unverified"); sys.exit(0)
+for p in panes:
+    # herdr tab/pane ids are "wN:tM"/"wN:pM" strings (never numeric), so every id
+    # comparison in this file (extract_tab, extract_pane_tab, extract_status, here)
+    # compares as-is — no str() coercion needed.
+    if (p.get("tab_id") or "") == tab:
+        print("present"); sys.exit(0)
+print("gone")'
 
 # herdr pane list for a workspace (empty ws → unscoped). Empty string on failure.
 pane_list() {
@@ -169,6 +200,20 @@ lookup_tab() {
   printf '%s\n' "$tab"
 }
 
+# Whether a tab still has any pane. $1=workspace $2=tab-id. Echoes one of
+# present|gone|unverified and ALWAYS returns 0 (callers branch on the word, and
+# this runs under `set -e` inside command substitution). "unverified" means we
+# could not check (herdr/python3 missing, or the list call failed) — distinct
+# from "gone", so /close never reports a close it didn't actually confirm.
+tab_status() {
+  local ws="$1" tab="$2" json
+  command -v herdr   >/dev/null 2>&1 || { echo unverified; return 0; }
+  command -v python3 >/dev/null 2>&1 || { echo unverified; return 0; }
+  json="$(pane_list "$ws")"
+  [ -n "$json" ] || { echo unverified; return 0; }
+  printf '%s' "$json" | python3 -c "$extract_tab_present" "$tab" 2>/dev/null || echo unverified
+}
+
 cmd="${1:-}"
 case "$cmd" in
   worktree-tab)
@@ -189,9 +234,38 @@ case "$cmd" in
     else lookup_tab "$2" "$3" --first; fi
     ;;
   close-tab)
-    [ $# -eq 2 ] || { echo "usage: ${0##*/} close-tab <tab-id>" >&2; exit 2; }
-    require_herdr
-    herdr tab close "$2"
+    # Scenario A: close the tab ONCE, then CONFIRM it's gone — a bare `herdr tab
+    # close` can report success yet leave the tab (the orphan this whole feature
+    # exists to prevent). Poll the status until `gone`, retrying the read on a
+    # transient `unverified`. We deliberately do NOT re-issue the close in the loop:
+    # if herdr recycled the now-closed tab id onto a fresh tab, a second `tab close`
+    # would kill that unrelated live tab — and a close that genuinely didn't take is
+    # surfaced as `still-open` so /close names it for a manual close anyway. Prints
+    # closed|still-open|unverified and ALWAYS exits 0 (no require_herdr — that would
+    # exit 1 with empty stdout, and /close's caller only branches on the three words).
+    [ $# -ge 2 ] && [ $# -le 3 ] || { echo "usage: ${0##*/} close-tab <tab-id> [workspace]" >&2; exit 2; }
+    tab="$2"; ws="${3:-${HERDR_WORKSPACE_ID:-}}"
+    herdr tab close "$tab" >/dev/null 2>&1 || true   # best-effort (no-op if herdr absent)
+    # Without both tools we can neither close nor verify — report unverified at once
+    # instead of spinning the loop on a condition that can never change.
+    if ! command -v herdr >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+      echo unverified; exit 0
+    fi
+    st=unverified
+    k=0
+    while [ $k -lt 5 ]; do
+      st="$(tab_status "$ws" "$tab")"
+      if [ "$st" = gone ]; then break; fi   # confirmed closed
+      k=$((k + 1))
+      # 'present' (async close in flight) or 'unverified' → wait before re-reading,
+      # but not after the final read (its result is what we report).
+      if [ $k -lt 5 ]; then sleep 0.3 2>/dev/null || true; fi
+    done
+    case "$st" in
+      gone)    echo closed ;;
+      present) echo still-open ;;
+      *)       echo unverified ;;
+    esac
     ;;
   focus-tab)
     [ $# -eq 2 ] || { echo "usage: ${0##*/} focus-tab <tab-id>" >&2; exit 2; }
@@ -234,13 +308,26 @@ case "$cmd" in
     [ -n "$pane" ] || exit 0
     command -v herdr   >/dev/null 2>&1 || exit 0
     command -v python3 >/dev/null 2>&1 || exit 0
+    # ~120s window (240 × 0.5s): a closing turn that archives + commits + pushes
+    # can outlast a 30s guess, and timing out injects nothing → the very idle
+    # orphan we are fixing. Generous headroom is cheap; the loop exits the instant
+    # the pane goes idle or vanishes.
     i=0
-    while [ $i -lt 60 ]; do
+    while [ $i -lt 240 ]; do
       json="$(pane_list "$ws")"
       if [ -z "$json" ]; then sleep 0.5 2>/dev/null || true; i=$((i + 1)); continue; fi
       st="$(printf '%s' "$json" | python3 -c "$extract_status" "$pane" 2>/dev/null || true)"
       case "$st" in
-        idle|done) bash "$0" inject-exit "$pane" >/dev/null 2>&1 || true; exit 0 ;;
+        idle|done)
+          # Turn ended → inject /exit onto the now-idle prompt (the state proven to
+          # exit cleanly), exactly ONCE. No speculative re-inject: a second /exit
+          # can't tell a dropped first injection from a user who reopened this tab
+          # and is momentarily idle, and would kill that live session mid-use. If
+          # this injection is dropped, /close's always-printed "close by hand:
+          # <tab>" line + the SessionEnd hook are the backups.
+          bash "$0" inject-exit "$pane" >/dev/null 2>&1 || true
+          exit 0
+          ;;
         __gone__)  exit 0 ;;   # pane already gone — nothing to exit
       esac
       sleep 0.5 2>/dev/null || true

@@ -222,7 +222,7 @@ Rules:
     - Remote branch deleted (if applicable)
     - Task file archived → <archived_path>     [the helper's actual path, e.g. tasks/archive/<name>-2.md on a collision]
     - main synced with origin (<N> commits pulled)     [if fast-forward happened]
-    - herdr tab closed (if run inside a herdr session — see step 12)
+    - herdr tab (if run inside a herdr session): step 12 reports whether it was closed, will close on exit, or needs a manual close
 
     Next: /kickoff for next task
     ```
@@ -242,12 +242,21 @@ Rules:
 
     **Scenario A — `SELF=no`** (`WT_TAB` ≠ `OWN_TAB`; you're in a *different* tab,
     normally the main session): close the worktree tab directly — a different tab, so
-    no self-kill:
+    no self-kill. `close-tab` closes **once and then polls** until the tab is gone (it
+    does not re-issue the close — herdr may recycle the id onto a fresh tab), so a
+    close that silently didn't take is reported as `still-open`, never as success:
     ```sh
-    bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-teardown.sh" close-tab "$WT_TAB"
+    CLOSE_RESULT=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-teardown.sh" close-tab "$WT_TAB" "$HERDR_WORKSPACE_ID")
     ```
-    Report: "herdr: closed the task's tab (`$WT_TAB`)." Done. (The idle task-agent
-    in that tab dies with it — fine, the task is merged and cleaned up.)
+    Branch on `$CLOSE_RESULT` and report accordingly:
+    - `closed` → "herdr: closed the task's tab (`$WT_TAB`)." (The idle task-agent in
+      that tab dies with it — fine, the task is merged and cleaned up.)
+    - `still-open` → the close didn't take: "herdr: couldn't close the task's tab
+      automatically — close it by hand: `$WT_TAB`."
+    - `unverified` → close sent but herdr couldn't be re-queried: "herdr: sent the
+      close for tab `$WT_TAB` but couldn't confirm it — check and close it by hand if
+      it's still open."
+    Done.
 
     **Scenario B — `SELF=yes`** (`WT_TAB` == `OWN_TAB`; `/close` was run from *inside*
     the worktree tab): Claude cannot close its own tab, only **exit cleanly**; the
@@ -286,9 +295,20 @@ Rules:
        - **B-hook (fallback):** if `self-exit` can't run (`herdr` injection
          unavailable / non-zero exit), do **not** inject — tell the user: "Cleanup
          done, main tab focused — press **Ctrl+D** (or type `/exit`) to close this
-         finished tab." The same auto-close + hook tear it down on that manual clean
-         exit. Never defer a tab-close to a SIGHUP/idle kill — that risks a corrupt
-         transcript / broken `--resume`.
+         finished tab (`$WT_TAB`)." The same auto-close + hook tear it down on that
+         manual clean exit. Never defer a tab-close to a SIGHUP/idle kill — that
+         risks a corrupt transcript / broken `--resume`. (This line already names the
+         tab, so item 5 does **not** apply to the B-hook path.)
+    5. **After B-inject, name the tab (verification fallback).** A self-close fires
+       *asynchronously* after this turn ends and **cannot be confirmed in-turn** — a
+       never-idle / `unknown` status or a dropped `/exit` can still leave this session
+       alive and idle (the exact orphan this task fixes), and the injector deliberately
+       fires only once. So when **B-inject** ran, the **last line** of the close
+       output must name this tab so any residual orphan is visible, not silent:
+       append "If this tab is still here in a few seconds, close it by hand:
+       `$WT_TAB` (or press Ctrl+D)." Do **not** claim the tab is already closed — in
+       Scenario B you cannot have observed that yet. (Skip this after B-hook, which
+       already named the tab.)
 
 ## Safety
 
