@@ -169,14 +169,18 @@ matching the pane's cwd (no persisted layout file) *before* removing the worktre
 and decides self-close vs. a different-tab close by pane id. Two entry points:
 
 - **From the main session** (the usual case): `/close <task>` closes the
-  worktree's tab directly — a different tab, so nothing self-terminates.
+  worktree's tab directly — a different tab, so nothing self-terminates. It then
+  **verifies** the tab is gone; if a close didn't take it names the tab so you can
+  close it by hand rather than leaving a silent orphan.
 - **From inside the worktree tab**: Claude cannot close its own tab, only exit
   cleanly. So `/close` focuses the main tab and arms a **detached `/exit`** that
   fires once the turn ends — Claude exits cleanly, its tab auto-closes, and
   you land back in the main session, hands-free. (The injector polls until the
   prompt is idle before delivering the exit; injecting into a busy TUI is
   unreliable.) If herdr injection isn't available it instead asks you to press
-  **Ctrl+D**.
+  **Ctrl+D**. Because a self-close fires *after* the turn and can't be confirmed
+  in-turn, `/close` always prints the tab id as a fallback — if the tab lingers,
+  close it by hand.
 
 For the self-close path a `SessionEnd` hook ships with the plugin as a backup: it
 closes the tab on a clean exit, but only when `/close` wrote a short-lived per-pane

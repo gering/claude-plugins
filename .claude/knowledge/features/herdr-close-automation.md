@@ -1,9 +1,9 @@
 ---
 title: "herdr /close Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-06-24
+updatedAt: 2026-06-30
 createdFrom: "branch: task/automate-close-in-herdr"
-updatedFrom: "branch: task/automate-close-in-herdr"
+updatedFrom: "branch: task/fix-close-herdr-orphan-tab"
 pluginVersion: 1.8.2
 prime: false
 ---
@@ -52,6 +52,14 @@ tears down).
   without closing. Marker lives under a **fixed** `$HOME/.cache` — not
   `$XDG_CACHE_HOME` (may diverge between the /close shell and the hook's env), not
   `$TMPDIR` (per-process on macOS) — so /close and the hook always agree on the path.
+- **Tear down, then verify — or name the tab (1.5.1).** A teardown must confirm its
+  own effect or hand the user an explicit fallback; it must never *report* a close it
+  didn't observe. So `close-tab` (Scenario A) now closes **and re-checks** the tab is
+  gone (one retry), returning `closed|still-open|unverified` via the `tab_status`
+  helper (`present|gone|unverified`); /close names the tab for a manual close on
+  anything but `closed`. Scenario B's self-close fires *asynchronously* after the turn
+  and **cannot be confirmed in-turn**, so /close step 12 *always* appends "close by
+  hand: `<tab-id>`" — turning a silent idle orphan into a visible, actionable line.
 
 ## Gotcha: there is exactly one way to exit Claude's TUI from outside
 
@@ -79,7 +87,13 @@ cleanly from another process:
   `agent_status` until a confirmed `idle`/`done`** (the launching turn has ended) and
   only then runs `inject-exit`, landing `/exit` on the now-idle prompt (the state
   proven to exit cleanly). Polling beats a fixed `sleep N` timer, which fires
-  mid-turn whenever the closing turn outlasts the guess. Critically it injects
+  mid-turn whenever the closing turn outlasts the guess. Empirically (verified live)
+  herdr's `agent_status` is one of `idle|working|done|unknown`, and a `nohup … &
+  disown` poller **survives** past the launching Bash tool call — so the detached
+  mechanism is sound; the real failure was the poll window timing out (raised
+  30s→120s in 1.5.1) or `/exit` being dropped, so after injecting on idle the poller
+  now **confirms the pane vanished and re-injects once**. It still injects only on
+  `idle`/`done` — never on `working`/`unknown` (ambiguous → could be mid-turn). Critically it injects
   *only* on a confirmed idle status — a transient `herdr pane list` failure yields
   empty output, which must be retried, **not** mistaken for idle (that would inject
   mid-turn); a vanished pane or a never-idle timeout injects nothing. `nohup` keeps

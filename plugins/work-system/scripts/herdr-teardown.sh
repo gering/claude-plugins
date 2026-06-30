@@ -32,7 +32,15 @@
 #       can focus it before a self-close. Falls back to the workspace's first
 #       pane *other than* exclude-tab (the self tab) so the user is never focused
 #       onto the dying tab. Exit 1 only when unreachable or no candidate pane.
-#   close-tab <tab-id>          Run `herdr tab close <tab-id>` (Scenario A).
+#   close-tab <tab-id> [workspace]
+#                               Scenario A: close the tab, then VERIFY it is gone
+#                               (one retry if still present). Prints one of
+#                               closed|still-open|unverified on stdout (always
+#                               exit 0) so /close can name the tab for a manual
+#                               close instead of silently leaving an orphan.
+#   tab-status <tab-id> [workspace]
+#                               Print gone|present|unverified for whether any pane
+#                               still has this tab — used to confirm a teardown.
 #   focus-tab <tab-id>          Run `herdr tab focus <tab-id>`.
 #   inject-exit <pane-id>       Feed a clean `/exit` into a Claude TUI pane:
 #                               `send-text "/exit"` then `send-keys Return`. NOTE
@@ -147,6 +155,22 @@ if pid:
             sys.exit(0)
 print("__gone__")'
 
+# Print present|gone for whether any pane still has tab_id == argv[0]; prints
+# "unverified" on malformed/empty JSON or an empty tab arg (can't tell — never
+# claim "gone" we did not actually observe). Lets /close confirm a teardown.
+extract_tab_present='import sys, json
+tab = sys.argv[1] if len(sys.argv) > 1 else ""
+try:
+    panes = json.load(sys.stdin)["result"]["panes"]
+except Exception:
+    print("unverified"); sys.exit(0)
+if not tab:
+    print("unverified"); sys.exit(0)
+for p in panes:
+    if (p.get("tab_id") or "") == tab:
+        print("present"); sys.exit(0)
+print("gone")'
+
 # herdr pane list for a workspace (empty ws → unscoped). Empty string on failure.
 pane_list() {
   local ws="${1:-}"
@@ -169,6 +193,20 @@ lookup_tab() {
   printf '%s\n' "$tab"
 }
 
+# Whether a tab still has any pane. $1=workspace $2=tab-id. Echoes one of
+# present|gone|unverified and ALWAYS returns 0 (callers branch on the word, and
+# this runs under `set -e` inside command substitution). "unverified" means we
+# could not check (herdr/python3 missing, or the list call failed) — distinct
+# from "gone", so /close never reports a close it didn't actually confirm.
+tab_status() {
+  local ws="$1" tab="$2" json
+  command -v herdr   >/dev/null 2>&1 || { echo unverified; return 0; }
+  command -v python3 >/dev/null 2>&1 || { echo unverified; return 0; }
+  json="$(pane_list "$ws")"
+  [ -n "$json" ] || { echo unverified; return 0; }
+  printf '%s' "$json" | python3 -c "$extract_tab_present" "$tab" 2>/dev/null || echo unverified
+}
+
 cmd="${1:-}"
 case "$cmd" in
   worktree-tab)
@@ -189,9 +227,29 @@ case "$cmd" in
     else lookup_tab "$2" "$3" --first; fi
     ;;
   close-tab)
-    [ $# -eq 2 ] || { echo "usage: ${0##*/} close-tab <tab-id>" >&2; exit 2; }
+    # Scenario A: close the tab, then CONFIRM it's gone — a bare `herdr tab close`
+    # can report success yet leave the tab (the orphan this whole feature exists to
+    # prevent). Retry once if still present, then print closed|still-open|unverified
+    # so /close names the tab for a manual close instead of silently orphaning it.
+    [ $# -ge 2 ] && [ $# -le 3 ] || { echo "usage: ${0##*/} close-tab <tab-id> [workspace]" >&2; exit 2; }
     require_herdr
-    herdr tab close "$2"
+    tab="$2"; ws="${3:-${HERDR_WORKSPACE_ID:-}}"
+    herdr tab close "$tab" >/dev/null 2>&1 || true
+    st="$(tab_status "$ws" "$tab")"
+    if [ "$st" = present ]; then
+      sleep 0.3 2>/dev/null || true
+      herdr tab close "$tab" >/dev/null 2>&1 || true
+      st="$(tab_status "$ws" "$tab")"
+    fi
+    case "$st" in
+      gone)    echo closed ;;
+      present) echo still-open ;;
+      *)       echo unverified ;;
+    esac
+    ;;
+  tab-status)
+    [ $# -ge 2 ] && [ $# -le 3 ] || { echo "usage: ${0##*/} tab-status <tab-id> [workspace]" >&2; exit 2; }
+    tab_status "${3:-${HERDR_WORKSPACE_ID:-}}" "$2"
     ;;
   focus-tab)
     [ $# -eq 2 ] || { echo "usage: ${0##*/} focus-tab <tab-id>" >&2; exit 2; }
@@ -234,13 +292,34 @@ case "$cmd" in
     [ -n "$pane" ] || exit 0
     command -v herdr   >/dev/null 2>&1 || exit 0
     command -v python3 >/dev/null 2>&1 || exit 0
+    # ~120s window (240 × 0.5s): a closing turn that archives + commits + pushes
+    # can outlast a 30s guess, and timing out injects nothing → the very idle
+    # orphan we are fixing. Generous headroom is cheap; the loop exits the instant
+    # the pane goes idle or vanishes.
     i=0
-    while [ $i -lt 60 ]; do
+    while [ $i -lt 240 ]; do
       json="$(pane_list "$ws")"
       if [ -z "$json" ]; then sleep 0.5 2>/dev/null || true; i=$((i + 1)); continue; fi
       st="$(printf '%s' "$json" | python3 -c "$extract_status" "$pane" 2>/dev/null || true)"
       case "$st" in
-        idle|done) bash "$0" inject-exit "$pane" >/dev/null 2>&1 || true; exit 0 ;;
+        idle|done)
+          # Turn ended → inject /exit onto the idle prompt, then CONFIRM the pane
+          # actually exited. A single send-text/Return pair can be dropped (TUI
+          # repaint, focus race); if it's still idle a few seconds later, re-inject
+          # ONCE. Beyond that, the marker + SessionEnd hook + /close's manual-close
+          # line are the backups — never inject endlessly.
+          bash "$0" inject-exit "$pane" >/dev/null 2>&1 || true
+          j=0
+          while [ $j -lt 12 ]; do
+            sleep 0.5 2>/dev/null || true
+            s2="$(pane_list "$ws" | python3 -c "$extract_status" "$pane" 2>/dev/null || true)"
+            if [ "$s2" = "__gone__" ]; then exit 0; fi   # exited cleanly, tab auto-closed
+            j=$((j + 1))
+          done
+          s3="$(pane_list "$ws" | python3 -c "$extract_status" "$pane" 2>/dev/null || true)"
+          case "$s3" in idle|done) bash "$0" inject-exit "$pane" >/dev/null 2>&1 || true ;; esac
+          exit 0
+          ;;
         __gone__)  exit 0 ;;   # pane already gone — nothing to exit
       esac
       sleep 0.5 2>/dev/null || true
@@ -288,7 +367,7 @@ case "$cmd" in
     exit 0
     ;;
   *)
-    echo "usage: ${0##*/} {worktree-tab|own-tab|main-tab|close-tab|focus-tab|inject-exit|self-exit|arm-self-close|on-session-end} ..." >&2
+    echo "usage: ${0##*/} {worktree-tab|own-tab|main-tab|close-tab|tab-status|focus-tab|inject-exit|self-exit|arm-self-close|on-session-end} ..." >&2
     exit 2
     ;;
 esac
