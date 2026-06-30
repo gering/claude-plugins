@@ -55,9 +55,9 @@ tears down).
 - **Tear down, then verify — or name the tab (1.5.1).** A teardown must confirm its
   own effect or hand the user an explicit fallback; it must never *report* a close it
   didn't observe. So `close-tab` (Scenario A) now closes **and re-checks** the tab is
-  gone (one retry), returning `closed|still-open|unverified` via the `tab_status`
-  helper (`present|gone|unverified`); /close names the tab for a manual close on
-  anything but `closed`. Scenario B's self-close fires *asynchronously* after the turn
+  gone (re-checking a few times, re-issuing the close while still present), returning
+  `closed|still-open|unverified` via the `tab_status` helper (`present|gone|unverified`);
+  /close names the tab for a manual close on anything but `closed`. Scenario B's self-close fires *asynchronously* after the turn
   and **cannot be confirmed in-turn**, so /close step 12 *always* appends "close by
   hand: `<tab-id>`" — turning a silent idle orphan into a visible, actionable line.
 
@@ -91,9 +91,11 @@ cleanly from another process:
   herdr's `agent_status` is one of `idle|working|done|unknown`, and a `nohup … &
   disown` poller **survives** past the launching Bash tool call — so the detached
   mechanism is sound; the real failure was the poll window timing out (raised
-  30s→120s in 1.5.1) or `/exit` being dropped, so after injecting on idle the poller
-  now **confirms the pane vanished and re-injects once**. It still injects only on
-  `idle`/`done` — never on `working`/`unknown` (ambiguous → could be mid-turn). Critically it injects
+  30s→120s in 1.5.1) or a dropped `/exit`. It injects only on `idle`/`done` (never
+  `working`/`unknown`, which are ambiguous) and **exactly once** — a second injection
+  can't tell a dropped `/exit` from a user who reopened the tab and is momentarily
+  idle, so it would risk killing that live session; a residual orphan is instead
+  surfaced by /close's always-printed manual-close line. Critically it injects
   *only* on a confirmed idle status — a transient `herdr pane list` failure yields
   empty output, which must be retried, **not** mistaken for idle (that would inject
   mid-turn); a vanished pane or a never-idle timeout injects nothing. `nohup` keeps

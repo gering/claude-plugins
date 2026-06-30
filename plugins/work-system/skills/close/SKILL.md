@@ -222,7 +222,7 @@ Rules:
     - Remote branch deleted (if applicable)
     - Task file archived → <archived_path>     [the helper's actual path, e.g. tasks/archive/<name>-2.md on a collision]
     - main synced with origin (<N> commits pulled)     [if fast-forward happened]
-    - herdr tab torn down (if run inside a herdr session — step 12 reports the exact status: verified-closed, closing-on-exit, or close-by-hand)
+    - herdr tab (if run inside a herdr session): step 12 reports whether it was closed, will close on exit, or needs a manual close
 
     Next: /kickoff for next task
     ```
@@ -294,18 +294,20 @@ Rules:
        - **B-hook (fallback):** if `self-exit` can't run (`herdr` injection
          unavailable / non-zero exit), do **not** inject — tell the user: "Cleanup
          done, main tab focused — press **Ctrl+D** (or type `/exit`) to close this
-         finished tab." The same auto-close + hook tear it down on that manual clean
-         exit. Never defer a tab-close to a SIGHUP/idle kill — that risks a corrupt
-         transcript / broken `--resume`.
-    5. **Always name the tab (verification fallback).** A self-close fires
-       *asynchronously* after this turn ends and **cannot be confirmed in-turn** —
-       the detached injector waits for idle and re-injects once, but a never-idle /
-       `unknown` status or a dropped `/exit` can still leave this session alive and
-       idle (the exact orphan this task fixes). So whichever path ran, the **last
-       line** of the close output must name this tab so any residual orphan is
-       visible, not silent: append "If this tab is still here in a few seconds, close
-       it by hand: `$WT_TAB` (or press Ctrl+D)." Do **not** claim the tab is already
-       closed — in Scenario B you cannot have observed that yet.
+         finished tab (`$WT_TAB`)." The same auto-close + hook tear it down on that
+         manual clean exit. Never defer a tab-close to a SIGHUP/idle kill — that
+         risks a corrupt transcript / broken `--resume`. (This line already names the
+         tab, so item 5 does **not** apply to the B-hook path.)
+    5. **After B-inject, name the tab (verification fallback).** A self-close fires
+       *asynchronously* after this turn ends and **cannot be confirmed in-turn** — a
+       never-idle / `unknown` status or a dropped `/exit` can still leave this session
+       alive and idle (the exact orphan this task fixes), and the injector deliberately
+       fires only once. So when **B-inject** ran, the **last line** of the close
+       output must name this tab so any residual orphan is visible, not silent:
+       append "If this tab is still here in a few seconds, close it by hand:
+       `$WT_TAB` (or press Ctrl+D)." Do **not** claim the tab is already closed — in
+       Scenario B you cannot have observed that yet. (Skip this after B-hook, which
+       already named the tab.)
 
 ## Safety
 

@@ -34,10 +34,11 @@
 #       onto the dying tab. Exit 1 only when unreachable or no candidate pane.
 #   close-tab <tab-id> [workspace]
 #                               Scenario A: close the tab, then VERIFY it is gone
-#                               (one retry if still present). Prints one of
+#                               (re-checks a few times, re-issuing the close while
+#                               still present). Prints one of
 #                               closed|still-open|unverified on stdout (always
-#                               exit 0) so /close can name the tab for a manual
-#                               close instead of silently leaving an orphan.
+#                               exit 0, even with herdr absent) so /close can name
+#                               the tab for a manual close instead of orphaning it.
 #   tab-status <tab-id> [workspace]
 #                               Print gone|present|unverified for whether any pane
 #                               still has this tab — used to confirm a teardown.
@@ -229,18 +230,28 @@ case "$cmd" in
   close-tab)
     # Scenario A: close the tab, then CONFIRM it's gone — a bare `herdr tab close`
     # can report success yet leave the tab (the orphan this whole feature exists to
-    # prevent). Retry once if still present, then print closed|still-open|unverified
-    # so /close names the tab for a manual close instead of silently orphaning it.
+    # prevent). Poll the status a few times: re-issue the close while it's still
+    # present, and retry the read on a transient list failure (`unverified`) so an
+    # async close or a flaky `pane list` doesn't raise a false alarm. Prints one of
+    # closed|still-open|unverified and ALWAYS exits 0 — even with herdr absent, where
+    # tab_status yields `unverified` (NO require_herdr here: that would exit 1 with
+    # empty stdout, and /close's caller only branches on the three words). So /close
+    # names the tab for a manual close instead of silently orphaning it.
     [ $# -ge 2 ] && [ $# -le 3 ] || { echo "usage: ${0##*/} close-tab <tab-id> [workspace]" >&2; exit 2; }
-    require_herdr
     tab="$2"; ws="${3:-${HERDR_WORKSPACE_ID:-}}"
     herdr tab close "$tab" >/dev/null 2>&1 || true
-    st="$(tab_status "$ws" "$tab")"
-    if [ "$st" = present ]; then
-      sleep 0.3 2>/dev/null || true
-      herdr tab close "$tab" >/dev/null 2>&1 || true
+    st=unverified
+    k=0
+    while [ $k -lt 4 ]; do
       st="$(tab_status "$ws" "$tab")"
-    fi
+      case "$st" in
+        gone)    break ;;                                          # confirmed closed
+        present) herdr tab close "$tab" >/dev/null 2>&1 || true ;; # still there — close again
+        *)       : ;;                                              # unverified — retry the read
+      esac
+      sleep 0.3 2>/dev/null || true
+      k=$((k + 1))
+    done
     case "$st" in
       gone)    echo closed ;;
       present) echo still-open ;;
@@ -303,21 +314,13 @@ case "$cmd" in
       st="$(printf '%s' "$json" | python3 -c "$extract_status" "$pane" 2>/dev/null || true)"
       case "$st" in
         idle|done)
-          # Turn ended → inject /exit onto the idle prompt, then CONFIRM the pane
-          # actually exited. A single send-text/Return pair can be dropped (TUI
-          # repaint, focus race); if it's still idle a few seconds later, re-inject
-          # ONCE. Beyond that, the marker + SessionEnd hook + /close's manual-close
-          # line are the backups — never inject endlessly.
+          # Turn ended → inject /exit onto the now-idle prompt (the state proven to
+          # exit cleanly), exactly ONCE. No speculative re-inject: a second /exit
+          # can't tell a dropped first injection from a user who reopened this tab
+          # and is momentarily idle, and would kill that live session mid-use. If
+          # this injection is dropped, /close's always-printed "close by hand:
+          # <tab>" line + the SessionEnd hook are the backups.
           bash "$0" inject-exit "$pane" >/dev/null 2>&1 || true
-          j=0
-          while [ $j -lt 12 ]; do
-            sleep 0.5 2>/dev/null || true
-            s2="$(pane_list "$ws" | python3 -c "$extract_status" "$pane" 2>/dev/null || true)"
-            if [ "$s2" = "__gone__" ]; then exit 0; fi   # exited cleanly, tab auto-closed
-            j=$((j + 1))
-          done
-          s3="$(pane_list "$ws" | python3 -c "$extract_status" "$pane" 2>/dev/null || true)"
-          case "$s3" in idle|done) bash "$0" inject-exit "$pane" >/dev/null 2>&1 || true ;; esac
           exit 0
           ;;
         __gone__)  exit 0 ;;   # pane already gone — nothing to exit
