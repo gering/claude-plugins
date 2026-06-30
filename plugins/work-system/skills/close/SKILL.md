@@ -242,8 +242,9 @@ Rules:
 
     **Scenario A — `SELF=no`** (`WT_TAB` ≠ `OWN_TAB`; you're in a *different* tab,
     normally the main session): close the worktree tab directly — a different tab, so
-    no self-kill. `close-tab` closes **and re-checks** that the tab is gone (one
-    retry), so a close that silently didn't take is never reported as success:
+    no self-kill. `close-tab` closes **and re-checks** that the tab is gone (it polls
+    a few times, re-issuing the close while still present), so a close that silently
+    didn't take is never reported as success:
     ```sh
     CLOSE_RESULT=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-teardown.sh" close-tab "$WT_TAB" "$HERDR_WORKSPACE_ID")
     ```

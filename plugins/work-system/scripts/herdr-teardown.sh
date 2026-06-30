@@ -39,9 +39,6 @@
 #                               closed|still-open|unverified on stdout (always
 #                               exit 0, even with herdr absent) so /close can name
 #                               the tab for a manual close instead of orphaning it.
-#   tab-status <tab-id> [workspace]
-#                               Print gone|present|unverified for whether any pane
-#                               still has this tab — used to confirm a teardown.
 #   focus-tab <tab-id>          Run `herdr tab focus <tab-id>`.
 #   inject-exit <pane-id>       Feed a clean `/exit` into a Claude TUI pane:
 #                               `send-text "/exit"` then `send-keys Return`. NOTE
@@ -157,15 +154,19 @@ if pid:
 print("__gone__")'
 
 # Print present|gone for whether any pane still has tab_id == argv[0]; prints
-# "unverified" on malformed/empty JSON or an empty tab arg (can't tell — never
-# claim "gone" we did not actually observe). Lets /close confirm a teardown.
+# "unverified" on malformed JSON, an empty tab arg, OR an empty panes array. The
+# empty-array case matters: a transiently empty-but-valid list (e.g. just after a
+# herdr restart while panes repopulate) must NOT read as "gone", or close-tab would
+# falsely report a still-open tab as closed — the silent orphan this feature
+# prevents. Never claim "gone" we did not actually observe. Lets /close confirm a
+# teardown.
 extract_tab_present='import sys, json
 tab = sys.argv[1] if len(sys.argv) > 1 else ""
 try:
     panes = json.load(sys.stdin)["result"]["panes"]
 except Exception:
     print("unverified"); sys.exit(0)
-if not tab:
+if not tab or not panes:
     print("unverified"); sys.exit(0)
 for p in panes:
     if (p.get("tab_id") or "") == tab:
@@ -231,15 +232,20 @@ case "$cmd" in
     # Scenario A: close the tab, then CONFIRM it's gone — a bare `herdr tab close`
     # can report success yet leave the tab (the orphan this whole feature exists to
     # prevent). Poll the status a few times: re-issue the close while it's still
-    # present, and retry the read on a transient list failure (`unverified`) so an
-    # async close or a flaky `pane list` doesn't raise a false alarm. Prints one of
-    # closed|still-open|unverified and ALWAYS exits 0 — even with herdr absent, where
-    # tab_status yields `unverified` (NO require_herdr here: that would exit 1 with
-    # empty stdout, and /close's caller only branches on the three words). So /close
-    # names the tab for a manual close instead of silently orphaning it.
+    # present, retry the read on a transient `unverified`, then re-read once more
+    # after the loop so a close that lands on the LAST iteration isn't misreported
+    # as `still-open`. Prints closed|still-open|unverified and ALWAYS exits 0 — no
+    # require_herdr (that would exit 1 with empty stdout, and /close's caller only
+    # branches on the three words). So /close names the tab for a manual close
+    # instead of silently orphaning it.
     [ $# -ge 2 ] && [ $# -le 3 ] || { echo "usage: ${0##*/} close-tab <tab-id> [workspace]" >&2; exit 2; }
     tab="$2"; ws="${3:-${HERDR_WORKSPACE_ID:-}}"
-    herdr tab close "$tab" >/dev/null 2>&1 || true
+    herdr tab close "$tab" >/dev/null 2>&1 || true   # best-effort (no-op if herdr absent)
+    # Without both tools we can neither close nor verify — report unverified at once
+    # instead of spinning the loop on a condition that can never change.
+    if ! command -v herdr >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+      echo unverified; exit 0
+    fi
     st=unverified
     k=0
     while [ $k -lt 4 ]; do
@@ -252,15 +258,14 @@ case "$cmd" in
       sleep 0.3 2>/dev/null || true
       k=$((k + 1))
     done
+    # Verify a close issued on the final iteration (the loop reads at the top, so the
+    # last re-issue would otherwise leave $st at the pre-close 'present').
+    if [ "$st" != gone ]; then st="$(tab_status "$ws" "$tab")"; fi
     case "$st" in
       gone)    echo closed ;;
       present) echo still-open ;;
       *)       echo unverified ;;
     esac
-    ;;
-  tab-status)
-    [ $# -ge 2 ] && [ $# -le 3 ] || { echo "usage: ${0##*/} tab-status <tab-id> [workspace]" >&2; exit 2; }
-    tab_status "${3:-${HERDR_WORKSPACE_ID:-}}" "$2"
     ;;
   focus-tab)
     [ $# -eq 2 ] || { echo "usage: ${0##*/} focus-tab <tab-id>" >&2; exit 2; }
@@ -370,7 +375,7 @@ case "$cmd" in
     exit 0
     ;;
   *)
-    echo "usage: ${0##*/} {worktree-tab|own-tab|main-tab|close-tab|tab-status|focus-tab|inject-exit|self-exit|arm-self-close|on-session-end} ..." >&2
+    echo "usage: ${0##*/} {worktree-tab|own-tab|main-tab|close-tab|focus-tab|inject-exit|self-exit|arm-self-close|on-session-end} ..." >&2
     exit 2
     ;;
 esac
