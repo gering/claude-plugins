@@ -33,12 +33,11 @@
 #       pane *other than* exclude-tab (the self tab) so the user is never focused
 #       onto the dying tab. Exit 1 only when unreachable or no candidate pane.
 #   close-tab <tab-id> [workspace]
-#                               Scenario A: close the tab, then VERIFY it is gone
-#                               (re-checks a few times, re-issuing the close while
-#                               still present). Prints one of
-#                               closed|still-open|unverified on stdout (always
-#                               exit 0, even with herdr absent) so /close can name
-#                               the tab for a manual close instead of orphaning it.
+#                               Scenario A: close the tab ONCE, then VERIFY it is
+#                               gone (polls until gone; does NOT re-issue the close).
+#                               Prints one of closed|still-open|unverified on stdout
+#                               (always exit 0, even with herdr absent) so /close can
+#                               name the tab for a manual close instead of orphaning it.
 #   focus-tab <tab-id>          Run `herdr tab focus <tab-id>`.
 #   inject-exit <pane-id>       Feed a clean `/exit` into a Claude TUI pane:
 #                               `send-text "/exit"` then `send-keys Return`. NOTE
@@ -172,7 +171,10 @@ except Exception:
 if not tab or not panes:
     print("unverified"); sys.exit(0)
 for p in panes:
-    if str(p.get("tab_id") or "") == tab:   # coerce: a numeric tab_id must still match its str argv
+    # herdr tab/pane ids are "wN:tM"/"wN:pM" strings (never numeric), so every id
+    # comparison in this file (extract_tab, extract_pane_tab, extract_status, here)
+    # compares as-is — no str() coercion needed.
+    if (p.get("tab_id") or "") == tab:
         print("present"); sys.exit(0)
 print("gone")'
 
@@ -254,8 +256,10 @@ case "$cmd" in
     while [ $k -lt 5 ]; do
       st="$(tab_status "$ws" "$tab")"
       if [ "$st" = gone ]; then break; fi   # confirmed closed
-      sleep 0.3 2>/dev/null || true         # 'present' (async close in flight) or 'unverified' → re-read
       k=$((k + 1))
+      # 'present' (async close in flight) or 'unverified' → wait before re-reading,
+      # but not after the final read (its result is what we report).
+      if [ $k -lt 5 ]; then sleep 0.3 2>/dev/null || true; fi
     done
     case "$st" in
       gone)    echo closed ;;
