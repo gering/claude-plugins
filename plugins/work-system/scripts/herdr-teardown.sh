@@ -128,33 +128,18 @@ if fallback:
             print(t)
             sys.exit(0)'
 
-# Tri-state variant for the /continue reopen guard: distinguish "a tab exists here"
-# from "definitely none" from "can't tell". Prints exactly one of:
-#   <tab-id>     a pane's realpath(cwd) == target
-#   none         a POPULATED, valid pane list with no cwd match → confidently no tab
-#   unverified   malformed JSON, an EMPTY panes array, or an empty target — the state
-#                is ambiguous (e.g. herdr just restarted and panes are repopulating),
-#                so the caller must NOT treat it as "no tab" and create a duplicate.
-# This mirrors extract_tab_present's empty-array-≠-gone stance: never claim absence we
-# did not actually observe.
-extract_tab_state='import sys, json, os
-def norm(p):
-    if not p or not p.strip():
-        return ""
-    p2 = p.rstrip("/") or "/"
-    return os.path.realpath(p2)
-target = norm(sys.argv[1]) if len(sys.argv) > 1 else ""
+# For the /continue reopen guard's tri-state: report only whether the pane list is
+# usable. Prints `populated` (valid, non-empty panes array), `empty` (valid but zero
+# panes — ambiguous: herdr may be repopulating after a restart), or `bad` (malformed).
+# The worktree-tab-state subcommand pairs this with the canonical extract_tab matcher
+# above, so the realpath/cwd-matching logic is defined ONCE (no drift between the
+# reopen guard and /close's worktree-tab lookup).
+extract_panes_populated='import sys, json
 try:
     panes = json.load(sys.stdin)["result"]["panes"]
 except Exception:
-    print("unverified"); sys.exit(0)
-if not panes or not target:
-    print("unverified"); sys.exit(0)
-for p in panes:
-    t = p.get("tab_id") or ""
-    if t and norm(p.get("cwd") or "") == target:
-        print(t); sys.exit(0)
-print("none")'
+    print("bad"); sys.exit(0)
+print("populated" if panes else "empty")'
 
 # Extract the tab_id of the pane whose pane_id == argv[0]. Empty pid never matches.
 extract_pane_tab='import sys, json
@@ -262,11 +247,23 @@ case "$cmd" in
     # tools, list call failed, or an empty/repopulating pane list) must make the caller
     # fail CLOSED, never auto-create a duplicate session.
     [ $# -eq 3 ] || { echo "usage: ${0##*/} worktree-tab-state <workspace> <worktree-path>" >&2; exit 2; }
+    # An empty target would make extract_tab match nothing and read as `none` (fail
+    # open); refuse it as unverified instead.
+    [ -n "$3" ] || { echo unverified; exit 0; }
     command -v herdr   >/dev/null 2>&1 || { echo unverified; exit 0; }
     command -v python3 >/dev/null 2>&1 || { echo unverified; exit 0; }
     json="$(pane_list "$2")"
     [ -n "$json" ] || { echo unverified; exit 0; }
-    printf '%s' "$json" | python3 -c "$extract_tab_state" "$3" 2>/dev/null || echo unverified
+    # Decide tri-state by reusing the CANONICAL cwd matcher (extract_tab) — no second
+    # copy of the realpath logic. Only a populated, valid list lets a no-match mean
+    # "confidently no tab"; an empty/malformed list stays unverified (fail closed).
+    case "$(printf '%s' "$json" | python3 -c "$extract_panes_populated" 2>/dev/null || echo bad)" in
+      populated)
+        state_tab="$(printf '%s' "$json" | python3 -c "$extract_tab" "$3" 2>/dev/null || true)"
+        [ -n "$state_tab" ] && printf '%s\n' "$state_tab" || echo none
+        ;;
+      *) echo unverified ;;
+    esac
     ;;
   own-tab)
     [ $# -eq 3 ] || { echo "usage: ${0##*/} own-tab <workspace> <pane-id>" >&2; exit 2; }

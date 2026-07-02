@@ -91,10 +91,13 @@ user_invocable: true
    Reopened task tab: <LABEL>   (workspace <HERDR_WORKSPACE_ID>)
    Worktree: .claude/worktrees/<task-name>
 
-   The tab is running `claude -c` to resume the task's most-recent session. Switch to
-   it to continue. (If this worktree never hosted a Claude session — e.g. it came from
-   `/adopt` — `claude -c` will report nothing to resume; just start `claude` there.)
+   Sent `claude -c` to the tab to resume the task's most-recent session — switch to
+   it. If you land on a bare shell instead (a shell startup prompt can occasionally
+   eat the command, or this worktree never hosted a session — e.g. it came from
+   `/adopt`), just run `claude -c` there yourself.
    ```
+   Word it as *sent*, not "is running" — the helper delivered the keystrokes but can't
+   confirm Claude actually came up (see the shell-startup race in the knowledge entry).
 
    **b) Outside herdr — manual block** (display this — do **not** execute the `cd`):
    ```
