@@ -33,6 +33,13 @@ debugging round.
   with "does not support parameter reasoningEffort"). The adapter must pin
   `-m grok-build`. grok's effort ladder (low…max) matches code-review's;
   codex has no `max` tier → map `max`→`xhigh` (`-c model_reasoning_effort=…`).
+- **`grok-composer-2.5-fast` also does not enforce `--json-schema`**: it
+  returns plain text with `structuredOutput: null` +
+  `structuredOutputError: "model output was not valid JSON"`. So it cannot
+  serve as a second grok ensemble voice (besides being same-family-correlated,
+  which would dilute the ≥2-backend consensus signal). `grok-build` is the
+  only schema-capable grok model; for "more grok" at high effort, prefer its
+  native `--best-of-n N` over a second model voice.
 - **Headless tool execution**: both CLIs run read-only commands (e.g.
   `git diff`) without extra approval flags — codex inside `-s read-only`
   sandbox, grok headless `-p` auto-approves read-only tools. So lens prompts
