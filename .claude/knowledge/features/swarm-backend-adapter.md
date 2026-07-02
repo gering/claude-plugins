@@ -2,7 +2,7 @@
 title: "Swarm Backend Adapter Layer"
 createdAt: 2026-07-02
 createdFrom: "branch: task/add-swarm-plugin"
-pluginVersion: 0.1.0
+pluginVersion: 1.8.2
 prime: false
 ---
 

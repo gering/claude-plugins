@@ -43,9 +43,20 @@ TMP_OUT=""
 cleanup() { if [[ -n "${TMP_OUT:-}" ]]; then rm -f "$TMP_OUT"; fi; }
 trap cleanup EXIT
 
+print_usage() {
+  # Usage block = header comment up to (not including) "# Backend notes";
+  # bounded by pattern, not line numbers, so header edits can't truncate it.
+  awk 'NR < 2 {next} /^# Backend notes/ {exit} {sub(/^# ?/, ""); print}' "$0"
+}
+
 usage() {
-  sed -n '2,17p' "$0" | sed 's|^# \{0,1\}||'
+  print_usage >&2
   exit 2
+}
+
+require_python3() {
+  command -v python3 >/dev/null \
+    || { echo "python3 not found on PATH — required by the swarm adapter" >&2; exit 1; }
 }
 
 validate_backend() {
@@ -58,8 +69,15 @@ validate_backend() {
 # ---------- probes ----------
 
 available_version() {
-  # Prints the CLI's version line; exit 1 if not installed.
+  # Prints the backend's version line; exit 1 if not installed.
   local backend="$1"
+  if [[ "$backend" == "claude" ]]; then
+    # claude reviews run in-session via the Agent tool, so inside a Claude
+    # Code session the backend exists by definition — the PATH lookup only
+    # provides a nicer version string, never gates availability.
+    claude --version 2>/dev/null | head -1 || echo "in-session"
+    return 0
+  fi
   command -v "$backend" >/dev/null || return 1
   "$backend" --version 2>/dev/null | head -1
 }
@@ -74,10 +92,10 @@ ready_check() {
 }
 
 ready_hint() {
+  # claude needs no hint: it is always available + ready in-session.
   case "$1" in
-    claude) echo "install Claude Code" ;;
-    codex)  echo "run: codex login" ;;
-    grok)   echo "run: grok login" ;;
+    codex) echo "run: codex login" ;;
+    grok)  echo "run: grok login" ;;
   esac
 }
 
@@ -90,24 +108,32 @@ subcmd_available() {
   available_version "$backend"
 }
 
-subcmd_ready() {
-  local backend="${1:-}"
-  [[ -z "$backend" ]] && usage
-  validate_backend "$backend"
+require_usable() {
+  # Shared installed+ready gate for `ready` and `run`.
+  local backend="$1"
   if ! available_version "$backend" >/dev/null; then
     echo "$backend: not installed" >&2
     exit 1
   fi
-  if ready_check "$backend"; then
-    echo "ready"
-  else
+  if ! ready_check "$backend"; then
     echo "$backend: not ready — $(ready_hint "$backend")" >&2
     exit 1
   fi
 }
 
+subcmd_ready() {
+  local backend="${1:-}"
+  [[ -z "$backend" ]] && usage
+  validate_backend "$backend"
+  require_usable "$backend"
+  echo "ready"
+}
+
 print_rows() {
-  # One TSV row per backend: backend, available, version, ready, hint
+  # One TSV row per backend: backend, available, version, ready, hint.
+  # $1 fills empty fields — the human table needs a placeholder because BSD
+  # column collapses adjacent tabs, shifting later columns left.
+  local placeholder="${1:-}"
   local b ver avail rdy hint
   for b in claude codex grok; do
     ver="" avail=no rdy=no hint=""
@@ -117,13 +143,16 @@ print_rows() {
     else
       hint="not installed"
     fi
-    printf '%s\t%s\t%s\t%s\t%s\n' "$b" "$avail" "$ver" "$rdy" "$hint"
+    ver="${ver//$'\t'/ }"  # a tab inside a version string would shift the TSV columns
+    printf '%s\t%s\t%s\t%s\t%s\n' "$b" "$avail" "${ver:-$placeholder}" "$rdy" "${hint:-$placeholder}"
   done
 }
 
 subcmd_list() {
-  if [[ "${1:-}" == "--json" ]]; then
-    print_rows | python3 -c '
+  case "${1:-}" in
+    --json)
+      require_python3
+      print_rows | python3 -c '
 import json, sys
 rows = []
 for line in sys.stdin:
@@ -133,10 +162,16 @@ for line in sys.stdin:
 json.dump(rows, sys.stdout, indent=2)
 print()
 '
-  else
-    { printf 'BACKEND\tAVAILABLE\tVERSION\tREADY\tHINT\n'; print_rows; } \
-      | column -t -s $'\t'
-  fi
+      ;;
+    "")
+      { printf 'BACKEND\tAVAILABLE\tVERSION\tREADY\tHINT\n'; print_rows "-"; } \
+        | column -t -s $'\t'
+      ;;
+    *)
+      echo "Unknown flag: $1" >&2
+      exit 2
+      ;;
+  esac
 }
 
 subcmd_run() {
@@ -151,6 +186,7 @@ subcmd_run() {
 
   local prompt_file="" effort="xhigh" model="" schema="$DEFAULT_SCHEMA"
   while [[ $# -gt 0 ]]; do
+    [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
     case "$1" in
       --prompt-file) prompt_file="$2"; shift 2 ;;
       --effort)      effort="$2";      shift 2 ;;
@@ -167,20 +203,22 @@ subcmd_run() {
 
   local prompt
   if [[ -n "$prompt_file" ]]; then
+    [[ -f "$prompt_file" ]] || { echo "Prompt file not found: $prompt_file" >&2; exit 2; }
     prompt="$(cat "$prompt_file")"
   else
     prompt="$(cat)"
   fi
   [[ -z "$prompt" ]] && { echo "Empty prompt (use --prompt-file or stdin)" >&2; exit 2; }
+  # The prompt travels as one argv word; stay well below ARG_MAX (~1 MiB
+  # including the environment on macOS) instead of failing as a generic
+  # backend error at exec time.
+  if (( ${#prompt} > 262144 )); then
+    echo "Prompt too large ($(( ${#prompt} / 1024 )) KiB > 256 KiB) — inline less of the diff, or instruct the agent to read it itself" >&2
+    exit 2
+  fi
 
-  if ! available_version "$backend" >/dev/null; then
-    echo "$backend: not installed" >&2
-    exit 1
-  fi
-  if ! ready_check "$backend"; then
-    echo "$backend: not ready — $(ready_hint "$backend")" >&2
-    exit 1
-  fi
+  require_usable "$backend"
+  require_python3
 
   case "$backend" in
     codex) run_codex "$prompt" "$effort" "$model" "$schema" ;;
@@ -198,34 +236,59 @@ run_codex() {
   # final message is discarded (its transcript goes to stderr = debug info).
   # stdin must be closed: with an inherited open non-TTY stdin, codex waits
   # for "additional input from stdin" and hangs.
+  # `--` ends flag parsing: a prompt starting with "-" (e.g. a markdown
+  # bullet) would otherwise be rejected as an unknown flag.
   if ! codex exec -s read-only --skip-git-repo-check \
       -c model_reasoning_effort="$effort" \
       ${model:+-m "$model"} \
       --output-schema "$schema" \
       --output-last-message "$TMP_OUT" \
-      "$prompt" </dev/null >/dev/null; then
+      -- "$prompt" </dev/null >/dev/null; then
     echo "codex exec failed" >&2
     exit 1
   fi
   [[ -s "$TMP_OUT" ]] || { echo "codex produced no output" >&2; exit 1; }
-  python3 -c 'import json,sys; json.load(sys.stdin)' <"$TMP_OUT" 2>/dev/null \
-    || { echo "codex returned invalid JSON" >&2; exit 1; }
+  python3 -c '
+import json, sys
+try:
+    json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+' <"$TMP_OUT" || { echo "codex returned invalid JSON" >&2; exit 1; }
   cat "$TMP_OUT"
   echo
 }
 
 run_grok() {
   local prompt="$1" effort="$2" model="$3" schema="$4"
+  local grok_model="${model:-$GROK_DEFAULT_MODEL}"
+
+  # Only grok-build understands --effort; other models reject the parameter
+  # outright (and don't enforce --json-schema either — see the knowledge
+  # entry), so omit the flag instead of failing the run.
+  local effort_args=()
+  if [[ "$grok_model" == "$GROK_DEFAULT_MODEL" ]]; then
+    effort_args=(--effort "$effort")
+  else
+    echo "note: --effort omitted — only $GROK_DEFAULT_MODEL supports it" >&2
+  fi
+
+  # --single=<prompt> (not "-p <prompt>"): as a separate argv word a prompt
+  # starting with "-" would be parsed as a flag.
   local raw
-  if ! raw="$(grok -m "${model:-$GROK_DEFAULT_MODEL}" --effort "$effort" \
+  if ! raw="$(grok -m "$grok_model" ${effort_args[@]+"${effort_args[@]}"} \
       --json-schema "$(cat "$schema")" \
-      -p "$prompt" </dev/null)"; then
+      --single="$prompt" </dev/null)"; then
     echo "grok failed" >&2
     exit 1
   fi
   printf '%s' "$raw" | python3 -c '
 import json, sys
-d = json.load(sys.stdin)
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.stderr.write("grok returned invalid JSON\n")
+    sys.exit(1)
 if d.get("type") == "error":
     sys.stderr.write("grok error: %s\n" % d.get("message", "unknown"))
     sys.exit(1)
@@ -246,7 +309,8 @@ main() {
     available)     subcmd_available "$@" ;;
     ready)         subcmd_ready "$@" ;;
     run)           subcmd_run "$@" ;;
-    ""|-h|--help)  usage ;;
+    -h|--help)     print_usage; exit 0 ;;
+    "")            usage ;;
     *)             echo "Unknown subcommand: $cmd" >&2; usage ;;
   esac
 }
