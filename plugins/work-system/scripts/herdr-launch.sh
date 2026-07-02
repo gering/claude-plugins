@@ -156,9 +156,10 @@ case "$mode" in
         # FAIL CLOSED, but as a distinct outcome (exit 0 + blocked=unverified), NOT a
         # generic launch failure: the caller must cue the user to CHECK herdr for an
         # already-open tab before reopening by hand — the plain manual block would just
-        # say "cd && claude -c" and risk the very duplicate this guard prevents.
+        # say "cd && claude -c" and risk the very duplicate this guard prevents. A
+        # single key, matching the header contract (the caller branches on `blocked`).
         echo "resume: could not verify existing tabs for $worktree — not auto-creating (avoids a duplicate session)" >&2
-        printf 'reused=no\nresumed=\nblocked=unverified\n'
+        printf 'blocked=unverified\n'
         exit 0
         ;;
       *)

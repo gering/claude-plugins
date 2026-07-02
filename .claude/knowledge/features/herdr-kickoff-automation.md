@@ -83,23 +83,34 @@ so Claude runs **inside a shell pane**. Two durable decisions:
   uncommitted changes. Four honesty/robustness details the guard needs to be sound:
   - **Fail CLOSED on uncertainty, via a single-pass tri-state lookup.**
     `worktree-tab-state` returns `<tab>` / `none` / `unverified` — not a bare empty
-    string that conflates "no tab" with "couldn't check." Only a POPULATED list with an
-    exact realpath cwd match yields a tab (reuse) or, with no match at all, `none`
-    (create). Everything ambiguous → `unverified`: herdr unreachable, an
-    EMPTY/repopulating pane list (the empty-≠-gone hazard `extract_tab_present` also
-    guards), a malformed/errored parse (any exception in the extractor prints
-    `unverified`, never a false `none`), OR a pane sitting in a *subdirectory* of the
-    worktree (a tab may have wandered in — don't risk missing it). On `unverified` the
-    helper emits `blocked=unverified` (exit 0, not a generic failure) and the skill
-    tells the user to CHECK herdr for an existing tab before reopening by hand — so the
+    string that conflates "no tab" with "couldn't check." Only a POPULATED list where
+    every tab pane has a READABLE cwd and one EXACTLY matches yields a tab (reuse), or
+    `none` (create) when all readable cwds miss. Everything ambiguous → `unverified`:
+    herdr unreachable, an EMPTY/repopulating pane list (the empty-≠-gone hazard
+    `extract_tab_present` also guards), a malformed/errored parse (any exception prints
+    `unverified`, never a false `none`), OR a tab pane whose cwd is empty/unreadable
+    (can't rule out that it IS the worktree tab). On `unverified` the helper emits a
+    lone `blocked=unverified` (exit 0, not a generic failure) and the skill tells the
+    user to CHECK herdr for an existing tab before reopening by hand — so the
     fail-closed path can't itself cause the duplicate (a plain manual block wouldn't cue
-    the check). This is ONE python pass; it mirrors `extract_tab`'s `norm()` (kept in
-    sync by comment) rather than reusing it, because it needs subtree-awareness +
-    tri-state output that `/close`'s exact-match `worktree-tab` must not inherit.
-  - **Search ALL workspaces.** The lookup passes an empty workspace so a still-live
-    tab for this worktree in a *different* herdr workspace is also found (worktree
-    paths are globally unique); the new tab is still *created* in
-    `$HERDR_WORKSPACE_ID`.
+    the check). It mirrors `extract_tab`'s `norm()` via a **shared prelude string**
+    concatenated into both (defined once, so the guard and `/close` can't drift on path
+    matching); the match/output logic stays separate because `/close`'s `worktree-tab`
+    must not inherit the tri-state.
+    - **Exact-match only — subtree-matching was tried and reverted.** Round 5 made a
+      pane in a worktree *subdirectory* fail closed (to catch a tab that `cd`'d into a
+      subdir); that deterministically blocked auto-reopen whenever ANY unrelated pane
+      sat under the worktree (e.g. a shell in `<worktree>/logs`). Reverted to exact
+      match. Accepted residual gap: a task's own tab that wandered into a subdir won't
+      be detected and a reopen could duplicate — narrow (reopen → `/exit` → `cd subdir`
+      → reopen again), and the alternative over-blocked the common case.
+  - **Search ALL workspaces (dedup only).** The lookup passes an empty workspace so a
+    still-live tab for this worktree in a *different* herdr workspace is also found
+    (worktree paths are globally unique); the new tab is still *created* in
+    `$HERDR_WORKSPACE_ID`. Consequence: reopening a *different* task from inside a
+    worktree can land its tab in the current session's workspace, which a later
+    `/close` (scoped to its own workspace) may not locate — it then prints its
+    manual-close line (graceful, no data loss). Accepted.
   - **Don't assert a live resume on reuse.** A cwd match can't distinguish a live
     Claude from a bare shell that survived a prior `/exit`, so the reuse branch emits
     `resumed=` (empty), and the skill tells the user to run `claude -c` if the focused

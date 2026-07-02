@@ -24,10 +24,10 @@
 #       Exit 1 (prints nothing) if herdr is unreachable or no pane matches.
 #   worktree-tab-state <workspace> <worktree-abs-path>
 #       Tri-state cwd→tab lookup for /continue's reopen guard: prints <tab-id>,
-#       `none` (populated list, no exact match, no subtree pane → confidently no tab),
-#       or `unverified` (no tools / failed / empty-repopulating / errored list, OR a
-#       pane whose cwd is a subdirectory of the worktree → caller must fail closed).
-#       Always exit 0. Empty <workspace> searches ALL workspaces.
+#       `none` (populated list, every tab pane has a readable cwd, none matches →
+#       confidently no tab), or `unverified` (no tools / failed / empty / errored list,
+#       or a tab pane whose cwd is unreadable → caller must fail closed). Always exit 0.
+#       Empty <workspace> searches ALL workspaces.
 #   own-tab <workspace> <pane-id>
 #       Print the tab_id of the pane with this pane id ($HERDR_PANE_ID). /close
 #       compares it to the worktree tab to decide self-close (Scenario B) vs a
@@ -92,6 +92,15 @@ marker_file() {
 
 require_herdr() { command -v herdr >/dev/null 2>&1 || { echo "herdr not on PATH" >&2; exit 1; }; }
 
+# realpath path-normalization, shared by BOTH extractors below so the reopen guard
+# and /close's worktree-tab lookup can never disagree on cwd matching. Concatenated
+# into each python program (they differ only in match/output logic).
+norm_py='def norm(p):
+    if not p or not p.strip():
+        return ""
+    p2 = p.rstrip("/") or "/"   # all-slashes path stays root, never collapses to ""
+    return os.path.realpath(p2)'
+
 # Extract a tab_id from `herdr pane list` JSON on stdin.
 #   argv: <target-cwd> [--first] [--exclude <tab>]   (cwd matched by realpath)
 # Prints the tab of the first pane whose realpath(cwd) == realpath(target), honoring
@@ -99,11 +108,7 @@ require_herdr() { command -v herdr >/dev/null 2>&1 || { echo "herdr not on PATH"
 # whose tab != --exclude. An empty/whitespace target never matches (realpath("")
 # would resolve to the process cwd). Empty output on no match or malformed JSON.
 extract_tab='import sys, json, os
-def norm(p):
-    if not p or not p.strip():
-        return ""
-    p2 = p.rstrip("/") or "/"   # all-slashes path stays root, never collapses to ""
-    return os.path.realpath(p2)
+'"$norm_py"'
 args = sys.argv[1:]
 target = norm(args[0]) if args else ""
 rest = args[1:]
@@ -130,38 +135,34 @@ if fallback:
             sys.exit(0)'
 
 # Tri-state cwd→tab lookup for /continue's reopen guard, in ONE pass. Prints:
-#   <tab-id>     a pane's realpath(cwd) == target                     → reuse it
-#   none         a POPULATED list, no exact match, no subtree pane    → confidently none
-#   unverified   malformed/empty/error, an empty target, OR a pane whose cwd is a
-#                SUBDIRECTORY of the worktree (a tab may have wandered in — fail closed
-#                rather than risk a duplicate session)
-# NOTE: norm() intentionally mirrors extract_tab above — keep the two in sync on path
-# normalization. They are deliberately separate: extract_tab is exact-match-only (shared
-# with /close's worktree-tab); this variant adds subtree-awareness + a tri-state, which
-# /close must NOT inherit. Everything is wrapped so any error fails to `unverified`,
-# never a false `none` (which would let the guard create a duplicate).
+#   <tab-id>     a pane whose realpath(cwd) == target (exact) → reuse it
+#   none         a POPULATED list where every tab pane has a READABLE cwd and none
+#                matches → confidently no tab here
+#   unverified   malformed/empty/error list, an empty target, OR a tab pane whose cwd
+#                is empty/unreadable (can't rule out that it IS the worktree tab) →
+#                fail closed rather than risk a duplicate `claude -c`
+# Exact-match only, like extract_tab (subtree-matching was tried and reverted: any
+# unrelated pane cd'd into a worktree subdir would have blocked auto-reopen forever).
+# Any exception prints `unverified`, never a false `none`.
 extract_tab_state='import sys, json, os
-def norm(p):
-    if not p or not p.strip():
-        return ""
-    p2 = p.rstrip("/") or "/"
-    return os.path.realpath(p2)
+'"$norm_py"'
 target = norm(sys.argv[1]) if len(sys.argv) > 1 else ""
 try:
     panes = json.load(sys.stdin)["result"]["panes"]
     if not panes or not target:
         print("unverified"); sys.exit(0)
-    under = False
+    unknown = False
     for p in panes:
         t = p.get("tab_id") or ""
+        if not t:
+            continue
         c = norm(p.get("cwd") or "")
-        if not t or not c:
+        if not c:
+            unknown = True   # a real tab whose cwd we cannot read — cannot rule it out
             continue
         if c == target:
             print(t); sys.exit(0)
-        if c.startswith(target + os.sep):
-            under = True
-    print("unverified" if under else "none")
+    print("unverified" if unknown else "none")
 except Exception:
     print("unverified")'
 
