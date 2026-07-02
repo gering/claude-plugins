@@ -70,8 +70,10 @@ session="${4:-$label}"
 # the manual block.
 command -v herdr   >/dev/null 2>&1 || { echo "herdr not on PATH" >&2; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "python3 not on PATH" >&2; exit 1; }
+# launch takes an optional session-name; resume does not (it runs `claude -c`).
+[ "$mode" = launch ] && usage_tail=" [session-name]" || usage_tail=""
 [ -n "$label" ] && [ -n "$worktree" ] && [ -n "$workspace" ] || {
-  echo "usage: ${0##*/} $mode <label> <worktree> <workspace-id> [session-name]" >&2
+  echo "usage: ${0##*/} $mode <label> <worktree> <workspace-id>$usage_tail" >&2
   exit 1
 }
 [ -d "$worktree" ] || { echo "worktree dir not found: $worktree" >&2; exit 1; }

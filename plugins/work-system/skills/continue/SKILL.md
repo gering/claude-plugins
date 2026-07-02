@@ -22,23 +22,29 @@ user_invocable: true
   focus it — recovering a task tab that a bare `/exit` closed (kickoff tabs run
   Claude as the root pane, so `/exit` closes them). ("Reopen mode" below.)
 
-**Pick the mode first:**
-- Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" linked` → `main` | `linked`.
-  - `linked` (inside a worktree):
-    - **No argument, or the argument names *this* worktree's task** → **in-session
-      resume**: go to step 1 below.
-    - **Argument names a *different* task that has its own worktree** (check
-      `<main-repo>/.claude/worktrees/<arg-task>` exists) → **Reopen mode** for that
-      task (you can reopen another task's tab from here — `main-repo-path.sh path`
-      resolves the main repo even from a linked worktree). Don't silently ignore a
-      real switch.
-    - **Argument doesn't resolve to another worktree** (a typo, alias, or differently
-      remembered name) → **in-session resume** of the current task (step 1). Never
-      refuse to resume the task you're in just because an argument didn't match; you
-      may note "no worktree named `<arg>` — resuming the current task."
-  - `main` **with** a `<task>` argument → **Reopen mode**.
-  - `main` **without** an argument → nothing to resume in-session here; tell the user
-    to name a task (`/continue <task>`) or use `/kickoff` / `/list`, and stop.
+**Pick the mode first.** Resolve names through `task-status.sh` so a `task/`-prefixed
+or aliased argument is normalized the SAME way worktree directories are named (they use
+the prefix-stripped task name) — comparing the raw argument instead misroutes.
+
+- Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" linked` → `main` | `linked`,
+  and `MAIN_REPO="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path)"`.
+- `linked` (inside a worktree):
+  - **No argument** → **in-session resume** (step 1).
+  - **Argument given** → normalize it:
+    `ARG_TASK="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/task-status.sh" resolve "<arg>" | sed -n 's/^task_name=//p')"`,
+    and read this worktree's task with `task-status.sh resolve` (no arg) → `CUR_TASK`.
+    - `ARG_TASK` empty **or** `ARG_TASK` == `CUR_TASK` → **in-session resume** (step 1).
+      This covers `/continue <current-task>` from its own worktree — resume in place,
+      don't fall into Reopen (which would just no-op-focus the tab you're in).
+    - `ARG_TASK` != `CUR_TASK` **and** `$MAIN_REPO/.claude/worktrees/$ARG_TASK` is a
+      directory → **Reopen mode** for `ARG_TASK` (a real switch — reopen its tab from
+      here; `main-repo-path.sh path` resolves the main repo even from a worktree).
+    - otherwise (a typo/alias with no matching worktree) → **in-session resume** of the
+      current task (step 1); you may note "no worktree named `<arg>` — resuming the
+      current task." Never refuse to resume the task you're in.
+- `main` **with** a `<task>` argument → **Reopen mode** (step 1 normalizes the name).
+- `main` **without** an argument → nothing to resume in-session here; tell the user to
+  name a task (`/continue <task>`) or use `/kickoff` / `/list`, and stop.
 
 ### Reopen mode (main session + `<task>` arg)
 

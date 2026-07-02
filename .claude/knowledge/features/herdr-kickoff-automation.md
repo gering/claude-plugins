@@ -14,8 +14,9 @@ Inside a herdr session, `/kickoff` replaces its manual "open a terminal yourself
 block with an automated tab launch. The launch lives in one shared, testable
 helper — `plugins/work-system/scripts/herdr-launch.sh` — with two subcommands:
 `launch` (called from `skills/kickoff/SKILL.md` step 12) and `resume` (called from
-`skills/continue/SKILL.md`, main-session reopen branch). The helper is the source
-of truth; this entry captures the durable design and one non-obvious gotcha.
+`skills/continue/SKILL.md`'s reopen path — the main session with a `<task>` arg, or
+a *different* task's name given from inside a worktree). The helper is the source of
+truth; this entry captures the durable design and one non-obvious gotcha.
 
 ## Design decisions
 
@@ -92,6 +93,12 @@ so Claude runs **inside a shell pane**. Two durable decisions:
     tab for this worktree in a *different* herdr workspace is also found (worktree
     paths are globally unique); the new tab is still *created* in
     `$HERDR_WORKSPACE_ID`.
+  - **Known gap: cwd is matched EXACTLY (realpath), shared with `/close`.** A pane
+    whose shell wandered into a *subdirectory* of the worktree no longer matches, so a
+    double-reopen after `/exit`-then-`cd subdir` could miss the surviving tab and
+    duplicate. Accepted: loosening to prefix-match would change the canonical
+    `extract_tab` matcher that `/close` also relies on (unverifiable here), and a
+    second lenient matcher would reintroduce the very drift the shared one prevents.
   - **Don't assert a live resume on reuse.** A cwd match can't distinguish a live
     Claude from a bare shell that survived a prior `/exit`, so the reuse branch emits
     `resumed=` (empty), and the skill tells the user to run `claude -c` if the focused
