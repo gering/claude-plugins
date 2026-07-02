@@ -1,9 +1,9 @@
 ---
 name: continue
 description: |
-  Resumes the current task: loads task file, recent commits, progress,
-  acceptance criteria, open questions.
-  Trigger: "continue", "resume the task", "pick up where I left off".
+  Resumes a task: inside a worktree, loads context and continues; from the main
+  session, `/continue <task>` reopens and resumes that task's session.
+  Trigger: "continue", "resume the task", "reopen <task>".
 user_invocable: true
 ---
 
@@ -12,6 +12,79 @@ user_invocable: true
 > Load context and continue working on the current task
 
 ## Instructions
+
+`/continue` runs in one of two modes, chosen by **where it is invoked**:
+
+- **Inside a worktree** → *in-session resume*: load TASK.md, deps, recent commits,
+  progress; keep working here. (Steps 1–7 under "In-session resume".)
+- **From the main session with a `<task>` argument** → *reopen*: open the task's
+  herdr tab at its worktree and resume its Claude session there (`claude -c`), then
+  focus it — recovering a task tab that a bare `/exit` closed (kickoff tabs run
+  Claude as the root pane, so `/exit` closes them). ("Reopen mode" below.)
+
+**Pick the mode first:**
+- Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" linked` → `main` | `linked`.
+  - `linked` → **in-session resume**: go to step 1 below. Ignore any argument — you
+    are already in the worktree.
+  - `main` **with** a `<task>` argument → **Reopen mode**.
+  - `main` **without** an argument → nothing to resume in-session here; tell the user
+    to name a task (`/continue <task>`) or use `/kickoff` / `/list`, and stop.
+
+### Reopen mode (main session + `<task>` arg)
+
+1. **Resolve the task's worktree:**
+   - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/task-status.sh" resolve "<task>"` and read
+     `task_name` (prefix stripped) and `on_main`. If `on_main=yes`, the name resolved to
+     the main branch — not a task; ask for a real task name and stop.
+   - Resolve the main repo, then the worktree path:
+     `MAIN_REPO="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path)"` →
+     `WORKTREE="$MAIN_REPO/.claude/worktrees/<task-name>"`.
+   - If `WORKTREE` is not a directory, there is no worktree for this task — suggest
+     `/kickoff <task>` (or `/list`) and stop.
+
+2. **Reopen + resume** — automate inside herdr, otherwise show the manual block.
+
+   Detect herdr: automate **only** when `[ "${HERDR_ENV:-}" = "1" ]`, a non-empty
+   `$HERDR_WORKSPACE_ID`, and both `command -v herdr` and `command -v python3`
+   succeed. (The helper re-checks these and exits non-zero if it cannot automate, so
+   a broken socket degrades to the manual block too.)
+
+   **a) Inside herdr — reopen the tab and resume via the shared helper:**
+   ```sh
+   LABEL="<short sidebar label from the task name, e.g. close-herdr>"   # same convention as /kickoff
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-launch.sh" resume "$LABEL" "$WORKTREE" "$HERDR_WORKSPACE_ID"
+   ```
+   The helper creates a tab at the worktree, runs `claude -c` **inside a shell pane**
+   (so a later `/exit` drops back to the shell and the tab survives), and focuses it.
+   It is the **single source of truth** for the herdr commands (robust JSON parsing,
+   graceful fallback, exit codes) — do not inline them. Branch on its result:
+   - **exit 0 with `tab=<id>`** → the task tab is reopened and focused, resuming the
+     session (`claude -c`). Report success (template below).
+   - **exit 0 with an empty `tab=`** → the pane opened (`pane=<id>`) but its tab id
+     couldn't be read; tell the user it's up and may need a manual focus.
+   - **non-zero exit** → the helper could not automate (herdr/python3 missing, broken
+     socket, or no pane id). Show the manual block (b).
+
+   Success report (fill `Tab` from the helper's `tab=` line):
+   ```
+   Reopened task tab: <LABEL>   (workspace <HERDR_WORKSPACE_ID>)
+   Worktree: .claude/worktrees/<task-name>
+
+   Resuming the existing Claude session (`claude -c`). Switch to the tab to continue.
+   ```
+
+   **b) Outside herdr — manual block** (display this — do **not** execute the `cd`):
+   ```
+   Reopen the task in a SEPARATE terminal:
+
+       cd <worktree>
+       claude -c        # resume the most-recent session for this worktree
+   ```
+   `claude -c` continues where the task left off; `claude --resume` instead opens a
+   picker if `-c` lands on the wrong session. Do **not** run the `cd` yourself — it is
+   for the user's terminal.
+
+### In-session resume (inside a worktree)
 
 1. **Verify we're in a worktree, identify the task** — via the shared helper:
    - Run: `git worktree list` (confirm this is a linked worktree, not the main repo).

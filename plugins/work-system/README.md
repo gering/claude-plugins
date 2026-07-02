@@ -30,7 +30,7 @@ Generic task and worktree workflow system for Claude Code. Manage tasks as markd
 | `/define` | Create a new task (markdown file with Goal/Context/Requirements) |
 | `/kickoff` | Start a task in an isolated git worktree |
 | `/adopt` | Adopt an existing branch into the work system |
-| `/continue` | Resume work on current task, load context |
+| `/continue` | Resume the current task (in a worktree); or `/continue <task>` from the main session reopens the task's herdr tab and resumes it |
 | `/status` | Check task status (PRs, branches, commits) |
 | `/close` | Clean up after merge (worktree, branches; archives the task file) |
 | `/list` | Overview of all tasks, worktrees, and status |
@@ -188,6 +188,24 @@ closes the tab on a clean exit, but only when `/close` wrote a short-lived per-p
 marker file (under `$HOME/.cache`), so it never fires on an ordinary session exit.
 All of this lives in the tested `scripts/herdr-teardown.sh`; see
 `skills/close/SKILL.md` step 12 for the flow.
+
+### `/continue <task>` reopens a closed task tab
+
+A kickoff tab runs Claude as its **root pane**, so a bare `/exit` (even just to
+restart Claude Code) ends that pane and herdr closes the whole tab — the worktree
+and the resumable session survive, but you lose your place. Run
+`/continue <task>` **from the main session** to get it back: it reopens a herdr tab
+at the task's worktree and resumes the existing session with `claude -c` (the
+most-recent session for that cwd — since each worktree hosts exactly one task, the
+cwd identifies it unambiguously), then focuses the tab.
+
+The reopened tab is hardened against the same `/exit`: Claude runs **inside a shell
+pane** (not as the root pane), so a later `/exit` just drops back to the shell and
+the tab stays open. Outside herdr, `/continue <task>` prints the manual
+`cd <worktree> && claude -c` block instead. Run from *inside* a worktree,
+`/continue` is unchanged — it loads context and resumes in place. The reopen shares
+the tested `scripts/herdr-launch.sh` with `/kickoff` (a `resume` mode alongside
+`launch`); see `skills/continue/SKILL.md`.
 
 ## Adopting Existing Branches
 

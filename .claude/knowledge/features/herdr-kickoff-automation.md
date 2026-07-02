@@ -1,20 +1,21 @@
 ---
-title: "herdr /kickoff Automation"
+title: "herdr /kickoff + /continue-reopen Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-06-24
+updatedAt: 2026-07-02
 createdFrom: "branch: task/automate-kickoff-in-herdr"
-updatedFrom: "branch: task/automate-kickoff-in-herdr"
+updatedFrom: "branch: task/continue-reopen-herdr"
 pluginVersion: 1.8.2
 prime: false
 ---
 
-# herdr /kickoff Automation
+# herdr /kickoff + /continue-reopen Automation
 
 Inside a herdr session, `/kickoff` replaces its manual "open a terminal yourself"
 block with an automated tab launch. The launch lives in one shared, testable
-helper — `plugins/work-system/scripts/herdr-launch.sh` (called from
-`skills/kickoff/SKILL.md` step 12) — which is the source of truth; this entry
-captures the durable design and one non-obvious gotcha.
+helper — `plugins/work-system/scripts/herdr-launch.sh` — with two subcommands:
+`launch` (called from `skills/kickoff/SKILL.md` step 12) and `resume` (called from
+`skills/continue/SKILL.md`, main-session reopen branch). The helper is the source
+of truth; this entry captures the durable design and one non-obvious gotcha.
 
 ## Design decisions
 
@@ -46,6 +47,33 @@ captures the durable design and one non-obvious gotcha.
   keeps the kickoff session in front; any failure (empty `$pane`) degrades to the
   unchanged manual block — never block kickoff on herdr.
 
+## `resume` mode: reopen a task tab a `/exit` closed
+
+A kickoff tab runs Claude as its **root pane** (argv-exec above), so a clean `/exit`
+— even one only meant to restart Claude Code — ends the pane and herdr closes the
+whole tab; the worktree and resumable session persist, but the tab is gone.
+`/continue <task>` **from the main session** recovers it via `herdr-launch.sh
+resume`, which — unlike `launch` — uses `herdr tab create` + `pane run "claude -c"`
+so Claude runs **inside a shell pane**. Two durable decisions:
+
+- **Shell-pane resume is the `/exit` hardening; kickoff stays argv.** Because the
+  reopened Claude is *not* the root pane, a later `/exit` drops back to the shell
+  and the **tab survives** — exactly what a plain kickoff tab can't do. We
+  deliberately did **not** convert kickoff to a shell-pane launch to get the same
+  prevention: argv-exec's race-freedom is verified (the gotcha below), and `/close`'s
+  teardown (self-exit poller on `agent_status`, SessionEnd hook keyed to
+  Claude-as-root-pane) is built around the root-pane model — changing it risks that
+  machinery with no way to live-verify here. So kickoff tabs still die on `/exit`;
+  reopen is the one-command recovery, and reopened tabs are hardened. A race-free
+  *prevention* (`agent start … -- bash -lc 'claude …; exec "$SHELL" -i'`) is possible
+  but deferred pending live herdr agent-detection verification.
+- **`claude -c`, no session-id stash.** Resume runs `claude -c` (most-recent session
+  for the cwd). Each worktree hosts exactly one task, so its cwd is a 1:1 proxy for
+  the session — `-c` is already unambiguous, and stashing a session id at kickoff
+  (capture-at-argv-launch + marker lifecycle + staleness) buys no disambiguation.
+  `resume` also *focuses* the reopened tab (the user is switching to it), where
+  `launch` opens `--no-focus` in the background.
+
 ## Gotcha: input into a fresh pane races shell startup
 
 This is *why* the launch uses argv-exec, not `herdr pane run` / typed keystrokes.
@@ -60,6 +88,12 @@ into a shell at all: `herdr agent start … -- <argv>` execs the binary directly
 
 Generalizes: when a multiplexer offers both "type into a pane's shell" and "exec
 argv" launch paths, prefer argv — it has no race against shell init.
+
+The `resume` mode knowingly takes the other path (`pane run "claude -c"`, which
+*does* race shell startup): a surviving-`/exit` tab **requires** a shell pane, and
+this exact sequence was verified live by hand. The race is a low-probability cost on
+a manual recovery action, accepted for the tab-survival payoff — not the automated,
+frequently-run kickoff, where argv-exec's certainty wins.
 
 Related: [skill-composition](../architecture/skill-composition.md) (kickoff softly
 drives `/continue` across a process boundary). The "never persistent `cd`" footgun
