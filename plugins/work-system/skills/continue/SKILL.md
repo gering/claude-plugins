@@ -49,12 +49,14 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
 ### Reopen mode (main session + `<task>` arg)
 
 1. **Resolve the task's worktree:**
-   - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/task-status.sh" resolve "<task>"` and read
-     `task_name` (prefix stripped) and `on_main`. If `on_main=yes`, the name resolved to
-     the main branch — not a task; ask for a real task name and stop.
-   - Resolve the main repo, then the worktree path:
-     `MAIN_REPO="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path)"` →
-     `WORKTREE="$MAIN_REPO/.claude/worktrees/<task-name>"`.
+   - Get the prefix-stripped `task_name`: if you arrived here from the `linked` branch
+     above you already have it as `ARG_TASK` (and `$MAIN_REPO` / the confirmed worktree)
+     — **reuse those, don't resolve again**. Otherwise (the `main` branch) run
+     `bash "${CLAUDE_PLUGIN_ROOT}/scripts/task-status.sh" resolve "<task>"` and read
+     `task_name` + `on_main`; if `on_main=yes` the name is the main branch, not a task —
+     ask for a real task name and stop.
+   - `MAIN_REPO="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path)"` (skip if
+     already set) → `WORKTREE="$MAIN_REPO/.claude/worktrees/<task-name>"`.
    - If `WORKTREE` is not a directory, there is no worktree for this task — suggest
      `/kickoff <task>` (or `/list`) and stop.
 

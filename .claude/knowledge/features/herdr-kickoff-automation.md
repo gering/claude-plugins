@@ -104,13 +104,24 @@ so Claude runs **inside a shell pane**. Two durable decisions:
       match. Accepted residual gap: a task's own tab that wandered into a subdir won't
       be detected and a reopen could duplicate — narrow (reopen → `/exit` → `cd subdir`
       → reopen again), and the alternative over-blocked the common case.
-  - **Search ALL workspaces (dedup only).** The lookup passes an empty workspace so a
-    still-live tab for this worktree in a *different* herdr workspace is also found
-    (worktree paths are globally unique); the new tab is still *created* in
-    `$HERDR_WORKSPACE_ID`. Consequence: reopening a *different* task from inside a
-    worktree can land its tab in the current session's workspace, which a later
-    `/close` (scoped to its own workspace) may not locate — it then prints its
-    manual-close line (graceful, no data loss). Accepted.
+  - **Search all workspaces of the current herdr SERVER (dedup only).** The lookup
+    passes an empty workspace so a still-live tab for this worktree in a *different*
+    workspace is also found (worktree paths are globally unique); the tab is still
+    *created* in `$HERDR_WORKSPACE_ID`. Two accepted limits: (a) `herdr pane list`
+    only spans the current herdr *server*, so a session for the same worktree in a
+    *separate* server (another Ghostty tab) is invisible and could duplicate — herdr
+    can't be queried across servers; (b) reopening a *different* task from inside a
+    worktree lands its tab in the current session's workspace, which a later `/close`
+    (scoped to its own workspace) may not locate — it then prints its manual-close line
+    (graceful, no data loss). The unscoped search also means one unreadable-cwd pane
+    ANYWHERE makes the guard `unverified` → reopen drops to the (cued) manual path;
+    fail-safe, no duplicate.
+  - **Re-anchor cwd before `claude -c`.** The reopen sends `cd <worktree> && claude -c`
+    (shell-quoted), not a bare `claude -c`: the pane is created with `--cwd`, but the
+    shell's rc (direnv/zoxide/an unconditional `cd`) can drift the cwd on startup, and
+    `claude -c` resumes the most-recent session *for the current cwd* — a drift would
+    silently attach to a different task. `launch`'s argv-exec has no shell, so it's
+    immune; this is the shell-pane path paying for that.
   - **Don't assert a live resume on reuse.** A cwd match can't distinguish a live
     Claude from a bare shell that survived a prior `/exit`, so the reuse branch emits
     `resumed=` (empty), and the skill tells the user to run `claude -c` if the focused

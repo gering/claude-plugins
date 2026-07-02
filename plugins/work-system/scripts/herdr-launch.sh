@@ -51,9 +51,9 @@
 # One resume-only terminal outcome, exit 0 with a single key and nothing else:
 #   blocked=unverified  (the guard could NOT verify whether a tab is already open —
 #                        herdr unreachable, an empty/repopulating pane list, or a pane
-#                        sitting in a subdir of the worktree. Fail closed: the caller
-#                        tells the user to CHECK herdr for an existing tab before
-#                        reopening by hand, so no duplicate session is created.)
+#                        with an unreadable cwd. Fail closed: the caller tells the user
+#                        to CHECK herdr for an existing tab before reopening by hand, so
+#                        no duplicate session is created.)
 # On failure to launch (exit 1) prints nothing on stdout — the caller should show
 # the manual instructions instead. Diagnostics always go to stderr.
 set -eu
@@ -138,15 +138,16 @@ case "$mode" in
     # cwd (e.g. the task was never `/exit`-ed), reopening would spawn a SECOND
     # `claude -c` on the same working tree — two sessions clobbering each other's
     # uncommitted changes. Ask the teardown helper's TRI-STATE cwd→tab lookup (the
-    # single source of truth for realpath pane-cwd matching), searching ALL
-    # workspaces (empty workspace arg) so a still-live tab for this worktree in a
-    # *different* herdr workspace is also caught — worktree paths are globally unique.
+    # single source of truth for realpath pane-cwd matching), with an empty workspace
+    # so it searches all workspaces OF THIS HERDR SERVER. (A session for the same
+    # worktree in a *separate* herdr server — another Ghostty tab — is invisible to
+    # `herdr pane list` and cannot be deduped; accepted limitation.)
     #   <tab-id>    → reuse: focus it, start nothing new.
     #   none        → confidently no tab here → create below.
-    #   unverified  → could NOT determine (herdr unreachable, or an empty/repopulating
-    #                 pane list): FAIL CLOSED — do not risk a duplicate. Exit 1 so the
-    #                 caller shows the manual block, where a human would spot an
-    #                 existing tab. (This also covers a missing teardown helper.)
+    #   unverified  → could NOT determine (herdr unreachable, an empty/repopulating pane
+    #                 list, or an unreadable-cwd pane): FAIL CLOSED — do not risk a
+    #                 duplicate. Emit blocked=unverified so the caller cues the user to
+    #                 check herdr for an existing tab. (Also covers a missing helper.)
     teardown="${0%/*}/herdr-teardown.sh"
     state=unverified
     [ -f "$teardown" ] && state="$(bash "$teardown" worktree-tab-state "" "$worktree" 2>/dev/null || echo unverified)"
@@ -189,13 +190,17 @@ case "$mode" in
     [ -n "$pane" ] || { echo "herdr tab create did not return a pane id" >&2; exit 1; }
 
     # Run `claude -c` INSIDE the shell pane — the /exit hardening (a later /exit
-    # returns to the shell, keeping the tab alive). Report resumed=no if the send
-    # fails, so the caller never claims a resume that didn't happen: the tab + shell
-    # exist, but the user must run `claude -c` in it by hand. (This catches a failed
-    # send; it can't catch `claude -c` erroring later on a cwd with no prior session
-    # — the caller's wording stays appropriately tentative for that case.)
+    # returns to the shell, keeping the tab alive). Prefix an explicit `cd <worktree>`
+    # (shell-quoted): the pane is created with --cwd, but the shell's rc (direnv,
+    # zoxide, an unconditional `cd` in .zshrc) can drift the cwd on startup, and
+    # `claude -c` resumes the most-recent session FOR THE CURRENT cwd — so a drifted
+    # cwd would silently attach to a different task's session. Re-anchoring keeps the
+    # cwd→session mapping the header relies on. Report resumed=no if the send fails, so
+    # the caller never claims a resume that didn't happen: the tab + shell exist, but
+    # the user must run it by hand. (Catches a failed send, not `claude -c` erroring
+    # later on a cwd with no prior session — the caller's wording stays tentative.)
     resumed=yes
-    if ! herdr pane run "$pane" "claude -c" >/dev/null 2>&1; then
+    if ! herdr pane run "$pane" "cd $(printf '%q' "$worktree") && claude -c" >/dev/null 2>&1; then
       resumed=no
       echo "herdr pane run could not start 'claude -c' in $pane (tab is open; run it by hand)" >&2
     fi
