@@ -110,7 +110,7 @@ The same rule applies to any project-specific setup the user's `CLAUDE.md` may a
     ```sh
     WORKTREE="<main-repo>/.claude/worktrees/<task-name>"   # absolute path
     LABEL="<short sidebar label, e.g. close-herdr>"
-    bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-launch.sh" "$LABEL" "$WORKTREE" "$HERDR_WORKSPACE_ID"
+    bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-launch.sh" launch "$LABEL" "$WORKTREE" "$HERDR_WORKSPACE_ID"
     ```
 
     The helper spawns Claude as **argv** (`herdr agent start … -- claude -n
