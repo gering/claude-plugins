@@ -78,10 +78,25 @@ so Claude runs **inside a shell pane**. Two durable decisions:
   `herdr-teardown.sh worktree-tab`, the single source of truth for realpath cwd
   matching) and, if found, just *focuses* it (`reused=yes`). Without this guard,
   `/continue <task>` on a task that was never `/exit`-ed would start a **second**
-  `claude -c` on the same working tree — two live sessions clobbering each other's
-  uncommitted changes. Resume also reports `resumed=no` when the `pane run "claude
-  -c"` send fails, so the skill never claims a resume that didn't happen (the tab is
-  a bare shell; the user runs `claude -c` by hand).
+  `claude -c` on the same working tree — two sessions clobbering each other's
+  uncommitted changes. Three honesty/robustness details the guard needs to be sound:
+  - **Retry the lookup** (~3×). `worktree-tab` returns empty for BOTH "no such tab"
+    and a transiently empty `herdr pane list` (e.g. just after a herdr restart) — so
+    a single empty read would fail OPEN and duplicate. Retrying turns most transient
+    misses into a hit; a genuine no-tab still ends empty and we create. (Same
+    empty-list-≠-gone hazard that `herdr-teardown.sh`'s `extract_tab_present` guards.)
+  - **Don't assert a live resume on reuse.** A cwd match can't distinguish a live
+    Claude from a bare shell that survived a prior `/exit`, so the reuse branch emits
+    `resumed=` (empty), and the skill tells the user to run `claude -c` if the focused
+    tab is just a shell — never a false "already resumed."
+  - **Report `resumed=no`/`focused=no` honestly.** A failed `pane run "claude -c"`
+    send → `resumed=no` (user runs it by hand); a failed/absent `tab focus` →
+    `focused=no` (skill doesn't claim a focus that didn't happen). The tab-create
+    response is parsed pipe-delimited (`<pane>|<tab>`) so an empty pane id can't be
+    mis-read as the tab id.
+  - **Workspace-scoped, by design.** The lookup is scoped to `$HERDR_WORKSPACE_ID`,
+    matching how `/kickoff` and `/close` operate; a still-live tab for the same
+    worktree in a *different* herdr workspace is out of scope (accepted limitation).
 
 ### Known asymmetry: reopened tabs and `/close` teardown
 

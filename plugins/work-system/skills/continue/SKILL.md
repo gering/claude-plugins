@@ -59,25 +59,29 @@ user_invocable: true
    LABEL="<short sidebar label from the task name, e.g. close-herdr>"   # same convention as /kickoff
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-launch.sh" resume "$LABEL" "$WORKTREE" "$HERDR_WORKSPACE_ID"
    ```
-   The helper finds an already-open tab at the worktree and focuses it, or (if none)
+   The helper reuses an already-open tab at the worktree (focuses it), or (if none)
    creates a tab and runs `claude -c` **inside a shell pane** (so a later `/exit`
    drops back to the shell and the tab survives), then focuses it. It is the **single
    source of truth** for the herdr commands (robust JSON parsing, graceful fallback,
-   exit codes) — do not inline them. Branch on its `key=value` output:
-   - **exit 0, `reused=yes`** → a tab was already open at this worktree (the task was
-     never `/exit`-ed); the helper just focused it — **no** second session was started.
-     Tell the user the task was already open and is now focused.
+   exit codes) — do not inline them. Branch on its `key=value` output, **in this
+   order** (check `reused`, then `resumed`, then `tab`/`focused`):
+   - **exit 0, `reused=yes`** → a tab already existed at this worktree, so **no**
+     second session was started. Its live state is not asserted (the helper can't tell
+     a live Claude from a shell that survived a prior `/exit`), so tell the user:
+     "A tab for this task is already open at `tab=<id>` — switch to it. If it's a bare
+     shell (you'd `/exit`-ed earlier), run `claude -c` there to resume." If
+     `focused=no`, add that you couldn't bring it to the front — they'll need to click it.
    - **exit 0, `reused=no resumed=yes`** → a fresh tab was opened and `claude -c` was
-     sent into it; report the reopen (template below).
+     sent. Report the reopen (template below). If `tab=` is empty **or** `focused=no`,
+     append: "couldn't confirm the tab focus — switch to it manually (pane `<pane>`)."
    - **exit 0, `reused=no resumed=no`** → the tab opened but `claude -c` could not be
      sent; tell the user the tab is up at the worktree and to run `claude -c` in it by
      hand.
-   - **exit 0 with an empty `tab=`** (and `reused=no`) → the pane opened (`pane=<id>`)
-     but its tab id couldn't be read; tell the user it's up and may need a manual focus.
    - **non-zero exit** → the helper could not automate (herdr/python3 missing, broken
      socket, or no pane id). Show the manual block (b).
 
-   Success report for the `resumed=yes` case (fill `Tab` from the `tab=` line):
+   Success report for the `reused=no resumed=yes` case (fill `Tab` from the `tab=`
+   line; drop the line if `tab=` is empty):
    ```
    Reopened task tab: <LABEL>   (workspace <HERDR_WORKSPACE_ID>)
    Worktree: .claude/worktrees/<task-name>

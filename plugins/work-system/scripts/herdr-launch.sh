@@ -37,11 +37,17 @@
 #   moved=<yes|no>   (launch: no → Claude is a split in the CALLER's tab;
 #                     resume: always yes — its own tab)
 # resume adds two keys so the caller never reports a resume that didn't happen:
-#   reused=<yes|no>  (yes → an existing tab at this worktree was focused, NOT a new
-#                     one — no second `claude -c` was started on the same worktree)
-#   resumed=<yes|no> (no → the tab opened but `claude -c` could not be sent into it;
-#                     the caller should tell the user to run it by hand. Omitted /
-#                     irrelevant when reused=yes — that session is already live.)
+#   reused=<yes|no>  (yes → a tab already existed at this worktree and was focused,
+#                     NOT a new one — no second `claude -c` was started. Its LIVE
+#                     state is NOT asserted: a cwd match can't tell a live Claude from
+#                     a bare shell that survived a prior `/exit`, so the caller tells
+#                     the user to run `claude -c` if it's just a shell.)
+#   resumed=<yes|no> (meaningful only when reused=no: yes → `claude -c` was sent into
+#                     the fresh pane; no → the tab opened but the send failed, so the
+#                     caller tells the user to run it by hand. EMPTY when reused=yes —
+#                     nothing fresh was started.)
+#   focused=<yes|no> (no → `herdr tab focus` failed or there was no tab id to focus,
+#                     so the caller must not claim the tab was brought to the front.)
 # On failure to launch (exit 1) prints nothing on stdout — the caller should show
 # the manual instructions instead. Diagnostics always go to stderr.
 set -eu
@@ -83,18 +89,20 @@ try:
     print(json.load(sys.stdin)["result"]["move_result"]["created_tab"]["tab_id"] or "")
 except Exception:
     pass'
-#   resume: tab create → the new tab's root pane id and its tab id in ONE pass
-#   (space-separated; the tab id may live at result.tab_id or, defensively, under
-#   the root pane). herdr ids are `wN:pM`/`wN:tM` — no spaces — so the caller can
-#   split on whitespace with `set --`.
+#   resume: tab create → the new tab's root pane id and its tab id in ONE pass,
+#   pipe-delimited as `<pane>|<tab>` (the tab id may live at result.tab_id or,
+#   defensively, under the root pane). A single `|` is ALWAYS printed, so the caller
+#   splits on the first `|` — an empty pane with a present tab yields pane="" (which
+#   then fails the non-empty-pane guard) instead of the tab being mis-read as the
+#   pane. herdr ids are `wN:pM`/`wN:tM` and never contain `|`.
 extract_root_pane_tab='import sys, json
 try:
     r = json.load(sys.stdin)["result"]
     pane = (r.get("root_pane") or {}).get("pane_id") or ""
     tab = r.get("tab_id") or (r.get("root_pane") or {}).get("tab_id") or ""
-    print(pane, tab)
+    print(pane + "|" + tab)
 except Exception:
-    pass'
+    print("|")'
 
 case "$mode" in
   launch)
@@ -120,29 +128,50 @@ case "$mode" in
   resume)
     # Guard against a duplicate session. If a tab is ALREADY open at this worktree
     # cwd (e.g. the task was never `/exit`-ed), reopening would spawn a SECOND
-    # `claude -c` on the same working tree — two live sessions clobbering each
-    # other's uncommitted changes. So look for an existing tab first and just focus
-    # it. Reuse the teardown helper's cwd→tab lookup (realpath match) rather than
-    # re-implementing it — single source of truth for pane-cwd matching.
+    # `claude -c` on the same working tree — two sessions clobbering each other's
+    # uncommitted changes. So look for an existing tab first and just focus it,
+    # reusing the teardown helper's cwd→tab lookup (realpath match) — the single
+    # source of truth for pane-cwd matching. Retry a few times: `worktree-tab`
+    # returns empty for BOTH "no such tab" and a transiently empty `herdr pane list`
+    # (e.g. just after a herdr restart while panes repopulate), and treating the
+    # latter as "no tab" would fail OPEN and duplicate. Retrying converts most
+    # transient misses into a hit; a genuine no-tab still ends empty and we create.
+    # NOTE: the lookup is scoped to $workspace, matching how /kickoff and /close
+    # operate — a still-live tab for this worktree in a DIFFERENT herdr workspace is
+    # out of scope and would not be found (accepted, consistent limitation).
     teardown="${0%/*}/herdr-teardown.sh"
+    existing_tab=""
     if [ -f "$teardown" ]; then
-      existing_tab="$(bash "$teardown" worktree-tab "$workspace" "$worktree" 2>/dev/null || true)"
-      if [ -n "$existing_tab" ]; then
-        herdr tab focus "$existing_tab" >/dev/null 2>&1 || true
-        printf 'pane=\ntab=%s\nmoved=yes\nreused=yes\nresumed=yes\n' "$existing_tab"
-        exit 0
-      fi
+      k=0
+      while [ $k -lt 3 ]; do
+        existing_tab="$(bash "$teardown" worktree-tab "$workspace" "$worktree" 2>/dev/null || true)"
+        [ -n "$existing_tab" ] && break
+        k=$((k + 1))
+        [ $k -lt 3 ] && sleep 0.3 2>/dev/null || true
+      done
+    fi
+    if [ -n "$existing_tab" ]; then
+      # Focus it, but do NOT assert a live resume: a cwd match can't tell a live
+      # Claude from a bare shell that survived a prior `/exit`. resumed is left EMPTY
+      # so the caller tells the user to run `claude -c` if the tab is just a shell.
+      focused=yes
+      herdr tab focus "$existing_tab" >/dev/null 2>&1 || focused=no
+      printf 'pane=\ntab=%s\nmoved=yes\nreused=yes\nresumed=\nfocused=%s\n' "$existing_tab" "$focused"
+      exit 0
     fi
 
     # No existing tab — create a fresh one at the worktree and read back its root
-    # (shell) pane id and tab id in one python3 pass (herdr ids never contain
-    # spaces, so `set --` splits them safely).
+    # (shell) pane id and tab id in one python3 pass. Split on the FIRST `|`, so an
+    # empty pane id (with a present tab id) stays empty and trips the guard below,
+    # rather than the tab id being mis-read as the pane id.
     create_json="$(herdr tab create --workspace "$workspace" \
       --cwd "$worktree" --label "$label" 2>/dev/null || true)"
-    set -- $(printf '%s' "$create_json" | python3 -c "$extract_root_pane_tab" 2>/dev/null || true)
-    pane="${1:-}"; tab="${2:-}"
+    pane_tab="$(printf '%s' "$create_json" | python3 -c "$extract_root_pane_tab" 2>/dev/null || true)"
+    pane="${pane_tab%%|*}"
+    tab="${pane_tab#*|}"
 
-    # Empty pane id → the tab did not open (broken socket / bad response).
+    # Empty pane id → the tab did not open, or the response was malformed (broken
+    # socket / bad JSON / pane-less result). Cannot run claude -c without a pane.
     [ -n "$pane" ] || { echo "herdr tab create did not return a pane id" >&2; exit 1; }
 
     # Run `claude -c` INSIDE the shell pane — the /exit hardening (a later /exit
@@ -158,9 +187,13 @@ case "$mode" in
     fi
 
     # Focus the reopened tab — unlike kickoff's background launch, the user is
-    # switching to it now.
-    [ -n "$tab" ] && herdr tab focus "$tab" >/dev/null 2>&1 || true
+    # switching to it now. Report whether the focus took, so the caller doesn't
+    # claim a focus that failed.
+    focused=yes
+    [ -n "$tab" ] || focused=no
+    if [ -n "$tab" ] && ! herdr tab focus "$tab" >/dev/null 2>&1; then focused=no; fi
 
-    printf 'pane=%s\ntab=%s\nmoved=yes\nreused=no\nresumed=%s\n' "$pane" "$tab" "$resumed"
+    printf 'pane=%s\ntab=%s\nmoved=yes\nreused=no\nresumed=%s\nfocused=%s\n' \
+      "$pane" "$tab" "$resumed" "$focused"
     ;;
 esac
