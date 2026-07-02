@@ -75,7 +75,14 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
    drops back to the shell and the tab survives), then focuses it. It is the **single
    source of truth** for the herdr commands (robust JSON parsing, graceful fallback,
    exit codes) — do not inline them. Branch on its `key=value` output, **in this
-   order** (check `reused`, then `resumed`, then `tab`/`focused`):
+   order** (check `blocked`, then `reused`, then `resumed`, then `tab`/`focused`):
+   - **exit 0, `blocked=unverified`** → the helper could **not** verify whether a tab
+     is already open (herdr unreachable, a transiently empty pane list, or a pane in a
+     subdir of the worktree). It deliberately created nothing. Do **not** auto-reopen;
+     tell the user: "Couldn't verify your herdr tabs — check whether a tab for this
+     task is already open at the worktree. Switch to it if so; only if there's none,
+     reopen by hand: `cd <worktree> && claude -c`." (This prevents a second session on
+     the same worktree.) Do not fall through to the other branches.
    - **exit 0, `reused=yes`** → a tab already existed at this worktree, so **no**
      second session was started. Its live state is not asserted (the helper can't tell
      a live Claude from a shell that survived a prior `/exit`), so tell the user:

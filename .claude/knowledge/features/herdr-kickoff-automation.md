@@ -81,24 +81,25 @@ so Claude runs **inside a shell pane**. Two durable decisions:
   `/continue <task>` on a task that was never `/exit`-ed would start a **second**
   `claude -c` on the same working tree — two sessions clobbering each other's
   uncommitted changes. Four honesty/robustness details the guard needs to be sound:
-  - **Fail CLOSED on uncertainty, via a tri-state lookup.** `worktree-tab-state`
-    returns `<tab>` / `none` / `unverified` — not a bare empty string that conflates
-    "no tab" with "couldn't check." `none` (populated list, no cwd match) → create;
-    `unverified` (herdr unreachable, or an EMPTY/repopulating pane list — the same
-    empty-≠-gone hazard `extract_tab_present` guards) → **exit 1**, so the skill shows
-    the manual block and a *human* spots any existing tab. A plain empty-return guard
-    fails OPEN and duplicates; this can't, and it pays no retry latency on the common
-    no-tab path.
+  - **Fail CLOSED on uncertainty, via a single-pass tri-state lookup.**
+    `worktree-tab-state` returns `<tab>` / `none` / `unverified` — not a bare empty
+    string that conflates "no tab" with "couldn't check." Only a POPULATED list with an
+    exact realpath cwd match yields a tab (reuse) or, with no match at all, `none`
+    (create). Everything ambiguous → `unverified`: herdr unreachable, an
+    EMPTY/repopulating pane list (the empty-≠-gone hazard `extract_tab_present` also
+    guards), a malformed/errored parse (any exception in the extractor prints
+    `unverified`, never a false `none`), OR a pane sitting in a *subdirectory* of the
+    worktree (a tab may have wandered in — don't risk missing it). On `unverified` the
+    helper emits `blocked=unverified` (exit 0, not a generic failure) and the skill
+    tells the user to CHECK herdr for an existing tab before reopening by hand — so the
+    fail-closed path can't itself cause the duplicate (a plain manual block wouldn't cue
+    the check). This is ONE python pass; it mirrors `extract_tab`'s `norm()` (kept in
+    sync by comment) rather than reusing it, because it needs subtree-awareness +
+    tri-state output that `/close`'s exact-match `worktree-tab` must not inherit.
   - **Search ALL workspaces.** The lookup passes an empty workspace so a still-live
     tab for this worktree in a *different* herdr workspace is also found (worktree
     paths are globally unique); the new tab is still *created* in
     `$HERDR_WORKSPACE_ID`.
-  - **Known gap: cwd is matched EXACTLY (realpath), shared with `/close`.** A pane
-    whose shell wandered into a *subdirectory* of the worktree no longer matches, so a
-    double-reopen after `/exit`-then-`cd subdir` could miss the surviving tab and
-    duplicate. Accepted: loosening to prefix-match would change the canonical
-    `extract_tab` matcher that `/close` also relies on (unverifiable here), and a
-    second lenient matcher would reintroduce the very drift the shared one prevents.
   - **Don't assert a live resume on reuse.** A cwd match can't distinguish a live
     Claude from a bare shell that survived a prior `/exit`, so the reuse branch emits
     `resumed=` (empty), and the skill tells the user to run `claude -c` if the focused

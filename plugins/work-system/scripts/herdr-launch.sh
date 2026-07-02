@@ -48,6 +48,12 @@
 #                     nothing fresh was started.)
 #   focused=<yes|no> (no → `herdr tab focus` failed or there was no tab id to focus,
 #                     so the caller must not claim the tab was brought to the front.)
+# One resume-only terminal outcome, exit 0 with a single key and nothing else:
+#   blocked=unverified  (the guard could NOT verify whether a tab is already open —
+#                        herdr unreachable, an empty/repopulating pane list, or a pane
+#                        sitting in a subdir of the worktree. Fail closed: the caller
+#                        tells the user to CHECK herdr for an existing tab before
+#                        reopening by hand, so no duplicate session is created.)
 # On failure to launch (exit 1) prints nothing on stdout — the caller should show
 # the manual instructions instead. Diagnostics always go to stderr.
 set -eu
@@ -147,8 +153,13 @@ case "$mode" in
     case "$state" in
       none) : ;;   # fall through to create
       unverified)
-        echo "resume: could not verify existing tabs for $worktree — refusing to auto-create (avoids a duplicate session)" >&2
-        exit 1
+        # FAIL CLOSED, but as a distinct outcome (exit 0 + blocked=unverified), NOT a
+        # generic launch failure: the caller must cue the user to CHECK herdr for an
+        # already-open tab before reopening by hand — the plain manual block would just
+        # say "cd && claude -c" and risk the very duplicate this guard prevents.
+        echo "resume: could not verify existing tabs for $worktree — not auto-creating (avoids a duplicate session)" >&2
+        printf 'reused=no\nresumed=\nblocked=unverified\n'
+        exit 0
         ;;
       *)
         # A tab already exists at this worktree → focus it, but do NOT assert a live
