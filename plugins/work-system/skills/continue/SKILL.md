@@ -26,8 +26,9 @@ user_invocable: true
 or aliased argument is normalized the SAME way worktree directories are named (they use
 the prefix-stripped task name) — comparing the raw argument instead misroutes.
 
-- Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" linked` → `main` | `linked`,
-  and `MAIN_REPO="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path)"`.
+- Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" linked` → `main` | `linked`.
+  Defer `MAIN_REPO="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path)"` until a
+  branch below needs it — the common in-worktree resume (linked, no arg) never does.
 - `linked` (inside a worktree):
   - **No argument** → **in-session resume** (step 1).
   - **Argument given** → normalize it:
@@ -36,12 +37,13 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
     - `ARG_TASK` empty **or** `ARG_TASK` == `CUR_TASK` → **in-session resume** (step 1).
       This covers `/continue <current-task>` from its own worktree — resume in place,
       don't fall into Reopen (which would just no-op-focus the tab you're in).
-    - `ARG_TASK` != `CUR_TASK` **and** `$MAIN_REPO/.claude/worktrees/$ARG_TASK` is a
-      directory → **Reopen mode** for `ARG_TASK` (a real switch — reopen its tab from
-      here; `main-repo-path.sh path` resolves the main repo even from a worktree).
-    - otherwise (a typo/alias with no matching worktree) → **in-session resume** of the
-      current task (step 1); you may note "no worktree named `<arg>` — resuming the
-      current task." Never refuse to resume the task you're in.
+    - `ARG_TASK` != `CUR_TASK` → a real switch is intended. Resolve the main repo now
+      (`MAIN_REPO="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path)"` — it
+      resolves even from a worktree) and test `$MAIN_REPO/.claude/worktrees/$ARG_TASK`:
+      - a directory → **Reopen mode** for `ARG_TASK` (reopen its tab from here).
+      - not a directory (a typo/alias with no matching worktree) → **in-session resume**
+        of the current task (step 1); you may note "no worktree named `<arg>` — resuming
+        the current task." Never refuse to resume the task you're in.
 - `main` **with** a `<task>` argument → **Reopen mode** (step 1 normalizes the name).
 - `main` **without** an argument → nothing to resume in-session here; tell the user to
   name a task (`/continue <task>`) or use `/kickoff` / `/list`, and stop.
@@ -79,8 +81,8 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
    exit codes) — do not inline them. Branch on its `key=value` output, **in this
    order** (check `blocked`, then `reused`, then `resumed`, then `tab`/`focused`):
    - **exit 0, `blocked=unverified`** → the helper could **not** verify whether a tab
-     is already open (herdr unreachable, a transiently empty pane list, or a pane in a
-     subdir of the worktree). It deliberately created nothing. Do **not** auto-reopen;
+     is already open (herdr unreachable, a transiently empty pane list, or a pane whose
+     cwd couldn't be read). It deliberately created nothing. Do **not** auto-reopen;
      tell the user: "Couldn't verify your herdr tabs — check whether a tab for this
      task is already open at the worktree. Switch to it if so; only if there's none,
      reopen by hand: `cd <worktree> && claude -c`." (This prevents a second session on
@@ -90,7 +92,9 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
      a live Claude from a shell that survived a prior `/exit`), so tell the user:
      "A tab for this task is already open at `tab=<id>` — switch to it. If it's a bare
      shell (you'd `/exit`-ed earlier), run `claude -c` there to resume." If
-     `focused=no`, add that you couldn't bring it to the front — they'll need to click it.
+     `focused=no`, add that you couldn't bring it to the front: they'll need to click it —
+     and if no such tab is actually there, it closed right after the check, so reopen by
+     hand with `cd <worktree> && claude -c`.
    - **exit 0, `reused=no resumed=yes`** → a fresh tab was opened and `claude -c` was
      sent. Report the reopen (template below). If `tab=` is empty **or** `focused=no`,
      append: "couldn't confirm the tab focus — switch to it manually (pane `<pane>`)."
@@ -107,9 +111,9 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
    Worktree: .claude/worktrees/<task-name>
 
    Sent `claude -c` to the tab to resume the task's most-recent session — switch to
-   it. If you land on a bare shell instead (a shell startup prompt can occasionally
-   eat the command, or this worktree never hosted a session — e.g. it came from
-   `/adopt`), just run `claude -c` there yourself.
+   it. If you land on a bare shell instead: if a shell startup prompt ate the command,
+   run `claude -c` there yourself; if this worktree never hosted a session (e.g. it came
+   from `/adopt`), `claude -c` has nothing to resume — start fresh with `claude`.
    ```
    Word it as *sent*, not "is running" — the helper delivered the keystrokes but can't
    confirm Claude actually came up (see the shell-startup race in the knowledge entry).

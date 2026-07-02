@@ -107,7 +107,10 @@ so Claude runs **inside a shell pane**. Two durable decisions:
   - **Search all workspaces of the current herdr SERVER (dedup only).** The lookup
     passes an empty workspace so a still-live tab for this worktree in a *different*
     workspace is also found (worktree paths are globally unique); the tab is still
-    *created* in `$HERDR_WORKSPACE_ID`. Two accepted limits: (a) `herdr pane list`
+    *created* in `$HERDR_WORKSPACE_ID`. This rests on one taken-on-faith assumption:
+    that an unscoped `herdr pane list` spans *every* workspace of the server, not just
+    the focused one — not live-verifiable here; were it workspace-local, a cross-workspace
+    tab could go undetected and be duplicated. Two accepted limits: (a) `herdr pane list`
     only spans the current herdr *server*, so a session for the same worktree in a
     *separate* server (another Ghostty tab) is invisible and could duplicate — herdr
     can't be queried across servers; (b) reopening a *different* task from inside a
@@ -130,7 +133,9 @@ so Claude runs **inside a shell pane**. Two durable decisions:
     send → `resumed=no` (user runs it by hand); a failed/absent `tab focus` →
     `focused=no` (skill doesn't claim a focus that didn't happen). The tab-create
     response is parsed pipe-delimited (`<pane>|<tab>`) so an empty pane id can't be
-    mis-read as the tab id.
+    mis-read as the tab id. If that parse yields a tab id but *no* pane id (schema
+    drift / pane-less result), the just-created tab is closed (`herdr tab close`) before
+    the helper bails, so a drifted response can't orphan a blank tab on every resume.
 
 ### Known asymmetry: reopened tabs and `/close` teardown
 

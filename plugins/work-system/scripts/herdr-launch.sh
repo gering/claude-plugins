@@ -186,8 +186,15 @@ case "$mode" in
     tab="${pane_tab#*|}"
 
     # Empty pane id → the tab did not open, or the response was malformed (broken
-    # socket / bad JSON / pane-less result). Cannot run claude -c without a pane.
-    [ -n "$pane" ] || { echo "herdr tab create did not return a pane id" >&2; exit 1; }
+    # socket / bad JSON / pane-less result). Cannot run claude -c without a pane. If a
+    # tab id WAS parsed (a pane-less/partial result from schema drift), the tab is real
+    # and would be orphaned — close it before bailing so a drifted response can't leak a
+    # blank tab on every resume; then the caller shows the manual block.
+    if [ -z "$pane" ]; then
+      [ -n "$tab" ] && herdr tab close "$tab" >/dev/null 2>&1 || true
+      echo "herdr tab create did not return a pane id" >&2
+      exit 1
+    fi
 
     # Run `claude -c` INSIDE the shell pane — the /exit hardening (a later /exit
     # returns to the shell, keeping the tab alive). Prefix an explicit `cd <worktree>`
