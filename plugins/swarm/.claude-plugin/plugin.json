@@ -1,0 +1,11 @@
+{
+  "name": "swarm",
+  "description": "Local mixture-of-agents code review for Claude Code. Fans out to Claude subagents plus codex and grok CLIs in parallel, merges and verifies their findings, and presents one ranked report.",
+  "version": "0.1.0",
+  "author": {
+    "name": "gering"
+  },
+  "repository": "https://github.com/gering/claude-plugins",
+  "license": "MIT",
+  "keywords": ["review", "code-review", "multi-agent", "ensemble", "codex", "grok"]
+}
