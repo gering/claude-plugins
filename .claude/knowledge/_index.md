@@ -9,7 +9,7 @@
 ## Features
 - `features/backfill-and-origin-metadata.md` — `/backfill-knowledge` significance bar + origin-reconstruction cascade
 - `features/statusline-integration.md` — Status-line segment: plugins can't own `statusLine.command`; marker-block injection
-- `features/herdr-kickoff-automation.md` — herdr `herdr-launch.sh`: `launch` (kickoff, argv-exec, race-free root-pane tab) + `resume` (`/continue <task>` reopens an `/exit`-closed tab in a shell pane, survives `/exit`, `claude -c`)
+- `features/herdr-kickoff-automation.md` — herdr `herdr-launch.sh`: `launch` (`/kickoff`) + `resume` (`/continue <task>` reopens an `/exit`-closed tab)
 - `features/herdr-close-automation.md` — `/close` in herdr: cwd-tab teardown, plugin SessionEnd hook, the one TUI-exit primitive, detached self-exit onto idle
 - `features/task-archiving-on-close.md` — `/close` archives (not deletes) the task file; adaptive commit + ff-push to main
 

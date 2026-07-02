@@ -201,11 +201,14 @@ cwd identifies it unambiguously), then focuses the tab.
 
 The reopened tab is hardened against the same `/exit`: Claude runs **inside a shell
 pane** (not as the root pane), so a later `/exit` just drops back to the shell and
-the tab stays open. Outside herdr, `/continue <task>` prints the manual
+the tab stays open. If the task's tab is in fact still open (you never `/exit`-ed),
+reopen just **focuses** it rather than starting a second `claude -c` on the same
+worktree. Outside herdr, `/continue <task>` prints the manual
 `cd <worktree> && claude -c` block instead. Run from *inside* a worktree,
-`/continue` is unchanged — it loads context and resumes in place. The reopen shares
-the tested `scripts/herdr-launch.sh` with `/kickoff` (a `resume` mode alongside
-`launch`); see `skills/continue/SKILL.md`.
+`/continue` is unchanged — it loads context and resumes in place (pass a *different*
+task name to reopen that one's tab from here). The reopen shares the tested
+`scripts/herdr-launch.sh` with `/kickoff` (a `resume` mode alongside `launch`); see
+`skills/continue/SKILL.md`.
 
 ## Adopting Existing Branches
 

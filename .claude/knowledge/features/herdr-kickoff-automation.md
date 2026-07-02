@@ -73,6 +73,27 @@ so Claude runs **inside a shell pane**. Two durable decisions:
   (capture-at-argv-launch + marker lifecycle + staleness) buys no disambiguation.
   `resume` also *focuses* the reopened tab (the user is switching to it), where
   `launch` opens `--no-focus` in the background.
+- **Idempotent — never spawn a second session on one worktree.** Before creating a
+  tab, `resume` looks up an existing tab at the worktree cwd (reusing
+  `herdr-teardown.sh worktree-tab`, the single source of truth for realpath cwd
+  matching) and, if found, just *focuses* it (`reused=yes`). Without this guard,
+  `/continue <task>` on a task that was never `/exit`-ed would start a **second**
+  `claude -c` on the same working tree — two live sessions clobbering each other's
+  uncommitted changes. Resume also reports `resumed=no` when the `pane run "claude
+  -c"` send fails, so the skill never claims a resume that didn't happen (the tab is
+  a bare shell; the user runs `claude -c` by hand).
+
+### Known asymmetry: reopened tabs and `/close` teardown
+
+A `resume`-launched Claude runs via `pane run` (a shell-foreground process), **not**
+`agent start`, so herdr may not track it as a registered agent. `/close`'s Scenario-B
+self-close polls the pane's `agent_status` and injects `/exit` only on `idle`/`done`;
+if that status is never populated for a shell-launched Claude, the poller times out
+and does not auto-close the reopened tab. This degrades **gracefully** — `/close`
+always prints the manual-close line as its backstop — so a reopened task may need a
+by-hand tab close where a kickoff tab would auto-close. This is the same
+agent-detection question flagged as unverified for the deferred race-free-prevention
+option above; both wait on live herdr verification.
 
 ## Gotcha: input into a fresh pane races shell startup
 

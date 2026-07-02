@@ -1,9 +1,9 @@
 ---
 name: continue
 description: |
-  Resumes a task: inside a worktree, loads context and continues; from the main
-  session, `/continue <task>` reopens and resumes that task's session.
-  Trigger: "continue", "resume the task", "reopen <task>".
+  Resumes a task, or reopens its herdr tab from the main session with
+  `/continue <task>`.
+  Trigger: "continue", "resume the task", "reopen <task>", "pick up where I left off".
 user_invocable: true
 ---
 
@@ -24,8 +24,13 @@ user_invocable: true
 
 **Pick the mode first:**
 - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" linked` → `main` | `linked`.
-  - `linked` → **in-session resume**: go to step 1 below. Ignore any argument — you
-    are already in the worktree.
+  - `linked` (inside a worktree):
+    - **No argument, or the argument names *this* worktree's task** → **in-session
+      resume**: go to step 1 below.
+    - **Argument names a *different* task** → **Reopen mode** for that task (you can
+      reopen another task's tab from here — `main-repo-path.sh path` still resolves the
+      main repo from a linked worktree). Do **not** silently ignore the argument and
+      resume the current task instead.
   - `main` **with** a `<task>` argument → **Reopen mode**.
   - `main` **without** an argument → nothing to resume in-session here; tell the user
     to name a task (`/continue <task>`) or use `/kickoff` / `/list`, and stop.
@@ -54,23 +59,32 @@ user_invocable: true
    LABEL="<short sidebar label from the task name, e.g. close-herdr>"   # same convention as /kickoff
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-launch.sh" resume "$LABEL" "$WORKTREE" "$HERDR_WORKSPACE_ID"
    ```
-   The helper creates a tab at the worktree, runs `claude -c` **inside a shell pane**
-   (so a later `/exit` drops back to the shell and the tab survives), and focuses it.
-   It is the **single source of truth** for the herdr commands (robust JSON parsing,
-   graceful fallback, exit codes) — do not inline them. Branch on its result:
-   - **exit 0 with `tab=<id>`** → the task tab is reopened and focused, resuming the
-     session (`claude -c`). Report success (template below).
-   - **exit 0 with an empty `tab=`** → the pane opened (`pane=<id>`) but its tab id
-     couldn't be read; tell the user it's up and may need a manual focus.
+   The helper finds an already-open tab at the worktree and focuses it, or (if none)
+   creates a tab and runs `claude -c` **inside a shell pane** (so a later `/exit`
+   drops back to the shell and the tab survives), then focuses it. It is the **single
+   source of truth** for the herdr commands (robust JSON parsing, graceful fallback,
+   exit codes) — do not inline them. Branch on its `key=value` output:
+   - **exit 0, `reused=yes`** → a tab was already open at this worktree (the task was
+     never `/exit`-ed); the helper just focused it — **no** second session was started.
+     Tell the user the task was already open and is now focused.
+   - **exit 0, `reused=no resumed=yes`** → a fresh tab was opened and `claude -c` was
+     sent into it; report the reopen (template below).
+   - **exit 0, `reused=no resumed=no`** → the tab opened but `claude -c` could not be
+     sent; tell the user the tab is up at the worktree and to run `claude -c` in it by
+     hand.
+   - **exit 0 with an empty `tab=`** (and `reused=no`) → the pane opened (`pane=<id>`)
+     but its tab id couldn't be read; tell the user it's up and may need a manual focus.
    - **non-zero exit** → the helper could not automate (herdr/python3 missing, broken
      socket, or no pane id). Show the manual block (b).
 
-   Success report (fill `Tab` from the helper's `tab=` line):
+   Success report for the `resumed=yes` case (fill `Tab` from the `tab=` line):
    ```
    Reopened task tab: <LABEL>   (workspace <HERDR_WORKSPACE_ID>)
    Worktree: .claude/worktrees/<task-name>
 
-   Resuming the existing Claude session (`claude -c`). Switch to the tab to continue.
+   The tab is running `claude -c` to resume the task's most-recent session. Switch to
+   it to continue. (If this worktree never hosted a Claude session — e.g. it came from
+   `/adopt` — `claude -c` will report nothing to resume; just start `claude` there.)
    ```
 
    **b) Outside herdr — manual block** (display this — do **not** execute the `cd`):
