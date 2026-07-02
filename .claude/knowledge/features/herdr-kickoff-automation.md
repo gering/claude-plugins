@@ -75,16 +75,23 @@ so Claude runs **inside a shell pane**. Two durable decisions:
   `launch` opens `--no-focus` in the background.
 - **Idempotent — never spawn a second session on one worktree.** Before creating a
   tab, `resume` looks up an existing tab at the worktree cwd (reusing
-  `herdr-teardown.sh worktree-tab`, the single source of truth for realpath cwd
+  `herdr-teardown.sh worktree-tab-state`, the single source of truth for realpath cwd
   matching) and, if found, just *focuses* it (`reused=yes`). Without this guard,
   `/continue <task>` on a task that was never `/exit`-ed would start a **second**
   `claude -c` on the same working tree — two sessions clobbering each other's
-  uncommitted changes. Three honesty/robustness details the guard needs to be sound:
-  - **Retry the lookup** (~3×). `worktree-tab` returns empty for BOTH "no such tab"
-    and a transiently empty `herdr pane list` (e.g. just after a herdr restart) — so
-    a single empty read would fail OPEN and duplicate. Retrying turns most transient
-    misses into a hit; a genuine no-tab still ends empty and we create. (Same
-    empty-list-≠-gone hazard that `herdr-teardown.sh`'s `extract_tab_present` guards.)
+  uncommitted changes. Four honesty/robustness details the guard needs to be sound:
+  - **Fail CLOSED on uncertainty, via a tri-state lookup.** `worktree-tab-state`
+    returns `<tab>` / `none` / `unverified` — not a bare empty string that conflates
+    "no tab" with "couldn't check." `none` (populated list, no cwd match) → create;
+    `unverified` (herdr unreachable, or an EMPTY/repopulating pane list — the same
+    empty-≠-gone hazard `extract_tab_present` guards) → **exit 1**, so the skill shows
+    the manual block and a *human* spots any existing tab. A plain empty-return guard
+    fails OPEN and duplicates; this can't, and it pays no retry latency on the common
+    no-tab path.
+  - **Search ALL workspaces.** The lookup passes an empty workspace so a still-live
+    tab for this worktree in a *different* herdr workspace is also found (worktree
+    paths are globally unique); the new tab is still *created* in
+    `$HERDR_WORKSPACE_ID`.
   - **Don't assert a live resume on reuse.** A cwd match can't distinguish a live
     Claude from a bare shell that survived a prior `/exit`, so the reuse branch emits
     `resumed=` (empty), and the skill tells the user to run `claude -c` if the focused
@@ -94,9 +101,6 @@ so Claude runs **inside a shell pane**. Two durable decisions:
     `focused=no` (skill doesn't claim a focus that didn't happen). The tab-create
     response is parsed pipe-delimited (`<pane>|<tab>`) so an empty pane id can't be
     mis-read as the tab id.
-  - **Workspace-scoped, by design.** The lookup is scoped to `$HERDR_WORKSPACE_ID`,
-    matching how `/kickoff` and `/close` operate; a still-live tab for the same
-    worktree in a *different* herdr workspace is out of scope (accepted limitation).
 
 ### Known asymmetry: reopened tabs and `/close` teardown
 

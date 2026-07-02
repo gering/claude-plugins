@@ -27,10 +27,15 @@ user_invocable: true
   - `linked` (inside a worktree):
     - **No argument, or the argument names *this* worktree's task** → **in-session
       resume**: go to step 1 below.
-    - **Argument names a *different* task** → **Reopen mode** for that task (you can
-      reopen another task's tab from here — `main-repo-path.sh path` still resolves the
-      main repo from a linked worktree). Do **not** silently ignore the argument and
-      resume the current task instead.
+    - **Argument names a *different* task that has its own worktree** (check
+      `<main-repo>/.claude/worktrees/<arg-task>` exists) → **Reopen mode** for that
+      task (you can reopen another task's tab from here — `main-repo-path.sh path`
+      resolves the main repo even from a linked worktree). Don't silently ignore a
+      real switch.
+    - **Argument doesn't resolve to another worktree** (a typo, alias, or differently
+      remembered name) → **in-session resume** of the current task (step 1). Never
+      refuse to resume the task you're in just because an argument didn't match; you
+      may note "no worktree named `<arg>` — resuming the current task."
   - `main` **with** a `<task>` argument → **Reopen mode**.
   - `main` **without** an argument → nothing to resume in-session here; tell the user
     to name a task (`/continue <task>`) or use `/kickoff` / `/list`, and stop.

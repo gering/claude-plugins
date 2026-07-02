@@ -36,7 +36,7 @@
 #                     resume: the reused or freshly-created tab, empty only if unparsable)
 #   moved=<yes|no>   (launch: no → Claude is a split in the CALLER's tab;
 #                     resume: always yes — its own tab)
-# resume adds two keys so the caller never reports a resume that didn't happen:
+# resume adds three keys so the caller never reports a resume that didn't happen:
 #   reused=<yes|no>  (yes → a tab already existed at this worktree and was focused,
 #                     NOT a new one — no second `claude -c` was started. Its LIVE
 #                     state is NOT asserted: a cwd match can't tell a live Claude from
@@ -129,36 +129,36 @@ case "$mode" in
     # Guard against a duplicate session. If a tab is ALREADY open at this worktree
     # cwd (e.g. the task was never `/exit`-ed), reopening would spawn a SECOND
     # `claude -c` on the same working tree — two sessions clobbering each other's
-    # uncommitted changes. So look for an existing tab first and just focus it,
-    # reusing the teardown helper's cwd→tab lookup (realpath match) — the single
-    # source of truth for pane-cwd matching. Retry a few times: `worktree-tab`
-    # returns empty for BOTH "no such tab" and a transiently empty `herdr pane list`
-    # (e.g. just after a herdr restart while panes repopulate), and treating the
-    # latter as "no tab" would fail OPEN and duplicate. Retrying converts most
-    # transient misses into a hit; a genuine no-tab still ends empty and we create.
-    # NOTE: the lookup is scoped to $workspace, matching how /kickoff and /close
-    # operate — a still-live tab for this worktree in a DIFFERENT herdr workspace is
-    # out of scope and would not be found (accepted, consistent limitation).
+    # uncommitted changes. Ask the teardown helper's TRI-STATE cwd→tab lookup (the
+    # single source of truth for realpath pane-cwd matching), searching ALL
+    # workspaces (empty workspace arg) so a still-live tab for this worktree in a
+    # *different* herdr workspace is also caught — worktree paths are globally unique.
+    #   <tab-id>    → reuse: focus it, start nothing new.
+    #   none        → confidently no tab here → create below.
+    #   unverified  → could NOT determine (herdr unreachable, or an empty/repopulating
+    #                 pane list): FAIL CLOSED — do not risk a duplicate. Exit 1 so the
+    #                 caller shows the manual block, where a human would spot an
+    #                 existing tab. (This also covers a missing teardown helper.)
     teardown="${0%/*}/herdr-teardown.sh"
-    existing_tab=""
-    if [ -f "$teardown" ]; then
-      k=0
-      while [ $k -lt 3 ]; do
-        existing_tab="$(bash "$teardown" worktree-tab "$workspace" "$worktree" 2>/dev/null || true)"
-        [ -n "$existing_tab" ] && break
-        k=$((k + 1))
-        [ $k -lt 3 ] && sleep 0.3 2>/dev/null || true
-      done
-    fi
-    if [ -n "$existing_tab" ]; then
-      # Focus it, but do NOT assert a live resume: a cwd match can't tell a live
-      # Claude from a bare shell that survived a prior `/exit`. resumed is left EMPTY
-      # so the caller tells the user to run `claude -c` if the tab is just a shell.
-      focused=yes
-      herdr tab focus "$existing_tab" >/dev/null 2>&1 || focused=no
-      printf 'pane=\ntab=%s\nmoved=yes\nreused=yes\nresumed=\nfocused=%s\n' "$existing_tab" "$focused"
-      exit 0
-    fi
+    state=unverified
+    [ -f "$teardown" ] && state="$(bash "$teardown" worktree-tab-state "" "$worktree" 2>/dev/null || echo unverified)"
+    case "$state" in
+      none) : ;;   # fall through to create
+      unverified)
+        echo "resume: could not verify existing tabs for $worktree — refusing to auto-create (avoids a duplicate session)" >&2
+        exit 1
+        ;;
+      *)
+        # A tab already exists at this worktree → focus it, but do NOT assert a live
+        # resume: a cwd match can't tell a live Claude from a bare shell that survived
+        # a prior `/exit`. resumed is left EMPTY so the caller tells the user to run
+        # `claude -c` if the tab is just a shell.
+        focused=yes
+        herdr tab focus "$state" >/dev/null 2>&1 || focused=no
+        printf 'pane=\ntab=%s\nmoved=yes\nreused=yes\nresumed=\nfocused=%s\n' "$state" "$focused"
+        exit 0
+        ;;
+    esac
 
     # No existing tab — create a fresh one at the worktree and read back its root
     # (shell) pane id and tab id in one python3 pass. Split on the FIRST `|`, so an
