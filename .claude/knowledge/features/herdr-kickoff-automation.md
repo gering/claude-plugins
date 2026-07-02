@@ -1,20 +1,22 @@
 ---
-title: "herdr /kickoff Automation"
+title: "herdr /kickoff + /continue-reopen Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-06-24
+updatedAt: 2026-07-02
 createdFrom: "branch: task/automate-kickoff-in-herdr"
-updatedFrom: "branch: task/automate-kickoff-in-herdr"
+updatedFrom: "branch: task/continue-reopen-herdr"
 pluginVersion: 1.8.2
 prime: false
 ---
 
-# herdr /kickoff Automation
+# herdr /kickoff + /continue-reopen Automation
 
 Inside a herdr session, `/kickoff` replaces its manual "open a terminal yourself"
 block with an automated tab launch. The launch lives in one shared, testable
-helper — `plugins/work-system/scripts/herdr-launch.sh` (called from
-`skills/kickoff/SKILL.md` step 12) — which is the source of truth; this entry
-captures the durable design and one non-obvious gotcha.
+helper — `plugins/work-system/scripts/herdr-launch.sh` — with two subcommands:
+`launch` (called from `skills/kickoff/SKILL.md` step 12) and `resume` (called from
+`skills/continue/SKILL.md`'s reopen path — the main session with a `<task>` arg, or
+a *different* task's name given from inside a worktree). The helper is the source of
+truth; this entry captures the durable design and one non-obvious gotcha.
 
 ## Design decisions
 
@@ -46,6 +48,107 @@ captures the durable design and one non-obvious gotcha.
   keeps the kickoff session in front; any failure (empty `$pane`) degrades to the
   unchanged manual block — never block kickoff on herdr.
 
+## `resume` mode: reopen a task tab a `/exit` closed
+
+A kickoff tab runs Claude as its **root pane** (argv-exec above), so a clean `/exit`
+— even one only meant to restart Claude Code — ends the pane and herdr closes the
+whole tab; the worktree and resumable session persist, but the tab is gone.
+`/continue <task>` **from the main session** recovers it via `herdr-launch.sh
+resume`, which — unlike `launch` — uses `herdr tab create` + `pane run "claude -c"`
+so Claude runs **inside a shell pane**. Two durable decisions:
+
+- **Shell-pane resume is the `/exit` hardening; kickoff stays argv.** Because the
+  reopened Claude is *not* the root pane, a later `/exit` drops back to the shell
+  and the **tab survives** — exactly what a plain kickoff tab can't do. We
+  deliberately did **not** convert kickoff to a shell-pane launch to get the same
+  prevention: argv-exec's race-freedom is verified (the gotcha below), and `/close`'s
+  teardown (self-exit poller on `agent_status`, SessionEnd hook keyed to
+  Claude-as-root-pane) is built around the root-pane model — changing it risks that
+  machinery with no way to live-verify here. So kickoff tabs still die on `/exit`;
+  reopen is the one-command recovery, and reopened tabs are hardened. A race-free
+  *prevention* (`agent start … -- bash -lc 'claude …; exec "$SHELL" -i'`) is possible
+  but deferred pending live herdr agent-detection verification.
+- **`claude -c`, no session-id stash.** Resume runs `claude -c` (most-recent session
+  for the cwd). Each worktree hosts exactly one task, so its cwd is a 1:1 proxy for
+  the session — `-c` is already unambiguous, and stashing a session id at kickoff
+  (capture-at-argv-launch + marker lifecycle + staleness) buys no disambiguation.
+  `resume` also *focuses* the reopened tab (the user is switching to it), where
+  `launch` opens `--no-focus` in the background.
+- **Idempotent — never spawn a second session on one worktree.** Before creating a
+  tab, `resume` looks up an existing tab at the worktree cwd (reusing
+  `herdr-teardown.sh worktree-tab-state`, the single source of truth for realpath cwd
+  matching) and, if found, just *focuses* it (`reused=yes`). Without this guard,
+  `/continue <task>` on a task that was never `/exit`-ed would start a **second**
+  `claude -c` on the same working tree — two sessions clobbering each other's
+  uncommitted changes. Four honesty/robustness details the guard needs to be sound:
+  - **Fail CLOSED on uncertainty, via a single-pass tri-state lookup.**
+    `worktree-tab-state` returns `<tab>` / `none` / `unverified` — not a bare empty
+    string that conflates "no tab" with "couldn't check." Only a POPULATED list where
+    every tab pane has a READABLE cwd and one EXACTLY matches yields a tab (reuse), or
+    `none` (create) when all readable cwds miss. Everything ambiguous → `unverified`:
+    herdr unreachable, an EMPTY/repopulating pane list (the empty-≠-gone hazard
+    `extract_tab_present` also guards), a malformed/errored parse (any exception prints
+    `unverified`, never a false `none`), OR a tab pane whose cwd is empty/unreadable
+    (can't rule out that it IS the worktree tab). On `unverified` the helper emits a
+    lone `blocked=unverified` (exit 0, not a generic failure) and the skill tells the
+    user to CHECK herdr for an existing tab before reopening by hand — so the
+    fail-closed path can't itself cause the duplicate (a plain manual block wouldn't cue
+    the check). It mirrors `extract_tab`'s `norm()` via a **shared prelude string**
+    concatenated into both (defined once, so the guard and `/close` can't drift on path
+    matching); the match/output logic stays separate because `/close`'s `worktree-tab`
+    must not inherit the tri-state.
+    - **Exact-match only — subtree-matching was tried and reverted.** Round 5 made a
+      pane in a worktree *subdirectory* fail closed (to catch a tab that `cd`'d into a
+      subdir); that deterministically blocked auto-reopen whenever ANY unrelated pane
+      sat under the worktree (e.g. a shell in `<worktree>/logs`). Reverted to exact
+      match. Accepted residual gap: a task's own tab that wandered into a subdir won't
+      be detected and a reopen could duplicate — narrow (reopen → `/exit` → `cd subdir`
+      → reopen again), and the alternative over-blocked the common case.
+  - **Search all workspaces of the current herdr SERVER (dedup only).** The lookup
+    passes an empty workspace so a still-live tab for this worktree in a *different*
+    workspace is also found (worktree paths are globally unique); the tab is still
+    *created* in `$HERDR_WORKSPACE_ID`. This rests on one taken-on-faith assumption:
+    that an unscoped `herdr pane list` spans *every* workspace of the server, not just
+    the focused one — not live-verifiable here; were it workspace-local, a cross-workspace
+    tab could go undetected and be duplicated. Two accepted limits: (a) `herdr pane list`
+    only spans the current herdr *server*, so a session for the same worktree in a
+    *separate* server (another Ghostty tab) is invisible and could duplicate — herdr
+    can't be queried across servers; (b) reopening a *different* task from inside a
+    worktree lands its tab in the current session's workspace, which a later `/close`
+    (scoped to its own workspace) may not locate — it then prints its manual-close line
+    (graceful, no data loss). The unscoped search also means one unreadable-cwd pane
+    ANYWHERE makes the guard `unverified` → reopen drops to the (cued) manual path;
+    fail-safe, no duplicate.
+  - **Re-anchor cwd before `claude -c`.** The reopen sends `cd <worktree> && claude -c`
+    (shell-quoted), not a bare `claude -c`: the pane is created with `--cwd`, but the
+    shell's rc (direnv/zoxide/an unconditional `cd`) can drift the cwd on startup, and
+    `claude -c` resumes the most-recent session *for the current cwd* — a drift would
+    silently attach to a different task. `launch`'s argv-exec has no shell, so it's
+    immune; this is the shell-pane path paying for that.
+  - **Don't assert a live resume on reuse.** A cwd match can't distinguish a live
+    Claude from a bare shell that survived a prior `/exit`, so the reuse branch emits
+    `resumed=` (empty), and the skill tells the user to run `claude -c` if the focused
+    tab is just a shell — never a false "already resumed."
+  - **Report `resumed=no`/`focused=no` honestly.** A failed `pane run "claude -c"`
+    send → `resumed=no` (user runs it by hand); a failed/absent `tab focus` →
+    `focused=no` (skill doesn't claim a focus that didn't happen). The tab-create
+    response is parsed pipe-delimited (`<pane>|<tab>`) so an empty pane id can't be
+    mis-read as the tab id. If that parse yields a tab id but *no* pane id (schema
+    drift / pane-less result), the just-created tab is closed (`herdr tab close`) before
+    the helper bails, so a drifted response can't orphan a blank tab on every resume.
+
+### Known asymmetry: reopened tabs and `/close` teardown
+
+A `resume`-launched Claude runs via `pane run` (a shell-foreground process), **not**
+`agent start`, so herdr may not track it as a registered agent. `/close`'s Scenario-B
+self-close polls the pane's `agent_status` and injects `/exit` only on `idle`/`done`;
+if that status is never populated for a shell-launched Claude, the poller times out
+and does not auto-close the reopened tab. This degrades **gracefully** — `/close`
+always prints the manual-close line as its backstop — so a reopened task may need a
+by-hand tab close where a kickoff tab would auto-close. This is the same
+agent-detection question flagged as unverified for the deferred race-free-prevention
+option above; both wait on live herdr verification.
+
 ## Gotcha: input into a fresh pane races shell startup
 
 This is *why* the launch uses argv-exec, not `herdr pane run` / typed keystrokes.
@@ -60,6 +163,12 @@ into a shell at all: `herdr agent start … -- <argv>` execs the binary directly
 
 Generalizes: when a multiplexer offers both "type into a pane's shell" and "exec
 argv" launch paths, prefer argv — it has no race against shell init.
+
+The `resume` mode knowingly takes the other path (`pane run "claude -c"`, which
+*does* race shell startup): a surviving-`/exit` tab **requires** a shell pane, and
+this exact sequence was verified live by hand. The race is a low-probability cost on
+a manual recovery action, accepted for the tab-survival payoff — not the automated,
+frequently-run kickoff, where argv-exec's certainty wins.
 
 Related: [skill-composition](../architecture/skill-composition.md) (kickoff softly
 drives `/continue` across a process boundary). The "never persistent `cd`" footgun

@@ -22,6 +22,12 @@
 #       realpath, so symlinked paths still match). Must run BEFORE
 #       `git worktree remove` (afterwards the cwd points at a deleted path).
 #       Exit 1 (prints nothing) if herdr is unreachable or no pane matches.
+#   worktree-tab-state <workspace> <worktree-abs-path>
+#       Tri-state cwd→tab lookup for /continue's reopen guard: prints <tab-id>,
+#       `none` (populated list, every tab pane has a readable cwd, none matches →
+#       confidently no tab), or `unverified` (no tools / failed / empty / errored list,
+#       or a tab pane whose cwd is unreadable → caller must fail closed). Always exit 0.
+#       Empty <workspace> searches ALL workspaces.
 #   own-tab <workspace> <pane-id>
 #       Print the tab_id of the pane with this pane id ($HERDR_PANE_ID). /close
 #       compares it to the worktree tab to decide self-close (Scenario B) vs a
@@ -86,6 +92,15 @@ marker_file() {
 
 require_herdr() { command -v herdr >/dev/null 2>&1 || { echo "herdr not on PATH" >&2; exit 1; }; }
 
+# realpath path-normalization, shared by BOTH extractors below so the reopen guard
+# and /close's worktree-tab lookup can never disagree on cwd matching. Concatenated
+# into each python program (they differ only in match/output logic).
+norm_py='def norm(p):
+    if not p or not p.strip():
+        return ""
+    p2 = p.rstrip("/") or "/"   # all-slashes path stays root, never collapses to ""
+    return os.path.realpath(p2)'
+
 # Extract a tab_id from `herdr pane list` JSON on stdin.
 #   argv: <target-cwd> [--first] [--exclude <tab>]   (cwd matched by realpath)
 # Prints the tab of the first pane whose realpath(cwd) == realpath(target), honoring
@@ -93,11 +108,7 @@ require_herdr() { command -v herdr >/dev/null 2>&1 || { echo "herdr not on PATH"
 # whose tab != --exclude. An empty/whitespace target never matches (realpath("")
 # would resolve to the process cwd). Empty output on no match or malformed JSON.
 extract_tab='import sys, json, os
-def norm(p):
-    if not p or not p.strip():
-        return ""
-    p2 = p.rstrip("/") or "/"   # all-slashes path stays root, never collapses to ""
-    return os.path.realpath(p2)
+'"$norm_py"'
 args = sys.argv[1:]
 target = norm(args[0]) if args else ""
 rest = args[1:]
@@ -122,6 +133,42 @@ if fallback:
         if t and t != exclude:
             print(t)
             sys.exit(0)'
+
+# Tri-state cwd→tab lookup for /continue's reopen guard, in ONE pass. Prints:
+#   <tab-id>     a pane whose realpath(cwd) == target (exact), with a tab_id → reuse it
+#   none         a POPULATED list where every pane has a READABLE cwd, none matches the
+#                worktree → confidently no tab here
+#   unverified   malformed/empty/error list, an empty target, a pane with an
+#                empty/unreadable cwd, OR a worktree-cwd pane with no tab_id (exists but
+#                can't be focused) — anything we can't rule out → fail closed rather than
+#                risk a duplicate `claude -c`
+# EXACT-match only, like extract_tab. Subtree-matching (treat a pane in a worktree
+# SUBDIR as the tab) was tried and reverted: any unrelated pane cd'd into a subdir would
+# have blocked auto-reopen forever. Consequence: a task tab that itself wandered into a
+# subdir is not detected — an accepted narrow gap (see the knowledge entry). cwd is
+# checked BEFORE tab_id so a worktree pane momentarily missing its tab_id fails closed
+# rather than being skipped. Any exception prints `unverified`, never a false `none`.
+extract_tab_state='import sys, json, os
+'"$norm_py"'
+target = norm(sys.argv[1]) if len(sys.argv) > 1 else ""
+try:
+    panes = json.load(sys.stdin)["result"]["panes"]
+    if not panes or not target:
+        print("unverified"); sys.exit(0)
+    unknown = False
+    for p in panes:
+        c = norm(p.get("cwd") or "")
+        if not c:
+            unknown = True   # unreadable cwd — cannot rule out that it is the worktree
+            continue
+        if c == target:
+            t = p.get("tab_id") or ""
+            if t:
+                print(t); sys.exit(0)   # exact match with a tab → reuse
+            unknown = True   # worktree pane exists but no tab_id → cannot focus, do not dup
+    print("unverified" if unknown else "none")
+except Exception:
+    print("unverified")'
 
 # Extract the tab_id of the pane whose pane_id == argv[0]. Empty pid never matches.
 extract_pane_tab='import sys, json
@@ -200,18 +247,27 @@ lookup_tab() {
   printf '%s\n' "$tab"
 }
 
-# Whether a tab still has any pane. $1=workspace $2=tab-id. Echoes one of
-# present|gone|unverified and ALWAYS returns 0 (callers branch on the word, and
-# this runs under `set -e` inside command substitution). "unverified" means we
-# could not check (herdr/python3 missing, or the list call failed) — distinct
-# from "gone", so /close never reports a close it didn't actually confirm.
-tab_status() {
-  local ws="$1" tab="$2" json
+# Run a python extractor over `herdr pane list` for a workspace and echo its output.
+# Any unavailability — herdr/python3 missing, or an empty/failed list — echoes
+# `unverified` instead, so a "couldn't check" is never mistaken for a definite answer.
+# ALWAYS returns 0 (callers branch on the word, under `set -e` in command subst). This
+# is the single definition of that guard chain, shared by tab_status() and the
+# worktree-tab-state subcommand so they can't drift on the herdr-down mapping.
+pane_query() {
+  local ws="$1" extractor="$2"; shift 2
   command -v herdr   >/dev/null 2>&1 || { echo unverified; return 0; }
   command -v python3 >/dev/null 2>&1 || { echo unverified; return 0; }
-  json="$(pane_list "$ws")"
+  local json; json="$(pane_list "$ws")"
   [ -n "$json" ] || { echo unverified; return 0; }
-  printf '%s' "$json" | python3 -c "$extract_tab_present" "$tab" 2>/dev/null || echo unverified
+  printf '%s' "$json" | python3 -c "$extractor" "$@" 2>/dev/null || echo unverified
+}
+
+# Whether a tab still has any pane. $1=workspace $2=tab-id. Echoes one of
+# present|gone|unverified and ALWAYS returns 0. "unverified" means we could not check
+# (herdr/python3 missing, or the list call failed) — distinct from "gone", so /close
+# never reports a close it didn't actually confirm.
+tab_status() {
+  pane_query "$1" "$extract_tab_present" "$2"
 }
 
 cmd="${1:-}"
@@ -219,6 +275,18 @@ case "$cmd" in
   worktree-tab)
     [ $# -eq 3 ] || { echo "usage: ${0##*/} worktree-tab <workspace> <worktree-path>" >&2; exit 2; }
     lookup_tab "$2" "$3"
+    ;;
+  worktree-tab-state)
+    # Tri-state cwd→tab lookup for /continue's reopen guard. Echoes one of
+    # <tab-id>|none|unverified and ALWAYS exits 0 (callers branch on the word; runs
+    # under `set -e` inside command substitution). An empty workspace searches all
+    # workspaces OF THE CURRENT HERDR SERVER (a session in a separate herdr server is
+    # invisible — accepted). `unverified` (no tools, failed/empty list, or an
+    # unreadable-cwd pane) must make the caller fail CLOSED, never auto-create a duplicate.
+    [ $# -eq 3 ] || { echo "usage: ${0##*/} worktree-tab-state <workspace> <worktree-path>" >&2; exit 2; }
+    # An empty target would match nothing and read as `none` (fail open); refuse it.
+    [ -n "$3" ] || { echo unverified; exit 0; }
+    pane_query "$2" "$extract_tab_state" "$3"
     ;;
   own-tab)
     [ $# -eq 3 ] || { echo "usage: ${0##*/} own-tab <workspace> <pane-id>" >&2; exit 2; }
@@ -375,7 +443,7 @@ case "$cmd" in
     exit 0
     ;;
   *)
-    echo "usage: ${0##*/} {worktree-tab|own-tab|main-tab|close-tab|focus-tab|inject-exit|self-exit|arm-self-close|on-session-end} ..." >&2
+    echo "usage: ${0##*/} {worktree-tab|worktree-tab-state|own-tab|main-tab|close-tab|focus-tab|inject-exit|self-exit|arm-self-close|on-session-end} ..." >&2
     exit 2
     ;;
 esac
