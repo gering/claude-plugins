@@ -28,6 +28,14 @@ PR review feedback loop. Create PRs with readiness checks, commit + push + trigg
 
 [Documentation →](plugins/pr-flow/)
 
+### Swarm
+
+Local mixture-of-agents code review. Fans out one review across Claude subagents plus the `codex` and `grok` CLIs, merges and verifies their findings, and presents a single ranked report — before anything is pushed. Complementary to PR Flow's GitHub-side loop. *(Phase 1: scaffold + backend adapter.)*
+
+**Commands:** `/swarm:agents` *(more to come: `/swarm:review`, `/swarm:adversarial`, `/swarm:style`, `/swarm:security`)*
+
+[Documentation →](plugins/swarm/)
+
 ## Installation
 
 ### 1. Add the marketplace
@@ -42,6 +50,7 @@ PR review feedback loop. Create PRs with readiness checks, commit + push + trigg
 /plugin install knowledge-system
 /plugin install work-system
 /plugin install pr-flow
+/plugin install swarm
 ```
 
 ### 3. Reload plugins
