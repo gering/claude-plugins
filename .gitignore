@@ -1,1 +1,4 @@
 .claude/settings.local.json
+
+# Archived task files — local history, kept out of the repo (tasks/ is untracked by design)
+tasks/archive/
