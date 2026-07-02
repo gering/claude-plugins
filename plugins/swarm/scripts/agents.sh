@@ -23,7 +23,9 @@
 #            Reasoning effort has no "max" tier -> max maps to xhigh.
 #   grok   — headless `-p` with inline --json-schema; the validated object is
 #            the `.structuredOutput` field of a response envelope. Needs an
-#            explicit model (-m): the default grok model rejects --effort.
+#            explicit model (-m): the default model (grok-composer-2.5-fast)
+#            rejects --effort AND ignores --json-schema (structuredOutput
+#            stays null) — grok-build is the only schema-capable choice.
 #            Auth heuristic: non-empty ~/.grok/auth.json (no status command).
 #
 # Exit codes: 0 ok · 1 unavailable / not ready / run failed · 2 usage error
