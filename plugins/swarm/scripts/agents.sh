@@ -107,11 +107,22 @@ require_valid_timeout() {
 # Linux: bwrap; else passthrough (scrub_secrets + backend flags remain).
 # Extra deny paths via SWARM_DENY_PATHS (colon-separated).
 _sandbox_deny_paths() {
+  # $1 = the calling backend (its OWN credential dir stays readable — it needs
+  # it to authenticate; the OTHER backends' cred dirs are denied so an injected
+  # read can't steal a sibling's token). A denylist is a backstop, not the
+  # primary defense: grok runs tool-less, the diff is inlined so backends need
+  # no file reads at all, and scrub_secrets + env filtering back it up. A full
+  # allowlist jail is impractical here — the node/bun-based CLIs load runtime
+  # from all over $HOME, so deny-$HOME breaks them (documented in the blueprint).
+  local own="${1:-}"
   printf '%s\n' \
     "$HOME/.aws" "$HOME/.ssh" "$HOME/.gnupg" "$HOME/.netrc" \
     "$HOME/.config/gcloud" "$HOME/.kube" "$HOME/.docker" \
     "$HOME/.git-credentials" "$HOME/.npmrc" "$HOME/.pypirc" \
-    "$HOME/.config/gh" "$HOME/.cargo/credentials" "/etc/master.passwd"
+    "$HOME/.config/gh" "$HOME/.cargo/credentials" "/etc/master.passwd" \
+    "$HOME/.config/anthropic" "$HOME/.config/openai" "$HOME/.claude.json"
+  if [[ "$own" != "codex" ]]; then printf '%s\n' "$HOME/.codex"; fi
+  if [[ "$own" != "grok" ]]; then printf '%s\n' "$HOME/.grok"; fi
   local extra="${SWARM_DENY_PATHS:-}"
   # if-form, not `[[ … ]] && …`: the latter returns 1 when extra is empty, and
   # under set -e that aborts the `profile="$(…)"` assignment that calls this.
@@ -123,16 +134,18 @@ SANDBOX_CMD=()
 _sandbox_warned=""
 _sandbox_ready=""
 _init_sandbox() {
-  # Lazy (called from `run`, after require_python3): needs python3 for realpath.
+  # Lazy, per-backend (needs python3 for realpath). One backend per process, so
+  # building once is fine.
   [[ -n "$_sandbox_ready" ]] && return
   _sandbox_ready=1
+  local backend="${1:-}"
   if command -v sandbox-exec >/dev/null; then
     # Build the deny profile via python: realpath each path (defeats symlinks
     # like /tmp→/private/tmp, /etc→/private/etc — sandbox-exec matches the
     # resolved path) and deny it as BOTH a subpath (dirs + contents) and a
     # literal (single files like ~/.netrc).
     local profile
-    profile="$(_sandbox_deny_paths | python3 -c '
+    profile="$(_sandbox_deny_paths "$backend" | python3 -c '
 import os, sys
 rules = []
 for line in sys.stdin:
@@ -148,18 +161,38 @@ sys.stdout.write("(version 1)(allow default)(deny file-read* %s)" % " ".join(rul
     SANDBOX_CMD=(sandbox-exec -p "$profile")
   elif command -v bwrap >/dev/null; then
     local args=(--dev-bind / /) p
-    while IFS= read -r p; do [[ -e "$p" ]] && args+=(--tmpfs "$p"); done < <(_sandbox_deny_paths)
+    while IFS= read -r p; do [[ -e "$p" ]] && args+=(--tmpfs "$p"); done < <(_sandbox_deny_paths "$backend")
     SANDBOX_CMD=(bwrap "${args[@]}")
   fi
 }
 
+_env_filter_args() {
+  # Emit `-u NAME` pairs for secret-shaped env vars: the jail blocks file reads
+  # but backends inherit the environment, so a secret in AWS_SECRET_ACCESS_KEY /
+  # *_TOKEN / *_API_KEY would otherwise pass straight through. Backend auth comes
+  # from its config dir (not env), so stripping these is safe.
+  local name
+  while IFS='=' read -r name _; do
+    case "$name" in
+      AWS_*|*_TOKEN|*_SECRET|*_PASSWORD|*PASSWD*|*_API_KEY|*APIKEY*|*_CREDENTIALS|GH_TOKEN|GITHUB_TOKEN|NPM_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY|XAI_API_KEY|GROK_API_KEY)
+        printf '%s\n' "-u" "$name" ;;
+    esac
+  done < <(env)
+}
+
 sandboxed() {
-  # Prefix an external call with the OS jail; warn once if none is available.
+  # OS jail + env filter around an external call. $1 = backend (its own cred dir
+  # stays readable; siblings' are denied). Warn once if no jail is available.
+  local backend="$1"; shift
+  _init_sandbox "$backend"
   if ((${#SANDBOX_CMD[@]} == 0)) && [[ -z "$_sandbox_warned" ]]; then
-    echo "warning: no sandbox-exec/bwrap — external calls run without an OS read-deny jail (secret scrub still applies)" >&2
+    echo "warning: no sandbox-exec/bwrap — external calls run without an OS read-deny jail (secret scrub + env filter still apply)" >&2
     _sandbox_warned=1
   fi
-  with_timeout ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"} "$@"
+  local env_args=() _e
+  while IFS= read -r _e; do env_args+=("$_e"); done < <(_env_filter_args)
+  # order: timeout → env (strip secrets) → sandbox-exec (jail) → backend
+  with_timeout env ${env_args[@]+"${env_args[@]}"} ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"} "$@"
 }
 
 scrub_secrets() {
@@ -368,7 +401,6 @@ subcmd_run() {
   require_usable "$backend"
   require_python3
   require_valid_timeout
-  _init_sandbox
 
   case "$backend" in
     codex) run_codex "$prompt" "$effort" "$model" "$schema" ;;
@@ -397,7 +429,7 @@ run_codex() {
   # injection it could echo a secret it read, and it never passes scrub_secrets.
   # The exit code (incl. 124 timeout) still drives error handling.
   local rc=0
-  sandboxed codex exec -s read-only --skip-git-repo-check \
+  sandboxed codex codex exec -s read-only --skip-git-repo-check \
       -c model_reasoning_effort="$effort" \
       ${model_args[@]+"${model_args[@]}"} \
       --output-schema "$schema" \
@@ -447,7 +479,7 @@ run_grok() {
   # `--disable-web-search` closes the network channel. scrub_secrets on the
   # output is the belt-and-braces backstop.
   local raw rc=0
-  raw="$(sandboxed grok -m "$grok_model" --effort "$effort" \
+  raw="$(sandboxed grok grok -m "$grok_model" --effort "$effort" \
       --tools "" --disable-web-search \
       --json-schema "$(cat "$schema")" \
       --single="$prompt" </dev/null 2>/dev/null)" || rc=$?
@@ -461,9 +493,9 @@ data = sys.stdin.read()
 try:
     d = json.loads(data)
 except Exception:
-    # Include a snippet so a non-JSON envelope (banner/warning on stdout) is
-    # triageable instead of an opaque "invalid JSON".
-    sys.stderr.write("grok returned invalid JSON: %s\n" % (data[:120].replace("\n", " ") or "<empty>"))
+    # Do NOT echo the raw bytes: on the error path they never pass scrub_secrets
+    # and could carry injected/secret content. Report size only.
+    sys.stderr.write("grok returned invalid JSON (%d bytes; content withheld)\n" % len(data))
     sys.exit(1)
 if not isinstance(d, dict):
     sys.stderr.write("grok returned non-object JSON (%s)\n" % type(d).__name__)

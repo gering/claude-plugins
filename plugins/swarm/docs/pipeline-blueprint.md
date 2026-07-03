@@ -207,10 +207,18 @@ The diff under review is **untrusted input** that flows into agentic backends an
 back into the report. Three loop rounds (one of which exfiltrated a real
 credential mid-review) converged on these non-negotiable mitigations:
 
-1. **Sandbox every backend to no-tool / read-deny.** The diff is inlined, so
-   backends need NO filesystem or shell tools. Adapter now enforces: grok
-   `--tools ""` (verified to block file reads) + `--disable-web-search`; codex
-   `-s read-only`. Full OS-level jailing (sandbox-exec / bwrap) is still open.
+1. **Sandbox every backend + filter the env.** The diff is inlined, so backends
+   need NO filesystem/shell tools. Adapter enforces: grok `--tools ""` (verified
+   to block file reads) + `--disable-web-search`; codex `-s read-only`; **an
+   OS-level read-deny jail** (`sandbox-exec`/`bwrap`) around every call, denying
+   secret stores **per-backend** (a backend keeps its own cred dir but not its
+   siblings' — verified: codex can't read `~/.grok`); **an env filter** stripping
+   secret-shaped vars (the jail blocks files, not the inherited env).
+   *Denylist, not allowlist, by necessity:* the node/bun-based CLIs load runtime
+   from all over `$HOME`, so a deny-`$HOME`-allowlist jail breaks them (tested:
+   codex's node loader dies). The denylist is a backstop; the primary defense is
+   that backends need no reads at all (diff inlined) + grok is tool-less. A full
+   allowlist (or a purpose-built minimal-runtime container) is the P2 upgrade.
 2. **Scrub secrets at the adapter boundary.** `scrub_secrets` redacts
    secret-shaped content (AWS keys, private keys, gh/sk tokens, `secret=…`) from
    findings JSON before it leaves `run_codex`/`run_grok` — a backstop even if a
