@@ -59,6 +59,17 @@ require_python3() {
     || { echo "python3 not found on PATH — required by the swarm adapter" >&2; exit 1; }
 }
 
+column_or_cat() {
+  # Align TSV into columns when util-linux `column` is present; otherwise pass
+  # the raw TSV through so `list` degrades instead of dying (exit 127) under
+  # set -euo pipefail on a minimal host.
+  if command -v column >/dev/null; then
+    column -t -s $'\t'
+  else
+    cat
+  fi
+}
+
 validate_backend() {
   case "$1" in
     claude|codex|grok) ;;
@@ -75,7 +86,12 @@ available_version() {
     # claude reviews run in-session via the Agent tool, so inside a Claude
     # Code session the backend exists by definition — the PATH lookup only
     # provides a nicer version string, never gates availability.
-    claude --version 2>/dev/null | head -1 || echo "in-session"
+    # Capture separately (not `… || echo in-session`): a SIGPIPE from head()
+    # under pipefail would otherwise run BOTH the real version and the
+    # fallback, printing two lines.
+    local cver
+    cver="$(claude --version 2>/dev/null | head -1 || true)"
+    echo "${cver:-in-session}"
     return 0
   fi
   command -v "$backend" >/dev/null || return 1
@@ -170,7 +186,7 @@ print()
       ;;
     "")
       { printf 'BACKEND\tAVAILABLE\tVERSION\tREADY\tHINT\n'; print_rows "-"; } \
-        | column -t -s $'\t'
+        | column_or_cat
       ;;
     *)
       echo "Unknown flag: $1" >&2
