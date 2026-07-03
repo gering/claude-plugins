@@ -55,10 +55,22 @@ Both external CLIs enforce the same JSON schema on their output, so the
 ensemble merge receives uniform findings:
 
 ```json
-{ "file", "line", "severity": "critical|warning|minor",
-  "summary", "failure_scenario", "confidence": "high|medium|low",
-  "recommendation" }
+{
+  "findings": [
+    {
+      "file": "scripts/foo.sh",
+      "line": 42,
+      "severity": "warning",
+      "summary": "One-sentence statement of the defect",
+      "failure_scenario": "Concrete, falsifiable inputs → wrong behavior",
+      "confidence": "high",
+      "recommendation": "Suggested fix"
+    }
+  ]
+}
 ```
+Severity is one of `critical | warning | minor`; confidence one of
+`high | medium | low`.
 
 `failure_scenario` is required and must be falsifiable — it is what the
 verifier tests in the confidence phase.

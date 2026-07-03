@@ -163,8 +163,14 @@ sys.stdout.write("(version 1)(allow default)(deny file-read* %s)" % " ".join(rul
 ')"
     SANDBOX_CMD=(sandbox-exec -p "$profile")
   elif command -v bwrap >/dev/null; then
+    # --tmpfs masks a directory; a regular file (e.g. ~/.netrc) needs a bind of
+    # an empty source instead — --tmpfs over a file dies with ENOTDIR.
     local args=(--dev-bind / /) p
-    while IFS= read -r p; do [[ -e "$p" ]] && args+=(--tmpfs "$p"); done < <(_sandbox_deny_paths "$backend")
+    while IFS= read -r p; do
+      if [[ -d "$p" ]]; then args+=(--tmpfs "$p")
+      elif [[ -f "$p" ]]; then args+=(--ro-bind /dev/null "$p")
+      fi
+    done < <(_sandbox_deny_paths "$backend")
     SANDBOX_CMD=(bwrap "${args[@]}")
   fi
 }
