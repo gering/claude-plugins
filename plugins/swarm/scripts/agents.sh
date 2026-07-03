@@ -251,22 +251,24 @@ subcmd_run() {
   esac
   [[ -f "$schema" ]] || { echo "Schema not found: $schema" >&2; exit 2; }
 
-  # The prompt travels as one argv word; stay well below ARG_MAX (~1 MiB incl.
-  # environment on macOS). Measure BYTES (ARG_MAX is a byte limit — a multibyte
-  # prompt would slip a `${#prompt}` char-count yet still overflow exec), and
-  # for a file check its size BEFORE reading it (a 500 MiB file would otherwise
-  # be slurped into a shell variable first).
-  local max_bytes=262144 nbytes
+  # The prompt travels as ONE argv word, so the binding limit is the per-argument
+  # cap, not total ARG_MAX: Linux MAX_ARG_STRLEN is 128 KiB (macOS has no
+  # per-arg cap but a ~1 MiB total). Cap at 120 KiB to stay under the Linux
+  # per-arg limit with headroom for the schema arg + environment. Measure BYTES
+  # (a multibyte prompt would slip a `${#prompt}` char-count yet overflow exec),
+  # and for a file check its size BEFORE reading it (a 500 MiB file would
+  # otherwise be slurped into a shell variable first).
+  local max_bytes=122880 nbytes
   local prompt
   if [[ -n "$prompt_file" ]]; then
     [[ -f "$prompt_file" ]] || { echo "Prompt file not found: $prompt_file" >&2; exit 2; }
     nbytes=$(wc -c < "$prompt_file")
-    (( nbytes > max_bytes )) && { echo "Prompt file too large ($(( nbytes / 1024 )) KiB > 256 KiB) — inline less of the diff, or have the agent read it itself" >&2; exit 2; }
+    (( nbytes > max_bytes )) && { echo "Prompt file too large ($(( nbytes / 1024 )) KiB > 120 KiB) — inline less of the diff, or have the agent read it itself" >&2; exit 2; }
     prompt="$(cat "$prompt_file")"
   else
     prompt="$(cat)"
     nbytes=$(printf '%s' "$prompt" | wc -c)
-    (( nbytes > max_bytes )) && { echo "Prompt too large ($(( nbytes / 1024 )) KiB > 256 KiB) — inline less of the diff, or have the agent read it itself" >&2; exit 2; }
+    (( nbytes > max_bytes )) && { echo "Prompt too large ($(( nbytes / 1024 )) KiB > 120 KiB) — inline less of the diff, or have the agent read it itself" >&2; exit 2; }
   fi
   [[ -z "$prompt" ]] && { echo "Empty prompt (use --prompt-file or stdin)" >&2; exit 2; }
 
