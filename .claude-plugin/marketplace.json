@@ -25,6 +25,12 @@
       "source": "./plugins/pr-flow",
       "description": "PR review feedback loop for Claude Code. Create PRs with readiness checks, commit + push + trigger @claude review, inspect status, and work through review issues interactively.",
       "version": "1.2.2"
+    },
+    {
+      "name": "swarm",
+      "source": "./plugins/swarm",
+      "description": "Local mixture-of-agents code review for Claude Code. Will fan out to Claude subagents plus codex and grok CLIs, merge and verify findings into one ranked report. Phase 1 ships the backend adapter and /swarm:agents status.",
+      "version": "0.1.0"
     }
   ]
 }

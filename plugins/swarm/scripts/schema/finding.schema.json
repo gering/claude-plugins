@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Swarm review findings",
+  "description": "Shared findings shape every swarm backend normalizes into. Enforced on codex via `codex exec --output-schema` and on grok via `--json-schema`, so the ensemble merge receives uniform JSON. All item fields are required (strict structured-output modes reject optional properties); use line=0 and confidence as honest defaults rather than omitting.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["findings"],
+  "properties": {
+    "findings": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "file",
+          "line",
+          "severity",
+          "summary",
+          "failure_scenario",
+          "confidence",
+          "recommendation"
+        ],
+        "properties": {
+          "file": {
+            "type": "string",
+            "maxLength": 500,
+            "description": "Repo-relative path of the file the finding is in"
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "1-indexed line the finding anchors to; 0 for file-level findings"
+          },
+          "severity": {
+            "enum": ["critical", "warning", "minor"],
+            "description": "critical = correctness/security defect; warning = likely problem or risky pattern; minor = cleanup/style"
+          },
+          "summary": {
+            "type": "string",
+            "maxLength": 400,
+            "description": "One-sentence statement of the defect"
+          },
+          "failure_scenario": {
+            "type": "string",
+            "maxLength": 1200,
+            "description": "Concrete inputs/state leading to wrong output or crash. Must be falsifiable — this is what the verifier tests. For style findings: the concrete maintenance cost."
+          },
+          "confidence": {
+            "enum": ["high", "medium", "low"],
+            "description": "Reviewer's own confidence that the finding is real"
+          },
+          "recommendation": {
+            "type": "string",
+            "maxLength": 800,
+            "description": "Suggested fix in one or two sentences. maxLength caps here (and on summary/failure_scenario) also bound how much data an injected payload could route through a finding field."
+          }
+        }
+      }
+    }
+  }
+}
