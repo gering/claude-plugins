@@ -35,6 +35,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_SCHEMA="$SCRIPT_DIR/schema/finding.schema.json"
 GROK_DEFAULT_MODEL="grok-build"
+# Default HOME so `$HOME` expansions below (auth file, sandbox deny paths) don't
+# abort the whole script under `set -u` when HOME is unset.
+HOME="${HOME:-$(cd ~ 2>/dev/null && pwd || echo /nonexistent)}"
 GROK_AUTH_FILE="${GROK_AUTH_FILE:-$HOME/.grok/auth.json}"
 
 # Temp file for codex's --output-last-message; must be a global (not a
