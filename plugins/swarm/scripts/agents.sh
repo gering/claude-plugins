@@ -99,6 +99,33 @@ require_valid_timeout() {
     || { echo "Invalid SWARM_TIMEOUT='$ADAPTER_TIMEOUT' — must be a non-negative integer (seconds; 0 disables)" >&2; exit 2; }
 }
 
+scrub_secrets() {
+  # Last-line-of-defense secret filter on the findings JSON before it leaves the
+  # adapter. The diff under review is untrusted and a prompt-injected backend
+  # could try to route a credential into a findings string field; redact
+  # secret-shaped content here so it can never reach the merged report, even if
+  # a backend sandbox is bypassed. Redacts (not blocks) so real findings survive.
+  python3 -c '
+import re, sys
+PATTERNS = [
+    (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED-AWS-KEY]"),
+    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"), "[REDACTED-PRIVATE-KEY]"),
+    (re.compile(r"(?i)aws_secret_access_key\s*[=:]\s*[A-Za-z0-9/+]{20,}"), "aws_secret_access_key=[REDACTED]"),
+    (re.compile(r"(?i)\b(secret|token|password|passwd|api[_-]?key)\b\s*[=:]\s*[A-Za-z0-9/+._-]{16,}"), r"\1=[REDACTED]"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "[REDACTED-GH-TOKEN]"),
+    (re.compile(r"\bsk-[A-Za-z0-9]{20,}"), "[REDACTED-API-KEY]"),
+]
+data = sys.stdin.read()
+hit = False
+for pat, repl in PATTERNS:
+    data, n = pat.subn(repl, data)
+    if n: hit = True
+if hit:
+    sys.stderr.write("swarm: redacted secret-shaped content from findings before output\n")
+sys.stdout.write(data)
+'
+}
+
 validate_backend() {
   case "$1" in
     claude|codex|grok) ;;
@@ -322,7 +349,7 @@ except Exception:
 if not (isinstance(d, dict) and isinstance(d.get("findings"), list)):
     sys.stderr.write("codex output is not a {findings:[...]} object\n"); sys.exit(1)
 ' <"$TMP_OUT" || exit 1
-  cat "$TMP_OUT"
+  scrub_secrets <"$TMP_OUT"
   echo
 }
 
@@ -343,13 +370,15 @@ run_grok() {
 
   # --single=<prompt> (not "-p <prompt>"): as a separate argv word a prompt
   # starting with "-" would be parsed as a flag.
-  # --disable-web-search: a defensive partial sandbox — the diff is untrusted
-  # and could try to steer grok into fetching a URL to exfiltrate data. This
-  # closes the web channel; full read-deny sandboxing (parity with codex
-  # `-s read-only`, plus denying shell/write) is P2 work.
+  # Sandbox: the diff is untrusted and could try to steer grok into reading
+  # local secrets or fetching a URL to exfiltrate. grok reviews the diff INLINE
+  # in the prompt, so it needs NO tools — `--tools ""` (empty allowlist)
+  # removes file/shell access (verified: grok then can't read files), and
+  # `--disable-web-search` closes the network channel. scrub_secrets on the
+  # output is the belt-and-braces backstop.
   local raw rc=0
   raw="$(with_timeout grok -m "$grok_model" --effort "$effort" \
-      --disable-web-search \
+      --tools "" --disable-web-search \
       --json-schema "$(cat "$schema")" \
       --single="$prompt" </dev/null)" || rc=$?
   if (( rc != 0 )); then
@@ -381,7 +410,7 @@ if not (isinstance(out, dict) and isinstance(out.get("findings"), list)):
     sys.exit(1)
 json.dump(out, sys.stdout)
 print()
-'
+' | scrub_secrets
 }
 
 main() {

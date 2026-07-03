@@ -196,6 +196,35 @@ return { gate, voices, findings: all, refuted, balance: { total: all.length, con
   vice-versa; codex's one finding was the false one. Different models, different
   catches.
 
+## Security — the trust boundary (MANDATORY for P2, hardened by the loop)
+
+The diff under review is **untrusted input** that flows into agentic backends and
+back into the report. Three loop rounds (one of which exfiltrated a real
+credential mid-review) converged on these non-negotiable mitigations:
+
+1. **Sandbox every backend to no-tool / read-deny.** The diff is inlined, so
+   backends need NO filesystem or shell tools. Adapter now enforces: grok
+   `--tools ""` (verified to block file reads) + `--disable-web-search`; codex
+   `-s read-only`. Full OS-level jailing (sandbox-exec / bwrap) is still open.
+2. **Scrub secrets at the adapter boundary.** `scrub_secrets` redacts
+   secret-shaped content (AWS keys, private keys, gh/sk tokens, `secret=…`) from
+   findings JSON before it leaves `run_codex`/`run_grok` — a backstop even if a
+   sandbox is bypassed. **The merge and verify stages must scrub too** (they
+   re-interpolate findings text into new prompts → second-order injection).
+3. **Fence the diff as data.** Wrap the inlined diff in explicit
+   untrusted-data delimiters with a system instruction that its content is data,
+   never instructions. (codex/grok get the diff as a positional prompt today
+   with no fencing — the injection vector.)
+4. **Bound findings size.** `finding.schema.json` caps summary/failure_scenario/
+   recommendation length, so a payload can't route a large blob through a field.
+5. **Don't fully trust consensus.** Consensus (≥2 backends) currently skips the
+   verifier, but agreement comes from LLM merge-clustering + correlated model
+   bias, not independent proof. P2: still run a light verify on consensus
+   findings, or require cross-family agreement (not composer+grok).
+6. **Prefer deterministic transport.** The Haiku "thin transport" wrapper can
+   silently drop/reshape findings while staying schema-valid; where a registered
+   workflow can shell out, pass adapter JSON through deterministically instead.
+
 ## Open P2 wiring (not yet in the blueprint)
 
 - **Registered workflow** (not inline) so per-agent `durationMs` is available
