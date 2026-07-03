@@ -99,6 +99,69 @@ require_valid_timeout() {
     || { echo "Invalid SWARM_TIMEOUT='$ADAPTER_TIMEOUT' — must be a non-negative integer (seconds; 0 disables)" >&2; exit 2; }
 }
 
+# OS-level read-deny jail for external CLI calls (the root-cause fix for
+# "-s read-only still permits file reads"). The diff is untrusted, so an
+# injected payload could steer a backend to read local secrets. This denies
+# reads of common secret stores while leaving the CLI's own config + the repo
+# readable (verified: ~/.aws blocked, ~/.codex readable). macOS: sandbox-exec;
+# Linux: bwrap; else passthrough (scrub_secrets + backend flags remain).
+# Extra deny paths via SWARM_DENY_PATHS (colon-separated).
+_sandbox_deny_paths() {
+  printf '%s\n' \
+    "$HOME/.aws" "$HOME/.ssh" "$HOME/.gnupg" "$HOME/.netrc" \
+    "$HOME/.config/gcloud" "$HOME/.kube" "$HOME/.docker" \
+    "$HOME/.git-credentials" "$HOME/.npmrc" "$HOME/.pypirc" \
+    "$HOME/.config/gh" "$HOME/.cargo/credentials" "/etc/master.passwd"
+  local extra="${SWARM_DENY_PATHS:-}"
+  # if-form, not `[[ … ]] && …`: the latter returns 1 when extra is empty, and
+  # under set -e that aborts the `profile="$(…)"` assignment that calls this.
+  if [[ -n "$extra" ]]; then printf '%s\n' "${extra//:/$'\n'}"; fi
+  return 0
+}
+
+SANDBOX_CMD=()
+_sandbox_warned=""
+_sandbox_ready=""
+_init_sandbox() {
+  # Lazy (called from `run`, after require_python3): needs python3 for realpath.
+  [[ -n "$_sandbox_ready" ]] && return
+  _sandbox_ready=1
+  if command -v sandbox-exec >/dev/null; then
+    # Build the deny profile via python: realpath each path (defeats symlinks
+    # like /tmp→/private/tmp, /etc→/private/etc — sandbox-exec matches the
+    # resolved path) and deny it as BOTH a subpath (dirs + contents) and a
+    # literal (single files like ~/.netrc).
+    local profile
+    profile="$(_sandbox_deny_paths | python3 -c '
+import os, sys
+rules = []
+for line in sys.stdin:
+    p = line.strip()
+    if not p:
+        continue
+    rp = os.path.realpath(p)
+    esc = rp.replace("\\", "\\\\").replace("\"", "\\\"")
+    rules.append("(subpath \"%s\")" % esc)
+    rules.append("(literal \"%s\")" % esc)
+sys.stdout.write("(version 1)(allow default)(deny file-read* %s)" % " ".join(rules))
+')"
+    SANDBOX_CMD=(sandbox-exec -p "$profile")
+  elif command -v bwrap >/dev/null; then
+    local args=(--dev-bind / /) p
+    while IFS= read -r p; do [[ -e "$p" ]] && args+=(--tmpfs "$p"); done < <(_sandbox_deny_paths)
+    SANDBOX_CMD=(bwrap "${args[@]}")
+  fi
+}
+
+sandboxed() {
+  # Prefix an external call with the OS jail; warn once if none is available.
+  if ((${#SANDBOX_CMD[@]} == 0)) && [[ -z "$_sandbox_warned" ]]; then
+    echo "warning: no sandbox-exec/bwrap — external calls run without an OS read-deny jail (secret scrub still applies)" >&2
+    _sandbox_warned=1
+  fi
+  with_timeout ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"} "$@"
+}
+
 scrub_secrets() {
   # Last-line-of-defense secret filter on the findings JSON before it leaves the
   # adapter. The diff under review is untrusted and a prompt-injected backend
@@ -293,6 +356,9 @@ subcmd_run() {
     (( nbytes > max_bytes )) && { echo "Prompt file too large ($(( nbytes / 1024 )) KiB > 120 KiB) — inline less of the diff, or have the agent read it itself" >&2; exit 2; }
     prompt="$(cat "$prompt_file")"
   else
+    # Guard against blocking forever on an interactive/absent stdin: with no
+    # --prompt-file and a TTY on fd 0, `cat` would hang waiting for input.
+    [[ -t 0 ]] && { echo "No prompt: pass --prompt-file <f> or pipe the prompt on stdin" >&2; exit 2; }
     prompt="$(cat)"
     nbytes=$(printf '%s' "$prompt" | wc -c)
     (( nbytes > max_bytes )) && { echo "Prompt too large ($(( nbytes / 1024 )) KiB > 120 KiB) — inline less of the diff, or have the agent read it itself" >&2; exit 2; }
@@ -302,6 +368,7 @@ subcmd_run() {
   require_usable "$backend"
   require_python3
   require_valid_timeout
+  _init_sandbox
 
   case "$backend" in
     codex) run_codex "$prompt" "$effort" "$model" "$schema" ;;
@@ -326,13 +393,16 @@ run_codex() {
   # for "additional input from stdin" and hangs.
   # `--` ends flag parsing: a prompt starting with "-" (e.g. a markdown
   # bullet) would otherwise be rejected as an unknown flag.
+  # 2>/dev/null discards codex's reasoning transcript (goes to stderr): under
+  # injection it could echo a secret it read, and it never passes scrub_secrets.
+  # The exit code (incl. 124 timeout) still drives error handling.
   local rc=0
-  with_timeout codex exec -s read-only --skip-git-repo-check \
+  sandboxed codex exec -s read-only --skip-git-repo-check \
       -c model_reasoning_effort="$effort" \
       ${model_args[@]+"${model_args[@]}"} \
       --output-schema "$schema" \
       --output-last-message "$TMP_OUT" \
-      -- "$prompt" </dev/null >/dev/null || rc=$?
+      -- "$prompt" </dev/null >/dev/null 2>/dev/null || rc=$?
   if (( rc != 0 )); then
     (( rc == 124 )) && echo "codex exec timed out after ${ADAPTER_TIMEOUT}s" >&2 || echo "codex exec failed" >&2
     exit 1
@@ -377,10 +447,10 @@ run_grok() {
   # `--disable-web-search` closes the network channel. scrub_secrets on the
   # output is the belt-and-braces backstop.
   local raw rc=0
-  raw="$(with_timeout grok -m "$grok_model" --effort "$effort" \
+  raw="$(sandboxed grok -m "$grok_model" --effort "$effort" \
       --tools "" --disable-web-search \
       --json-schema "$(cat "$schema")" \
-      --single="$prompt" </dev/null)" || rc=$?
+      --single="$prompt" </dev/null 2>/dev/null)" || rc=$?
   if (( rc != 0 )); then
     (( rc == 124 )) && echo "grok timed out after ${ADAPTER_TIMEOUT}s" >&2 || echo "grok failed" >&2
     exit 1

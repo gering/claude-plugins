@@ -27,7 +27,10 @@ Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok) → Merge (file,mechan
    Consensus = ≥2 distinct backends in one cluster ⇒ CONFIRMED.
 4. **Verify** — every solo cluster (one backend only) goes through an
    adversarial 3-state verifier (CONFIRMED/PLAUSIBLE/REFUTED; PLAUSIBLE is the
-   default, only REFUTED is dropped). Consensus clusters skip verify.
+   default, only REFUTED is dropped). Consensus clusters get a *lighter* verify
+   rather than a blind skip — agreement across backends that share the same
+   inlined diff + schema + near-identical prompts can be correlated bias, not
+   independent proof (see § Security). Prefer cross-family agreement.
 5. **Synthesis** — rank (severity, then consensus>solo) and emit the balance
    data (severity split, consensus/solo, per-lens raw vs. surviving).
 
@@ -168,6 +171,8 @@ const verifiedSolos = await parallel(soloClusters.map((c) => () =>
 ))
 
 // Synthesis + balance data
+// P2 (see § Security): consensus is a strong prior, not proof — run a light verify
+// here too (or require cross-family agreement) instead of stamping CONFIRMED blind.
 const finalConsensus = consensusClusters.map((c) => ({ ...c, verifier: 'CONFIRMED', evidence: `agreed by ${c.backends.join('+')}` }))
 const finalSolos = verifiedSolos.filter(Boolean).filter((c) => c.verifier !== 'REFUTED')
 const refuted = verifiedSolos.filter(Boolean).filter((c) => c.verifier === 'REFUTED')
@@ -221,9 +226,13 @@ credential mid-review) converged on these non-negotiable mitigations:
    verifier, but agreement comes from LLM merge-clustering + correlated model
    bias, not independent proof. P2: still run a light verify on consensus
    findings, or require cross-family agreement (not composer+grok).
-6. **Prefer deterministic transport.** The Haiku "thin transport" wrapper can
-   silently drop/reshape findings while staying schema-valid; where a registered
-   workflow can shell out, pass adapter JSON through deterministically instead.
+6. **Prefer deterministic transport, and distinguish error from empty.** The
+   Haiku "thin transport" wrapper can silently drop/reshape findings while
+   staying schema-valid; where a registered workflow can shell out, pass adapter
+   JSON through deterministically instead. A backend that errored/was dropped
+   must NOT collapse to the same `{findings:[]}` as a clean empty review —
+   carry an explicit `error` marker so a silently-failing backend is visible,
+   not mistaken for "found nothing".
 
 ## Open P2 wiring (not yet in the blueprint)
 
