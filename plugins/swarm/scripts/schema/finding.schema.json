@@ -27,6 +27,7 @@
           },
           "line": {
             "type": "integer",
+            "minimum": 0,
             "description": "1-indexed line the finding anchors to; 0 for file-level findings"
           },
           "severity": {

@@ -75,11 +75,28 @@ column_or_cat() {
 # passes through unchanged if neither exists (best-effort, never a hard dep).
 # Override seconds via SWARM_TIMEOUT; 0 disables.
 ADAPTER_TIMEOUT="${SWARM_TIMEOUT:-600}"
+_timeout_warned=""
 with_timeout() {
   if [[ "$ADAPTER_TIMEOUT" == "0" ]]; then "$@"; return; fi
   if command -v timeout >/dev/null; then timeout "$ADAPTER_TIMEOUT" "$@"
   elif command -v gtimeout >/dev/null; then gtimeout "$ADAPTER_TIMEOUT" "$@"
-  else "$@"; fi
+  else
+    # No coreutils timeout: run bare, but say so once — otherwise the documented
+    # cap silently never applies (e.g. stock macOS) and a hung backend blocks.
+    if [[ -z "$_timeout_warned" ]]; then
+      echo "warning: no timeout/gtimeout on PATH — external calls run WITHOUT the ${ADAPTER_TIMEOUT}s cap (install coreutils, or set SWARM_TIMEOUT=0 to silence)" >&2
+      _timeout_warned=1
+    fi
+    "$@"
+  fi
+}
+
+require_valid_timeout() {
+  # A malformed SWARM_TIMEOUT would reach `timeout` and exit 125 — which the
+  # rc==124 checks don't recognize, so every external run would misreport as a
+  # backend failure. Reject up front. Only the literal integer disables (0).
+  [[ "$ADAPTER_TIMEOUT" =~ ^[0-9]+$ ]] \
+    || { echo "Invalid SWARM_TIMEOUT='$ADAPTER_TIMEOUT' — must be a non-negative integer (seconds; 0 disables)" >&2; exit 2; }
 }
 
 validate_backend() {
@@ -255,6 +272,7 @@ subcmd_run() {
 
   require_usable "$backend"
   require_python3
+  require_valid_timeout
 
   case "$backend" in
     codex) run_codex "$prompt" "$effort" "$model" "$schema" ;;
@@ -291,13 +309,17 @@ run_codex() {
     exit 1
   fi
   [[ -s "$TMP_OUT" ]] || { echo "codex produced no output" >&2; exit 1; }
+  # Validate SHAPE, not just JSON syntax: a valid-but-wrong object (no findings
+  # array) would otherwise pass through and crash the merge step downstream.
   python3 -c '
 import json, sys
 try:
-    json.load(sys.stdin)
+    d = json.load(sys.stdin)
 except Exception:
-    sys.exit(1)
-' <"$TMP_OUT" || { echo "codex returned invalid JSON" >&2; exit 1; }
+    sys.stderr.write("codex returned invalid JSON\n"); sys.exit(1)
+if not (isinstance(d, dict) and isinstance(d.get("findings"), list)):
+    sys.stderr.write("codex output is not a {findings:[...]} object\n"); sys.exit(1)
+' <"$TMP_OUT" || exit 1
   cat "$TMP_OUT"
   echo
 }
@@ -319,8 +341,13 @@ run_grok() {
 
   # --single=<prompt> (not "-p <prompt>"): as a separate argv word a prompt
   # starting with "-" would be parsed as a flag.
+  # --disable-web-search: a defensive partial sandbox — the diff is untrusted
+  # and could try to steer grok into fetching a URL to exfiltrate data. This
+  # closes the web channel; full read-deny sandboxing (parity with codex
+  # `-s read-only`, plus denying shell/write) is P2 work.
   local raw rc=0
   raw="$(with_timeout grok -m "$grok_model" --effort "$effort" \
+      --disable-web-search \
       --json-schema "$(cat "$schema")" \
       --single="$prompt" </dev/null)" || rc=$?
   if (( rc != 0 )); then
@@ -346,6 +373,9 @@ if d.get("type") == "error":
 out = d.get("structuredOutput")
 if out is None:
     sys.stderr.write("grok returned no structuredOutput\n")
+    sys.exit(1)
+if not (isinstance(out, dict) and isinstance(out.get("findings"), list)):
+    sys.stderr.write("grok structuredOutput is not a {findings:[...]} object\n")
     sys.exit(1)
 json.dump(out, sys.stdout)
 print()

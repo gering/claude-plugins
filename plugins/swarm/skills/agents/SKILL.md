@@ -34,3 +34,8 @@ user_invocable: true
 - Read-only, no side effects — safe to run anytime.
 - `claude` is always ready when Claude Code runs (reviews happen in-session
   via the Agent tool; the external CLIs are called through the adapter).
+- **`grok` Ready is a heuristic** — it means a non-empty `~/.grok/auth.json`
+  exists, NOT that the token is valid/unexpired (codex, by contrast, runs a
+  real `codex login status`). So grok can show Ready yet fail at review time on
+  a stale token; treat it as "credentials present" and let the run surface a
+  real auth error.
