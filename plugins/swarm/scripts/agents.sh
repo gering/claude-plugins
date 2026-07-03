@@ -79,7 +79,12 @@ available_version() {
     return 0
   fi
   command -v "$backend" >/dev/null || return 1
-  "$backend" --version 2>/dev/null | head -1
+  # Best-effort version string. `|| true` + explicit `return 0`: once
+  # `command -v` confirmed the CLI, a non-zero `--version` exit or a SIGPIPE
+  # from head() (under pipefail) must NOT flip an installed backend to
+  # "unavailable".
+  "$backend" --version 2>/dev/null | head -1 || true
+  return 0
 }
 
 ready_check() {
@@ -232,6 +237,11 @@ run_codex() {
 
   TMP_OUT="$(mktemp)"
 
+  # Array (not unquoted ${model:+…}) so a model name with whitespace is one
+  # argv word, matching the effort_args idiom in run_grok.
+  local model_args=()
+  [[ -n "$model" ]] && model_args=(-m "$model")
+
   # The schema-validated JSON lands in $TMP_OUT; codex's stdout copy of the
   # final message is discarded (its transcript goes to stderr = debug info).
   # stdin must be closed: with an inherited open non-TTY stdin, codex waits
@@ -240,7 +250,7 @@ run_codex() {
   # bullet) would otherwise be rejected as an unknown flag.
   if ! codex exec -s read-only --skip-git-repo-check \
       -c model_reasoning_effort="$effort" \
-      ${model:+-m "$model"} \
+      ${model_args[@]+"${model_args[@]}"} \
       --output-schema "$schema" \
       --output-last-message "$TMP_OUT" \
       -- "$prompt" </dev/null >/dev/null; then
@@ -284,10 +294,16 @@ run_grok() {
   fi
   printf '%s' "$raw" | python3 -c '
 import json, sys
+data = sys.stdin.read()
 try:
-    d = json.load(sys.stdin)
+    d = json.loads(data)
 except Exception:
-    sys.stderr.write("grok returned invalid JSON\n")
+    # Include a snippet so a non-JSON envelope (banner/warning on stdout) is
+    # triageable instead of an opaque "invalid JSON".
+    sys.stderr.write("grok returned invalid JSON: %s\n" % (data[:120].replace("\n", " ") or "<empty>"))
+    sys.exit(1)
+if not isinstance(d, dict):
+    sys.stderr.write("grok returned non-object JSON (%s)\n" % type(d).__name__)
     sys.exit(1)
 if d.get("type") == "error":
     sys.stderr.write("grok error: %s\n" % d.get("message", "unknown"))
