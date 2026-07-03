@@ -4,8 +4,8 @@
 > ensemble dry-runs on this very branch (2026-07-02/03, runs `wf_b692c02d-990`
 > and `wf_354898e8-770`). This is the **starting point for P2**, not shipped
 > code — P2 turns it into a registered workflow script under `plugins/swarm/`.
-> Design rationale lives in the task file (`tasks/add-swarm-plugin.md`); this
-> file is the concrete shape.
+> Design rationale lives in the working task file (kept locally, not committed
+> to the repo); this file is the concrete shape.
 
 ## Pipeline shape (4 phases)
 

@@ -70,6 +70,18 @@ column_or_cat() {
   fi
 }
 
+# Wall-clock cap for external CLI calls so a hung backend fails fast instead of
+# blocking a fan-out forever. Uses coreutils timeout/gtimeout when available;
+# passes through unchanged if neither exists (best-effort, never a hard dep).
+# Override seconds via SWARM_TIMEOUT; 0 disables.
+ADAPTER_TIMEOUT="${SWARM_TIMEOUT:-600}"
+with_timeout() {
+  if [[ "$ADAPTER_TIMEOUT" == "0" ]]; then "$@"; return; fi
+  if command -v timeout >/dev/null; then timeout "$ADAPTER_TIMEOUT" "$@"
+  elif command -v gtimeout >/dev/null; then gtimeout "$ADAPTER_TIMEOUT" "$@"
+  else "$@"; fi
+}
+
 validate_backend() {
   case "$1" in
     claude|codex|grok) ;;
@@ -222,21 +234,24 @@ subcmd_run() {
   esac
   [[ -f "$schema" ]] || { echo "Schema not found: $schema" >&2; exit 2; }
 
+  # The prompt travels as one argv word; stay well below ARG_MAX (~1 MiB incl.
+  # environment on macOS). Measure BYTES (ARG_MAX is a byte limit — a multibyte
+  # prompt would slip a `${#prompt}` char-count yet still overflow exec), and
+  # for a file check its size BEFORE reading it (a 500 MiB file would otherwise
+  # be slurped into a shell variable first).
+  local max_bytes=262144 nbytes
   local prompt
   if [[ -n "$prompt_file" ]]; then
     [[ -f "$prompt_file" ]] || { echo "Prompt file not found: $prompt_file" >&2; exit 2; }
+    nbytes=$(wc -c < "$prompt_file")
+    (( nbytes > max_bytes )) && { echo "Prompt file too large ($(( nbytes / 1024 )) KiB > 256 KiB) — inline less of the diff, or have the agent read it itself" >&2; exit 2; }
     prompt="$(cat "$prompt_file")"
   else
     prompt="$(cat)"
+    nbytes=$(printf '%s' "$prompt" | wc -c)
+    (( nbytes > max_bytes )) && { echo "Prompt too large ($(( nbytes / 1024 )) KiB > 256 KiB) — inline less of the diff, or have the agent read it itself" >&2; exit 2; }
   fi
   [[ -z "$prompt" ]] && { echo "Empty prompt (use --prompt-file or stdin)" >&2; exit 2; }
-  # The prompt travels as one argv word; stay well below ARG_MAX (~1 MiB
-  # including the environment on macOS) instead of failing as a generic
-  # backend error at exec time.
-  if (( ${#prompt} > 262144 )); then
-    echo "Prompt too large ($(( ${#prompt} / 1024 )) KiB > 256 KiB) — inline less of the diff, or instruct the agent to read it itself" >&2
-    exit 2
-  fi
 
   require_usable "$backend"
   require_python3
@@ -264,13 +279,15 @@ run_codex() {
   # for "additional input from stdin" and hangs.
   # `--` ends flag parsing: a prompt starting with "-" (e.g. a markdown
   # bullet) would otherwise be rejected as an unknown flag.
-  if ! codex exec -s read-only --skip-git-repo-check \
+  local rc=0
+  with_timeout codex exec -s read-only --skip-git-repo-check \
       -c model_reasoning_effort="$effort" \
       ${model_args[@]+"${model_args[@]}"} \
       --output-schema "$schema" \
       --output-last-message "$TMP_OUT" \
-      -- "$prompt" </dev/null >/dev/null; then
-    echo "codex exec failed" >&2
+      -- "$prompt" </dev/null >/dev/null || rc=$?
+  if (( rc != 0 )); then
+    (( rc == 124 )) && echo "codex exec timed out after ${ADAPTER_TIMEOUT}s" >&2 || echo "codex exec failed" >&2
     exit 1
   fi
   [[ -s "$TMP_OUT" ]] || { echo "codex produced no output" >&2; exit 1; }
@@ -289,23 +306,25 @@ run_grok() {
   local prompt="$1" effort="$2" model="$3" schema="$4"
   local grok_model="${model:-$GROK_DEFAULT_MODEL}"
 
-  # Only grok-build understands --effort; other models reject the parameter
-  # outright (and don't enforce --json-schema either — see the knowledge
-  # entry), so omit the flag instead of failing the run.
-  local effort_args=()
-  if [[ "$grok_model" == "$GROK_DEFAULT_MODEL" ]]; then
-    effort_args=(--effort "$effort")
-  else
-    echo "note: --effort omitted — only $GROK_DEFAULT_MODEL supports it" >&2
+  # Preflight-reject non-default models: only grok-build enforces --json-schema
+  # (and accepts --effort). Any other model would silently return
+  # structuredOutput:null and the run would fail late with no schema output —
+  # so reject up front with a usage error rather than burn a review on it.
+  # (Schema-less models like grok-composer-2.5-fast belong on the caller's own
+  # defensive-parse path, not this schema-enforcing adapter.)
+  if [[ "$grok_model" != "$GROK_DEFAULT_MODEL" ]]; then
+    echo "grok model '$grok_model' does not enforce --json-schema — the adapter requires schema output; use $GROK_DEFAULT_MODEL (default)" >&2
+    exit 2
   fi
 
   # --single=<prompt> (not "-p <prompt>"): as a separate argv word a prompt
   # starting with "-" would be parsed as a flag.
-  local raw
-  if ! raw="$(grok -m "$grok_model" ${effort_args[@]+"${effort_args[@]}"} \
+  local raw rc=0
+  raw="$(with_timeout grok -m "$grok_model" --effort "$effort" \
       --json-schema "$(cat "$schema")" \
-      --single="$prompt" </dev/null)"; then
-    echo "grok failed" >&2
+      --single="$prompt" </dev/null)" || rc=$?
+  if (( rc != 0 )); then
+    (( rc == 124 )) && echo "grok timed out after ${ADAPTER_TIMEOUT}s" >&2 || echo "grok failed" >&2
     exit 1
   fi
   printf '%s' "$raw" | python3 -c '

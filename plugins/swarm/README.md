@@ -2,9 +2,10 @@
 
 Local mixture-of-agents code review for Claude Code. Fans out one review
 across multiple independent agents — Claude subagents plus the `codex` and
-`grok` CLIs — merges and deduplicates their findings, uses cross-agent
-agreement as the primary confidence signal, and presents a single ranked
-report.
+`grok` CLIs — merges and deduplicates their findings, and presents a single
+ranked report. Cross-agent agreement is a strong confidence signal when it
+occurs; single-agent findings (the common case) pass an adversarial 3-state
+verifier so real catches survive and noise is dropped.
 
 Complementary to [pr-flow](../pr-flow/): pr-flow drives the GitHub-PR
 `@claude`-bot loop; swarm reviews **locally**, before anything is pushed.
