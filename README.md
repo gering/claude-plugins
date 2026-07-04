@@ -36,6 +36,14 @@ Local mixture-of-agents code review. Fans out one review across Claude subagents
 
 [Documentation →](plugins/swarm/)
 
+### X Twitter Scraper
+
+Xquik REST API, MCP, SDK, webhook, export, monitor, and confirmation-gated workflow planning for X/Twitter data.
+
+**Skills:** `x-twitter-scraper`
+
+[Documentation →](plugins/x-twitter-scraper/)
+
 ## Installation
 
 ### 1. Add the marketplace
@@ -51,6 +59,7 @@ Local mixture-of-agents code review. Fans out one review across Claude subagents
 /plugin install work-system
 /plugin install pr-flow
 /plugin install swarm
+/plugin install x-twitter-scraper
 ```
 
 ### 3. Reload plugins
