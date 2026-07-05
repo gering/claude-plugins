@@ -372,12 +372,12 @@ subcmd_run() {
     exit 2
   fi
 
-  local prompt_file="" effort="xhigh" model="" schema="$DEFAULT_SCHEMA"
+  local prompt_file="" effort="xhigh" effort_set="" model="" schema="$DEFAULT_SCHEMA"
   while [[ $# -gt 0 ]]; do
     [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
     case "$1" in
       --prompt-file) prompt_file="$2"; shift 2 ;;
-      --effort)      effort="$2";      shift 2 ;;
+      --effort)      effort="$2"; effort_set=1; shift 2 ;;
       --model)       model="$2";       shift 2 ;;
       --schema)      schema="$2";      shift 2 ;;
       *) echo "Unknown flag: $1" >&2; exit 2 ;;
@@ -388,6 +388,11 @@ subcmd_run() {
     *) echo "Invalid effort: $effort (low|medium|high|xhigh|max)" >&2; exit 2 ;;
   esac
   [[ -f "$schema" ]] || { echo "Schema not found: $schema" >&2; exit 2; }
+  # composer has no reasoning-effort control; say so if the caller set --effort
+  # explicitly, so review depth isn't misjudged against grok-build.
+  if [[ "$backend" == "grok" && "$model" == "$GROK_COMPOSER_MODEL" && -n "$effort_set" ]]; then
+    echo "note: --effort is ignored for $GROK_COMPOSER_MODEL (it has no reasoning-effort control)" >&2
+  fi
 
   # The prompt travels as ONE argv word, so the binding limit is the per-argument
   # cap, not total ARG_MAX: Linux MAX_ARG_STRLEN is 128 KiB (macOS has no
@@ -551,6 +556,18 @@ Respond with ONLY a single JSON object conforming to this JSON Schema — no pro
 no explanation, no markdown code fences:
 $(cat "$schema")"
 
+  # The assembled prompt travels as ONE argv word (--single=), so re-check it
+  # against Linux MAX_ARG_STRLEN (128 KiB): subcmd_run caps the *prompt* at 120
+  # KiB, but this path appends the schema+directive into the SAME word, eating
+  # that headroom. Only a large custom --schema realizes the gap (the bundled
+  # schema is ~2.4 KiB); guard at 126 KiB so a genuine overflow errors cleanly.
+  local full_bytes
+  full_bytes=$(printf '%s' "$full" | wc -c)
+  if (( full_bytes > 129024 )); then
+    echo "grok(composer) prompt+schema is $(( full_bytes / 1024 )) KiB — over the 126 KiB single-argument limit; narrow the diff or use a smaller --schema" >&2
+    exit 1
+  fi
+
   local raw rc=0
   raw="$(sandboxed grok grok -m "$GROK_COMPOSER_MODEL" \
       --tools "" --disable-web-search \
@@ -599,15 +616,36 @@ def all_objects(s):
         start = s.find("{", start + 1)
     return objs
 
+SEV = {"critical", "warning", "minor"}
+CONF = {"high", "medium", "low"}
+REQ_STR = ("file", "summary", "failure_scenario", "recommendation")
+
+def valid_item(f):
+    # Mirror finding.schema.json required fields/types. composer is NOT
+    # schema-enforced (unlike codex/grok-build, whose CLIs enforce the schema),
+    # so a malformed item must ERROR here rather than reach the merge/verify
+    # stages, which rely on the documented uniform-findings contract.
+    if not isinstance(f, dict):
+        return False
+    if not all(isinstance(f.get(k), str) for k in REQ_STR):
+        return False
+    ln = f.get("line")
+    if not isinstance(ln, int) or isinstance(ln, bool) or ln < 0:
+        return False
+    return f.get("severity") in SEV and f.get("confidence") in CONF
+
 objs = all_objects(sys.stdin.read())
-if not objs:
-    sys.stderr.write("grok(composer) returned no parseable JSON (content withheld)\n")
+cands = [f for f in (findings_from(o) for o in objs) if f is not None]
+if not cands:
+    sys.stderr.write("grok(composer) returned no {findings:[...]} object (content withheld)\n")
     sys.exit(1)
-# Prefer the first object that actually carries findings, over any earlier
-# non-findings object (fixes: a leading {"note":...} masking the real object).
-d = next((f for f in (findings_from(o) for o in objs) if f is not None), None)
-if d is None:
-    sys.stderr.write("grok(composer) output is not a {findings:[...]} object\n")
+# Prefer a NON-EMPTY findings object over an empty preamble object that would
+# otherwise mask the real answer (a leading {"findings":[]} or {"note":...});
+# fall back to the first object if every candidate is empty.
+d = next((c for c in cands if c["findings"]), cands[0])
+bad = [i for i, f in enumerate(d["findings"]) if not valid_item(f)]
+if bad:
+    sys.stderr.write("grok(composer) emitted %d finding(s) violating finding.schema.json\n" % len(bad))
     sys.exit(1)
 json.dump({"findings": d["findings"]}, sys.stdout)
 print()

@@ -42,10 +42,13 @@ debugging round.
   `structuredOutput`** (verified P2, grok 0.2.82; simpler than grok-build's
   envelope). The adapter routes `--model grok-composer-2.5-fast` to a separate
   `run_grok_composer` path that parses the answer **defensively**: collect ALL
-  balanced `{...}` objects (whole string, fenced blocks, every `{` run) and pick
-  the first that carries a `findings` list — never the first decodable object
-  (a leading `{"note":…}` would otherwise mask the real findings and misreport an
-  ERROR; this exact bug was caught by swarm reviewing its own diff). composer is
+  balanced `{...}` objects (whole string, fenced blocks, every `{` run), pick the
+  first **non-empty** `findings` object (a leading `{"note":…}`/`{"findings":[]}`
+  would otherwise mask the real one), and **validate every item against
+  `finding.schema.json`** (composer, unlike codex/grok-build, is not CLI-schema-
+  enforced — a malformed item must ERROR, not reach merge/verify). Both the
+  first-object bug and the missing per-item validation were caught by swarm
+  reviewing its own diff. composer is
   ~2× faster than grok-build. It is same-family-correlated, so consumers must
   count consensus by **model family**, not backend (composer + grok-build
   agreeing is one grok vote — see [[swarm-review-pipeline]]).
