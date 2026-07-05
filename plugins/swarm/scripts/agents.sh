@@ -23,9 +23,14 @@
 #            Reasoning effort has no "max" tier -> max maps to xhigh.
 #   grok   — headless `-p` with inline --json-schema; the validated object is
 #            the `.structuredOutput` field of a response envelope. Needs an
-#            explicit model (-m): the default model (grok-composer-2.5-fast)
-#            rejects --effort AND ignores --json-schema (structuredOutput
-#            stays null) — grok-build is the only schema-capable choice.
+#            explicit model (-m): grok-build is the schema-capable default and
+#            accepts --effort. The one other accepted model is
+#            grok-composer-2.5-fast (`--model grok-composer-2.5-fast`): it
+#            ignores --json-schema/--effort, so the adapter drives it with a
+#            strict-JSON prompt and parses the findings defensively (verified:
+#            emits pure {"findings":[...]} on stdout, no envelope). It is a
+#            second, ~2x-faster grok voice — same family as grok-build, so a
+#            caller must treat their agreement as one family, not consensus.
 #            Auth heuristic: non-empty ~/.grok/auth.json (no status command).
 #
 # Exit codes: 0 ok · 1 unavailable / not ready / run failed · 2 usage error
@@ -35,6 +40,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_SCHEMA="$SCRIPT_DIR/schema/finding.schema.json"
 GROK_DEFAULT_MODEL="grok-build"
+GROK_COMPOSER_MODEL="grok-composer-2.5-fast"
 # Default HOME so `$HOME` expansions below (auth file, sandbox deny paths) don't
 # abort the whole script under `set -u` when HOME is unset.
 HOME="${HOME:-$(cd ~ 2>/dev/null && pwd || echo /nonexistent)}"
@@ -468,14 +474,19 @@ run_grok() {
   local prompt="$1" effort="$2" model="$3" schema="$4"
   local grok_model="${model:-$GROK_DEFAULT_MODEL}"
 
-  # Preflight-reject non-default models: only grok-build enforces --json-schema
-  # (and accepts --effort). Any other model would silently return
-  # structuredOutput:null and the run would fail late with no schema output —
-  # so reject up front with a usage error rather than burn a review on it.
-  # (Schema-less models like grok-composer-2.5-fast belong on the caller's own
-  # defensive-parse path, not this schema-enforcing adapter.)
+  # grok-composer-2.5-fast is the one non-default model the adapter supports; it
+  # ignores --json-schema/--effort, so it takes a separate defensive-parse path.
+  if [[ "$grok_model" == "$GROK_COMPOSER_MODEL" ]]; then
+    run_grok_composer "$prompt" "$schema"
+    return
+  fi
+
+  # Preflight-reject any OTHER non-default model: only grok-build enforces
+  # --json-schema (and accepts --effort). An unlisted model would silently
+  # return structuredOutput:null and fail late with no schema output — so reject
+  # up front with a usage error rather than burn a review on it.
   if [[ "$grok_model" != "$GROK_DEFAULT_MODEL" ]]; then
-    echo "grok model '$grok_model' does not enforce --json-schema — the adapter requires schema output; use $GROK_DEFAULT_MODEL (default)" >&2
+    echo "grok model '$grok_model' does not enforce --json-schema — the adapter requires schema output; use $GROK_DEFAULT_MODEL (default) or $GROK_COMPOSER_MODEL" >&2
     exit 2
   fi
 
@@ -520,6 +531,85 @@ if not (isinstance(out, dict) and isinstance(out.get("findings"), list)):
     sys.stderr.write("grok structuredOutput is not a {findings:[...]} object\n")
     sys.exit(1)
 json.dump(out, sys.stdout)
+print()
+' | scrub_secrets
+}
+
+run_grok_composer() {
+  # grok-composer-2.5-fast: ~2x faster than grok-build but ignores
+  # --json-schema/--effort (would return plain text with structuredOutput:null).
+  # So we DON'T pass those flags — instead we append a strict-JSON directive
+  # (the schema itself) to the prompt and parse the answer defensively. Verified:
+  # composer then emits pure {"findings":[...]} on stdout (no envelope). Same
+  # sandbox + env filter + scrub as grok-build; only the schema mechanism differs.
+  local prompt="$1" schema="$2"
+  local full
+  full="$prompt
+
+---
+Respond with ONLY a single JSON object conforming to this JSON Schema — no prose,
+no explanation, no markdown code fences:
+$(cat "$schema")"
+
+  local raw rc=0
+  raw="$(sandboxed grok grok -m "$GROK_COMPOSER_MODEL" \
+      --tools "" --disable-web-search \
+      --single="$full" </dev/null 2>/dev/null)" || rc=$?
+  if (( rc != 0 )); then
+    (( rc == 124 )) && echo "grok(composer) timed out after ${ADAPTER_TIMEOUT}s" >&2 \
+                    || echo "grok(composer) failed" >&2
+    exit 1
+  fi
+  # Defensive parse: composer is not schema-enforced, so the answer may arrive as
+  # bare JSON (observed), wrapped in ```json fences, or as a grok envelope with a
+  # .structuredOutput field. Extract a {"findings":[...]} object from any of those,
+  # or fail non-zero (so the caller records an ERROR, never a false empty review).
+  printf '%s' "$raw" | python3 -c '
+import json, re, sys
+
+def findings_from(o):
+    # Return the findings-bearing object: the object itself, or a nested
+    # structuredOutput, else None.
+    if isinstance(o, dict):
+        if isinstance(o.get("findings"), list):
+            return o
+        inner = o.get("structuredOutput")
+        if isinstance(inner, dict) and isinstance(inner.get("findings"), list):
+            return inner
+    return None
+
+def all_objects(s):
+    # Every JSON object we can pull out, in priority order: whole string, each
+    # fenced block, then every balanced {...} run. We collect ALL of them (not
+    # the first decodable one) so a leading non-findings object cannot mask the
+    # real findings object later in the stream.
+    objs = []
+    for cand in (s.strip(), *[m.strip() for m in re.findall(r"```(?:json)?\s*(.*?)```", s, re.S)]):
+        try:
+            objs.append(json.loads(cand))
+        except Exception:
+            pass
+    start = s.find("{")
+    while start != -1:
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(s[start:])
+            objs.append(obj)
+        except Exception:
+            pass
+        start = s.find("{", start + 1)
+    return objs
+
+objs = all_objects(sys.stdin.read())
+if not objs:
+    sys.stderr.write("grok(composer) returned no parseable JSON (content withheld)\n")
+    sys.exit(1)
+# Prefer the first object that actually carries findings, over any earlier
+# non-findings object (fixes: a leading {"note":...} masking the real object).
+d = next((f for f in (findings_from(o) for o in objs) if f is not None), None)
+if d is None:
+    sys.stderr.write("grok(composer) output is not a {findings:[...]} object\n")
+    sys.exit(1)
+json.dump({"findings": d["findings"]}, sys.stdout)
 print()
 ' | scrub_secrets
 }
