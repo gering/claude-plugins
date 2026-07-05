@@ -577,6 +577,16 @@ $(cat "$schema")"
                     || echo "grok(composer) failed" >&2
     exit 1
   fi
+  # Cap the output before parsing: the defensive brace-scan below is O(n^2) in
+  # the number of '{' and runs OUTSIDE with_timeout (which wraps only the grok
+  # subprocess), so a multi-MB brace-dense blob could spin for minutes. A valid
+  # findings payload (<=100 items, capped fields) stays well under 512 KiB.
+  local raw_bytes
+  raw_bytes=$(printf '%s' "$raw" | wc -c)
+  if (( raw_bytes > 524288 )); then
+    echo "grok(composer) output too large ($(( raw_bytes / 1024 )) KiB) — refusing to parse" >&2
+    exit 1
+  fi
   # Defensive parse: composer is not schema-enforced, so the answer may arrive as
   # bare JSON (observed), wrapped in ```json fences, or as a grok envelope with a
   # .structuredOutput field. Extract a {"findings":[...]} object from any of those,
@@ -618,17 +628,25 @@ def all_objects(s):
 
 SEV = {"critical", "warning", "minor"}
 CONF = {"high", "medium", "low"}
-REQ_STR = ("file", "summary", "failure_scenario", "recommendation")
+# field -> maxLength, mirroring finding.schema.json. The caps double as injection
+# limits (bounding how much data a payload can route through a field), so they
+# must be enforced, not just the types.
+MAXLEN = {"file": 500, "summary": 400, "failure_scenario": 1200, "recommendation": 800}
+KEYS = {"file", "line", "severity", "summary", "failure_scenario", "confidence", "recommendation"}
 
 def valid_item(f):
-    # Mirror finding.schema.json required fields/types. composer is NOT
-    # schema-enforced (unlike codex/grok-build, whose CLIs enforce the schema),
-    # so a malformed item must ERROR here rather than reach the merge/verify
-    # stages, which rely on the documented uniform-findings contract.
-    if not isinstance(f, dict):
+    # Mirror finding.schema.json EXACTLY. composer is not CLI-schema-enforced
+    # (unlike codex/grok-build), so a malformed item must ERROR here rather than
+    # reach merge/verify, which rely on the uniform-findings contract. Check the
+    # exact key set (additionalProperties:false + all required), maxLength, and
+    # enums — a hand-rolled type-only subset would drop valid rows and pass
+    # oversized/extra-key ones.
+    if not isinstance(f, dict) or set(f) != KEYS:
         return False
-    if not all(isinstance(f.get(k), str) for k in REQ_STR):
-        return False
+    for k, m in MAXLEN.items():
+        v = f.get(k)
+        if not isinstance(v, str) or len(v) > m:
+            return False
     ln = f.get("line")
     if not isinstance(ln, int) or isinstance(ln, bool) or ln < 0:
         return False

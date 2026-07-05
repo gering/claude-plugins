@@ -85,9 +85,14 @@ function scrubField(s) {
   return { s, hit }
 }
 function scrubFinding(f) {
+  // Scrub EVERY string field, not a fixed list: verifier `evidence` and cluster
+  // `mechanism` are free text a secret can reach too (verifiers read the repo).
+  // Enum/short fields (severity, verifier, …) are strings but never match a
+  // secret pattern, so scrubbing them is a harmless no-op.
   let hit = false
   const out = { ...f }
-  for (const k of ['file', 'summary', 'failure_scenario', 'recommendation']) {
+  for (const k of Object.keys(out)) {
+    if (typeof out[k] !== 'string') continue
     const r = scrubField(out[k])
     out[k] = r.s
     hit = hit || r.hit
@@ -133,7 +138,9 @@ const claudeThunks = runLensesSafe.map((lens) => () =>
     `One finding per distinct defect, each with a concrete falsifiable failure_scenario. Prefix each summary with "[${lens}] ". An empty findings list is valid. Cite real file lines.`,
     { label: `claude:${lens}`, phase: 'Fan-out', schema: FINDINGS_SCHEMA, effort: 'medium' }
   ).then((r) => ({ backend: 'claude', lens, findings: r?.findings || [] }))
-   .catch(() => ({ backend: 'claude', lens, findings: [] }))
+   // error != empty for Claude voices too: a crashed lens must surface in
+   // backendErrors, not masquerade as a clean empty review.
+   .catch((e) => ({ backend: 'claude', lens, ok: false, error: `claude:${lens} — ${String(e).slice(0, 120)}`, findings: [] }))
 )
 
 // External voices: thin transport wrappers. They report ok/error so a dropped
@@ -205,7 +212,7 @@ if (pool.length > 0) {
     const families = Array.from(new Set(members.map((i) => pool[i].family))).sort()
     // Consensus requires >=2 distinct FAMILIES (composer+grok-build = one family).
     return { ...c, backends, families, consensus: families.length >= 2 ? 'CONFIRMED' : 'solo' }
-  })
+  }).filter((c) => c.backends.length > 0)  // drop clusters whose member_indices all filtered out — no backing voice
 }
 const consensusClusters = clusters.filter((c) => c.consensus === 'CONFIRMED')
 const soloClusters = clusters.filter((c) => c.consensus === 'solo')
@@ -236,15 +243,30 @@ const finalSolos = verifiedSolos.filter(Boolean).filter((c) => c.verifier !== 'R
 const refuted = verifiedSolos.filter(Boolean).filter((c) => c.verifier === 'REFUTED')
 
 // ---- output gate + rank -----------------------------------------------------
+// The gate is the LAST scrub for Claude-origin findings, so it must cover EVERY
+// surfaced list — live findings AND refuted (a REFUTED solo can still quote a
+// secret from the diff or verifier evidence).
 let redactions = 0
-const gated = [...finalConsensus, ...finalSolos].map((c) => {
-  const { finding, hit } = scrubFinding(c)
-  if (hit) redactions++
-  return finding
-})
+const gate1 = (c) => { const { finding, hit } = scrubFinding(c); if (hit) redactions++; return finding }
+const gatedFindings = [...finalConsensus, ...finalSolos].map(gate1)
+const gatedRefuted = refuted.map(gate1)
+
 const sevRank = { critical: 0, warning: 1, minor: 2 }
-const findings = gated.sort((a, b) =>
-  (sevRank[a.severity] - sevRank[b.severity]) || (a.consensus === 'CONFIRMED' ? -1 : 1))
+const conRank = (c) => (c.consensus === 'CONFIRMED' ? 0 : 1)  // antisymmetric: compare BOTH operands
+const findings = gatedFindings.sort((a, b) =>
+  (sevRank[a.severity] - sevRank[b.severity]) || (conRank(a) - conRank(b)))
+
+// Per-backend rollup for the balance "Agents" line: concrete short model label
+// + voice/finding counts + whether it ran clean. Wall-time (per-agent durationMs)
+// needs a registered workflow to surface — tracked as P4 wiring.
+const MODEL_LABEL = { claude: 'opus', codex: 'gpt', grok: 'grok', composer: 'composer' }
+const agents = {}
+for (const v of voices) {
+  const a = agents[v.backend] || (agents[v.backend] = { backend: v.backend, model: MODEL_LABEL[v.backend] || v.backend, voices: 0, findings: 0, ok: true })
+  a.voices++
+  a.findings += (v.findings || []).length
+  if (v.ok === false) a.ok = false
+}
 
 const rawPerLens = {}, survivingPerLens = {}
 for (const f of pool) rawPerLens[f.lens] = (rawPerLens[f.lens] || 0) + 1
@@ -256,15 +278,16 @@ log(`Done: ${findings.length} findings (${finalConsensus.length} consensus, ${fi
 return {
   gate,
   findings,
-  refuted,
+  refuted: gatedRefuted,
   backendErrors,
   balance: {
     total: findings.length,
     consensus: finalConsensus.length,
     solo: finalSolos.length,
-    refuted: refuted.length,
+    refuted: gatedRefuted.length,
     redactions,
     voices: voices.length,
+    agents: Object.values(agents),
     backendErrors,
     rawPerLens,
     survivingPerLens,
