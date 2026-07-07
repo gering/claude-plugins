@@ -222,9 +222,10 @@ scrub_secrets() {
 import re, sys
 PATTERNS = [
     (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED-AWS-KEY]"),
-    # PEM key: whole BEGIN...END block, but also a key truncated by a field cap
-    # (header + base64 body, no END) — the END marker is optional.
-    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[A-Za-z0-9+/=\r\n]*(?:-----END [A-Z0-9 ]*PRIVATE KEY-----)?"), "[REDACTED-PRIVATE-KEY]"),
+    # PEM key: full BEGIN...END block (any interior — incl. encrypted Proc-Type/
+    # DEK-Info metadata), OR a key truncated by a field cap (header + base64, no
+    # END). Alternation: END-block first, else base64 run.
+    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----|[A-Za-z0-9+/=\r\n]*)"), "[REDACTED-PRIVATE-KEY]"),
     (re.compile(r"(?i)aws_secret_access_key\s*[=:]\s*[A-Za-z0-9/+]{20,}"), "aws_secret_access_key=[REDACTED]"),
     (re.compile(r"(?i)\b(secret|token|password|passwd|api[_-]?key)\b\s*[=:]\s*[A-Za-z0-9/+._-]{16,}"), r"\1=[REDACTED]"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "[REDACTED-GH-TOKEN]"),

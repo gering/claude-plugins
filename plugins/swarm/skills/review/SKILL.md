@@ -55,13 +55,17 @@ else
   git diff HEAD > "$DIFF"
 fi
 
-# git diff excludes UNTRACKED files — append each as a new-file diff (via
-# --no-index, so the index is never mutated) or the default "uncommitted work"
-# scope would silently skip brand-new files. (For a ref/--staged argument, drop
-# this loop — untracked files aren't part of that scope.)
-git ls-files --others --exclude-standard -z | while IFS= read -r -d '' f; do
-  git diff --no-index -- /dev/null "$f" >> "$DIFF" 2>/dev/null || true
-done
+# git diff excludes UNTRACKED files — for the DEFAULT scope append each as a
+# new-file diff (via --no-index, so the index is never mutated) or brand-new
+# files are silently skipped. Set INCLUDE_UNTRACKED=0 for a ref/--staged review
+# (untracked files aren't in that scope); for a pathspec, add `-- <pathspec>`
+# after --others so only matching untracked files are included.
+INCLUDE_UNTRACKED=1
+if [ "$INCLUDE_UNTRACKED" = 1 ]; then
+  git ls-files --others --exclude-standard -z | while IFS= read -r -d '' f; do
+    git diff --no-index -- /dev/null "$f" >> "$DIFF" 2>/dev/null || true
+  done
+fi
 
 if [ ! -s "$DIFF" ]; then echo "SWARM_EMPTY"; rm -rf "$TMPD"; exit 0; fi
 
@@ -98,8 +102,8 @@ echo "LIVE_JSON=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json | t
   `available && ready`; include `"grok"` and `"composer"` iff grok is
   `available && ready` (both share the grok CLI + auth). If none are live, the
   review runs with the Claude lenses alone — say so.
-- **Oversize** — if `PROMPT_BYTES` > 120000 the diff exceeds the adapter's 120 KiB
-  per-call cap, so the external CLIs cannot run: set `externalVoices` to `[]`
+- **Oversize** — if `PROMPT_BYTES` > 122880 the diff exceeds the adapter's 120 KiB
+  (122880-byte) per-call cap, so the external CLIs cannot run: set `externalVoices` to `[]`
   (Claude-lens-only review), tell the user the external backends were skipped,
   and suggest narrowing the range. Do NOT pass live voices the adapter would
   only reject with an error.

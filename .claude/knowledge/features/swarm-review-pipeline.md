@@ -51,10 +51,30 @@ grok-build ∥ composer (see [[swarm-backend-adapter]]).
   reported distinctly, never collapsed to a clean empty review). The container /
   auth-proxy pieces from the security doc are deferred as accepted residual.
 
+- **`args.claude: false`** runs an **external-only control** (codex + grok-build
+  + composer, no Claude finder lenses, no gate; merge/verify still in-session).
+  Proven useful: a control run found real bugs the with-Claude run missed (an
+  `aws_secret_access_key` scrub-list drift, `git diff` omitting untracked files)
+  — the "different models catch different defects" premise, live.
+
+## Future idea (P3+): per-lens external prompts
+
+Today externals run ONE broad multi-lens review each; Claude fans out per lens.
+Running externals per-lens too would add depth-per-lens + symmetry + authoritative
+lens tags + let the gate prune external calls. **But** it multiplies external CLI
+calls ~5× (backends × lenses) — steep cost + CLI overhead, against the efficiency
+goal. Verdict: make it an **opt-in `lensMode`**, gate the external lenses when on,
+and for routine depth prefer higher external `--effort` / grok `--best-of-n` (one
+call, more thinking) over N calls. Not a default.
+
 ## Verified end-to-end (2026-07-05)
 
 Real background runs on this branch: a Claude-only smoke run proved the wiring
 (6 agents, correct return shape); the review **found a real bug in its own
 composer parser** (first-object-vs-findings-object), which was then fixed. Only
 `REFUTED` solos are dropped; consensus/solo/refuted counts + per-lens raw→
-surviving ship in the `balance` block the skill renders.
+surviving ship in the `balance` block the skill renders. Iterating a
+`/swarm:review` loop over the branch caught several fix-induced regressions
+(a pipefail abort, an unconditional untracked-append, incomplete scrub coverage)
+— the loop's real value is catching incomplete fixes, but it diverges
+(marginal findings grow), so cap the rounds.
