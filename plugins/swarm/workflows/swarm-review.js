@@ -34,20 +34,24 @@ const LENS_BRIEF = {
   conventions: 'repo conventions: naming, doc/README sync, version-sync, sibling-script idioms',
 }
 
-// One finding, mirrors scripts/schema/finding.schema.json.
+// One finding. DRIFT WARNING: this schema is hand-mirrored in THREE places —
+// scripts/schema/finding.schema.json (canonical, CLI-enforced on codex/grok),
+// this FINDING_ITEM, and agents.sh's composer validator (KEYS/MAXLEN/SEV/CONF).
+// The caps double as injection limits, so all three must stay in sync — edit
+// them together.
 const FINDING_ITEM = {
   type: 'object', additionalProperties: false,
   required: ['file', 'line', 'severity', 'summary', 'failure_scenario', 'confidence', 'recommendation'],
   properties: {
-    file: { type: 'string' }, line: { type: 'integer' },
+    file: { type: 'string', maxLength: 500 }, line: { type: 'integer', minimum: 0 },
     severity: { enum: ['critical', 'warning', 'minor'] },
-    summary: { type: 'string' }, failure_scenario: { type: 'string' },
-    confidence: { enum: ['high', 'medium', 'low'] }, recommendation: { type: 'string' },
+    summary: { type: 'string', maxLength: 400 }, failure_scenario: { type: 'string', maxLength: 1200 },
+    confidence: { enum: ['high', 'medium', 'low'] }, recommendation: { type: 'string', maxLength: 800 },
   },
 }
 const FINDINGS_SCHEMA = {
   type: 'object', additionalProperties: false, required: ['findings'],
-  properties: { findings: { type: 'array', items: FINDING_ITEM } },
+  properties: { findings: { type: 'array', maxItems: 100, items: FINDING_ITEM } },
 }
 // error != empty: the external transport reports whether the backend actually
 // ran, so a dropped/errored CLI is never silently collapsed to "found nothing".
@@ -65,14 +69,18 @@ const EXTERNAL_SCHEMA = {
 const FAMILY = { claude: 'claude', codex: 'openai', grok: 'grok', composer: 'grok' }
 
 // ---- output gate: last-line secret scrub over surviving findings ------------
-// Mirrors the adapter's scrub_secrets, but runs on EVERY finding (incl. Claude
-// finders, which never pass the adapter) right before results leave the workflow.
+// Runs on EVERY finding (incl. Claude finders, which never pass the adapter)
+// right before results leave the workflow. DRIFT WARNING: these patterns
+// hand-mirror the adapter's scrub_secrets (agents.sh); keep the two lists in
+// sync so both redact identically — a secret the adapter would catch must not
+// slip through here.
 function scrubField(s) {
   if (typeof s !== 'string') return { s, hit: false }
   let hit = false
   const rules = [
     [/AKIA[0-9A-Z]{16}/g, '[REDACTED-AWS-KEY]'],
-    [/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/g, '[REDACTED-PRIVATE-KEY]'],
+    // Whole PEM block (BEGIN…END), not just the header line, or the key body leaks.
+    [/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g, '[REDACTED-PRIVATE-KEY]'],
     [/\bgh[pousr]_[A-Za-z0-9]{20,}/g, '[REDACTED-GH-TOKEN]'],
     [/\bsk-[A-Za-z0-9]{20,}/g, '[REDACTED-API-KEY]'],
     [/(?<key>\b(?:secret|token|password|passwd|api[_-]?key)\b)\s*[=:]\s*[A-Za-z0-9/+._-]{16,}/gi, '$<key>=[REDACTED]'],
@@ -213,6 +221,21 @@ if (pool.length > 0) {
     // Consensus requires >=2 distinct FAMILIES (composer+grok-build = one family).
     return { ...c, backends, families, consensus: families.length >= 2 ? 'CONFIRMED' : 'solo' }
   }).filter((c) => c.backends.length > 0)  // drop clusters whose member_indices all filtered out — no backing voice
+
+  // Coverage guard: the merge agent can silently omit pool indices (dropping
+  // findings). Recover every uncovered finding as its own solo cluster so
+  // nothing is lost; imperfect coverage is logged, not fatal.
+  const covered = new Set(clusters.flatMap((c) => (c.member_indices || []).filter((i) => i >= 0 && i < pool.length)))
+  const uncovered = pool.map((_, i) => i).filter((i) => !covered.has(i))
+  for (const i of uncovered) {
+    const f = pool[i]
+    clusters.push({
+      file: f.file, line: f.line, mechanism: f.lens, severity: f.severity,
+      summary: f.summary, failure_scenario: f.failure_scenario, recommendation: f.recommendation,
+      lens: f.lens, member_indices: [i], backends: [f.backend], families: [f.family], consensus: 'solo',
+    })
+  }
+  if (uncovered.length) log(`Merge coverage: recovered ${uncovered.length} unclustered finding(s)`)
 }
 const consensusClusters = clusters.filter((c) => c.consensus === 'CONFIRMED')
 const soloClusters = clusters.filter((c) => c.consensus === 'solo')
@@ -262,11 +285,14 @@ const findings = gatedFindings.sort((a, b) =>
 const MODEL_LABEL = { claude: 'opus', codex: 'gpt', grok: 'grok', composer: 'composer' }
 const agents = {}
 for (const v of voices) {
-  const a = agents[v.backend] || (agents[v.backend] = { backend: v.backend, model: MODEL_LABEL[v.backend] || v.backend, voices: 0, findings: 0, ok: true })
+  const a = agents[v.backend] || (agents[v.backend] = { backend: v.backend, model: MODEL_LABEL[v.backend] || v.backend, voices: 0, failedVoices: 0, findings: 0, ok: true })
   a.voices++
   a.findings += (v.findings || []).length
-  if (v.ok === false) a.ok = false
+  if (v.ok === false) a.failedVoices++
 }
+// A multi-voice backend (claude runs one voice per lens) counts as "ok" unless
+// ALL its voices failed — one crashed lens must not mark the whole backend down.
+for (const a of Object.values(agents)) a.ok = a.failedVoices < a.voices
 
 const rawPerLens = {}, survivingPerLens = {}
 for (const f of pool) rawPerLens[f.lens] = (rawPerLens[f.lens] || 0) + 1
@@ -275,11 +301,21 @@ for (const c of findings) survivingPerLens[c.lens] = (survivingPerLens[c.lens] |
 log(`Done: ${findings.length} findings (${finalConsensus.length} consensus, ${finalSolos.length} solo), ` +
     `${refuted.length} refuted${redactions ? `, ${redactions} redacted by output gate` : ''}`)
 
+// The gate also covers the other free-text channels that surface to the user:
+// dropped-backend error strings (may echo stderr) and the gate's own classification.
+const scrubText = (s) => scrubField(s || '').s
+const scrubbedErrors = backendErrors.map((e) => ({ ...e, error: scrubText(e.error) }))
+const scrubbedGate = gate ? {
+  ...gate,
+  change_kind: scrubText(gate.change_kind),
+  skip: Array.isArray(gate.skip) ? gate.skip.map((s) => ({ ...s, why: scrubText(s.why) })) : gate.skip,
+} : gate
+
 return {
-  gate,
+  gate: scrubbedGate,
   findings,
   refuted: gatedRefuted,
-  backendErrors,
+  backendErrors: scrubbedErrors,
   balance: {
     total: findings.length,
     consensus: finalConsensus.length,
@@ -288,7 +324,7 @@ return {
     redactions,
     voices: voices.length,
     agents: Object.values(agents),
-    backendErrors,
+    backendErrors: scrubbedErrors,
     rawPerLens,
     survivingPerLens,
   },

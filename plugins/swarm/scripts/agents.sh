@@ -216,11 +216,14 @@ scrub_secrets() {
   # could try to route a credential into a findings string field; redact
   # secret-shaped content here so it can never reach the merged report, even if
   # a backend sandbox is bypassed. Redacts (not blocks) so real findings survive.
+  # DRIFT WARNING: these patterns hand-mirror the JS output gate (scrubField in
+  # swarm-review.js); keep both lists in sync so they redact identically.
   python3 -c '
 import re, sys
 PATTERNS = [
     (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED-AWS-KEY]"),
-    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"), "[REDACTED-PRIVATE-KEY]"),
+    # Whole PEM block (BEGIN...END), not just the header, or the key body leaks.
+    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"), "[REDACTED-PRIVATE-KEY]"),
     (re.compile(r"(?i)aws_secret_access_key\s*[=:]\s*[A-Za-z0-9/+]{20,}"), "aws_secret_access_key=[REDACTED]"),
     (re.compile(r"(?i)\b(secret|token|password|passwd|api[_-]?key)\b\s*[=:]\s*[A-Za-z0-9/+._-]{16,}"), r"\1=[REDACTED]"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "[REDACTED-GH-TOKEN]"),
@@ -628,10 +631,12 @@ def all_objects(s):
 
 SEV = {"critical", "warning", "minor"}
 CONF = {"high", "medium", "low"}
-# field -> maxLength, mirroring finding.schema.json. The caps double as injection
-# limits (bounding how much data a payload can route through a field), so they
-# must be enforced, not just the types.
+# DRIFT WARNING: these caps/keys hand-mirror finding.schema.json (and
+# FINDING_ITEM in swarm-review.js). The caps double as injection limits, so the
+# three copies must stay in sync — edit them together. MAXITEMS mirrors the
+# schema findings maxItems.
 MAXLEN = {"file": 500, "summary": 400, "failure_scenario": 1200, "recommendation": 800}
+MAXITEMS = 100
 KEYS = {"file", "line", "severity", "summary", "failure_scenario", "confidence", "recommendation"}
 
 def valid_item(f):
@@ -661,6 +666,9 @@ if not cands:
 # otherwise mask the real answer (a leading {"findings":[]} or {"note":...});
 # fall back to the first object if every candidate is empty.
 d = next((c for c in cands if c["findings"]), cands[0])
+if len(d["findings"]) > MAXITEMS:
+    sys.stderr.write("grok(composer) emitted %d findings (> %d maxItems)\n" % (len(d["findings"]), MAXITEMS))
+    sys.exit(1)
 bad = [i for i, f in enumerate(d["findings"]) if not valid_item(f)]
 if bad:
     sys.stderr.write("grok(composer) emitted %d finding(s) violating finding.schema.json\n" % len(bad))

@@ -38,7 +38,10 @@ DIFF="$TMPD/diff.txt"; PROMPT="$TMPD/external-prompt.txt"
 # rules above (a ref → git diff <ref>; --staged → git diff --cached; a pathspec
 # → append -- <pathspec>). Never SILENTLY fall back to `git diff HEAD` — that
 # drops committed branch work and reviews a smaller scope than advertised.
-DEFBR="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
+# `|| true`: git symbolic-ref exits non-zero when origin/HEAD is unset, and
+# under `set -o pipefail` that would abort the whole block before the fallback
+# loop runs — defeating its own purpose.
+DEFBR="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||' || true)"
 BASE=""
 for b in "$DEFBR" main master; do
   [ -n "$b" ] || continue
@@ -156,8 +159,8 @@ Then, when present:
   A `Status` column (🔧 fixed / ⏭️ skipped / 🔁 recurred) is added ONLY in
   `--loop` re-review rounds.
 
-After the FIRST review, offer: "Soll ich die Findings fixen und mit
-`/swarm:review --loop` bis clean durchlaufen?"
+After the review, offer to fix the ✅-agree / 🟨-partial findings. (Automated
+`--fix` / `--loop` is P5 — not built yet; do not advertise it as runnable.)
 
 Then clean up: `rm -rf "$TMPD"`.
 
