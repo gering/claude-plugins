@@ -55,6 +55,14 @@ else
   git diff HEAD > "$DIFF"
 fi
 
+# git diff excludes UNTRACKED files — append each as a new-file diff (via
+# --no-index, so the index is never mutated) or the default "uncommitted work"
+# scope would silently skip brand-new files. (For a ref/--staged argument, drop
+# this loop — untracked files aren't part of that scope.)
+git ls-files --others --exclude-standard -z | while IFS= read -r -d '' f; do
+  git diff --no-index -- /dev/null "$f" >> "$DIFF" 2>/dev/null || true
+done
+
 if [ ! -s "$DIFF" ]; then echo "SWARM_EMPTY"; rm -rf "$TMPD"; exit 0; fi
 
 # Fence the diff as untrusted DATA with a PER-RUN RANDOM nonce in the delimiter:
@@ -112,9 +120,11 @@ Workflow({
 })
 ```
 
-Fill `<DIFF>`/`<PROMPT>` from the echoed paths. The workflow runs in the
-background for several minutes — **tell the user they can watch live progress
-with `/workflows`** while it runs. It returns
+Fill `<DIFF>`/`<PROMPT>` from the echoed paths. Add `claude: false` to `args`
+for an **external-only control run** (codex + grok-build + composer, no Claude
+finder lenses — merge/verify still run in-session); default is the full ensemble.
+The workflow runs in the background for several minutes — **tell the user they
+can watch live progress with `/workflows`** while it runs. It returns
 `{ findings, refuted, backendErrors, balance, gate }`.
 
 ### 3. Present the report — LOCKED layout, render exactly this
