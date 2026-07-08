@@ -1,7 +1,7 @@
 {
   "name": "swarm",
-  "description": "Local mixture-of-agents code review for Claude Code. Will fan out to Claude subagents plus codex and grok CLIs, merge and verify findings into one ranked report. Phase 1 ships the backend adapter and /swarm:agents status.",
-  "version": "0.1.0",
+  "description": "Local mixture-of-agents code review for Claude Code. Fans a diff across Claude lenses plus the codex and grok CLIs (grok-build + composer models), merges by mechanism with cross-family consensus, verifies solo findings, and presents one ranked report. Skills: /swarm:review, /swarm:agents.",
+  "version": "0.2.0",
   "author": {
     "name": "gering"
   },

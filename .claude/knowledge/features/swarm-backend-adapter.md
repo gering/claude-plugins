@@ -1,9 +1,9 @@
 ---
 title: "Swarm Backend Adapter Layer"
 createdAt: 2026-07-02
-updatedAt: 2026-07-02
+updatedAt: 2026-07-05
 createdFrom: "branch: task/add-swarm-plugin"
-updatedFrom: "branch: task/add-swarm-plugin"
+updatedFrom: "branch: task/swarm-p2-security-architecture"
 pluginVersion: 1.8.2
 prime: false
 ---
@@ -35,13 +35,23 @@ debugging round.
   with "does not support parameter reasoningEffort"). The adapter must pin
   `-m grok-build`. grok's effort ladder (low…max) matches code-review's;
   codex has no `max` tier → map `max`→`xhigh` (`-c model_reasoning_effort=…`).
-- **`grok-composer-2.5-fast` also does not enforce `--json-schema`**: it
-  returns plain text with `structuredOutput: null` +
-  `structuredOutputError: "model output was not valid JSON"`. So it cannot
-  serve as a second grok ensemble voice (besides being same-family-correlated,
-  which would dilute the ≥2-backend consensus signal). `grok-build` is the
-  only schema-capable grok model; for "more grok" at high effort, prefer its
-  native `--best-of-n N` over a second model voice.
+- **`grok-composer-2.5-fast` does not enforce `--json-schema`** — but it is
+  still usable as a second grok voice. Given a strict-JSON *prompt* (the adapter
+  appends the schema text and drops `--json-schema`/`--effort`), it emits **pure
+  `{"findings":[...]}` directly on stdout — no response envelope, no
+  `structuredOutput`** (verified P2, grok 0.2.82; simpler than grok-build's
+  envelope). The adapter routes `--model grok-composer-2.5-fast` to a separate
+  `run_grok_composer` path that parses the answer **defensively**: collect ALL
+  balanced `{...}` objects (whole string, fenced blocks, every `{` run), pick the
+  first **non-empty** `findings` object (a leading `{"note":…}`/`{"findings":[]}`
+  would otherwise mask the real one), and **validate every item against
+  `finding.schema.json`** (composer, unlike codex/grok-build, is not CLI-schema-
+  enforced — a malformed item must ERROR, not reach merge/verify). Both the
+  first-object bug and the missing per-item validation were caught by swarm
+  reviewing its own diff. composer is
+  ~2× faster than grok-build. It is same-family-correlated, so consumers must
+  count consensus by **model family**, not backend (composer + grok-build
+  agreeing is one grok vote — see [[swarm-review-pipeline]]).
 - **Headless tool execution**: both CLIs run read-only commands (e.g.
   `git diff`) without extra approval flags — codex inside `-s read-only`
   sandbox, grok headless `-p` auto-approves read-only tools. So lens prompts

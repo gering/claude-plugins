@@ -12,16 +12,48 @@ Complementary to [pr-flow](../pr-flow/): pr-flow drives the GitHub-PR
 
 ## Status
 
-**Phase 1 of 6** — plugin scaffold + backend adapter layer. The review
-pipeline (`/swarm:review`) lands in later phases.
+**Phase 2 of 6** — the review pipeline ships. `/swarm:review` fans a diff
+across four voices (Claude lenses + `codex` + `grok-build` + `composer`),
+merges by mechanism, verifies solo findings, and presents one ranked report.
 
 ## Commands
 
+- `/swarm:review [ref | --staged | pathspec]` — review a diff with the full
+  ensemble. Defaults to the branch delta vs the default branch (including
+  uncommitted work).
 - `/swarm:agents` — show which review backends are installed, authenticated,
   and ready.
 
-Planned: `/swarm:review` (main command), `/swarm:adversarial`, `/swarm:style`,
-`/swarm:security` (thin lens presets).
+Planned: `/swarm:adversarial`, `/swarm:style`, `/swarm:security` (thin lens
+presets).
+
+## The pipeline (`/swarm:review`)
+
+```
+Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok-build ∥ composer)
+          → Merge (file, mechanism) → Verify solos → Ranked synthesis
+```
+
+1. **Scope + gate** — a cheap agent classifies the diff and picks which Claude
+   lenses are worth running (security is never gated out when code/args/files
+   flow to an external process).
+2. **Fan-out** — four voices in parallel: one Claude finder per gated lens plus
+   `codex`, `grok-build` and `composer` as full reviews through the adapter.
+3. **Merge** — an LLM step clusters findings by `(file, mechanism)`, not
+   `(file, line)` (external CLIs number against the inlined diff).
+4. **Verify** — solo clusters go through an adversarial 3-state verifier
+   (`CONFIRMED`/`PLAUSIBLE`/`REFUTED`; only `REFUTED` is dropped).
+
+**Consensus counts model *families*, not backends.** `grok-build` and
+`composer` are both grok, so their agreement is one vote — a `CONSENSUS` tag
+requires ≥2 of *claude / openai / grok*. Everything else is a solo and earns
+its place through the verifier.
+
+**Security is minimal by design.** The diff is fenced as untrusted data, the
+external CLIs run sandboxed + tool-less (grok) with a secret scrub at the
+adapter boundary, and a final **output gate** re-scrubs every surviving finding
+before it reaches you. Findings are advisory — nothing is auto-applied. The
+full threat model lives in `docs/pipeline-blueprint.md` § Security.
 
 ## Architecture
 
@@ -44,10 +76,11 @@ Backends:
 |---------|------|-----------|
 | `claude` | probe-only | reviews run in-session via the Agent tool |
 | `codex` | external reviewer | `codex exec --output-schema` in a read-only sandbox; auth via `codex login status` |
-| `grok` | external reviewer | headless `-p` with inline `--json-schema`; findings extracted from the response envelope |
+| `grok` | external reviewer | headless `-p` with inline `--json-schema` (model `grok-build`); findings extracted from the response envelope. `--model grok-composer-2.5-fast` takes a separate defensive-parse path (a ~2×-faster second grok voice, no schema flag). |
 
-Unavailable backends drop silently from the ensemble — `claude` alone still
-works.
+Unavailable backends drop from the ensemble — `claude` alone still works.
+`/swarm:review` reports a backend that *errored* mid-run distinctly from one
+that cleanly found nothing (error ≠ empty).
 
 ### Shared findings schema (`scripts/schema/finding.schema.json`)
 

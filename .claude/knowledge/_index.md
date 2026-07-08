@@ -13,7 +13,8 @@
 - `features/herdr-kickoff-automation.md` — herdr `herdr-launch.sh`: `launch` (`/kickoff`) + `resume` (`/continue <task>` reopens an `/exit`-closed tab)
 - `features/herdr-close-automation.md` — `/close` in herdr: cwd-tab teardown, plugin SessionEnd hook, the one TUI-exit primitive, detached self-exit onto idle
 - `features/task-archiving-on-close.md` — `/close` archives (not deletes) the task file; adaptive commit + ff-push to main
-- `features/swarm-backend-adapter.md` — Verified codex/grok CLI facts (schema-enforced JSON, effort mapping, stdin hang) behind `swarm`'s adapter script
+- `features/swarm-backend-adapter.md` — Verified codex/grok CLI facts (schema-enforced JSON, effort mapping, stdin hang, composer defensive-parse voice) behind `swarm`'s adapter script
+- `features/swarm-review-pipeline.md` — `/swarm:review` P2 pipeline: skill↔Workflow wiring (args-as-string, `${CLAUDE_PLUGIN_ROOT}` not substituted in JS), family-consensus, minimal security (fence + output-gate + error≠empty)
 
 ## Deployment
 - `deployment/ci-structure-checks.md` — `check-structure.py` as the single automated guard for a build-less repo
