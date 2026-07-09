@@ -12,6 +12,22 @@ user_invocable: true
 > Fan one code review across Claude lenses + codex + grok-build + composer,
 > merge by mechanism, verify solos, and present one ranked report.
 
+## Arguments
+
+`$ARGUMENTS` carries an optional **scope** (which diff to review) and optional
+**action flags**, in any order. Strip the flags first; whatever remains is the
+scope, parsed by step 1 (a git ref, `--staged`, or a pathspec — default is the
+branch delta).
+
+- `--fix` — after presenting the report, apply the agreed findings **once**
+  (✅ agree + 🟨 partial), then stop. No re-review. See step 4.
+- `--loop[=N]` — fix-then-re-review until the loop converges or a cap (default
+  `10`; `--loop=N` overrides). Implies `--fix`. See step 4.
+- Anything left after removing the flags → the scope argument for step 1.
+
+Without either flag the review is **read-only**: present the report and offer to
+fix (step 3), but change nothing.
+
 ## Instructions
 
 Run the pipeline via the **Workflow tool** — this skill is the explicit opt-in
@@ -173,10 +189,73 @@ Then, when present:
   A `Status` column (🔧 fixed / ⏭️ skipped / 🔁 recurred) is added ONLY in
   `--loop` re-review rounds.
 
-After the review, offer to fix the ✅-agree / 🟨-partial findings. (Automated
-`--fix` / `--loop` is P5 — not built yet; do not advertise it as runnable.)
+Then clean up this round's scratch dir: `rm -rf "$TMPD"` (the fix step edits the
+repo directly by `file:line`, not from the diff file, so it is safe to remove).
 
-Then clean up: `rm -rf "$TMPD"`.
+After presenting:
+- `--fix` or `--loop` given → proceed to **step 4**.
+- neither → the review is read-only. Offer to fix the ✅/🟨 findings (or to
+  re-run with `--fix` / `--loop`) and wait — change nothing on your own.
+
+### 4. Act on the findings (`--fix` / `--loop`)
+
+Only when `--fix` or `--loop` was given. Act **only** on the main-session
+**Verdict**: ✅ agree and 🟨 partial. ❌ disagree is **never touched** and stays
+in the report.
+
+#### `--fix` — one fix round
+
+Work the ✅/🟨 findings, most severe first. For each:
+
+1. **Re-confirm claim-vs-code** — re-read the cited `file:line` and confirm the
+   defect is still there. If it's gone (already fixed, comment rot, line drift,
+   refactored away) → **skip it, report as skipped-stale; never fabricate an
+   edit** to justify a stale finding.
+2. **Claude applies the fix.** External agents stay review-only — never run
+   `codex apply` or otherwise hand edit authority to codex/grok.
+3. **🟨 partial** → apply **your own variant**, not the reviewer's
+   `recommendation` verbatim (partial = you accept the problem, not their exact
+   fix).
+4. **More than one good fix?** → **ask the user which path** before editing;
+   don't silently pick. Hold the finding as needs-decision until they choose.
+
+Then report per finding, keyed by its stable `#`: `🔧 applied` ·
+`⏭️ skipped-stale` · `❓ needs-decision`. ❌-disagree findings stay listed,
+untouched. In `--fix` (no loop): stop here.
+
+#### `--loop[=N]` — fix → re-review until clean
+
+Wrap `--fix` in the `/cycle` loop state machine, run **locally** (no push, no
+`@claude` poll — everything happens in-session on the working tree). Parse
+`--loop=N` for the cap (default `10`).
+
+Setup: `ROUND = 0`, `FIXES_TOTAL = 0`, and `OPEN[]` — the per-round OPEN-findings
+count (❌-disagree + ✅/🟨 skipped-stale), R0 first, held in-session.
+
+Each round:
+1. You already hold this round's report (round 0 = step 3; later rounds = the
+   re-review below). Let `F` = findings, `A` = ✅+🟨 count.
+2. **Fix** — run the `--fix` procedure above. Let `C` = files changed this round.
+   `FIXES_TOTAL += fixes applied`. Append this round's OPEN count to `OPEN[]`.
+3. **Termination decision** — deterministic, never by hand:
+   ```sh
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/loop-closeout.py" step \
+     --round <ROUND> --cap <CAP> --findings <F> --agreed <A> --changed <C>
+   ```
+   `continue` → step 4. `terminate=<reason>` → Close-out.
+4. **Re-review** — re-run steps 1–3 (Prepare diff → Workflow → Present) on the
+   **new** working tree. In these re-review rounds the table adds the **`Status`**
+   column (🔧 fixed / ⏭️ skipped / 🔁 recurred), and `#` stays **stable**: a
+   recurring finding keeps its number; only genuinely new findings get new ones.
+   `ROUND += 1`; loop back to step 1.
+
+Close-out — render the trajectory deterministically (never by hand):
+```sh
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/loop-closeout.py" box "<OPEN joined by spaces>" --reason <reason>
+```
+Print the box, then one summary line: rounds run, `FIXES_TOTAL`, and which of the
+4 termination reasons fired. A rise in the box (a fix surfaced new findings) is
+legitimate — the script shows it; don't explain it away.
 
 ## Notes
 
@@ -188,8 +267,13 @@ Then clean up: `rm -rf "$TMPD"`.
   secret scrub at the adapter boundary, and a final **output gate** re-scrubs
   every surviving finding before it reaches you. Minimal by design — see
   `docs/pipeline-blueprint.md` § Security for the threat model.
-- Read-only today: swarm never edits your code; findings are advisory. **`--fix`
-  / `--loop` (P5, not yet built)** will act only on ✅-agree + 🟨-partial findings,
-  and **when a finding has more than one good fix, ask the user which path to
-  take** before applying. `--loop[=N]` re-reviews after each fix round until
-  clean or the cap (default 10). Disagree (❌) is never touched.
+- **Acting on findings** (`--fix` / `--loop`): without a flag the review is
+  read-only. With one, swarm acts **only** on ✅-agree + 🟨-partial findings —
+  **Claude** applies every edit (external agents stay review-only, jailed +
+  tool-less); ❌-disagree is never touched. Each edit re-confirms the claim
+  against the code first (stale findings are skipped, not fabricated), 🟨 applies
+  the session's own variant, and a finding with more than one good fix asks the
+  user which path. `--loop[=N]` re-reviews after each fix round until it
+  converges (0 findings · nothing agreed · no files changed · cap, default 10).
+  The deterministic loop bits (termination decision, close-out box) live in
+  `scripts/loop-closeout.py`, not this prose.

@@ -12,15 +12,18 @@ Complementary to [pr-flow](../pr-flow/): pr-flow drives the GitHub-PR
 
 ## Status
 
-**Phase 2 of 6** — the review pipeline ships. `/swarm:review` fans a diff
+**Phase 3 of 6** — the pipeline can now **act**. `/swarm:review` fans a diff
 across four voices (Claude lenses + `codex` + `grok-build` + `composer`),
-merges by mechanism, verifies solo findings, and presents one ranked report.
+merges by mechanism, verifies solo findings, presents one ranked report, and —
+with `--fix` / `--loop` — applies the findings you agreed with.
 
 ## Commands
 
-- `/swarm:review [ref | --staged | pathspec]` — review a diff with the full
-  ensemble. Defaults to the branch delta vs the default branch (including
-  uncommitted work).
+- `/swarm:review [ref | --staged | pathspec] [--fix | --loop[=N]]` — review a
+  diff with the full ensemble. Defaults to the branch delta vs the default
+  branch (including uncommitted work). `--fix` applies the agreed findings once;
+  `--loop[=N]` re-reviews after each fix round until it converges (cap default
+  `10`).
 - `/swarm:agents` — show which review backends are installed, authenticated,
   and ready.
 
@@ -52,8 +55,10 @@ its place through the verifier.
 **Security is minimal by design.** The diff is fenced as untrusted data, the
 external CLIs run sandboxed + tool-less (grok) with a secret scrub at the
 adapter boundary, and a final **output gate** re-scrubs every surviving finding
-before it reaches you. Findings are advisory — nothing is auto-applied. The
-full threat model lives in `docs/pipeline-blueprint.md` § Security.
+before it reaches you. Findings are advisory by default; `--fix` / `--loop` act
+only on the ones you agreed with, and **only Claude** applies edits — the
+external agents stay review-only, never touching your code. The full threat
+model lives in `docs/pipeline-blueprint.md` § Security.
 
 ## Architecture
 
