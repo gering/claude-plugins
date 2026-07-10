@@ -35,6 +35,11 @@ debugging round.
   with "does not support parameter reasoningEffort"). The adapter must pin
   `-m grok-build`. grok's effort ladder (low…max) matches code-review's;
   codex has no `max` tier → map `max`→`xhigh` (`-c model_reasoning_effort=…`).
+- **codex model is pinned** to `CODEX_DEFAULT_MODEL` (`gpt-5.6-terra`, adapter
+  passes `-m`), overridable per call via `--model` — so a review is reproducible
+  instead of tracking the user's ambient `~/.codex/config` default. The pipeline
+  runs codex at `xhigh` (verified: `gpt-5.6-terra` accepts `xhigh` + the
+  `--output-schema` path end-to-end).
 - **`grok-composer-2.5-fast` does not enforce `--json-schema`** — but it is
   still usable as a second grok voice. Given a strict-JSON *prompt* (the adapter
   appends the schema text and drops `--json-schema`/`--effort`), it emits **pure

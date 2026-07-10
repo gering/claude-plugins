@@ -176,7 +176,7 @@ const claudeThunks = runLensesSafe.map((lens) => () =>
 // External voices: thin transport wrappers. They report ok/error so a dropped
 // backend is visible, not mistaken for a clean empty review.
 const EXTERNAL_VOICES = [
-  { backend: 'codex', label: 'codex:full', cmd: `bash "${ADAPTER}" run codex --effort high --prompt-file "${EXTERNAL_PROMPT}"` },
+  { backend: 'codex', label: 'codex:full', cmd: `bash "${ADAPTER}" run codex --effort xhigh --prompt-file "${EXTERNAL_PROMPT}"` },
   { backend: 'grok', label: 'grok-build:full', cmd: `bash "${ADAPTER}" run grok --effort high --prompt-file "${EXTERNAL_PROMPT}"` },
   { backend: 'composer', label: 'composer:full', cmd: `bash "${ADAPTER}" run grok --model grok-composer-2.5-fast --prompt-file "${EXTERNAL_PROMPT}"` },
 ]

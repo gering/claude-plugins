@@ -20,7 +20,9 @@
 #   codex  — `codex exec --output-schema` in a read-only sandbox; the pure
 #            schema JSON arrives via --output-last-message (stdout carries the
 #            agent transcript, which we discard). Auth: `codex login status`.
-#            Reasoning effort has no "max" tier -> max maps to xhigh.
+#            Reasoning effort has no "max" tier -> max maps to xhigh. Model is
+#            pinned to CODEX_DEFAULT_MODEL (override with --model) so a review
+#            doesn't track the user's ambient ~/.codex config.
 #   grok   — headless `-p` with inline --json-schema; the validated object is
 #            the `.structuredOutput` field of a response envelope. Needs an
 #            explicit model (-m): grok-build is the schema-capable default and
@@ -41,6 +43,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_SCHEMA="$SCRIPT_DIR/schema/finding.schema.json"
 GROK_DEFAULT_MODEL="grok-build"
 GROK_COMPOSER_MODEL="grok-composer-2.5-fast"
+# Pin codex to an explicit model so a review is reproducible regardless of the
+# user's ambient ~/.codex/config default. Override per call with `--model`.
+CODEX_DEFAULT_MODEL="gpt-5.6-terra"
 # Default HOME so `$HOME` expansions below (auth file, sandbox deny paths) don't
 # abort the whole script under `set -u` when HOME is unset.
 HOME="${HOME:-$(cd ~ 2>/dev/null && pwd || echo /nonexistent)}"
@@ -439,10 +444,12 @@ run_codex() {
 
   TMP_OUT="$(mktemp)"
 
-  # Array (not unquoted ${model:+…}) so a model name with whitespace is one
-  # argv word, matching the effort_args idiom in run_grok.
-  local model_args=()
-  [[ -n "$model" ]] && model_args=(-m "$model")
+  # Pin the model: caller's --model wins, else the adapter default (so a review
+  # doesn't silently change model when the user's ~/.codex config does). Array
+  # (not unquoted ${model:+…}) so a name with whitespace stays one argv word,
+  # matching the effort_args idiom in run_grok.
+  local codex_model="${model:-$CODEX_DEFAULT_MODEL}"
+  local model_args=(-m "$codex_model")
 
   # The schema-validated JSON lands in $TMP_OUT; codex's stdout copy of the
   # final message is discarded (its transcript goes to stderr = debug info).
