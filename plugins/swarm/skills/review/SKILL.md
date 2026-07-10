@@ -1,9 +1,9 @@
 ---
 name: review
 description: |
-  Local mixture-of-agents review of your diff: Claude lenses plus codex, grok
-  and composer, merged and verified into one ranked report.
-  Trigger: "swarm review", "review my changes", "multi-agent review".
+  Local mixture-of-agents review: Claude lenses plus codex, grok and composer,
+  merged into one ranked report; --fix/--loop applies agreed findings.
+  Trigger: "swarm review", "review my changes", "review and fix".
 user_invocable: true
 ---
 
@@ -23,6 +23,8 @@ branch delta).
   (✅ agree + 🟨 partial), then stop. No re-review. See step 4.
 - `--loop[=N]` — fix-then-re-review until the loop converges or a cap (default
   `10`; `--loop=N` overrides). Implies `--fix`. See step 4.
+- If **both** `--fix` and `--loop` are given, `--loop` wins (it already implies
+  `--fix`) — run the loop to convergence/cap, not a single fix pass.
 - Anything left after removing the flags → the scope argument for step 1.
 
 Without either flag the review is **read-only**: present the report and offer to
@@ -186,8 +188,16 @@ Then, when present:
 - **Redactions** — if `balance.redactions > 0`, note the output gate scrubbed N
   finding(s).
 - `Agents`/`Verifier` columns are swarm-only (a single-source review omits them).
-  A `Status` column (🔧 fixed / ⏭️ skipped / 🔁 recurred) is added ONLY in
-  `--loop` re-review rounds.
+  A **`Status`** column is added ONLY in `--loop` re-review rounds (round 0 uses
+  the 8-column table above). The full re-review header then is:
+
+  `| # | Sev | Ort | Finding | Agents | Verifier | Verdict | Note | Status |`
+
+  Status values: 🔧 fixed · ⏭️ skipped · 🔁 recurred · **🆕 new** (raised this
+  round, no prior round had it). Match findings across rounds by
+  **`(file, mechanism)`, not `(file, line)`** — external CLIs renumber against the
+  inlined diff and lines drift after edits. A matched finding **keeps its `#`**;
+  only a 🆕 finding takes the next free number. Never renumber.
 
 Then clean up this round's scratch dir: `rm -rf "$TMPD"` (the fix step edits the
 repo directly by `file:line`, not from the diff file, so it is safe to remove).
@@ -210,7 +220,11 @@ Work the ✅/🟨 findings, most severe first. For each:
 1. **Re-confirm claim-vs-code** — re-read the cited `file:line` and confirm the
    defect is still there. If it's gone (already fixed, comment rot, line drift,
    refactored away) → **skip it, report as skipped-stale; never fabricate an
-   edit** to justify a stale finding.
+   edit** to justify a stale finding. **Anchor every edit on surrounding
+   content, not the report's raw line number** — an earlier fix in the same file
+   this pass shifts later line numbers; the `Edit` tool matches strings, so
+   re-reading the anchor text before each edit is what keeps a same-file batch
+   correct.
 2. **Claude applies the fix.** External agents stay review-only — never run
    `codex apply` or otherwise hand edit authority to codex/grok.
 3. **🟨 partial** → apply **your own variant**, not the reviewer's
@@ -230,24 +244,37 @@ Wrap `--fix` in the `/cycle` loop state machine, run **locally** (no push, no
 `--loop=N` for the cap (default `10`).
 
 Setup: `ROUND = 0`, `FIXES_TOTAL = 0`, and `OPEN[]` — the per-round OPEN-findings
-count (❌-disagree + ✅/🟨 skipped-stale), R0 first, held in-session.
+count, R0 first, held in-session. **Open = every finding this round left
+unresolved:** ❌-disagree + ✅/🟨 skipped-stale + ❓ needs-decision the user
+hasn't answered yet. A ❓ that stays unanswered is open (not fixed) — it must
+count, or the close-out box under-reports and the `no-change` termination can
+fire while a decision is still pending.
 
 Each round:
 1. You already hold this round's report (round 0 = step 3; later rounds = the
    re-review below). Let `F` = findings, `A` = ✅+🟨 count.
 2. **Fix** — run the `--fix` procedure above. Let `C` = files changed this round.
    `FIXES_TOTAL += fixes applied`. Append this round's OPEN count to `OPEN[]`.
-3. **Termination decision** — deterministic, never by hand:
+3. **Termination decision** — deterministic, never by hand. Pass `--pending <P>`
+   = the count of agreed findings still awaiting a user decision, so a round that
+   changed no files but has an open decision does **not** false-terminate as
+   `no-change`:
    ```sh
    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/loop-closeout.py" step \
-     --round <ROUND> --cap <CAP> --findings <F> --agreed <A> --changed <C>
+     --round <ROUND> --cap <CAP> --findings <F> --agreed <A> --changed <C> --pending <P>
    ```
-   `continue` → step 4. `terminate=<reason>` → Close-out.
+   `continue` → step 4. `terminate=<reason>` → Close-out. **On `terminate=cap`
+   the last round's fixes were applied but not re-reviewed** (cap fires before
+   step 4) — say so in the close-out summary; the cap is a safety stop, not a
+   clean bill of health for the final edits.
 4. **Re-review** — re-run steps 1–3 (Prepare diff → Workflow → Present) on the
-   **new** working tree. In these re-review rounds the table adds the **`Status`**
-   column (🔧 fixed / ⏭️ skipped / 🔁 recurred), and `#` stays **stable**: a
-   recurring finding keeps its number; only genuinely new findings get new ones.
-   `ROUND += 1`; loop back to step 1.
+   **new** working tree. In these rounds the table adds the **`Status`** column —
+   see step 3 for the concrete 9-column header, the 🔧/⏭️/🔁/🆕 values, and the
+   `(file, mechanism)` matching rule that keeps `#` stable. Use the workflow's
+   per-finding **`mechanism`** field (the merge step already emits it) as the
+   cross-round identity key — it's the mechanical anchor for matching, stable
+   numbering, Status, and the OPEN count, so those aren't reconstructed from
+   memory. `ROUND += 1`; loop back to step 1.
 
 Close-out — render the trajectory deterministically (never by hand):
 ```sh

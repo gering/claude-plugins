@@ -2,3 +2,10 @@
 
 # Archived task files — local history, kept out of the repo (tasks/ is untracked by design)
 tasks/archive/
+
+# Ephemeral work-system task file copied into a worktree by /kickoff — never commit it
+/TASK.md
+
+# Python bytecode cache — generated when a plugin script runs; never commit it
+__pycache__/
+*.pyc

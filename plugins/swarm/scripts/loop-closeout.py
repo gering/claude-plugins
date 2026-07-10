@@ -27,12 +27,13 @@ Reasons: 0-findings | nothing-agreed | no-change | cap
 import argparse
 import sys
 
-# Termination reason -> human label (German, matching the review's language).
+# Termination reason -> human label. English, like the rest of the skill output;
+# the presenter translates around it if the conversation is in another language.
 REASONS = {
-    "0-findings": "0 Findings — sauber konvergiert",
-    "nothing-agreed": "nichts zugestimmt — nur Ablehnungen (❌) offen",
-    "no-change": "keine Dateien geändert — Fixpunkt erreicht",
-    "cap": "Cap erreicht",
+    "0-findings": "0 findings — converged clean",
+    "nothing-agreed": "nothing agreed — only disagreements (❌) left open",
+    "no-change": "no files changed — fixed point reached",
+    "cap": "cap reached",
 }
 
 
@@ -42,15 +43,30 @@ def cmd_step(a: argparse.Namespace) -> int:
     Fixed evaluation order — the first matching condition wins:
       1. review returned zero findings          -> 0-findings   (clean)
       2. nothing was agreed (no ✅/🟨 this round) -> nothing-agreed
-      3. no files changed (all agreed were stale) -> no-change   (fixed point)
+      3. no files changed AND nothing is pending  -> no-change   (fixed point)
       4. this was the last allowed round          -> cap
     Otherwise: continue.
+
+    `no-change` is a real fixed point only when the round changed nothing AND no
+    agreed finding is still awaiting a user decision. `--pending` (needs-decision
+    findings the user hasn't answered) suppresses no-change so the loop doesn't
+    declare convergence while a choice is still open — the divergence the caller
+    would otherwise hit. Inputs are range-checked so a mis-parsed flag (e.g.
+    `--cap 0`) fails loudly instead of silently collapsing the loop.
     """
+    for name, val, lo in (
+        ("--cap", a.cap, 1), ("--round", a.round, 0), ("--findings", a.findings, 0),
+        ("--agreed", a.agreed, 0), ("--changed", a.changed, 0), ("--pending", a.pending, 0),
+    ):
+        if val < lo:
+            print(f"loop-closeout: {name} must be >= {lo} (got {val})", file=sys.stderr)
+            return 2
+
     if a.findings <= 0:
         print("terminate=0-findings")
     elif a.agreed <= 0:
         print("terminate=nothing-agreed")
-    elif a.changed <= 0:
+    elif a.changed <= 0 and a.pending <= 0:
         print("terminate=no-change")
     elif a.round + 1 >= a.cap:
         print("terminate=cap")
@@ -83,19 +99,19 @@ def cmd_box(a: argparse.Namespace) -> int:
 
     non_increasing = all(b <= a_ for a_, b in zip(counts, counts[1:]))
     if counts[-1] == 0:
-        trend = "monoton bis null" if non_increasing else "bis null (mit Zwischenanstieg)"
+        trend = "monotone to zero" if non_increasing else "to zero (with an intermediate rise)"
     else:
-        trend = f"beendet bei {counts[-1]} offen"
+        trend = f"ended with {counts[-1]} open"
 
     reason = REASONS.get(a.reason, a.reason)
 
-    print(f"Loop-Abschluss — {len(counts)} Runde(n), {trend}:")
+    print(f"Loop close-out — {len(counts)} round(s), {trend}:")
     print(rule("┌", "┬", "┐"))
     print(row(labels))
     print(rule("├", "┼", "┤"))
     print(row(cells))
     print(rule("└", "┴", "┘"))
-    print(f"Ende: {reason}")
+    print(f"End: {reason}")
     return 0
 
 
@@ -109,6 +125,8 @@ def main() -> int:
     s.add_argument("--findings", type=int, required=True, help="findings this round")
     s.add_argument("--agreed", type=int, required=True, help="✅+🟨 findings this round")
     s.add_argument("--changed", type=int, required=True, help="files changed this round")
+    s.add_argument("--pending", type=int, default=0,
+                   help="agreed findings still awaiting a user decision (default 0)")
     s.set_defaults(func=cmd_step)
 
     b = sub.add_parser("box", help="render the OPEN-findings close-out box")

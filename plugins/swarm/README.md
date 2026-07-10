@@ -12,7 +12,8 @@ Complementary to [pr-flow](../pr-flow/): pr-flow drives the GitHub-PR
 
 ## Status
 
-**Phase 3 of 6** — the pipeline can now **act**. `/swarm:review` fans a diff
+**Phase 5 of 6** — the pipeline can now **act** (P3/P4 lens presets still to
+come). `/swarm:review` fans a diff
 across four voices (Claude lenses + `codex` + `grok-build` + `composer`),
 merges by mechanism, verifies solo findings, presents one ranked report, and —
 with `--fix` / `--loop` — applies the findings you agreed with.
