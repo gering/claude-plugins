@@ -263,18 +263,24 @@ Each round:
    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/loop-closeout.py" step \
      --round <ROUND> --cap <CAP> --findings <F> --agreed <A> --changed <C> --pending <P>
    ```
-   `continue` → step 4. `terminate=<reason>` → Close-out. **On `terminate=cap`
-   the last round's fixes were applied but not re-reviewed** (cap fires before
-   step 4) — say so in the close-out summary; the cap is a safety stop, not a
-   clean bill of health for the final edits.
+   Read stdout: `continue` → step 4; `terminate=<reason>` → Close-out. **A
+   non-zero exit (with no stdout token) means bad input — abort and surface the
+   stderr message; never treat a missing token as `continue`.** **On
+   `terminate=cap` the last round's fixes were applied but not re-reviewed** (cap
+   fires before step 4) — say so in the close-out summary; the cap is a safety
+   stop, not a clean bill of health for the final edits.
 4. **Re-review** — re-run steps 1–3 (Prepare diff → Workflow → Present) on the
    **new** working tree. In these rounds the table adds the **`Status`** column —
    see step 3 for the concrete 9-column header, the 🔧/⏭️/🔁/🆕 values, and the
-   `(file, mechanism)` matching rule that keeps `#` stable. Use the workflow's
-   per-finding **`mechanism`** field (the merge step already emits it) as the
-   cross-round identity key — it's the mechanical anchor for matching, stable
-   numbering, Status, and the OPEN count, so those aren't reconstructed from
-   memory. `ROUND += 1`; loop back to step 1.
+   `(file, mechanism)` matching rule that keeps `#` stable. Match on the
+   workflow's per-finding **`mechanism`** field plus the file — but treat it as a
+   **best-effort heuristic, not an exact key**: `mechanism` is model-generated
+   prose, so it can drift (same defect re-worded → a false 🆕) or collide (two
+   distinct defects, one string → a false match). Reconcile by the underlying
+   defect, not string equality, and when unsure prefer keeping a finding's
+   existing `#` over minting a new one. (A stable ID emitted by the merge step
+   would remove the ambiguity — a future improvement.) `ROUND += 1`; loop back to
+   step 1.
 
 Close-out — render the trajectory deterministically (never by hand):
 ```sh

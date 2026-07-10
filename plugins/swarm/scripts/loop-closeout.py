@@ -16,8 +16,12 @@ them from each round's presentation) and passes them in. No state file, so
 there is no working-directory footgun.
 
 Usage:
-  loop-closeout.py step --round R --cap N --findings F --agreed A --changed C
+  loop-closeout.py step --round R --cap N --findings F --agreed A --changed C [--pending P]
       -> prints `continue` or `terminate=<reason>` (one of the 4 reasons).
+      --pending P = agreed findings still awaiting a user decision (default 0);
+      P > 0 keeps the loop alive past every convergence reason except the cap.
+      On bad input it writes to stderr and exits non-zero with NO stdout token —
+      the caller must treat a non-zero exit as abort, not as `continue`.
 
   loop-closeout.py box "15 7 4 4 5 4 3 1 1 0" --reason cap
       -> prints the close-out box + the termination reason line.
@@ -47,11 +51,11 @@ def cmd_step(a: argparse.Namespace) -> int:
       4. this was the last allowed round          -> cap
     Otherwise: continue.
 
-    `no-change` is a real fixed point only when the round changed nothing AND no
-    agreed finding is still awaiting a user decision. `--pending` (needs-decision
-    findings the user hasn't answered) suppresses no-change so the loop doesn't
-    declare convergence while a choice is still open — the divergence the caller
-    would otherwise hit. Inputs are range-checked so a mis-parsed flag (e.g.
+    Any agreed finding still awaiting a user decision (`--pending` > 0) keeps the
+    loop alive: it suppresses ALL THREE convergence reasons (0-findings,
+    nothing-agreed, no-change), because none of them is a true fixed point while a
+    choice is still owed. Only `cap` — the safety stop — can still fire with a
+    decision pending. Inputs are range-checked so a mis-parsed flag (e.g.
     `--cap 0`) fails loudly instead of silently collapsing the loop.
     """
     for name, val, lo in (
@@ -62,11 +66,12 @@ def cmd_step(a: argparse.Namespace) -> int:
             print(f"loop-closeout: {name} must be >= {lo} (got {val})", file=sys.stderr)
             return 2
 
-    if a.findings <= 0:
+    converged = a.pending <= 0  # a pending decision is never a fixed point
+    if converged and a.findings <= 0:
         print("terminate=0-findings")
-    elif a.agreed <= 0:
+    elif converged and a.agreed <= 0:
         print("terminate=nothing-agreed")
-    elif a.changed <= 0 and a.pending <= 0:
+    elif converged and a.changed <= 0:
         print("terminate=no-change")
     elif a.round + 1 >= a.cap:
         print("terminate=cap")
@@ -83,6 +88,9 @@ def cmd_box(a: argparse.Namespace) -> int:
         return 2
     if not counts:
         print("loop-closeout: no counts given", file=sys.stderr)
+        return 2
+    if any(c < 0 for c in counts):
+        print("loop-closeout: OPEN counts must be >= 0", file=sys.stderr)
         return 2
 
     labels = [f"R{i}" for i in range(len(counts))]
