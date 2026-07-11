@@ -25,6 +25,13 @@ branch delta).
   `10`; `--loop=N` overrides). Implies `--fix`. See step 4.
 - If **both** `--fix` and `--loop` are given, `--loop` wins (it already implies
   `--fix`) — run the loop to convergence/cap, not a single fix pass.
+- `--max` — **deepest-effort profile**: lift every voice to its ceiling for the
+  slowest, most thorough review (costs more time + tokens). Orthogonal to
+  `--fix`/`--loop` — composes with both (`--max --loop` = max-depth fix loop).
+  Set `max: true` in the workflow args (step 2). It bumps: codex →
+  `gpt-5.6-sol` at `xhigh` (codex has no `max` tier), grok-build → `max`,
+  Claude finder lenses + the adversarial verifier → `xhigh`. gate/merge and the
+  composer voice (no effort control) are unchanged.
 - Anything left after removing the flags → the scope argument for step 1.
 
 Without either flag the review is **read-only**: present the report and offer to
@@ -142,7 +149,9 @@ Workflow({
 })
 ```
 
-Fill `<DIFF>`/`<PROMPT>` from the echoed paths. Add `claude: false` to `args`
+Fill `<DIFF>`/`<PROMPT>` from the echoed paths. Add `max: true` to `args` when
+`--max` was given (step 1 stripped it) — the deepest-effort profile. Add
+`claude: false` to `args`
 for an **external-only control run** (codex + grok-build + composer, no Claude
 finder lenses — merge/verify still run in-session); default is the full ensemble.
 The workflow runs in the background for several minutes — **tell the user they

@@ -20,11 +20,13 @@ with `--fix` / `--loop` — applies the findings you agreed with.
 
 ## Commands
 
-- `/swarm:review [ref | --staged | pathspec] [--fix | --loop[=N]]` — review a
-  diff with the full ensemble. Defaults to the branch delta vs the default
-  branch (including uncommitted work). `--fix` applies the agreed findings once;
-  `--loop[=N]` re-reviews after each fix round until it converges (cap default
-  `10`).
+- `/swarm:review [ref | --staged | pathspec] [--fix | --loop[=N]] [--max]` —
+  review a diff with the full ensemble. Defaults to the branch delta vs the
+  default branch (including uncommitted work). `--fix` applies the agreed
+  findings once; `--loop[=N]` re-reviews after each fix round until it converges
+  (cap default `10`); `--max` runs the deepest-effort profile (codex
+  `gpt-5.6-sol`/`xhigh`, grok `max`, Claude lenses + verifier `xhigh`) — slower,
+  more thorough, composes with `--fix`/`--loop`.
 - `/swarm:agents` — show which review backends are installed, authenticated,
   and ready.
 
