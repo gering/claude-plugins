@@ -164,27 +164,37 @@ can watch live progress with `/workflows`** while it runs. It returns
 ### 3. Present the report — LOCKED layout, render exactly this
 
 Header `# 🐝 Swarm Review` + the target, then the findings table (most severe
-first), then the balance block. All columns stay narrow:
+first), then the required per-finding notes, then the balance block. The table
+is **terminal-narrow — six columns, every cell short** so it renders as a real
+table in an ~80–100-col terminal; a wide table degrades to raw pipes (that is
+why `Note` lives below, not in a column, and `Agents`+`Verifier` fold into one):
 
-| # | Sev | Ort | Finding | Agents | Verifier | Verdict | Note |
+| # | Sev | Ort | Befund | Quelle | V |
+
+(Translate the labels to the conversation language; `Ort`/`Befund` shown here in
+German. Do not translate finding content.)
 
 - **#** — stable finding number; never renumber across `--loop` rounds (new
   findings get new numbers).
 - **Sev** — icon only: 🔴 critical · 🟡 warning · ⚪ minor.
 - **Ort** — `` `file:line` `` in backticks.
-- **Finding** — short one-line summary.
-- **Agents** — the concrete models that raised it, short + dot-joined, mapping
-  each finding's `backends`: `claude→opus`, `codex→gpt`, `grok→grok`,
-  `composer→composer` (e.g. `opus·grok`, `gpt·composer`). Never the backend
-  names, never single letters. grok+composer = one family (no cross-family
-  consensus).
-- **Verifier** — the ensemble's confidence from `verifier`: `CONFIRMED` /
-  `PLAUSIBLE` (consensus clusters are CONFIRMED).
-- **Verdict** — YOUR main-session judgment, icon only, the action gate: ✅ agree ·
-  🟨 partial · ❌ disagree. Judge each finding against project context — this is
-  distinct from Verifier (ensemble confidence).
-- **Note** — short; REQUIRED for 🟨/❌ (the why), optional for ✅ (fix hint /
-  "trivial one-liner").
+- **Befund** — one short clause, **≤ ~45 chars** (the width budget); no emoji here.
+- **Quelle** — who raised it + ensemble confidence, folded into one cell: the
+  concrete models (`claude→opus`, `codex→gpt`, `grok→grok`, `composer→composer`,
+  dot-joined, e.g. `opus·grok`) then a confidence glyph — **`✓` = CONFIRMED ·
+  `~` = PLAUSIBLE** (e.g. `opus·grok ✓`, `gpt ~`). Never the backend names / single
+  letters. grok+composer = one family (no cross-family consensus). A single-source
+  review (no ensemble) omits this column.
+- **V** — YOUR main-session Verdict, icon only, the action gate: ✅ agree ·
+  🟨 partial · ❌ disagree. Distinct from the `✓`/`~` confidence in Quelle.
+
+**Notes go BELOW the table, not in a column** — one terse line per finding that
+needs a *why*, keyed by `#`, **REQUIRED for every 🟨/❌** (optional for ✅ as a
+fix hint). Collapse them onto one wrapped line:
+
+```
+Notiz:  #3 🟨 <why> · #6 ❌ <why> · #1 🟨 <fix hint>
+```
 
 Then the balance block (ALWAYS, this shape), from `balance`:
 
@@ -199,11 +209,11 @@ Then, when present:
   an errored backend is NOT "found nothing".
 - **Redactions** — if `balance.redactions > 0`, note the output gate scrubbed N
   finding(s).
-- `Agents`/`Verifier` columns are swarm-only (a single-source review omits them).
+- The `Quelle` column is swarm-only (a single-source review omits it).
   A **`Status`** column is added ONLY in `--loop` re-review rounds (round 0 uses
-  the 8-column table above). The full re-review header then is:
+  the six-column table above). The seven-column re-review header is:
 
-  `| # | Sev | Ort | Finding | Agents | Verifier | Verdict | Note | Status |`
+  `| # | Sev | Ort | Befund | Quelle | V | Status |`
 
   Status values: 🔧 fixed · ⏭️ skipped · 🔁 recurred · **🆕 new** (raised this
   round, no prior round had it). Match findings across rounds by
@@ -301,7 +311,7 @@ Each round:
      the fixed files (`git add`) before the re-review — otherwise `git diff
      --cached` reviews the frozen index and the loop never sees its own edits.
    In these rounds the table adds the **`Status`** column —
-   see step 3 for the concrete 9-column header, the 🔧/⏭️/🔁/🆕 values, and the
+   see step 3 for the concrete seven-column header, the 🔧/⏭️/🔁/🆕 values, and the
    `(file, mechanism)` matching rule that keeps `#` stable. Match on the
    workflow's per-finding **`mechanism`** field plus the file — but treat it as a
    **best-effort heuristic, not an exact key**: `mechanism` is model-generated
