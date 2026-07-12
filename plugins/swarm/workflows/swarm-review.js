@@ -33,6 +33,13 @@ const EXTERNAL_PROMPT = INPUT.externalPromptFile
 // backendError (a visible degraded ensemble), never a silent downgrade.
 const MAX = INPUT.max === true
 const MAX_CODEX_MODEL = 'gpt-5.6-sol'
+// Defense-in-depth: this value is interpolated into a shell command string a
+// transport agent runs via Bash. It is a constant today (no injection vector),
+// but guard it so a future edit to a dynamic/untrusted source can't inject —
+// allow only model-id characters, else fail loudly rather than build a bad cmd.
+if (MAX && !/^[A-Za-z0-9._-]+$/.test(MAX_CODEX_MODEL)) {
+  throw new Error(`unsafe MAX_CODEX_MODEL: ${JSON.stringify(MAX_CODEX_MODEL)}`)
+}
 if (!ADAPTER || !DIFF_FILE || !EXTERNAL_PROMPT) {
   // Full shape so the /swarm:review presenter can render this without tripping
   // on missing gate/balance/refuted/backendErrors keys.
