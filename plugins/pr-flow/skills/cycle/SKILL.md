@@ -117,6 +117,7 @@ When `--loop` (alias `--auto`) is present, `/cycle` stops being a single pass an
 
 - Parse `--max=N` (default `10`). This caps total iterations so the loop can never run forever.
 - Initialize counters: `ROUND = 0`, `FIXES_TOTAL = 0`, `FIX_COMMITS = 0`, and an `OPEN` list (findings you disagreed with, deduped across rounds).
+- Initialize `SEEN` — the loop's in-session store of prior findings, keyed by `(file, mechanism)`, each holding its stable `#`, verdict, and disposition (🔧 fixed / ⏭️ skipped / 🔁 recurred / ❌ disagreed). This is the **only** source for the re-review `Status` column and stable `#` (the poll returns just the raw latest review with no memory) — see the format spec's "Status column" section.
 - **Reuse a fresh review if one already exists**: if the latest `@claude` review on the PR is newer than the latest push (not stale) and has findings, skip the initial commit/push/trigger and go straight to "Fix agreed" with that review. Otherwise run one normal cycle (steps 1–10 above) to obtain the first review.
 
 ### Each iteration
@@ -126,6 +127,7 @@ When `--loop` (alias `--auto`) is present, `/cycle` stops being a single pass an
    - Before editing, confirm the reviewer's claim still matches the code (comment rot / already-fixed / line drift → skip that finding, don't force it).
    - Add every ❌ disagree to the `OPEN` list (so it is reported, not silently dropped).
    - `FIXES_TOTAL += fixes applied this round`.
+   - Update `SEEN`: match each finding against it by `(file, mechanism)` — a matched finding keeps its stable `#` (only a new one takes the next free number); record each finding's disposition (🔧 fixed / ⏭️ skipped / 🔁 recurred / ❌ disagreed). The next re-cycle's step-10 render reads `SEEN` to populate the `Status` column and reuse stable numbers.
 2. **Print per-round stats** (before the wait):
    ```
    🔁 Loop round <ROUND+1>/<MAX> · fixes total: <FIXES_TOTAL> · this round: <Y> · open (disagreed): <Z>

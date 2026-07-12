@@ -128,7 +128,7 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
        ```
        bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" poll <PR_NUMBER> "<TRIGGER_ISO>"
        ```
-       Use the **Bash tool** with `run_in_background: true`. When it completes, render the review following `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md`.
+       Use the **Bash tool** with `run_in_background: true`. When it completes, render the review following the shared format spec at `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md` — read that file before presenting. Required sections: header, status line, findings markdown table, single-line recommendation. (A post-rebase review is round 0 — no prior findings, so no `Status` column.)
      - If output is empty → no auto-trigger detected. Inform user they can run `/cycle` to trigger a review manually. Do NOT trigger automatically — `/rebase` is a rebase tool, not a review trigger.
 
 10. **Final summary**:

@@ -1,13 +1,16 @@
 # Shared Review Output Format
 
 > Canonical format for presenting Claude review results. Used by `/cycle`
-> (after polling completes), `/check` (for the latest review section), and
-> `/fix` (for the checklist before asking which to fix).
+> (after polling completes), `/check` (for the latest review section), `/fix`
+> (for the checklist before asking which to fix), and `/open` + `/rebase` (for
+> the auto-triggered review after opening / rebasing a PR).
 >
-> This is the same findings-table layout `/swarm:review` renders — narrow
-> icon-only judgment columns, a separate short note. The one difference: a
+> This is the same findings-table *family* as `/swarm:review` — same columns,
+> icon-only judgment cells, a separate short note — but not byte-identical: a
 > single-source Claude review omits swarm's `Quelle` (`Agents`+`Verifier`)
-> column (see "Swarm-only columns" below).
+> column (see "Swarm-only columns" below), and swarm compresses harder for that
+> extra column (a one-char `V` header, tighter cell budgets). pr-flow, one
+> column lighter, uses the more readable `Verdict` header and wider budgets.
 
 ## Language
 
@@ -91,11 +94,14 @@ finding + ensemble confidence) between `Finding` and `Verdict`. A single-source
 Claude review has no ensemble to attribute, so **pr-flow omits that column** —
 use the six columns above.
 
-### Status column (re-review cycles only)
+### Status column (`/cycle --loop` re-reviews only)
 
-On a re-review (a later `/cycle`, or after `/fix`), append a `Status` column so
-the user sees at a glance what happened to each prior finding — this replaces a
-separate "previously raised" table:
+The `Status` column needs memory of the prior round's findings — their `#`,
+verdict, and disposition. The **only** producer of that memory is a `/cycle
+--loop` run: it holds the previous round's findings in-session and carries them
+forward (see the loop's "Fix agreed" step). On its re-review rounds, append a
+`Status` column so the user sees at a glance what happened to each prior finding
+— this replaces a separate "previously raised" table:
 
 ```
 | # | Sev | Location | Finding | Verdict | Note | Status |
@@ -111,7 +117,10 @@ location. **`mechanism`** = what is wrong + which code element, independent of
 line number — e.g. "unchecked null on `user.email`" or "off-by-one in the loop
 bound": a later edit that shifts the line leaves the mechanism unchanged, so the
 finding still matches. A matched finding keeps its `#`; only a 🆕 finding takes
-the next free number. Round 0 (the first review) omits the `Status` column.
+the next free number. Round 0 (the first review) omits the `Status` column — as
+do all stateless single-shot presentations (`/check`, `/open`, `/rebase`, and a
+standalone `/fix`): they re-parse the raw latest review with no prior-round
+memory, so they always render the round-0 table.
 
 ### Table formatting requirements
 
@@ -131,9 +140,11 @@ the next free number. Round 0 (the first review) omits the `Status` column.
 
 Pick exactly one:
 
-- **Any 🔴 blocking present** → `Run /fix to work through them, then /cycle again.`
+- **Any 🔴 blocking present** — including a carried-over 🔴 still ⏭️ skipped or
+  ❌ disagreed on a `--loop` re-review → `Run /fix to work through them, then /cycle again.`
 - **Only 🟡/⚪ findings** → `Address if you want. Otherwise: run /merge when ready.`
-- **Zero findings** → `Ready to merge — run /merge.`
+- **Zero findings** — round 0, or a re-review with every prior 🔴 resolved →
+  `Ready to merge — run /merge.`
 - **CI failing or merge-blocked** → `Investigate CI failure before proceeding.`
 - **Review is stale** → `Push latest changes and run /cycle for a fresh review.`
 
