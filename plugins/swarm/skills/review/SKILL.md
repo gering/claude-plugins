@@ -118,7 +118,14 @@ HDR
   printf '\n<<<<<<<< DIFF-%s END <<<<<<<<\n' "$NONCE"
 } > "$PROMPT"
 
-echo "TMPD=$TMPD"; echo "DIFF=$DIFF"; echo "PROMPT=$PROMPT"
+# Second fence nonce for the FINDING text the backends send BACK (re-fed to the
+# merge/verify agents → second-order injection). Generated here as real entropy
+# but DELIBERATELY NOT written into $PROMPT: the backends must never see it, or a
+# compromised backend could forge the delimiter. The workflow collision-checks it
+# against the returned findings (which don't exist yet) and extends it if needed.
+FINDING_NONCE="$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
+
+echo "TMPD=$TMPD"; echo "DIFF=$DIFF"; echo "PROMPT=$PROMPT"; echo "FINDING_NONCE=$FINDING_NONCE"
 echo "PROMPT_BYTES=$(wc -c < "$PROMPT")"
 echo "LIVE_JSON=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json | tr -d '\n')"
 ```
@@ -148,12 +155,13 @@ Workflow({
     adapter: "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh",
     diffFile: "<DIFF>",
     externalPromptFile: "<PROMPT>",
+    findingNonce: "<FINDING_NONCE>",
     externalVoices: [<the live voices from step 1>]
   }
 })
 ```
 
-Fill `<DIFF>`/`<PROMPT>` from the echoed paths. Add `max: true` to `args` when
+Fill `<DIFF>`/`<PROMPT>`/`<FINDING_NONCE>` from the echoed values. Add `max: true` to `args` when
 `--max` was given (step 1 stripped it) — the deepest-effort profile. Add
 `claude: false` to `args`
 for an **external-only control run** (codex + grok-build + composer, no Claude

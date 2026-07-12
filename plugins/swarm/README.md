@@ -55,10 +55,12 @@ Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok-build ∥ composer)
 requires ≥2 of *claude / openai / grok*. Everything else is a solo and earns
 its place through the verifier.
 
-**Security is minimal by design.** The diff is fenced as untrusted data, the
-external CLIs run sandboxed + tool-less (grok) with a secret scrub at the
-adapter boundary, and a final **output gate** re-scrubs every surviving finding
-before it reaches you. Findings are advisory by default; `--fix` / `--loop` act
+**Security is minimal by design.** Untrusted text is fenced with a per-run
+random nonce at both hops — the diff going into the backends, and the finding
+text they send back into the merge/verify prompts (closing second-order
+injection). The external CLIs run sandboxed + tool-less (grok) with a secret
+scrub at the adapter boundary, and a final **output gate** re-scrubs every
+surviving finding before it reaches you. Findings are advisory by default; `--fix` / `--loop` act
 only on the ones you agreed with, and **only Claude** applies edits — the
 external agents stay review-only, never touching your code. The full threat
 model lives in `docs/pipeline-blueprint.md` § Security.
