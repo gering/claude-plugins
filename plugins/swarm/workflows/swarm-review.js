@@ -14,6 +14,8 @@ export const meta = {
 // args.diffFile           file the Claude finders read (raw unified diff)
 // args.externalPromptFile file the external CLIs get (review instr + fenced diff)
 // args.externalVoices     which external backends are live (subset of the three)
+// args.claude             false → external-only control run (no Claude lenses)
+// args.max                true (strict boolean) → deepest-effort profile below
 // Normalize: the runtime may deliver `args` as an object OR a JSON string.
 let INPUT = args
 if (typeof INPUT === 'string') { try { INPUT = JSON.parse(INPUT) } catch { INPUT = {} } }
@@ -24,6 +26,11 @@ const EXTERNAL_PROMPT = INPUT.externalPromptFile
 // `--max` profile: lift every voice to its ceiling for a deepest-effort review.
 // codex has no `max` tier (xhigh is its top) + gets the stronger model; grok
 // goes to `max`; the in-session Claude finders and verifier go to `xhigh`.
+// Strict === true: the skill always passes a boolean, and a stray truthy value
+// (max:1 / "true") should NOT silently trigger a slower, costlier run.
+// MAX_CODEX_MODEL must be a model the local codex CLI can load — if it's been
+// renamed/retired, run_codex exits non-zero and the voice surfaces as a
+// backendError (a visible degraded ensemble), never a silent downgrade.
 const MAX = INPUT.max === true
 const MAX_CODEX_MODEL = 'gpt-5.6-sol'
 if (!ADAPTER || !DIFF_FILE || !EXTERNAL_PROMPT) {

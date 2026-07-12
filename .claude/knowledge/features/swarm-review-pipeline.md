@@ -77,7 +77,10 @@ the diff out of the script, above). Claude applies edits between rounds.
   / nothing-agreed / no-change / cap, default 10), `box` = the OPEN-findings
   close-out visualization that **shows a legitimate rise** (a fix surfaced new
   findings) instead of hiding it. Stateless — Claude passes the per-round counts
-  in; no state file, so no cwd footgun.
+  in; no state file, so no cwd footgun. The determinism is **the arithmetic, not
+  the inputs**: `F/A/C/pending/OPEN[]` are Claude's in-session tallies, so a
+  miscount still feeds a wrong reason in (garbage-in) — the script can't make a
+  judged count reproducible, only the branch logic over it.
 - Loop mechanics mirror pr-flow `/cycle` run locally (no push / no `@claude`
   poll); the `Status` column (🔧/⏭️/🔁) and stable `#` across rounds come from
   the shared [[swarm-review-pipeline]] table contract (P2 reserved them).
