@@ -40,7 +40,8 @@ debugging round.
   passes `-m` on every call), overridable per call via `--model` — so a review is
   reproducible instead of tracking the user's ambient `~/.codex/config` default.
   The pipeline runs codex at `high` normally; the `--max` profile overrides both
-  model and effort (`gpt-5.6-sol` @ `xhigh`) — see [[swarm-review-pipeline]].
+  model and effort (`gpt-5.6-sol` @ `xhigh`) — see
+  [swarm-review-pipeline](swarm-review-pipeline.md).
 - **`grok-composer-2.5-fast` does not enforce `--json-schema`** — but it is
   still usable as a second grok voice. Given a strict-JSON *prompt* (the adapter
   appends the schema text and drops `--json-schema`/`--effort`), it emits **pure

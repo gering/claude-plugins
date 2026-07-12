@@ -73,7 +73,7 @@ the diff out of the script, above). Claude applies edits between rounds.
 - **Re-confirm claim-vs-code before every edit** — a stale finding (comment rot,
   already-fixed, line drift) is reported as skipped, never fabricated into an edit.
 - **Deterministic bits live in `scripts/loop-closeout.py`, not skill prose**
-  (per [[project_prose_skill_logic_drift]] — stateful skill logic drifts as
+  (per the project's prose-drift memory — stateful skill logic drifts as
   prose): `step` = the 4-part termination decision in **fixed order** (0-findings
   / nothing-agreed / no-change / cap, default 10), `box` = the OPEN-findings
   close-out visualization that **shows a legitimate rise** (a fix surfaced new
