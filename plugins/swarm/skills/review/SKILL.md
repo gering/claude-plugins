@@ -22,10 +22,11 @@ branch delta).
 - `--fix` — after presenting the report, apply the agreed findings **once**
   (✅ agree + 🟨 partial), then stop. No re-review. See step 4.
 - `--loop[=N]` — fix-then-re-review until the loop converges or a cap (default
-  `10`; `--loop=N` overrides). Implies `--fix`. See step 4. **`--loop=0` is a
-  single `--fix` pass** — treat it as plain `--fix` and never call the loop
-  machinery (cap `0` would fail the script's `--cap≥1` guard *after* fixes were
-  applied, stranding the run half-done).
+  `10`; `--loop=N` overrides). Implies `--fix`. See step 4. **Any `--loop=N` with
+  `N < 1` (i.e. `0` or negative) is a single `--fix` pass** — normalize it to
+  plain `--fix` and never call the loop machinery (a cap `< 1` would fail the
+  script's `--cap≥1` guard *after* fixes were applied, stranding the run
+  half-done). Non-integer `N` → same fallback.
 - If **both** `--fix` and `--loop` are given, `--loop` wins (it already implies
   `--fix`) — run the loop to convergence/cap, not a single fix pass.
 - `--max` — **deepest-effort profile**: lift every voice to its ceiling for the
@@ -164,21 +165,25 @@ can watch live progress with `/workflows`** while it runs. It returns
 ### 3. Present the report — LOCKED layout, render exactly this
 
 Header `# 🐝 Swarm Review` + the target, then the findings table (most severe
-first), then the required per-finding notes, then the balance block. The table
-is **terminal-narrow — six columns, every cell short** so it renders as a real
-table in an ~80–100-col terminal; a wide table degrades to raw pipes (that is
-why `Note` lives below, not in a column, and `Agents`+`Verifier` fold into one):
+first), then the balance block. The table is **terminal-narrow — seven columns,
+every prose cell kept short** so it renders as a real table in a terminal instead
+of degrading to raw pipes. Total table width is driven by **column count ×
+per-cell length**, and a terminal renderer **wraps** an over-long cell to its
+column width (taller row) rather than widening the table — so the lever is short
+cells, not fewer facts. Two moves keep it fitting: `Agents`+`Verifier` fold into
+one `Quelle` cell (7 columns, not 8), and the two prose cells carry a hard char
+budget so they wrap:
 
-| # | Sev | Ort | Befund | Quelle | V |
+| # | Sev | Ort | Befund | Quelle | V | Notiz |
 
-(Translate the labels to the conversation language; `Ort`/`Befund` shown here in
-German. Do not translate finding content.)
+(Translate the labels to the conversation language; `Ort`/`Befund`/`Notiz` shown
+here in German. Do not translate finding content.)
 
 - **#** — stable finding number; never renumber across `--loop` rounds (new
   findings get new numbers).
 - **Sev** — icon only: 🔴 critical · 🟡 warning · ⚪ minor.
 - **Ort** — `` `file:line` `` in backticks.
-- **Befund** — one short clause, **≤ ~45 chars** (the width budget); no emoji here.
+- **Befund** — one short clause, **≤ ~40 chars** (hard budget); no emoji here.
 - **Quelle** — who raised it + ensemble confidence, folded into one cell: the
   concrete models (`claude→opus`, `codex→gpt`, `grok→grok`, `composer→composer`,
   dot-joined, e.g. `opus·grok`) then a confidence glyph — **`✓` = CONFIRMED ·
@@ -187,14 +192,10 @@ German. Do not translate finding content.)
   review (no ensemble) omits this column.
 - **V** — YOUR main-session Verdict, icon only, the action gate: ✅ agree ·
   🟨 partial · ❌ disagree. Distinct from the `✓`/`~` confidence in Quelle.
-
-**Notes go BELOW the table, not in a column** — one terse line per finding that
-needs a *why*, keyed by `#`, **REQUIRED for every 🟨/❌** (optional for ✅ as a
-fix hint). Collapse them onto one wrapped line:
-
-```
-Notiz:  #3 🟨 <why> · #6 ❌ <why> · #1 🟨 <fix hint>
-```
+- **Notiz** — the *why*, **≤ ~55 chars** (hard budget — let the renderer wrap it
+  into a taller cell, never widen the row). **REQUIRED for every 🟨/❌**; optional
+  for ✅ (a fix hint / "trivial one-liner"). No line breaks inside the cell (a
+  table row is one line) — keep it short and let wrapping do the rest.
 
 Then the balance block (ALWAYS, this shape), from `balance`:
 
@@ -211,9 +212,9 @@ Then, when present:
   finding(s).
 - The `Quelle` column is swarm-only (a single-source review omits it).
   A **`Status`** column is added ONLY in `--loop` re-review rounds (round 0 uses
-  the six-column table above). The seven-column re-review header is:
+  the seven-column table above). The eight-column re-review header is:
 
-  `| # | Sev | Ort | Befund | Quelle | V | Status |`
+  `| # | Sev | Ort | Befund | Quelle | V | Notiz | Status |`
 
   Status values: 🔧 fixed · ⏭️ skipped · 🔁 recurred · **🆕 new** (raised this
   round, no prior round had it). Match findings across rounds by
@@ -308,10 +309,14 @@ Each round:
      resume the loop once the decision produces (or explicitly declines) an edit.
    - **Re-review must see the fixes.** Fixes land in the **working tree**, so the
      re-review scope must be the working tree. For a `--staged` review, re-stage
-     the fixed files (`git add`) before the re-review — otherwise `git diff
-     --cached` reviews the frozen index and the loop never sees its own edits.
+     **only the fixed hunks** (`git add -p` / a patch-scoped add), **immediately
+     after each fix** — not a whole-file `git add` (that would sweep unrelated
+     unstaged edits into the index, diverging from the staged diff the user
+     agreed to) and not deferred to just before the re-review (round-0 edits must
+     be staged the same round). Otherwise `git diff --cached` reviews the frozen
+     index and the loop never sees its own edits.
    In these rounds the table adds the **`Status`** column —
-   see step 3 for the concrete seven-column header, the 🔧/⏭️/🔁/🆕 values, and the
+   see step 3 for the concrete eight-column header, the 🔧/⏭️/🔁/🆕 values, and the
    `(file, mechanism)` matching rule that keeps `#` stable. Match on the
    workflow's per-finding **`mechanism`** field plus the file — but treat it as a
    **best-effort heuristic, not an exact key**: `mechanism` is model-generated

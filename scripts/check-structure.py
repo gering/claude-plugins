@@ -248,12 +248,33 @@ def check_shell_scripts():
             err(f"{rel(script)}: bash syntax error — {detail}")
 
 
+def check_plugin_tests():
+    """Run every plugins/*/scripts/test_*.py — a plugin drops a self-contained
+    assert-based test there and CI runs it. Non-zero exit = failure."""
+    for test in sorted((REPO / "plugins").glob("*/scripts/test_*.py")):
+        try:
+            result = subprocess.run(
+                ["python3", str(test)],
+                capture_output=True,
+                text=True,
+                cwd=str(test.parent),
+            )
+        except FileNotFoundError:
+            err("python3 not found on PATH — cannot run plugin tests")
+            return
+        if result.returncode != 0:
+            detail = (result.stderr.strip() or result.stdout.strip()).splitlines()
+            tail = " | ".join(detail[-3:]) if detail else "(no output)"
+            err(f"{rel(test)}: test failed — {tail}")
+
+
 def main() -> int:
     checks = [
         ("JSON validity + version sync", check_json_and_versions),
         ("SKILL.md frontmatter", check_skill_frontmatter),
         ("internal ${CLAUDE_PLUGIN_ROOT} references", check_internal_refs),
         ("shell script syntax", check_shell_scripts),
+        ("plugin tests", check_plugin_tests),
     ]
     for label, fn in checks:
         fn()

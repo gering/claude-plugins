@@ -83,7 +83,7 @@ the diff out of the script, above). Claude applies edits between rounds.
   judged count reproducible, only the branch logic over it.
 - Loop mechanics mirror pr-flow `/cycle` run locally (no push / no `@claude`
   poll); the `Status` column (🔧/⏭️/🔁) and stable `#` across rounds come from
-  the shared [[swarm-review-pipeline]] table contract (P2 reserved them).
+  the report table contract this entry defines above (P2 reserved them).
 - **`--max` profile** (`INPUT.max` in the workflow): lifts every voice to its
   ceiling — codex `gpt-5.6-sol`@`xhigh` (codex has NO `max` tier, xhigh is its
   top), grok-build `max`, Claude finder lenses + verifier `xhigh`; gate/merge
