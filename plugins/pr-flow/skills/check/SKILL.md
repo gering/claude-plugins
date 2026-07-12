@@ -73,7 +73,7 @@ user_invocable: true
      ⚠️ 2 uncommitted files
      ⚠️ 1 unpushed commit
      ```
-   - **Claude review section** — if a Claude review exists, render its findings following the shared format spec at `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md`. Required: header + status + **markdown findings table**. No prose cards, no per-finding headings. See forbidden patterns in the spec.
+   - **Claude review section** — if a Claude review exists, render its findings following the shared format spec at `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md`. Required: header + status + **markdown findings table**. No prose cards, no per-finding headings. See forbidden patterns in the spec. `/check` is a stateless single-comment snapshot — it renders the latest review's table only, with **no `Status` column** (cross-cycle status tracking is `/cycle`'s and `/fix`'s job).
    - If no Claude review: skip the findings table, just note "No Claude review yet."
 
 8. **Recommendation** — exactly one line, picked per the rules in `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md` (Recommendation section). Adapt to this skill's context:

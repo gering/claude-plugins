@@ -32,7 +32,9 @@ user_invocable: true
 
 3. **Parse issues**:
    - Split the review body into discrete findings (grouped by file, each with severity if noted)
-   - Number them sequentially starting at #1
+   - Number them sequentially starting at #1 — a standalone `/fix` re-parses the
+     raw review and has no prior cycle's numbers to reuse (stable `#` is a
+     within-`/cycle`-loop property; see the `#` rule in the format spec)
    - For each issue, extract:
      - File path + line(s)
      - Reviewer's concern (quote the key phrase)

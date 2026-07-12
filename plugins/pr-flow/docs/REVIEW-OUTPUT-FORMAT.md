@@ -12,9 +12,12 @@
 ## Language
 
 Match the language of the user conversation. Structure below uses English
-labels; translate labels (`Sev`, `Location`, `Finding`, `Verdict`, `Note`) to
-German when the conversation is in German. **Do not translate content** from
-the review — quote it as-is.
+labels; when the conversation is in German, translate `Location`, `Finding`,
+and `Note` to `Ort`, `Befund`, `Notiz`. Keep `Sev` and `Verdict` as fixed
+tokens in every language — the authoritative German header is
+`# | Sev | Ort | Befund | Verdict | Notiz` (plus `Status` on re-reviews), the
+same one every skill references. **Do not translate content** from the review —
+quote it as-is.
 
 ## Required sections
 
@@ -57,9 +60,12 @@ One of the three Verdict variants — pick based on severity mix:
 
 ### Column rules
 
-- **`#`** — stable finding number (lets user say "fix #1 and #3"). In re-review
-  cycles it **stays the same** for a recurring finding; only new findings take
-  the next free number. Never renumber.
+- **`#`** — finding number (lets user say "fix #1 and #3"). **Stable within a
+  single `/cycle` loop**, which holds its findings in-session: across its
+  re-review rounds a recurring finding keeps its number and only new findings
+  take the next free number — never renumber mid-loop. A standalone `/fix` or a
+  fresh `/check` re-parses the raw review with no memory of earlier numbers, so
+  it numbers from #1; that's expected, not a violation.
 - **`Sev`** — **icon only** (no text label), one of:
   - 🔴 blocking — bug, correctness issue, missing test for critical path
   - 🟡 suggestion — improvement the reviewer justified
@@ -100,7 +106,11 @@ separate "previously raised" table:
 
 `Status` values: 🔧 fixed · ⏭️ skipped · 🔁 recurred · 🆕 new (raised this round).
 Match a finding across cycles by **`(file, mechanism)`, not `(file, line)`** —
-lines drift after edits. A matched finding keeps its `#`; only a 🆕 finding takes
+lines drift after edits, so match on the *nature of the defect*, not its
+location. **`mechanism`** = what is wrong + which code element, independent of
+line number — e.g. "unchecked null on `user.email`" or "off-by-one in the loop
+bound": a later edit that shifts the line leaves the mechanism unchanged, so the
+finding still matches. A matched finding keeps its `#`; only a 🆕 finding takes
 the next free number. Round 0 (the first review) omits the `Status` column.
 
 ### Table formatting requirements
@@ -112,7 +122,10 @@ the next free number. Round 0 (the first review) omits the `Status` column.
   German: `# | Sev | Ort | Befund | Verdict | Notiz`, plus `Status` on
   re-reviews).
 - If a review has zero findings: skip the table, write `No issues raised. LGTM.`
-  under the Findings heading.
+  under the Findings heading. **Exception (re-reviews):** when prior findings
+  still need accounting for, render the Status table with their 🔧 fixed /
+  ⏭️ skipped rows even if there are zero *new* findings — the LGTM shortcut is
+  for round 0 (nothing raised yet, nothing to account for).
 
 ## Recommendation (REQUIRED — exactly one line)
 

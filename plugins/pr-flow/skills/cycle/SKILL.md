@@ -132,7 +132,7 @@ When `--loop` (alias `--auto`) is present, `/cycle` stops being a single pass an
    ```
 3. **Termination check** — break the loop (go to "Wrap-up") if any holds:
    - The review had **zero findings** → converged clean ✅.
-   - **Nothing was agreed** this round (every finding is a `Disagree`) → only disagreements remain.
+   - **Nothing was agreed** this round (every finding is a ❌ disagree) → only disagreements remain.
    - **No files changed** this round (everything agreed turned out to be comment-rot / already-fixed) → nothing actionable left.
    - `ROUND + 1 >= MAX` → safety cap hit.
    - The user said to stop (see "Interruptible").
