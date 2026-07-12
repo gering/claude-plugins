@@ -75,7 +75,7 @@ Backends:
 | Backend | Role | Mechanics |
 |---------|------|-----------|
 | `claude` | probe-only | reviews run in-session via the Agent tool |
-| `codex` | external reviewer | `codex exec --output-schema` in a read-only sandbox; auth via `codex login status` |
+| `codex` | external reviewer | `codex exec --output-schema` (model `gpt-5.6-terra`, effort `xhigh`) in a read-only sandbox; auth via `codex login status` |
 | `grok` | external reviewer | headless `-p` with inline `--json-schema` (model `grok-build`); findings extracted from the response envelope. `--model grok-composer-2.5-fast` takes a separate defensive-parse path (a ~2×-faster second grok voice, no schema flag). |
 
 Unavailable backends drop from the ensemble — `claude` alone still works.

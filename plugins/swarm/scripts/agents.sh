@@ -39,6 +39,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_SCHEMA="$SCRIPT_DIR/schema/finding.schema.json"
+CODEX_DEFAULT_MODEL="gpt-5.6-terra"
 GROK_DEFAULT_MODEL="grok-build"
 GROK_COMPOSER_MODEL="grok-composer-2.5-fast"
 # Default HOME so `$HOME` expansions below (auth file, sandbox deny paths) don't
@@ -439,10 +440,11 @@ run_codex() {
 
   TMP_OUT="$(mktemp)"
 
+  # Pin the swarm codex model (override with --model) so the ensemble is
+  # deterministic regardless of the user's global ~/.codex/config.toml default.
   # Array (not unquoted ${model:+…}) so a model name with whitespace is one
   # argv word, matching the effort_args idiom in run_grok.
-  local model_args=()
-  [[ -n "$model" ]] && model_args=(-m "$model")
+  local model_args=(-m "${model:-$CODEX_DEFAULT_MODEL}")
 
   # The schema-validated JSON lands in $TMP_OUT; codex's stdout copy of the
   # final message is discarded (its transcript goes to stderr = debug info).
