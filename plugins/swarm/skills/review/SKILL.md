@@ -282,11 +282,18 @@ fire while a decision is still pending.
 Each round:
 1. You already hold this round's report (round 0 = step 3; later rounds = the
    re-review below). Let `F` = findings, `A` = ✅+🟨 count.
-2. **Fix** — snapshot the tree first (`SNAP=$(git stash create || git rev-parse HEAD)`),
-   run the `--fix` procedure above, then derive `C` **deterministically from git,
-   not by hand**: `C=$(git diff --name-only "$SNAP" | wc -l | tr -d ' ')` = files
-   this round's fixes actually changed. `FIXES_TOTAL += fixes applied`. Append
-   this round's OPEN count to `OPEN[]`.
+2. **Fix** — snapshot the tree, run the `--fix` procedure above, then derive `C`
+   (files this round's fixes changed) **deterministically from git, not by hand**:
+   ```sh
+   SNAP=$(git stash create); [ -n "$SNAP" ] || SNAP=$(git rev-parse HEAD)   # stash create is empty (exit 0) on a clean tree
+   BEFORE_NEW=$(git ls-files --others --exclude-standard | sort)            # untracked snapshot (stash create omits these)
+   # … apply the round's fixes …
+   C=$(( $(git diff --name-only "$SNAP" | wc -l) \
+       + $(comm -13 <(printf '%s\n' "$BEFORE_NEW") <(git ls-files --others --exclude-standard | sort) | grep -c .) ))
+   ```
+   The two terms: modified tracked files (`git diff` vs the pre-fix snapshot) +
+   files newly created this round (`git diff` never lists untracked). `FIXES_TOTAL
+   += fixes applied`. Append this round's OPEN count to `OPEN[]`.
 3. **Termination decision** — **deterministic arithmetic over judged inputs**:
    the script's branch logic is fixed. `C` is now git-derived (step 2), but
    `F`/`A`/`P` and `OPEN[]` are still your in-session tallies, so a miscount there

@@ -250,7 +250,13 @@ def check_shell_scripts():
 
 def check_plugin_tests():
     """Run every plugins/*/scripts/test_*.py — a plugin drops a self-contained
-    assert-based test there and CI runs it. Non-zero exit = failure."""
+    assert-based test there and CI runs it. Non-zero exit = failure.
+
+    NOTE: this executes discovered test files, so it is arbitrary code execution
+    by design. That is safe here only because CI must never expose secrets or a
+    write-capable token to an untrusted PR run — GitHub Actions withholds both
+    from fork PRs by default, which is the property this relies on. If that ever
+    changes (secrets added to the PR job), gate this check to trusted branches."""
     for test in sorted((REPO / "plugins").glob("*/scripts/test_*.py")):
         try:
             result = subprocess.run(
