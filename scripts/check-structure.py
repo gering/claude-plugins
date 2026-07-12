@@ -248,12 +248,44 @@ def check_shell_scripts():
             err(f"{rel(script)}: bash syntax error — {detail}")
 
 
+def check_plugin_tests():
+    """Run every plugins/*/scripts/test_*.py — a plugin drops a self-contained
+    assert-based test there and CI runs it. Non-zero exit = failure.
+
+    NOTE: this executes discovered test files, so it is arbitrary code execution
+    by design. That is safe here only because CI must never expose secrets or a
+    write-capable token to an untrusted PR run — GitHub Actions withholds both
+    from fork PRs by default, which is the property this relies on. If that ever
+    changes (secrets added to the PR job), gate this check to trusted branches."""
+    for test in sorted((REPO / "plugins").glob("*/scripts/test_*.py")):
+        try:
+            result = subprocess.run(
+                ["python3", str(test)],
+                capture_output=True,
+                text=True,
+                cwd=str(test.parent),
+                stdin=subprocess.DEVNULL,  # a test that reads stdin must not block CI
+                timeout=120,               # a hang must fail, not wedge the check
+            )
+        except FileNotFoundError:
+            err("python3 not found on PATH — cannot run plugin tests")
+            return
+        except subprocess.TimeoutExpired:
+            err(f"{rel(test)}: test timed out (>120s) — treated as a failure")
+            continue
+        if result.returncode != 0:
+            detail = (result.stderr.strip() or result.stdout.strip()).splitlines()
+            tail = " | ".join(detail[-3:]) if detail else "(no output)"
+            err(f"{rel(test)}: test failed — {tail}")
+
+
 def main() -> int:
     checks = [
         ("JSON validity + version sync", check_json_and_versions),
         ("SKILL.md frontmatter", check_skill_frontmatter),
         ("internal ${CLAUDE_PLUGIN_ROOT} references", check_internal_refs),
         ("shell script syntax", check_shell_scripts),
+        ("plugin tests", check_plugin_tests),
     ]
     for label, fn in checks:
         fn()

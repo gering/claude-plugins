@@ -241,6 +241,17 @@ credential mid-review) converged on these non-negotiable mitigations:
    must NOT collapse to the same `{findings:[]}` as a clean empty review —
    carry an explicit `error` marker so a silently-failing backend is visible,
    not mistaken for "found nothing".
+7. **Edit authority is Claude-only (P5 `--fix`/`--loop`).** The review is
+   advisory by default; acting is opt-in. When it acts, **only the main Claude
+   session edits the working tree** — the external backends stay strictly
+   review-only (never `codex apply`, no write tools), so a backend compromised
+   via the untrusted diff can at most emit a *finding*, never an edit. Claude
+   acts only on findings it agreed with (✅/🟨), re-confirms each claim against
+   the code before editing (a fabricated finding fails this and is skipped), and
+   the loop never pushes or merges — all changes land locally for the user to
+   review. This keeps the untrusted-input boundary (1–6, read side) and the
+   write boundary (this item) separate: nothing that crosses the review boundary
+   ever gains write authority.
 
 ## Open P2 wiring (not yet in the blueprint)
 

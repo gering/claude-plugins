@@ -1,9 +1,9 @@
 ---
 title: "Swarm Review Pipeline (/swarm:review)"
 createdAt: 2026-07-05
-updatedAt: 2026-07-05
+updatedAt: 2026-07-09
 createdFrom: "branch: task/swarm-p2-security-architecture"
-updatedFrom: "branch: task/swarm-p2-security-architecture"
+updatedFrom: "branch: task/swarm-p5-fix-loop"
 pluginVersion: 1.8.2
 prime: false
 ---
@@ -56,6 +56,41 @@ grok-build ∥ composer (see [[swarm-backend-adapter]]).
   Proven useful: a control run found real bugs the with-Claude run missed (an
   `aws_secret_access_key` scrub-list drift, `git diff` omitting untracked files)
   — the "different models catch different defects" premise, live.
+
+## P5: `--fix` / `--loop` actions (swarm 0.3.0)
+
+`/swarm:review` can now **act**, not just advise — but the loop is **orchestrated
+in-session by Claude between Workflow runs**, one workflow run per review round,
+because workflow JS has no Bash and can't edit files (same constraint that keeps
+the diff out of the script, above). Claude applies edits between rounds.
+
+- **Only Claude edits.** External agents stay review-only — never `codex apply`,
+  never hand them edit authority (also the security posture: they run jailed +
+  tool-less). Act only on ✅-agree + 🟨-partial findings; 🟨 = apply the
+  session's own variant, not the reviewer's `recommendation` verbatim;
+  ❌-disagree is never touched and stays visible in the report.
+- **Re-confirm claim-vs-code before every edit** — a stale finding (comment rot,
+  already-fixed, line drift) is reported as skipped, never fabricated into an edit.
+- **Deterministic bits live in `scripts/loop-closeout.py`, not skill prose**
+  (per [[project_prose_skill_logic_drift]] — stateful skill logic drifts as
+  prose): `step` = the 4-part termination decision in **fixed order** (0-findings
+  / nothing-agreed / no-change / cap, default 10), `box` = the OPEN-findings
+  close-out visualization that **shows a legitimate rise** (a fix surfaced new
+  findings) instead of hiding it. Stateless — Claude passes the per-round counts
+  in; no state file, so no cwd footgun. The determinism is **the arithmetic, not
+  the inputs**: `F/A/C/pending/OPEN[]` are Claude's in-session tallies, so a
+  miscount still feeds a wrong reason in (garbage-in) — the script can't make a
+  judged count reproducible, only the branch logic over it.
+- Loop mechanics mirror pr-flow `/cycle` run locally (no push / no `@claude`
+  poll); the `Status` column (🔧/⏭️/🔁) and stable `#` across rounds come from
+  the report table contract this entry defines above (P2 reserved them).
+- **`--max` profile** (`INPUT.max` in the workflow): lifts every voice to its
+  ceiling — codex `gpt-5.6-sol`@`xhigh` (codex has NO `max` tier, xhigh is its
+  top), grok-build `max`, Claude finder lenses + verifier `xhigh`; gate/merge
+  and composer (no effort control) unchanged. Orthogonal to `--fix`/`--loop`,
+  composes with both. Both max-tier settings were verified live before wiring
+  (`gpt-5.6-sol`@xhigh + grok `--effort max` end-to-end) — the "no silent fail
+  on a non-existent model/effort" rule.
 
 ## Future idea (P3+): per-lens external prompts
 
