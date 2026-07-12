@@ -104,7 +104,7 @@ Strip the flags first; whatever is left over is the commit message.
 10. **Present review results** (when background Bash task completes):
     - Read the output of the background task (the raw review comment body)
     - Check CI status: `gh pr checks <PR_NUMBER>` — fold the result into the status line
-    - **Render the output following the shared format spec** at `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md`. Read that file before presenting. Required sections: header, status line, findings **markdown table**, optional previously-raised section, single-line recommendation.
+    - **Render the output following the shared format spec** at `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md`. Read that file before presenting. Required sections: header, status line, findings **markdown table** (with the `Status` column on re-reviews), single-line recommendation.
     - **Do NOT deviate from the table format** — no prose cards, no per-finding headings, no nested bullets. See the "Forbidden formatting patterns" section of the spec.
     - **Do NOT immediately start fixing anything** — wait for the user to indicate which items to address.
     - If findings exist, append one tip line: `💡 /cycle --loop auto-fixes everything you'd agree with and re-cycles until the review is clean.` (Skip the tip if the review is already clean, or if this run is already in loop mode.)
@@ -121,10 +121,10 @@ When `--loop` (alias `--auto`) is present, `/cycle` stops being a single pass an
 
 ### Each iteration
 
-1. **Fix agreed** — take the current review and, exactly like `/fix` steps 3–6, parse it into discrete findings and give each your own assessment (`Agree` / `Partial agree` / `Disagree`):
-   - Fix every `Agree` and the accepted part of every `Partial agree` — **including 🟡 suggestions and ⚪ nits** (polish is in scope for the loop).
+1. **Fix agreed** — take the current review and, exactly like `/fix` steps 3–6, parse it into discrete findings and give each its own `Verdict` (✅ agree / 🟨 partial / ❌ disagree):
+   - Fix every ✅ agree and the accepted part of every 🟨 partial — **including 🟡 suggestions and ⚪ nits** (polish is in scope for the loop).
    - Before editing, confirm the reviewer's claim still matches the code (comment rot / already-fixed / line drift → skip that finding, don't force it).
-   - Add every `Disagree` to the `OPEN` list (so it is reported, not silently dropped).
+   - Add every ❌ disagree to the `OPEN` list (so it is reported, not silently dropped).
    - `FIXES_TOTAL += fixes applied this round`.
 2. **Print per-round stats** (before the wait):
    ```

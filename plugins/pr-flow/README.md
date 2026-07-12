@@ -64,9 +64,9 @@ If a clear pattern emerges (e.g. 18 of 20 last PRs were squashed), `/merge` sugg
 
 ### Structured review output
 
-**What it does.** `/cycle`, `/check`, and `/fix` all render review output through a **single shared format spec** (`docs/REVIEW-OUTPUT-FORMAT.md`). Required: header, status line, a markdown findings table (columns: # · Severity · Location · Finding · My assessment), optional previously-raised section, one-line recommendation.
+**What it does.** `/cycle`, `/check`, and `/fix` all render review output through a **single shared format spec** (`docs/REVIEW-OUTPUT-FORMAT.md`) — the same findings-table layout `/swarm:review` uses. Required: header, status line, a markdown findings table (columns: # · Sev · Location · Finding · Verdict · Note — icon-only `Sev`/`Verdict`, with a `Status` column added on re-reviews), one-line recommendation.
 
-**Why it matters.** Every review looks the same. You learn the format once. `/fix` can parse the table and turn rows into an interactive checklist because the format is deterministic.
+**Why it matters.** Every review looks the same across plugins. You learn the format once. `/fix` can parse the table and turn rows into an interactive checklist because the format is deterministic.
 
 ### Interactive fix walkthrough
 
