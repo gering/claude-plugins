@@ -239,8 +239,10 @@ credential mid-review) converged on these non-negotiable mitigations:
      external prompt, so the backends never see it and cannot forge the delimiter.
      The sandbox has no RNG, so the workflow only collision-checks the nonce
      against the returned findings and extends it deterministically on collision.
-     Fences layer WITH the "treat as DATA" instruction and the merge/verify scrub
-     (item 2), not instead of them.
+     Fences layer WITH the "treat as DATA" instruction and the final output-gate
+     scrub, not instead of them. (There is no separate secret-scrub *at* merge or
+     verify — finding text reaches those agents unredacted; the fence, not a
+     scrub, is what protects them. Item 2's scrub runs only on the way out.)
 4. **Bound findings size.** `finding.schema.json` caps summary/failure_scenario/
    recommendation length, so a payload can't route a large blob through a field.
 5. **Don't fully trust consensus.** Consensus (≥2 backends) currently skips the
