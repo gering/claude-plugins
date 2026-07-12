@@ -1,11 +1,12 @@
 ---
 title: "Idempotent Scaffolding into Shared User Files"
 createdAt: 2026-06-21
-updatedAt: 2026-06-22
-createdFrom: "branch: task/harden-init-scaffolding"
-updatedFrom: "PR #14"
-pluginVersion: 1.8.0
+updatedAt: 2026-07-12
+createdFrom: "PR #14"
+updatedFrom: "session: 2026-07-12"
+pluginVersion: 1.8.2
 prime: true
+reindexedAt: 2026-07-12
 ---
 
 # Idempotent Scaffolding into Shared User Files
@@ -64,5 +65,5 @@ can drift out of sync with reality, **point at the dedicated reconciler instead
 of reimplementing it or resetting destructively**. Removing the special case
 beats adding one.
 
-See [[skill-composition]] for the marker/format-contract mechanics these blocks
+See [skill-composition](skill-composition.md) for the marker/format-contract mechanics these blocks
 rely on.

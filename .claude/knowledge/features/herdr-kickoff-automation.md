@@ -1,11 +1,12 @@
 ---
 title: "herdr /kickoff + /continue-reopen Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-07-02
-createdFrom: "branch: task/automate-kickoff-in-herdr"
-updatedFrom: "branch: task/continue-reopen-herdr"
+updatedAt: 2026-07-12
+createdFrom: "PR #17"
+updatedFrom: "session: 2026-07-12"
 pluginVersion: 1.8.2
 prime: false
+reindexedAt: 2026-07-12
 ---
 
 # herdr /kickoff + /continue-reopen Automation
@@ -171,5 +172,7 @@ a manual recovery action, accepted for the tab-survival payoff — not the autom
 frequently-run kickoff, where argv-exec's certainty wins.
 
 Related: [skill-composition](../architecture/skill-composition.md) (kickoff softly
-drives `/continue` across a process boundary). The "never persistent `cd`" footgun
+drives `/continue` across a process boundary) ·
+[worktree-task-file-copy](../architecture/worktree-task-file-copy.md) (why the
+worktree gets a `TASK.md` *copy*, not a symlink). The "never persistent `cd`" footgun
 that the worktree commands avoid is a rule, not knowledge — see `.claude/rules/cwd-safety.md`.

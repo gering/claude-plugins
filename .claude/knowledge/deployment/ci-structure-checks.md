@@ -1,11 +1,12 @@
 ---
 title: "CI Structure Checks"
 createdAt: 2026-06-18
-updatedAt: 2026-06-19
+updatedAt: 2026-07-12
 createdFrom: "PR #6"
-updatedFrom: "PR #6"
-pluginVersion: 1.8.0
+updatedFrom: "session: 2026-07-12"
+pluginVersion: 1.8.2
 prime: false
+reindexedAt: 2026-07-12
 ---
 
 # CI Structure Checks
@@ -27,8 +28,9 @@ The script groups its checks into five functions:
    word budget (thresholds live in the script's `DESC_WORDS_*` constants).
    Enforced mechanically because an over-budget description gets silently
    truncated in sessions and can stop matching its triggers (see
-   [[skill-design-conventions]]).
-3. **Internal `${CLAUDE_PLUGIN_ROOT}` references** — paths referenced in skills
+   [skill-design-conventions](../architecture/skill-design-conventions.md)).
+3. **Internal `${CLAUDE_PLUGIN_ROOT}` references** — paths referenced in
+   Markdown (skills, READMEs) *and* in the hook manifests (`hooks/*.json`)
    actually exist, catching dangling cross-references.
 4. **Shell script syntax** — bundled `.sh` files parse.
 5. **Plugin tests** — runs every `plugins/*/scripts/test_*.py` (bounded timeout,
@@ -44,4 +46,4 @@ compiler. This check closes the most common failure class (broken JSON, version
 drift, dangling refs, budget violations) cheaply and mechanically. Keep it green;
 it runs on every PR and push to main.
 
-Related: [[skill-design-conventions]].
+Related: [skill-design-conventions](../architecture/skill-design-conventions.md).

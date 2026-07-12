@@ -1,11 +1,12 @@
 ---
 title: "Status-Line Integration"
 createdAt: 2026-06-18
-updatedAt: 2026-06-19
+updatedAt: 2026-07-12
 createdFrom: "PR #3"
-updatedFrom: "PR #3"
-pluginVersion: 1.8.0
+updatedFrom: "session: 2026-07-12"
+pluginVersion: 1.8.2
 prime: false
+reindexedAt: 2026-07-12
 ---
 
 # Status-Line Integration
@@ -48,4 +49,4 @@ The "inject a marked block into a user-owned file you don't control" pattern
 recurs — `/init` does the same to `CLAUDE.md`. Idempotent marker blocks are the
 plugin's standard mechanism for editing files the user also edits.
 
-Related: [[skill-composition]] (shared-script single-source), [[ci-structure-checks]].
+Related: [skill-composition](../architecture/skill-composition.md) (shared-script single-source), [ci-structure-checks](../deployment/ci-structure-checks.md).

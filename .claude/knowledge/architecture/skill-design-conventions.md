@@ -1,11 +1,12 @@
 ---
 title: "Skill Design Conventions & Context Economy"
 createdAt: 2026-06-18
-updatedAt: 2026-06-19
-createdFrom: "branch: task/dogfood-knowledge-system"
-updatedFrom: "PR #8"
-pluginVersion: 1.8.0
+updatedAt: 2026-07-12
+createdFrom: "PR #13"
+updatedFrom: "session: 2026-07-12"
+pluginVersion: 1.8.2
 prime: true
+reindexedAt: 2026-07-12
 ---
 
 # Skill Design Conventions & Context Economy
@@ -69,4 +70,4 @@ only when the template content changes (independent of plugin version), and
 number to flag drift — surfacing staleness without ever auto-mutating a
 committed project file.
 
-Related: [[skill-composition]], [[model-economics]], [[ci-structure-checks]].
+Related: [skill-composition](skill-composition.md), [model-economics](model-economics.md), [ci-structure-checks](../deployment/ci-structure-checks.md).

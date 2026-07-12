@@ -1,11 +1,12 @@
 ---
 title: "Swarm Review Pipeline (/swarm:review)"
-createdAt: 2026-07-05
-updatedAt: 2026-07-09
-createdFrom: "branch: task/swarm-p2-security-architecture"
-updatedFrom: "branch: task/swarm-p5-fix-loop"
+createdAt: 2026-07-08
+updatedAt: 2026-07-12
+createdFrom: "PR #24"
+updatedFrom: "session: 2026-07-12"
 pluginVersion: 1.8.2
 prime: false
+reindexedAt: 2026-07-12
 ---
 
 # Swarm Review Pipeline (`/swarm:review`)
@@ -14,7 +15,7 @@ P2 turns the blueprint into a working review: a **Workflow-tool script**
 (`plugins/swarm/workflows/swarm-review.js`) launched by the `/swarm:review`
 skill. Shape: `scope+gate → fan-out (4 voices) → merge (file,mechanism) →
 verify solos → output-gated synthesis`. Four voices: Claude lenses ∥ codex ∥
-grok-build ∥ composer (see [[swarm-backend-adapter]]).
+grok-build ∥ composer (see [swarm-backend-adapter](swarm-backend-adapter.md)).
 
 ## The skill ↔ workflow wiring (the non-obvious parts)
 

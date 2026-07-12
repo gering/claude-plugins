@@ -1,11 +1,12 @@
 ---
 title: "Swarm Backend Adapter Layer"
-createdAt: 2026-07-02
-updatedAt: 2026-07-05
-createdFrom: "branch: task/add-swarm-plugin"
-updatedFrom: "branch: task/swarm-p2-security-architecture"
+createdAt: 2026-07-03
+updatedAt: 2026-07-12
+createdFrom: "PR #21"
+updatedFrom: "session: 2026-07-12"
 pluginVersion: 1.8.2
 prime: false
+reindexedAt: 2026-07-12
 ---
 
 # Swarm Backend Adapter Layer
@@ -56,7 +57,7 @@ debugging round.
   reviewing its own diff. composer is
   ~2× faster than grok-build. It is same-family-correlated, so consumers must
   count consensus by **model family**, not backend (composer + grok-build
-  agreeing is one grok vote — see [[swarm-review-pipeline]]).
+  agreeing is one grok vote — see [swarm-review-pipeline](swarm-review-pipeline.md)).
 - **Headless tool execution**: both CLIs run read-only commands (e.g.
   `git diff`) without extra approval flags — codex inside `-s read-only`
   sandbox, grok headless `-p` auto-approves read-only tools. So lens prompts

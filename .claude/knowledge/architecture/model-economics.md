@@ -1,11 +1,12 @@
 ---
 title: "Model Economics: Picking the Model per Skill"
 createdAt: 2026-06-18
-updatedAt: 2026-06-19
-createdFrom: "branch: task/dogfood-knowledge-system"
-updatedFrom: "branch: task/dogfood-knowledge-system"
-pluginVersion: 1.8.0
+updatedAt: 2026-07-12
+createdFrom: "PR #13"
+updatedFrom: "session: 2026-07-12"
+pluginVersion: 1.8.2
 prime: true
+reindexedAt: 2026-07-12
 ---
 
 # Model Economics
@@ -50,4 +51,4 @@ files and return a dense answer instead of dragging file contents into the
 primary session. `/prime` is the deliberate inverse: it loads content *into*
 the main context on purpose, so it runs in-context with no subagent.
 
-Related: [[skill-design-conventions]], [[skill-composition]].
+Related: [skill-design-conventions](skill-design-conventions.md), [skill-composition](skill-composition.md).

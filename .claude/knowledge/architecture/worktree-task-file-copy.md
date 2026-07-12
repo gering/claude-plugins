@@ -1,11 +1,12 @@
 ---
 title: "Worktree task file: copy, not symlink"
 createdAt: 2026-07-02
-updatedAt: 2026-07-02
+updatedAt: 2026-07-12
 createdFrom: "session: 2026-07-02"
-updatedFrom: "session: 2026-07-02"
+updatedFrom: "session: 2026-07-12"
 pluginVersion: 1.8.2
 prime: false
+reindexedAt: 2026-07-12
 ---
 
 # Worktree task file: copy, not symlink
@@ -48,3 +49,8 @@ there is nothing to simplify.
 If the "living task doc" property is ever wanted, the targeted fix is to fold
 worktree `TASK.md` edits into the archive at `/close` time (before worktree remove)
 — not a symlink.
+
+Related: [task-archiving-on-close](../features/task-archiving-on-close.md) (what
+`/close` does with the canonical file) ·
+[herdr-kickoff-automation](../features/herdr-kickoff-automation.md) (the launch
+around the same worktree setup).

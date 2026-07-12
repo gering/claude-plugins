@@ -1,11 +1,12 @@
 ---
 title: "Backfill from History & Origin Metadata"
 createdAt: 2026-06-18
-updatedAt: 2026-06-19
+updatedAt: 2026-07-12
 createdFrom: "PR #2"
-updatedFrom: "PR #2"
-pluginVersion: 1.8.0
+updatedFrom: "session: 2026-07-12"
+pluginVersion: 1.8.2
 prime: false
+reindexedAt: 2026-07-12
 ---
 
 # Backfill from History & Origin Metadata
@@ -20,8 +21,10 @@ Bootstraps (or extends) a knowledge base from merged-PR history. Shape:
 - A **background Sonnet agent** fetches each PR's metadata, commits, and diff
   and judges it against a **strict significance bar** — only new user-facing
   features, architecture changes, or durable major insights pass. Bug fixes,
-  refactors, tests, deps-bumps, chores are rejected. Target acceptance is
-  ~10–20%; a bloated base is worse than a small one.
+  refactors, tests, deps-bumps, chores are rejected. The exact bar and target
+  acceptance rate live in the skill prompt
+  (`plugins/knowledge-system/skills/backfill-knowledge/SKILL.md`); the guiding
+  principle: a bloated base is worse than a small one.
 - The agent **never writes files** — it returns a candidate report. The user
   approves a selection, then `/curate` runs per pick with `--origin "PR #<N>"`.
 - **Idempotency** comes from two sources unioned together: PR numbers already
@@ -53,4 +56,4 @@ A `"branch: <name>"` value is upgraded to `"PR #<N>"` later by `/reindex` once
 the branch merges — re-running the cascade on the same SHAs, never on the branch
 name (the branch may be deleted post-merge).
 
-Related: [[skill-design-conventions]] (frontmatter as managed surface).
+Related: [skill-design-conventions](../architecture/skill-design-conventions.md) (frontmatter as managed surface).

@@ -1,11 +1,12 @@
 ---
 title: "Task Archiving on /close"
-createdAt: 2026-06-24
-updatedAt: 2026-06-24
-createdFrom: "branch: task/archive-tasks-on-close"
-updatedFrom: "branch: task/archive-tasks-on-close"
+createdAt: 2026-06-29
+updatedAt: 2026-07-12
+createdFrom: "PR #19"
+updatedFrom: "session: 2026-07-12"
 pluginVersion: 1.8.2
 prime: false
+reindexedAt: 2026-07-12
 ---
 
 # Task Archiving on /close
@@ -16,14 +17,16 @@ appends a one-line entry to an append-only `tasks/archive/_index.md` log. Ration
 `tasks/` is untracked by design (no git history to fall back on), so the old `rm`
 left a closed task gone for good. Archiving keeps finished-task context (goal,
 acceptance criteria, shipping PR) and turns the closed set into a queryable record.
-Companion to [[herdr-close-automation]] (the other half of `/close` cleanup).
+Companion to [herdr-close-automation](herdr-close-automation.md) (the other half of `/close` cleanup);
+the worktree's `TASK.md` copy is deliberately *not* archived — see
+[worktree-task-file-copy](../architecture/worktree-task-file-copy.md).
 
 The deterministic logic lives in one helper — `plugins/work-system/scripts/archive-task.sh`
 (`archive` subcommand, called from `skills/close/SKILL.md` step 10) — mirroring the
-[[herdr-close-automation]] / herdr-teardown.sh split: the script is the source of
+[herdr-close-automation](herdr-close-automation.md) / herdr-teardown.sh split: the script is the source of
 truth for stamp format, collision handling, and the index; SKILL.md only branches
 on its `key=value` output. This follows the prose-drift convention (stateful skill
-logic belongs in a tested script, not SKILL.md prose). See also [[skill-composition]].
+logic belongs in a tested script, not SKILL.md prose). See also [skill-composition](../architecture/skill-composition.md).
 
 ## Design decisions
 

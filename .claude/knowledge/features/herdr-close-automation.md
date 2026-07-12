@@ -1,11 +1,12 @@
 ---
 title: "herdr /close Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-06-30
-createdFrom: "branch: task/automate-close-in-herdr"
-updatedFrom: "branch: task/fix-close-herdr-orphan-tab"
+updatedAt: 2026-07-12
+createdFrom: "PR #18"
+updatedFrom: "session: 2026-07-12"
 pluginVersion: 1.8.2
 prime: false
+reindexedAt: 2026-07-12
 ---
 
 # herdr /close Automation
@@ -16,7 +17,7 @@ lives in one tested helper — `plugins/work-system/scripts/herdr-teardown.sh`
 (called from `skills/close/SKILL.md` steps 7 + 12) — plus a plugin-shipped
 `SessionEnd` hook (`plugins/work-system/hooks/hooks.json`). This entry captures the
 durable design and the hard-won TUI-exit gotchas; the scripts are the source of
-truth. Companion to [[herdr-kickoff-automation]] (kickoff creates the tab this
+truth. Companion to [herdr-kickoff-automation](herdr-kickoff-automation.md) (kickoff creates the tab this
 tears down).
 
 ## Design decisions
@@ -42,7 +43,7 @@ tears down).
   user hooks on install; the command may use `${CLAUDE_PLUGIN_ROOT}` and **inherits
   the session's env** (so `HERDR_PANE_ID`/`HERDR_TAB_ID` are visible). This is
   unlike the status line, which can't be plugin-owned and needs marker-block
-  injection (see [[statusline-integration]]). Note CI: `check-structure.py` must
+  injection (see [statusline-integration](statusline-integration.md)). Note CI: `check-structure.py` must
   scan `hooks/*.json` for `${CLAUDE_PLUGIN_ROOT}` refs too, else a renamed script
   breaks the hook while CI stays green.
 - **The hook is conditional via a short-lived per-pane marker.** `/close` (Scenario
@@ -106,6 +107,6 @@ cleanly from another process:
   unusual pane id). This sidesteps mid-turn delivery entirely and needs no
   `--dangerously-skip-permissions` agent to test.
 
-Related: [[herdr-kickoff-automation]], [[skill-composition]] (helper-script single
+Related: [herdr-kickoff-automation](herdr-kickoff-automation.md), [skill-composition](../architecture/skill-composition.md) (helper-script single
 source of truth). The "never persistent `cd`" footgun the path commands avoid is a
 rule — see `.claude/rules/cwd-safety.md`.

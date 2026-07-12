@@ -1,11 +1,12 @@
 ---
 title: "Skill Composition: Flag Contracts, Shared Scripts, Soft Coupling"
 createdAt: 2026-06-18
-updatedAt: 2026-06-19
-createdFrom: "branch: task/dogfood-knowledge-system"
-updatedFrom: "branch: task/dogfood-knowledge-system"
-pluginVersion: 1.8.0
+updatedAt: 2026-07-12
+createdFrom: "PR #13"
+updatedFrom: "session: 2026-07-12"
+pluginVersion: 1.8.2
 prime: true
+reindexedAt: 2026-07-12
 ---
 
 # Skill Composition
@@ -65,5 +66,5 @@ this way: both now read `plugins/pr-flow/docs/READINESS-CHECKS.md` instead of
 each carrying their own copy. When you see the same logic in two skills, that is
 the move.
 
-Related: [[skill-design-conventions]]. See also the `cwd-safety` rule
+Related: [skill-design-conventions](skill-design-conventions.md). See also the `cwd-safety` rule
 (`.claude/rules/cwd-safety.md`).
