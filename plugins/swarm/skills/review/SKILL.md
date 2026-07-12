@@ -289,7 +289,7 @@ Each round:
    BEFORE_NEW=$(git ls-files --others --exclude-standard | sort)            # untracked snapshot (stash create omits these)
    # … apply the round's fixes …
    C=$(( $(git diff --name-only "$SNAP" | wc -l) \
-       + $(comm -13 <(printf '%s\n' "$BEFORE_NEW") <(git ls-files --others --exclude-standard | sort) | grep -c .) ))
+       + $(comm -13 <(printf '%s\n' "$BEFORE_NEW") <(git ls-files --others --exclude-standard | sort) | wc -l) ))
    ```
    The two terms: modified tracked files (`git diff` vs the pre-fix snapshot) +
    files newly created this round (`git diff` never lists untracked). `FIXES_TOTAL

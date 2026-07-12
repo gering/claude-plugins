@@ -264,10 +264,15 @@ def check_plugin_tests():
                 capture_output=True,
                 text=True,
                 cwd=str(test.parent),
+                stdin=subprocess.DEVNULL,  # a test that reads stdin must not block CI
+                timeout=120,               # a hang must fail, not wedge the check
             )
         except FileNotFoundError:
             err("python3 not found on PATH — cannot run plugin tests")
             return
+        except subprocess.TimeoutExpired:
+            err(f"{rel(test)}: test timed out (>120s) — treated as a failure")
+            continue
         if result.returncode != 0:
             detail = (result.stderr.strip() or result.stdout.strip()).splitlines()
             tail = " | ".join(detail[-3:]) if detail else "(no output)"

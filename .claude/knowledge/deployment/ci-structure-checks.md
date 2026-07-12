@@ -17,7 +17,7 @@ in CI (`.github/workflows/structure-checks.yml`) and locally before pushing.
 
 ## What it verifies
 
-The script groups its checks into four functions:
+The script groups its checks into five functions:
 
 1. **JSON validity + version sync** — every `plugin.json` / `marketplace.json`
    parses, and each plugin's version matches between the two. Version drift is a
@@ -31,6 +31,10 @@ The script groups its checks into four functions:
 3. **Internal `${CLAUDE_PLUGIN_ROOT}` references** — paths referenced in skills
    actually exist, catching dangling cross-references.
 4. **Shell script syntax** — bundled `.sh` files parse.
+5. **Plugin tests** — runs every `plugins/*/scripts/test_*.py` (bounded timeout,
+   stdin closed); a plugin drops a self-contained assert-based test there and CI
+   runs it. It executes discovered files, so the CI job must never expose secrets
+   / a write token to untrusted PRs (GitHub withholds both from fork PRs).
 
 ## Why it exists
 
