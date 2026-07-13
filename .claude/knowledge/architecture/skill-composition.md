@@ -1,9 +1,9 @@
 ---
 title: "Skill Composition: Flag Contracts, Shared Scripts, Soft Coupling"
 createdAt: 2026-06-18
-updatedAt: 2026-07-12
+updatedAt: 2026-07-13
 createdFrom: "PR #13"
-updatedFrom: "session: 2026-07-12"
+updatedFrom: "PR #27"
 pluginVersion: 1.8.2
 prime: true
 reindexedAt: 2026-07-12
@@ -45,8 +45,28 @@ once and all callers benefit.
 
 When one skill must parse another's output, the format is pinned in a shared
 spec. `plugins/pr-flow/docs/REVIEW-OUTPUT-FORMAT.md` lets `/fix` deterministically
-parse the findings table `/cycle` produces. The contract is the interface;
-neither side reverse-engineers the other.
+parse the findings table `/cycle`, `/check`, `/open`, `/rebase` produce. The
+contract is the interface; neither side reverse-engineers the other.
+
+Two non-obvious rules this spec learned the hard way (PR #27):
+
+- **Cross-plugin means *same family*, not byte-identical.** pr-flow's table and
+  swarm's `/swarm:review` table share columns, icon-only Sev/Verdict semantics,
+  `file:line` location, and a separate short Note — but they are not identical
+  and the spec must not claim they are. swarm carries an extra `Quelle`
+  (ensemble source+confidence) column in the same terminal width, so it
+  compresses harder (one-char `V` header, tighter cell budgets); pr-flow, one
+  column lighter, affords the readable `Verdict` header and wider budgets. The
+  *rendering width* differences follow from column count — the uniformity that
+  matters is semantic. Forcing byte-parity would only cramp one side.
+- **A contract that mandates state must name its producer.** The re-review
+  `Status` column and stable `#` are only producible by an **in-session `/cycle
+  --loop`**, which holds prior findings in context and carries them forward via
+  a `SEEN` store keyed by `(file, mechanism)`. Every stateless single-shot
+  presentation (`/check`, `/open`, `/rebase`, standalone `/fix`) re-parses the
+  raw latest review with no prior-round memory and always renders round-0.
+  Mandating cross-cycle state without naming the one skill that can supply it is
+  unimplementable prose — scope the mandate to its producer.
 
 ## 4. Soft coupling for a future split
 

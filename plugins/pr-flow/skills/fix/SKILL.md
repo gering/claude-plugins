@@ -32,7 +32,8 @@ user_invocable: true
 
 3. **Parse issues**:
    - Split the review body into discrete findings (grouped by file, each with severity if noted)
-   - Number them sequentially starting at #1
+   - Number them sequentially starting at #1 (see the `#` column rule in the
+     format spec for why a standalone `/fix` numbers fresh)
    - For each issue, extract:
      - File path + line(s)
      - Reviewer's concern (quote the key phrase)
@@ -40,18 +41,18 @@ user_invocable: true
      - Reviewer's proposed fix (if given)
 
 4. **Present the checklist**:
-   - Render findings as a **markdown table** following the shared format spec at `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md`. Required columns: `# | Severity | Location | Finding | My assessment`. No prose cards, no per-finding headings.
-   - Include your own assessment per row (this replaces the separate "Own assessment first" step) — agree/partial/disagree with ≤80 chars reasoning.
+   - Render findings as a **markdown table** following the shared format spec at `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md`. Required columns: `# | Sev | Location | Finding | Verdict | Note` (icon-only `Sev`/`Verdict`). No prose cards, no per-finding headings.
+   - Fill your own assessment per row via the `Verdict` icon (✅ agree / 🟨 partial / ❌ disagree) plus a short `Note` — this replaces the separate "Own assessment first" step. `Note` is required for 🟨/❌.
    - After the table, append a single prompt line:
      ```
      Which issues do you want to address? (e.g. "1,3", "1-3", "all", "blocking", "skip <N>")
      ```
 
 5. **Honor your table assessment when implementing**:
-   - Your assessments are already in the step-4 table — act on them consistently:
-     - If you marked `Disagree` and user insists on fixing → flag the conflict once, then follow user's lead
-     - If you marked `Agree` → implement the proposed fix
-     - If `Partial agree` → clarify what you'll actually do before editing
+   - Your `Verdict` icons are already in the step-4 table — act on them consistently:
+     - If you marked ❌ disagree and user insists on fixing → flag the conflict once, then follow user's lead
+     - If you marked ✅ agree → implement the proposed fix
+     - If 🟨 partial → clarify what you'll actually do before editing
 
 6. **Implement fixes one by one**:
    - For each selected issue:

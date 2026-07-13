@@ -64,13 +64,13 @@ If a clear pattern emerges (e.g. 18 of 20 last PRs were squashed), `/merge` sugg
 
 ### Structured review output
 
-**What it does.** `/cycle`, `/check`, and `/fix` all render review output through a **single shared format spec** (`docs/REVIEW-OUTPUT-FORMAT.md`). Required: header, status line, a markdown findings table (columns: # · Severity · Location · Finding · My assessment), optional previously-raised section, one-line recommendation.
+**What it does.** `/cycle`, `/check`, `/fix`, `/open`, and `/rebase` all render review output through a **single shared format spec** (`docs/REVIEW-OUTPUT-FORMAT.md`) — the same findings-table family as `/swarm:review` (same columns and icon semantics; swarm adds a `Quelle` column and compresses harder for it). Required: header, status line, a markdown findings table (columns: # · Sev · Location · Finding · Verdict · Note — icon-only `Sev`/`Verdict`, with a `Status` column added on `--loop` re-reviews), one-line recommendation.
 
-**Why it matters.** Every review looks the same. You learn the format once. `/fix` can parse the table and turn rows into an interactive checklist because the format is deterministic.
+**Why it matters.** Every review reads the same across plugins. You learn the format once. `/fix` can parse the table and turn rows into an interactive checklist because the format is deterministic.
 
 ### Interactive fix walkthrough
 
-**What it does.** `/fix` parses the latest review into a numbered checklist with severity labels (blocking / suggestion / nit). You pick by number (`1`, `1,3,5`, `1-4`, `all`, `blocking`). For each picked finding, Claude gives its own assessment first, then applies a minimal targeted edit.
+**What it does.** `/fix` parses the latest review into a markdown findings table — each row carries an icon-only `Sev` and Claude's own `Verdict` (✅/🟨/❌) plus a short `Note`, filled in up front. You pick by number (`1`, `1,3,5`, `1-4`, `all`, `blocking`). Claude then applies a minimal targeted edit for each picked finding, honoring the verdict it already gave.
 
 **Why it matters.** Reviews have noise. You skip the nits and fix the blockers. Claude won't run through everything unbidden — you decide.
 

@@ -1,15 +1,26 @@
 # Shared Review Output Format
 
 > Canonical format for presenting Claude review results. Used by `/cycle`
-> (after polling completes), `/check` (for the latest review section), and
-> `/fix` (for the checklist before asking which to fix).
+> (after polling completes), `/check` (for the latest review section), `/fix`
+> (for the checklist before asking which to fix), and `/open` + `/rebase` (for
+> the auto-triggered review after opening / rebasing a PR).
+>
+> This is the same findings-table *family* as `/swarm:review` — same columns,
+> icon-only judgment cells, a separate short note — but not byte-identical: a
+> single-source Claude review omits swarm's `Quelle` (`Agents`+`Verifier`)
+> column (see "Swarm-only columns" below), and swarm compresses harder for that
+> extra column (a one-char `V` header, tighter cell budgets). pr-flow, one
+> column lighter, uses the more readable `Verdict` header and wider budgets.
 
 ## Language
 
 Match the language of the user conversation. Structure below uses English
-labels; translate labels (`Severity`, `Finding`, `My assessment`, etc.) to
-German when the conversation is in German. **Do not translate content** from
-the review — quote it as-is.
+labels; when the conversation is in German, translate `Location`, `Finding`,
+and `Note` to `Ort`, `Befund`, `Notiz`. Keep `Sev` and `Verdict` as fixed
+tokens in every language — the authoritative German header is
+`# | Sev | Ort | Befund | Verdict | Notiz` (plus `Status` on re-reviews), the
+same one every skill references. **Do not translate content** from the review —
+quote it as-is.
 
 ## Required sections
 
@@ -18,8 +29,10 @@ Every presentation MUST include, in this order:
 1. **Header** — one line with PR number + verdict emoji
 2. **Status line** — CI, reviews, staleness
 3. **Findings table** — all issues as a markdown table
-4. **Previously raised** (optional) — only if prior cycle had issues
-5. **Recommendation** — exactly one actionable next step
+4. **Recommendation** — exactly one actionable next step
+
+In re-review cycles the findings table gains a `Status` column (see below) —
+there is no separate "previously raised" table.
 
 ## Header + status
 
@@ -41,55 +54,97 @@ One of the three Verdict variants — pick based on severity mix:
 ```
 ### Findings
 
-| # | Severity | Location | Finding | My assessment |
-|---|----------|----------|---------|---------------|
-| 1 | 🔴 blocking | `src/foo.ts:42` | "Empty catch block swallows the error" | Agree — log or rethrow |
-| 2 | 🟡 suggestion | `src/bar.ts:17` | "Magic number 86400" | Partial agree — extract to const |
-| 3 | ⚪ nit | `README.md:5` | "Typo: recieve → receive" | Agree, trivial |
+| # | Sev | Location | Finding | Verdict | Note |
+|---|-----|----------|---------|---------|------|
+| 1 | 🔴 | `src/foo.ts:42` | "Empty catch swallows the error" | ✅ | log or rethrow |
+| 2 | 🟡 | `src/bar.ts:17` | "Magic number 86400" | 🟨 | accept const, skip rename |
+| 3 | ⚪ | `README.md:5` | "Typo: recieve → receive" | ✅ | trivial one-liner |
 ```
 
 ### Column rules
 
-- **`#`** — sequential 1, 2, 3… (lets user say "fix #1 and #3")
-- **`Severity`** — one of the three severities with emoji:
-  - 🔴 `blocking` — bug, correctness issue, missing test for critical path
-  - 🟡 `suggestion` — improvement that the reviewer justified
-  - ⚪ `nit` — style, trivial, typo
-- **`Location`** — `` `file:line` `` in backticks. If multiple lines: `src/foo.ts:42,58`. If no specific line: `src/foo.ts`. If file-less: `—`
-- **`Finding`** — quote the reviewer's key phrase in double quotes, keep it to ≤120 chars; omit the "Fix: …" suggestion (that goes in your assessment if you agree with it)
-- **`My assessment`** — one of:
-  - `Agree` — plus one-clause reason or proposed fix
-  - `Partial agree` — plus what part you accept
-  - `Disagree` — plus why (with link to counter-evidence if possible)
-  - Keep to ≤80 chars. No essays.
+- **`#`** — finding number (lets user say "fix #1 and #3"). **Stable within a
+  single `/cycle` loop**, which holds its findings in-session: across its
+  re-review rounds a recurring finding keeps its number and only new findings
+  take the next free number — never renumber mid-loop. A standalone `/fix` or a
+  fresh `/check` re-parses the raw review with no memory of earlier numbers, so
+  it numbers from #1; that's expected, not a violation.
+- **`Sev`** — **icon only** (no text label), one of:
+  - 🔴 blocking — bug, correctness issue, missing test for critical path
+  - 🟡 suggestion — improvement the reviewer justified
+  - ⚪ nit — style, trivial, typo
+- **`Location`** — `` `file:line` `` in backticks. Multiple lines:
+  `src/foo.ts:42,58`. No specific line: `src/foo.ts`. File-less: `—`
+- **`Finding`** — quote the reviewer's key phrase in double quotes, keep it
+  short (≤ ~120 chars); no emoji here; omit the "Fix: …" suggestion (that goes
+  in `Note` if you agree with it).
+- **`Verdict`** — YOUR assessment, **icon only**, the action gate:
+  - ✅ agree
+  - 🟨 partial agree
+  - ❌ disagree
+- **`Note`** — the *why*, short (≤ ~80 chars — let the renderer wrap it into a
+  taller cell, never widen the row). **REQUIRED for every 🟨/❌** (what part you
+  accept / why you disagree); optional for ✅ when useful (a fix hint, reason, or
+  "trivial one-liner"). No line breaks inside the cell.
+
+### Swarm-only columns
+
+`/swarm:review` inserts a `Quelle` column (`Agents`+`Verifier` — who raised the
+finding + ensemble confidence) between `Finding` and `Verdict`. A single-source
+Claude review has no ensemble to attribute, so **pr-flow omits that column** —
+use the six columns above.
+
+### Status column (`/cycle --loop` re-reviews only)
+
+The `Status` column needs memory of the prior round's findings — their `#`,
+verdict, and disposition. The **only** producer of that memory is a `/cycle
+--loop` run: it holds the previous round's findings in-session and carries them
+forward (see the loop's "Fix agreed" step). On its re-review rounds, append a
+`Status` column so the user sees at a glance what happened to each prior finding
+— this replaces a separate "previously raised" table:
+
+```
+| # | Sev | Location | Finding | Verdict | Note | Status |
+|---|-----|----------|---------|---------|------|--------|
+| 1 | 🔴 | `src/foo.ts:42` | "Empty catch swallows the error" | ✅ | fixed last cycle | 🔧 fixed |
+| 2 | 🟡 | `src/bar.ts:17` | "Magic number 86400" | 🟨 | intentional | ⏭️ skipped |
+```
+
+`Status` values: 🔧 fixed · ⏭️ skipped · 🔁 recurred · 🆕 new (raised this round).
+Match a finding across cycles by **`(file, mechanism)`, not `(file, line)`** —
+lines drift after edits, so match on the *nature of the defect*, not its
+location. **`mechanism`** = what is wrong + which code element, independent of
+line number — e.g. "unchecked null on `user.email`" or "off-by-one in the loop
+bound": a later edit that shifts the line leaves the mechanism unchanged, so the
+finding still matches. A matched finding keeps its `#`; only a 🆕 finding takes
+the next free number. Round 0 (the first review) omits the `Status` column — as
+do all stateless single-shot presentations (`/check`, `/open`, `/rebase`, and a
+standalone `/fix`): they re-parse the raw latest review with no prior-round
+memory, so they always render the round-0 table.
 
 ### Table formatting requirements
 
-- Must be a **real markdown table** with `|` separators and header separator row (`|---|---|`). Not prose with bullet hyphens. Not a numbered list.
+- Must be a **real markdown table** with `|` separators and header separator row
+  (`|---|---|`). Not prose with bullet hyphens. Not a numbered list.
 - All rows must have the same column count.
-- Use the exact column headers above (translated to German if conversing in German: `# | Severity | Ort | Befund | Meine Einschätzung`).
-- If a review has zero findings: skip the table, write `No issues raised. LGTM.` under the Findings heading.
-
-## Previously raised (optional)
-
-Only include if this isn't the first review cycle and previous findings exist:
-
-```
-### Previously raised
-
-| # | Issue | Status |
-|---|-------|--------|
-| — | Missing null check on user input | ✅ fixed last cycle |
-| — | Extract magic number 86400 | ⏭️ skipped (intentional) |
-```
+- Use the exact column headers above (translated to German if conversing in
+  German: `# | Sev | Ort | Befund | Verdict | Notiz`, plus `Status` on
+  re-reviews).
+- If a review has zero findings: skip the table, write `No issues raised. LGTM.`
+  under the Findings heading. **Exception (re-reviews):** when prior findings
+  still need accounting for, render the Status table with their 🔧 fixed /
+  ⏭️ skipped rows even if there are zero *new* findings — the LGTM shortcut is
+  for round 0 (nothing raised yet, nothing to account for).
 
 ## Recommendation (REQUIRED — exactly one line)
 
 Pick exactly one:
 
-- **Any 🔴 blocking present** → `Run /fix to work through them, then /cycle again.`
+- **Any 🔴 blocking present** — including a carried-over 🔴 still ⏭️ skipped or
+  ❌ disagreed on a `--loop` re-review → `Run /fix to work through them, then /cycle again.`
 - **Only 🟡/⚪ findings** → `Address if you want. Otherwise: run /merge when ready.`
-- **Zero findings** → `Ready to merge — run /merge.`
+- **Zero findings** — round 0, or a re-review with every prior 🔴 resolved →
+  `Ready to merge — run /merge.`
 - **CI failing or merge-blocked** → `Investigate CI failure before proceeding.`
 - **Review is stale** → `Push latest changes and run /cycle for a fresh review.`
 
@@ -108,7 +163,9 @@ Pick exactly one:
 - ❌ Headings per finding (`### Finding 1`, `### Finding 2`)
 - ❌ Combining findings into groups (e.g. "minor issues bundle")
 - ❌ Skipping the table when findings exist — always use the table
-- ❌ Emojis inside the Finding column (they belong in Severity only)
+- ❌ Emojis or text labels in `Sev`/`Verdict` beyond the single icon (no
+  `🔴 blocking`, no `✅ Agree` — icon only)
+- ❌ Emojis inside the `Finding` column (they belong in `Sev`/`Verdict` only)
 
 ## After the presentation
 

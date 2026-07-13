@@ -104,7 +104,7 @@ Strip the flags first; whatever is left over is the commit message.
 10. **Present review results** (when background Bash task completes):
     - Read the output of the background task (the raw review comment body)
     - Check CI status: `gh pr checks <PR_NUMBER>` — fold the result into the status line
-    - **Render the output following the shared format spec** at `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md`. Read that file before presenting. Required sections: header, status line, findings **markdown table**, optional previously-raised section, single-line recommendation.
+    - **Render the output following the shared format spec** at `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md`. Read that file before presenting. Required sections: header, status line, findings **markdown table** (with the `Status` column on re-reviews), single-line recommendation.
     - **Do NOT deviate from the table format** — no prose cards, no per-finding headings, no nested bullets. See the "Forbidden formatting patterns" section of the spec.
     - **Do NOT immediately start fixing anything** — wait for the user to indicate which items to address.
     - If findings exist, append one tip line: `💡 /cycle --loop auto-fixes everything you'd agree with and re-cycles until the review is clean.` (Skip the tip if the review is already clean, or if this run is already in loop mode.)
@@ -117,22 +117,24 @@ When `--loop` (alias `--auto`) is present, `/cycle` stops being a single pass an
 
 - Parse `--max=N` (default `10`). This caps total iterations so the loop can never run forever.
 - Initialize counters: `ROUND = 0`, `FIXES_TOTAL = 0`, `FIX_COMMITS = 0`, and an `OPEN` list (findings you disagreed with, deduped across rounds).
+- Initialize `SEEN` — the loop's in-session store of prior findings, keyed by `(file, mechanism)`, each holding its stable `#`, verdict, and disposition (🔧 fixed / ⏭️ skipped / 🔁 recurred / ❌ disagreed). This is the **only** source for the re-review `Status` column and stable `#` (the poll returns just the raw latest review with no memory) — see the format spec's "Status column" section.
 - **Reuse a fresh review if one already exists**: if the latest `@claude` review on the PR is newer than the latest push (not stale) and has findings, skip the initial commit/push/trigger and go straight to "Fix agreed" with that review. Otherwise run one normal cycle (steps 1–10 above) to obtain the first review.
 
 ### Each iteration
 
-1. **Fix agreed** — take the current review and, exactly like `/fix` steps 3–6, parse it into discrete findings and give each your own assessment (`Agree` / `Partial agree` / `Disagree`):
-   - Fix every `Agree` and the accepted part of every `Partial agree` — **including 🟡 suggestions and ⚪ nits** (polish is in scope for the loop).
+1. **Fix agreed** — take the current review and, exactly like `/fix` steps 3–6, parse it into discrete findings and give each its own `Verdict` (✅ agree / 🟨 partial / ❌ disagree):
+   - Fix every ✅ agree and the accepted part of every 🟨 partial — **including 🟡 suggestions and ⚪ nits** (polish is in scope for the loop).
    - Before editing, confirm the reviewer's claim still matches the code (comment rot / already-fixed / line drift → skip that finding, don't force it).
-   - Add every `Disagree` to the `OPEN` list (so it is reported, not silently dropped).
+   - Add every ❌ disagree to the `OPEN` list (so it is reported, not silently dropped).
    - `FIXES_TOTAL += fixes applied this round`.
+   - Update `SEEN`: match each finding against it by `(file, mechanism)` — a matched finding keeps its stable `#` (only a new one takes the next free number); record each finding's disposition (🔧 fixed / ⏭️ skipped / 🔁 recurred / ❌ disagreed). The next re-cycle's step-10 render reads `SEEN` to populate the `Status` column and reuse stable numbers.
 2. **Print per-round stats** (before the wait):
    ```
    🔁 Loop round <ROUND+1>/<MAX> · fixes total: <FIXES_TOTAL> · this round: <Y> · open (disagreed): <Z>
    ```
 3. **Termination check** — break the loop (go to "Wrap-up") if any holds:
    - The review had **zero findings** → converged clean ✅.
-   - **Nothing was agreed** this round (every finding is a `Disagree`) → only disagreements remain.
+   - **Nothing was agreed** this round (every finding is a ❌ disagree) → only disagreements remain.
    - **No files changed** this round (everything agreed turned out to be comment-rot / already-fixed) → nothing actionable left.
    - `ROUND + 1 >= MAX` → safety cap hit.
    - The user said to stop (see "Interruptible").
