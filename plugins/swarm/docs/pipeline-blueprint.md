@@ -219,11 +219,15 @@ credential mid-review) converged on these non-negotiable mitigations:
    codex's node loader dies). The denylist is a backstop; the primary defense is
    that backends need no reads at all (diff inlined) + grok is tool-less. A full
    allowlist (or a purpose-built minimal-runtime container) is the P2 upgrade.
-2. **Scrub secrets at the adapter boundary.** `scrub_secrets` redacts
-   secret-shaped content (AWS keys, private keys, gh/sk tokens, `secret=…`) from
-   findings JSON before it leaves `run_codex`/`run_grok` — a backstop even if a
-   sandbox is bypassed. **The merge and verify stages must scrub too** (they
-   re-interpolate findings text into new prompts → second-order injection).
+2. **Scrub secrets at the boundaries.** `scrub_secrets` redacts secret-shaped
+   content (AWS keys, private keys, gh/sk tokens, `secret=…`) from findings JSON
+   before it leaves `run_codex`/`run_grok` — a backstop even if a sandbox is
+   bypassed. A final **output gate** re-scrubs every surviving finding (incl.
+   Claude finders, which never pass the adapter) before results leave the
+   workflow. Scrubbing runs at these two *boundaries* (inbound from a backend,
+   outbound to the user) — **not** at merge/verify: finding text reaches those
+   in-session agents unredacted, and it is **fencing** (item 3), not a scrub,
+   that protects them from the re-interpolated text (second-order injection).
 3. **Fence untrusted text as data (both hops).** Wrap untrusted content in
    explicit delimiters carrying a **per-run random nonce** the content cannot
    forge, plus a system instruction that everything inside is data, never
@@ -239,10 +243,9 @@ credential mid-review) converged on these non-negotiable mitigations:
      external prompt, so the backends never see it and cannot forge the delimiter.
      The sandbox has no RNG, so the workflow only collision-checks the nonce
      against the returned findings and extends it deterministically on collision.
-     Fences layer WITH the "treat as DATA" instruction and the final output-gate
-     scrub, not instead of them. (There is no separate secret-scrub *at* merge or
-     verify — finding text reaches those agents unredacted; the fence, not a
-     scrub, is what protects them. Item 2's scrub runs only on the way out.)
+     Fences layer WITH the "treat as DATA" instruction, not instead of it; there
+     is no secret-scrub *at* merge/verify (item 2), so the fence is the sole
+     structural defense for the text those agents read.
 4. **Bound findings size.** `finding.schema.json` caps summary/failure_scenario/
    recommendation length, so a payload can't route a large blob through a field.
 5. **Don't fully trust consensus.** Consensus (≥2 backends) currently skips the

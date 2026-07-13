@@ -124,6 +124,11 @@ HDR
 # compromised backend could forge the delimiter. The workflow collision-checks it
 # against the returned findings (which don't exist yet) and extends it if needed.
 FINDING_NONCE="$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
+# Fail closed at the source: if python3/secrets is unavailable the substitution
+# yields '', which would silently degrade the workflow's finding-fence to the
+# instruction-only guard. Catch it here (like the diff-nonce collision guard) so
+# the fence is never quietly disabled downstream.
+if [ -z "$FINDING_NONCE" ]; then echo "SWARM_NONCE_UNAVAILABLE=could not mint finding nonce (python3/secrets missing)"; rm -rf "$TMPD"; exit 1; fi
 
 echo "TMPD=$TMPD"; echo "DIFF=$DIFF"; echo "PROMPT=$PROMPT"; echo "FINDING_NONCE=$FINDING_NONCE"
 echo "PROMPT_BYTES=$(wc -c < "$PROMPT")"
@@ -132,6 +137,9 @@ echo "LIVE_JSON=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json | t
 
 - `SWARM_EMPTY` → tell the user there is nothing to review (clean working tree /
   no branch delta) and stop.
+- `SWARM_NONCE_UNAVAILABLE=…` → the finding-fence nonce could not be minted
+  (python3/secrets missing). Do NOT fall back to an unfenced run: tell the user
+  the second-order fence can't be provisioned on this host and stop.
 - `SWARM_WARN=…` → surface that line: the scope narrowed to uncommitted changes
   because no default-branch ancestor was found. Then continue.
 - From `LIVE_JSON` build `externalVoices`: include `"codex"` iff codex is
