@@ -246,6 +246,18 @@ credential mid-review) converged on these non-negotiable mitigations:
      Fences layer WITH the "treat as DATA" instruction, not instead of it; there
      is no secret-scrub *at* merge/verify (item 2), so the fence is the sole
      structural defense for the text those agents read.
+     *Threat-model assumptions for the finding fence:* (a) the nonce is minted in
+     Bash (`token_hex(8)`; the workflow validates hex+length but cannot measure
+     entropy) and its secrecy holds only because it is never sent to a backend
+     **and** the orchestrator that transports it into the workflow args is not
+     attacker-steerable — the diff it also handles is fenced (first hop) precisely
+     to keep planted text from steering that choice. (b) If no valid nonce reaches
+     the workflow the fence degrades to the instruction-only guard; that
+     degradation is surfaced in the return payload (`fenceDegraded`) and the Bash
+     prep fails closed (`SWARM_NONCE_UNAVAILABLE`) so it is never silent. (c) The
+     backend-supplied `file` is confined to the repo tree (`repoSafePath`) before
+     any reader opens it; symlink-realpath containment is the residual the JS
+     sandbox can't enforce.
 4. **Bound findings size.** `finding.schema.json` caps summary/failure_scenario/
    recommendation length, so a payload can't route a large blob through a field.
 5. **Don't fully trust consensus.** Consensus (≥2 backends) currently skips the

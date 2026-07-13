@@ -32,12 +32,16 @@ const EXTERNAL_PROMPT = INPUT.externalPromptFile
 // absent/bad nonce degrades visibly to the instruction-only guard.
 let FINDING_NONCE = typeof INPUT.findingNonce === 'string' ? INPUT.findingNonce.trim() : ''
 const FINDING_NONCE_RAW = FINDING_NONCE  // remember what was passed, to explain a drop
-// Shape AND a length floor: the fence's unforgeability rests on the nonce's
-// entropy (it is secret — never sent to backends), which the workflow can only
-// bound, not measure. Require >=16 chars — the skill mints `token_hex(8)` = 16
-// hex; a shorter/low-entropy token is a caller-contract violation, rejected here
-// (a longer one from a future generator still passes).
-if (FINDING_NONCE && !/^[A-Za-z0-9]{16,}$/.test(FINDING_NONCE)) FINDING_NONCE = ''
+// Enforce the exact shape the skill mints — `token_hex(8)` = >=16 lowercase hex.
+// The fence's unforgeability rests on the nonce's entropy (it is secret — never
+// sent to backends), which the workflow cannot measure, only bound: pinning the
+// hex charset + length floor rejects an obviously-wrong caller token (short,
+// upper/mixed-case, a `<FINDING_NONCE>` placeholder). It canNOT stop a
+// high-shape-but-low-entropy value (e.g. all-zeros): that residual rests on the
+// orchestrator not being attacker-steerable into choosing the nonce — see the
+// blueprint § Security threat-model note. A longer hex token still passes.
+if (FINDING_NONCE && !/^[a-f0-9]{16,}$/.test(FINDING_NONCE)) FINDING_NONCE = ''
+const fenceDegraded = !FINDING_NONCE  // no structural fence at merge/verify — surfaced in the return payload
 // `--max` profile: lift every voice to its ceiling for a deepest-effort review.
 // codex has no `max` tier (xhigh is its top) + gets the stronger model; grok
 // goes to `max`; the in-session Claude finders and verifier go to `xhigh`.
@@ -60,8 +64,8 @@ if (!ADAPTER || !DIFF_FILE || !EXTERNAL_PROMPT) {
   // on missing gate/balance/refuted/backendErrors keys.
   return {
     error: 'swarm-review requires args.adapter, args.diffFile, args.externalPromptFile',
-    gate: null, findings: [], refuted: [], backendErrors: [],
-    balance: { total: 0, consensus: 0, solo: 0, refuted: 0, redactions: 0, voices: 0, agents: [], backendErrors: [], rawPerLens: {}, survivingPerLens: {} },
+    gate: null, findings: [], refuted: [], backendErrors: [], fenceDegraded: false,
+    balance: { total: 0, consensus: 0, solo: 0, refuted: 0, redactions: 0, fenceDegraded: false, voices: 0, agents: [], backendErrors: [], rawPerLens: {}, survivingPerLens: {} },
   }
 }
 
@@ -203,9 +207,16 @@ function fenceFindings(kind, body) {
 // disclosure *via* the path — two distinct vectors on the same untrusted field.
 function repoSafePath(p) {
   if (typeof p !== 'string' || p === '') return false
-  if (p.startsWith('/') || p.startsWith('~') || p.startsWith('\\')) return false
-  if (/(^|[\\/])\.\.([\\/]|$)/.test(p)) return false
+  if (/[\x00-\x1f\x7f]/.test(p)) return false   // control chars / newlines (keep it one line)
+  if (p.startsWith('/') || p.startsWith('~') || p.startsWith('\\')) return false  // POSIX-absolute, home, UNC
+  if (/^[A-Za-z]:/.test(p)) return false                     // Windows drive-absolute (C:\...)
+  if (/(^|[\\/])\.\.([\\/]|$)/.test(p)) return false         // .. traversal
   return true
+  // Residual (can't fix here — the workflow sandbox has no fs): a spelled-clean
+  // relative path can still resolve outside the repo through a symlink. realpath
+  // containment would need the verifier/--fix reader to enforce it; string
+  // spelling alone can't. Backstops: paths come from a repo-relative git diff in
+  // practice, and the verifier is told to stay in-repo.
 }
 
 // ============================================================================
@@ -320,7 +331,12 @@ if (pool.length > 0) {
       },
     } } },
   }
-  const numbered = pool.map((f, i) => `#${i} [${f.backend}/${f.lens}] ${f.file}:${f.line} — ${f.summary} :: ${f.failure_scenario}`).join('\n')
+  // Collapse whitespace so each finding is exactly ONE line: a field may carry a
+  // literal newline (schema caps length, not charset), which would otherwise
+  // split a `#N` record across lines and let the merge agent mis-cluster (the
+  // coverage guard still recovers every index, so this is robustness, not safety).
+  const oneLine = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim()
+  const numbered = pool.map((f, i) => `#${i} [${f.backend}/${f.lens}] ${oneLine(f.file)}:${f.line} — ${oneLine(f.summary)} :: ${oneLine(f.failure_scenario)}`).join('\n')
   const fence = fenceFindings('FINDINGS', numbered)
   const res = await agent(
     `Merge/dedup step for a code review. ${pool.length} raw findings from claude/codex/grok are numbered below. ` +
@@ -402,7 +418,12 @@ const refuted = verifiedSolos.filter(Boolean).filter((c) => c.verifier === 'REFU
 // surfaced list — live findings AND refuted (a REFUTED solo can still quote a
 // secret from the diff or verifier evidence).
 let redactions = 0
-const gate1 = (c) => { const { finding, hit } = scrubFinding(c); if (hit) redactions++; return finding }
+// `pathSafe` travels WITH every finding so downstream readers that re-open the
+// cited path — the `--fix`/`--loop` re-read step, and any consensus cluster that
+// skipped the solo verifier — can refuse an unsafe (out-of-repo / traversal /
+// control-char) `file` without re-deriving the check. The solo verifier already
+// acts on it (above); this closes the coverage gap for consensus + --fix reads.
+const gate1 = (c) => { const { finding, hit } = scrubFinding(c); if (hit) redactions++; return { ...finding, pathSafe: repoSafePath(c.file) } }
 const gatedFindings = [...finalConsensus, ...finalSolos].map(gate1)
 const gatedRefuted = refuted.map(gate1)
 
@@ -449,12 +470,19 @@ return {
   findings,
   refuted: gatedRefuted,
   backendErrors: scrubbedErrors,
+  // Surface the degraded fence in the RETURN payload, not just the /workflows
+  // log: the presenter must render it so an operator reading only the final
+  // report sees that merge/verify ran with the instruction-only guard (the
+  // structural second-hop fence was off). "never silently insecure" means
+  // visible in the artifact the user actually reads, not only the live view.
+  fenceDegraded,
   balance: {
     total: findings.length,
     consensus: finalConsensus.length,
     solo: finalSolos.length,
     refuted: gatedRefuted.length,
     redactions,
+    fenceDegraded,
     voices: voices.length,
     agents: Object.values(agents),
     backendErrors: scrubbedErrors,
