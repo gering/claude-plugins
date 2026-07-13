@@ -27,6 +27,13 @@ with `--fix` / `--loop` — applies the findings you agreed with.
   (cap default `10`); `--max` runs the deepest-effort profile (codex
   `gpt-5.6-sol`/`xhigh`, grok `max`, Claude lenses + verifier `xhigh`) — slower,
   more thorough, composes with `--fix`/`--loop`.
+- `/swarm:review --pr [<number>]` — run the same ensemble against a **GitHub
+  PR's diff** (`gh pr diff`; bare `--pr` resolves the current branch's PR) and,
+  after a single confirmation, post the output-gated result as a PR comment via
+  `gh pr comment` — the codex/grok/Claude voice on GitHub with no CI, repo
+  secrets, or API-token cost. Read-only (never edits the tree); mutually
+  exclusive with `--fix`/`--loop`. The comment is posted under your own `gh`
+  identity, so it does not disturb pr-flow's `@claude` review polling.
 - `/swarm:agents` — show which review backends are installed, authenticated,
   and ready.
 
