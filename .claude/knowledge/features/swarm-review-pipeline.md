@@ -1,9 +1,9 @@
 ---
 title: "Swarm Review Pipeline (/swarm:review)"
 createdAt: 2026-07-08
-updatedAt: 2026-07-12
+updatedAt: 2026-07-13
 createdFrom: "PR #24"
-updatedFrom: "session: 2026-07-12"
+updatedFrom: "session: 2026-07-13"
 pluginVersion: 1.8.2
 prime: false
 reindexedAt: 2026-07-12
@@ -100,6 +100,31 @@ the diff out of the script, above). Claude applies edits between rounds.
   composes with both. Both max-tier settings were verified live before wiring
   (`gpt-5.6-sol`@xhigh + grok `--effort max` end-to-end) — the "no silent fail
   on a non-existent model/effort" rule.
+
+## `--pr`: review a PR diff and post the result (swarm 0.4.0)
+
+`/swarm:review --pr [<number>]` runs the **same** pipeline against a GitHub PR's
+diff instead of the local tree. It rides the existing seam: the diff already
+arrives as a temp-file path (above), so `--pr` only swaps *how that file is
+filled* — `gh pr diff <n>` (bare `--pr` resolves the current branch's PR via
+`gh pr view`) instead of `git diff`. The **workflow is untouched**; only step 1
+(diff source) and a new **step 5 (publish)** differ.
+
+- **pr-flow compatibility is the load-bearing design point.** The comment is
+  posted with `gh pr comment` under the **user's own gh identity**, not
+  `author.login == "claude"`. pr-flow's `claude-review.sh` polls *only* for
+  `claude`-authored comments, so a swarm comment is invisible to `/cycle`/`/check`
+  — it can't be mistaken for an `@claude` review or stall a running PR loop. The
+  `## 🐝 Swarm review (local ensemble)` marker header keeps it visually distinct too.
+- **Only output-gated findings are ever posted** — the body is built from the
+  gated `findings`/`balance`, never raw backend output. Posting is outward-facing,
+  so it **confirms once** before publishing (the flag authorizes the review, not
+  silent publishing).
+- **`--pr` is read-only and mutually exclusive with `--fix`/`--loop`** — a
+  local-edit loop has no meaning against a remote diff; the two lifecycles need
+  their own design (deferred). Auto-review-on-push (a self-built Action running
+  `agents.sh` with `XAI_API_KEY`) stays a deliberate non-goal — only the user's
+  machine triggers a review.
 
 ## Future idea (P3+): per-lens external prompts
 
