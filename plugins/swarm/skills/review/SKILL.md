@@ -1,9 +1,10 @@
 ---
 name: review
 description: |
-  Local mixture-of-agents review: Claude lenses plus codex, grok and composer,
-  merged into one ranked report; --fix/--loop applies agreed findings.
-  Trigger: "swarm review", "review my changes", "review and fix".
+  Local mixture-of-agents review: Claude lenses plus codex and grok, one ranked
+  report. --fix/--loop applies agreed findings; --pr reviews a GitHub PR diff and
+  posts the result.
+  Trigger: "swarm review", "review my changes", "review this PR".
 user_invocable: true
 ---
 
@@ -19,6 +20,17 @@ user_invocable: true
 scope, parsed by step 1 (a git ref, `--staged`, or a pathspec — default is the
 branch delta).
 
+- `--pr [<number>]` — review a **GitHub PR's diff** instead of the local
+  working tree, then offer to publish the result as a PR comment. With a number,
+  target that PR; without one, resolve the PR of the current branch
+  (`gh pr view`). Replaces the step-1 diff source with the PR diff and enables
+  the publish step (step 5). **Incompatible with `--fix`/`--loop`** — those edit
+  the local tree, which has no defined meaning against a remote PR diff; if
+  combined, refuse and explain (do not silently drop either), and let the user
+  re-run with one or the other. A `--pr` review is otherwise **read-only** (it
+  never edits the tree); its only side effect is the confirmed comment. If a
+  scope argument is also present it is ignored for `--pr` (the PR defines the
+  diff) — say so.
 - `--fix` — after presenting the report, apply the agreed findings **once**
   (✅ agree + 🟨 partial), then stop. No re-review. See step 4.
 - `--loop[=N]` — fix-then-re-review until the loop converges or a cap (default
@@ -56,6 +68,8 @@ Decide what to review from the user's argument, then run the block:
   `git diff <ref>`.
 - **`--staged`** → `git diff --cached`.
 - **a pathspec** → append `-- <pathspec>` to the diff command.
+- **`--pr [<number>]`** → the PR diff, resolved by `gh` (see the `--pr` block
+  below **instead of** the default diff-resolution block).
 
 ```sh
 set -euo pipefail
@@ -143,6 +157,45 @@ echo "PROMPT_BYTES=$(wc -c < "$PROMPT")"
 echo "LIVE_JSON=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json | tr -d '\n')"
 ```
 
+**`--pr` diff source** — when `--pr` was given, run this block *first* (in place
+of the default `DEFBR`/`BASE` resolution and the untracked-files loop); it writes
+`$DIFF` from the PR, then the **same fencing block above** (from `NONCE` onward,
+plus the `TMPD`/`DIFF`/`PROMPT`/`PROMPT_BYTES`/`LIVE_JSON` echoes) runs unchanged.
+Set `INCLUDE_UNTRACKED=0` — a PR diff is complete, there are no local untracked
+files in scope.
+
+```sh
+set -euo pipefail
+# gh must be present + authenticated to read a PR diff. These are hard stops for
+# a --pr review (there is no local diff to fall back to): report and stop.
+command -v gh >/dev/null 2>&1 || { echo "SWARM_PR_ERR=gh CLI not found"; exit 0; }
+gh auth status >/dev/null 2>&1 || { echo "SWARM_PR_ERR=gh not authenticated (run: gh auth login)"; exit 0; }
+
+# Resolve the PR number: explicit arg wins; else the PR of the current branch.
+PR_ARG="<number-or-empty>"   # fill from the parsed --pr value; empty when bare
+if [ -n "$PR_ARG" ]; then
+  PR_NUM="$PR_ARG"
+else
+  PR_NUM="$(gh pr view --json number --jq .number 2>/dev/null || true)"
+  [ -n "$PR_NUM" ] || { echo "SWARM_PR_ERR=no open PR for the current branch — pass an explicit number: --pr <n>"; exit 0; }
+fi
+
+# PR metadata (for the report header + the post step) and the PR diff itself.
+PR_META="$(gh pr view "$PR_NUM" --json number,title,url,baseRefName,headRefName 2>/dev/null || true)"
+[ -n "$PR_META" ] || { echo "SWARM_PR_ERR=cannot read PR #$PR_NUM (does it exist? is the repo the right one?)"; exit 0; }
+gh pr diff "$PR_NUM" > "$DIFF" 2>/dev/null || { echo "SWARM_PR_ERR=cannot fetch diff for PR #$PR_NUM"; exit 0; }
+INCLUDE_UNTRACKED=0
+
+echo "PR_NUM=$PR_NUM"
+echo "PR_META=$(printf '%s' "$PR_META" | tr -d '\n')"
+# … then run the fencing block from the default step-1 block (NONCE onward). …
+```
+
+- `SWARM_PR_ERR=…` → surface the message and **stop** — a `--pr` review has no
+  local diff to fall back to. (`gh` missing/unauthenticated, no PR for the
+  branch, or an unreadable PR/diff all land here.)
+- On success carry `PR_NUM` and `PR_META` (number, title, url, base/head) into
+  the report header (step 3) and the post step (step 5).
 - `SWARM_EMPTY` → tell the user there is nothing to review (clean working tree /
   no branch delta) and stop.
 - `SWARM_NONCE_UNAVAILABLE=…` → the finding-fence nonce could not be minted
@@ -256,9 +309,14 @@ Then clean up this round's scratch dir: `rm -rf "$TMPD"` (the fix step edits the
 repo directly by `file:line`, not from the diff file, so it is safe to remove).
 
 After presenting:
+- `--pr` given → proceed to **step 5** (offer to publish the report as a PR
+  comment). `--pr` never fixes, so step 4 is skipped.
 - `--fix` or `--loop` given → proceed to **step 4**.
 - neither → the review is read-only. Offer to fix the ✅/🟨 findings (or to
   re-run with `--fix` / `--loop`) and wait — change nothing on your own.
+
+For a `--pr` review, title the header with the PR: `# 🐝 Swarm Review — PR #<n>
+"<title>"` (from `PR_META`); otherwise the local target as before.
 
 ### 4. Act on the findings (`--fix` / `--loop`)
 
@@ -387,6 +445,62 @@ Print the box, then one summary line: rounds run, `FIXES_TOTAL`, and which of th
 4 termination reasons fired. A rise in the box (a fix surfaced new findings) is
 legitimate — the script shows it; don't explain it away.
 
+### 5. Publish to the PR (`--pr` only)
+
+Only when `--pr` was given, after presenting the report (step 3). Posting is an
+**outward-facing action** — the `--pr` flag authorized the *review*, not silent
+publishing, so **confirm once** before posting.
+
+1. **Build the comment body from the gated report — never raw backend output.**
+   Use exactly the findings you just rendered (they already passed the output
+   gate; the workflow's `findings`/`balance`/`gate` are the only source). Body
+   shape (GitHub-flavored Markdown, so the table renders):
+
+   ```
+   ## 🐝 Swarm review (local ensemble)
+
+   <the step-3 findings table>
+
+   <the step-3 balance block, in a ``` fenced block>
+
+   <sub>Local mixture-of-agents review (Claude lenses + codex + grok) run from
+   the author's machine — not a hosted bot. Verdicts (✅/🟨/❌) are the runner's
+   own assessment.</sub>
+   ```
+
+   Keep the same swarm findings-table columns as step 3 (do not re-shape it for
+   GitHub). If the review found nothing, post a one-line `No issues raised.`
+   under the header instead of an empty table. Redactions / backend-error notes
+   from step 3, if any, belong in the body too (they are part of the honest
+   result).
+
+2. **Show the exact body and confirm once.** Render the full comment body to the
+   user and ask a single yes/no: *post this to PR #<n>?* Do not post on anything
+   short of an explicit yes. On no → keep the review result on screen, stop.
+
+3. **Post via `gh pr comment`** (write the body to a temp file to avoid quoting
+   pitfalls; reuse `$TMPD` before it is cleaned up, or a fresh `mktemp`):
+
+   ```sh
+   gh pr comment "$PR_NUM" --body-file "$BODY_FILE"
+   ```
+
+   Report the comment URL `gh` prints on success.
+
+4. **Graceful failure.** If the post fails (auth expired, network, permissions),
+   report the error and **keep the review result usable** — it is already on
+   screen; offer to retry or to copy the body manually. A post failure never
+   discards the review.
+
+5. **pr-flow compatibility.** This comment is posted under the **user's own `gh`
+   identity**, not `author.login == "claude"`. pr-flow's `claude-review.sh`
+   polls only for `claude`-authored comments, so a swarm comment is invisible to
+   `/cycle`/`/check` polling — it will not be mistaken for an `@claude` review or
+   disrupt a running PR loop. (The `## 🐝 Swarm review` marker header also keeps
+   it visually distinct from `@claude`/`@codex` bot reviews.)
+
+Then clean up: `rm -rf "$TMPD"`.
+
 ## Notes
 
 - **Consensus = cross-family agreement** (≥2 of claude / openai / grok). Two
@@ -407,3 +521,12 @@ legitimate — the script shows it; don't explain it away.
   converges (0 findings · nothing agreed · no files changed · cap, default 10).
   The deterministic loop bits (termination decision, close-out box) live in
   `scripts/loop-closeout.py`, not this prose.
+- **Reviewing a PR** (`--pr [<number>]`): the *same* pipeline runs against the
+  PR diff (`gh pr diff`) instead of the local tree; only the diff source (step 1)
+  and an optional publish step (step 5) differ — the workflow is untouched.
+  Posting confirms once, goes out via `gh pr comment` under the user's own
+  identity (so pr-flow's `claude`-authored poll ignores it), and only ever
+  carries **output-gated** findings. `--pr` is **read-only** and mutually
+  exclusive with `--fix`/`--loop` (a local-edit loop has no meaning against a
+  remote diff); auto-review-on-push is a deliberate non-goal (see the task's
+  residual note).
