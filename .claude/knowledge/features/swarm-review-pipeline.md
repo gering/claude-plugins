@@ -51,6 +51,14 @@ grok-build ∥ composer (see [swarm-backend-adapter](swarm-backend-adapter.md)).
   external transport returns `{ok,error,findings}` so a dropped backend is
   reported distinctly, never collapsed to a clean empty review). The container /
   auth-proxy pieces from the security doc are deferred as accepted residual.
+  A later patch extends the fence to the **second hop** (T6): finding free-text
+  is re-fed to the merge/verify agents, so it is fenced there too with a
+  **separate** nonce. Key constraint — the Workflow sandbox has no RNG
+  (`Math.random`/`Date.now` throw), so security nonces are minted in the skill's
+  Bash prep (`secrets.token_hex`) and passed via `args.findingNonce`, **never**
+  written into the external prompt (backends must not see it, or they could forge
+  the delimiter); the workflow only collision-checks it against the returned
+  findings and extends it deterministically (`nonce-1`, `-2`…) on collision.
 
 - **`args.claude: false`** runs an **external-only control** (codex + grok-build
   + composer, no Claude finder lenses, no gate; merge/verify still in-session).
