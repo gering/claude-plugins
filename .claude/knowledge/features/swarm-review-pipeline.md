@@ -1,9 +1,9 @@
 ---
 title: "Swarm Review Pipeline (/swarm:review)"
 createdAt: 2026-07-08
-updatedAt: 2026-07-13
+updatedAt: 2026-07-14
 createdFrom: "PR #24"
-updatedFrom: "session: 2026-07-13"
+updatedFrom: "session: 2026-07-14"
 pluginVersion: 1.8.2
 prime: false
 reindexedAt: 2026-07-12
@@ -125,6 +125,26 @@ filled* — `gh pr diff <n>` (bare `--pr` resolves the current branch's PR via
   their own design (deferred). Auto-review-on-push (a self-built Action running
   `agents.sh` with `XAI_API_KEY`) stays a deliberate non-goal — only the user's
   machine triggers a review.
+- **The publish path is a deterministic script, not skill prose** (swarm 0.4.1,
+  `scripts/pr-post.py` + `test_pr_post.py`) — the accepted residual from the
+  `--loop` review that spawned this. Three prose iterations each regressed the
+  same way (a forgeable heredoc terminator, an advisory-echo "stale check" that
+  posted anyway, `$PR_NUM`/`$PR_HEAD_OID` referenced across tool calls that don't
+  share shell state, per-cell sanitize rules with no enforcer), so it moved to
+  code: `build` renders the exact body from structured gated rows + balance + PR
+  meta through a **per-cell sanitizer** (escape `|`/backtick/newline; `@`→`&#64;`
+  and `://`/`www.`→entities to kill mentions + bare-URL autolinks *anywhere* in a
+  cell; `<>`→entities to strip raw HTML; `[`/`]` to break link syntax; `ort` as an
+  inert code span — everything inside a span is already inert), and the PR title
+  (untrusted contributor input) runs the same sanitizer. `post` owns the **real
+  stale-head gate** (re-reads the live head; a mismatch returns `SWARM_PR_STALE`
+  and does *not* post) then `gh pr comment --body-file` with a self-cleaning temp
+  file, **rebuilt from the same JSON** so what the confirm gate showed is what is
+  sent. SKILL step 5 shrank to: assemble JSON (cells raw, script sanitizes — never
+  pre-escape) → `build` → human injection-scan + confirm once → `post`, branching
+  on one token. Same two-tier exit convention as `loop-closeout.py` (operational
+  outcome → token + exit 0; misuse → stderr + exit 2). Pure functions
+  (`sanitize_prose`/`sanitize_code`/`stale_gate`/`render_body`) keep it unit-tested.
 
 ## Future idea (P3+): per-lens external prompts
 
