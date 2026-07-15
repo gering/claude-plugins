@@ -1,9 +1,9 @@
 ---
 title: "Swarm Review Pipeline (/swarm:review)"
 createdAt: 2026-07-08
-updatedAt: 2026-07-13
+updatedAt: 2026-07-14
 createdFrom: "PR #24"
-updatedFrom: "session: 2026-07-13"
+updatedFrom: "session: 2026-07-14"
 pluginVersion: 1.8.2
 prime: false
 reindexedAt: 2026-07-12
@@ -125,6 +125,35 @@ filled* — `gh pr diff <n>` (bare `--pr` resolves the current branch's PR via
   their own design (deferred). Auto-review-on-push (a self-built Action running
   `agents.sh` with `XAI_API_KEY`) stays a deliberate non-goal — only the user's
   machine triggers a review.
+- **The publish path is a deterministic script, not skill prose** (swarm 0.4.1,
+  `scripts/pr-post.py` + `test_pr_post.py`) — the accepted residual from the
+  `--loop` review that spawned this. Three prose iterations each regressed the
+  same way (a forgeable heredoc terminator, an advisory-echo "stale check" that
+  posted anyway, `$PR_NUM`/`$PR_HEAD_OID` referenced across tool calls that don't
+  share shell state, per-cell sanitize rules with no enforcer), so it moved to
+  code: `build` renders the exact body from structured gated rows + balance + PR
+  meta through a **per-cell sanitizer** that **entity-encodes** every markdown-
+  active char (`|`→`&#124;`, `[`/`]`, backtick, `* _ ~`, `<>`, `@`→`&#64;`,
+  `://`/`www.`→entities). **Entity-encoding, not backslash-escaping** — a review
+  (external-only, "ohne opus") caught that `\|` becomes `\\|` under backslash-
+  escaping and frees a live pipe / re-opens `\[..\](url)`; a numeric entity carries
+  no literal metacharacter, so the table delimiter / link / mention can never
+  re-form (the table splits on a literal `|` *before* inline parsing). `ort` is an
+  inert code span (backtick + `|` **stripped**, since entities don't decode inside
+  a span and escaping is bypassable there too). Header `pr_num`/`head_oid` are
+  validated in `render_body` (digits / hex-only), not just at the gh-target seam —
+  else a JSON `pr_num` like `"29\n\n**evil**"` injects markdown past the cell
+  sanitizer. `post` owns the **real stale-head gate**, built body-last so the gate
+  is the final step before the comment: it fails **closed** on both a mismatch
+  (`SWARM_PR_STALE`) *and* an unreadable live head (`SWARM_PR_HEAD_UNVERIFIED`) —
+  publishing a possibly stale review under the user's identity is worse than a
+  retry. Then `gh pr comment --body-file`, **rebuilt from the same JSON** so what
+  the confirm gate showed is what is sent, with a self-cleaning temp file. SKILL
+  step 5 shrank to: assemble JSON (cells raw, script sanitizes — never pre-escape)
+  → `build` → human injection-scan + confirm once → `post`, branching on one token.
+  Same two-tier exit as `loop-closeout.py` (operational → token + exit 0; misuse,
+  incl. non-list `rows`, → stderr + exit 2). Pure functions
+  (`sanitize_prose`/`sanitize_code`/`stale_gate`/`render_body`) keep it unit-tested.
 
 ## Future idea (P3+): per-lens external prompts
 
