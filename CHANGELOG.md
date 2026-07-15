@@ -49,6 +49,9 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.7.0 — 2026-07-15
+- Add `/statusline` skill: a `[ws ○… ●… ◇… ✓…]` task-backlog segment for Claude Code's status line. Counts `tasks/*.md` by state (not-started / active / in-review / merged) with muted single-width glyphs; PR state comes from a short-TTL `.git/` cache refreshed by a detached background `gh` call, so rendering never blocks on the network. Own marker segment coexists with the knowledge-system `[cks …]` block.
+
 ### 1.6.0 — 2026-07-02
 - Add `/continue` reopen mode to recover `/exit`-closed herdr tabs.
 

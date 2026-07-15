@@ -49,4 +49,24 @@ The "inject a marked block into a user-owned file you don't control" pattern
 recurs — `/init` does the same to `CLAUDE.md`. Idempotent marker blocks are the
 plugin's standard mechanism for editing files the user also edits.
 
+## The work-system parallel (`[ws …]`)
+
+work-system reuses this whole pattern for its task backlog: `/work-system:statusline`
+injects a **second** marker block (`# >>> work-system:ws-statusline >>>`) that renders
+`[ws ○… ●… ◇… ✓…]` — `tasks/*.md` counts by state (not-started / active / in-review /
+merged) with muted single-width glyphs, zero columns dropped. It owns a distinct
+marker segment and coexists with `[cks …]` in one `~/.claude/statusline.sh`; the two
+installers are near-identical clones (a deliberate, accepted duplication over building
+a shared host library).
+
+Non-obvious bit worth keeping: **PR state must never block a render.** `gh pr list` is
+far too slow to call on every status-line paint, so `ws-statusline.sh` reads only a
+short-TTL cache file in `.git/` (shared across worktrees via the common git dir; never
+dirties the tree) and, when it's stale, kicks off a *detached* background `gh` refresh —
+stdout/stderr closed so the host statusline's command substitution doesn't wait on the
+child — that writes the cache for the *next* render. The first render after a state
+change is therefore one refresh behind; an accepted trade for a never-blocking line.
+A `mkdir` lock (with a stale-lock sweep) keeps concurrent renders from spawning a
+refresh stampede.
+
 Related: [skill-composition](../architecture/skill-composition.md) (shared-script single-source), [ci-structure-checks](../deployment/ci-structure-checks.md).

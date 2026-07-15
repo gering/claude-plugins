@@ -1,0 +1,592 @@
+#!/usr/bin/env bash
+# ws-statusline-install.sh — install/manage the [ws ...] work-system status
+# block in Claude Code's custom status line.
+#
+# The render half is scripts/ws-statusline.sh; this is the install half. It is
+# the source of truth for /work-system:statusline — the SKILL.md is a thin
+# wrapper that parses the argument, runs this, and relays the output.
+#
+# Subcommands:
+#   status     (default) report plugin/installed renderer versions, marker-block
+#              presence, and the current project's disable sentinel.
+#   install    copy the renderer to ~/.claude/ws-statusline.sh (version-gated)
+#              and inject a marker block into ~/.claude/statusline.sh.
+#   enable     remove this project's disable sentinel.
+#   disable    create this project's disable sentinel (per-project opt-out).
+#   uninstall  strip the marker block and delete the installed renderer.
+#
+# Flags:
+#   --force    (install only) overwrite a pre-existing manual ws block, or
+#              force a downgrade of the installed renderer.
+#
+# python3 is required (symlink resolution + atomic file mutation). BSD awk on
+# macOS rejects newlines in -v values and silently truncates the target, so all
+# multi-line mutation goes through python3, reading/writing BYTES so the host's
+# encoding and line endings survive untouched, then an atomic os.replace.
+#
+# set -u (catch unset vars) but NOT -e: the flow relies on grep returning
+# non-zero for "no match" all over the place; errors are handled explicitly.
+set -u
+
+# ---- paths and constants ----------------------------------------------------
+
+STATUSLINE="${HOME}/.claude/statusline.sh"          # configured path (maybe a symlink)
+INSTALLED="${HOME}/.claude/ws-statusline.sh"        # stable runtime renderer path
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SOURCE="${SCRIPT_DIR}/ws-statusline.sh"             # plugin's renderer source of truth
+BEGIN_MARKER="# >>> work-system:ws-statusline >>>"
+END_MARKER="# <<< work-system:ws-statusline <<<"
+SENTINEL_NAME=".ws-statusline-off"                  # per-project disable sentinel
+
+STATUSLINE_TARGET=""   # resolved real path of STATUSLINE (set by resolve_target)
+BACKUP=""              # session backup path (set by backup_target)
+
+# Marker-pair inspection results (set by inspect_markers).
+MK_NB=0; MK_NE=0; MK_BL=""; MK_EL=""; MK_STATE="absent"
+
+MARKER_BLOCK="$(cat <<'EOF'
+# >>> work-system:ws-statusline >>>
+# Managed by /work-system:statusline. Do not edit between markers —
+# run `/work-system:statusline uninstall` to remove cleanly.
+if [ -x "$HOME/.claude/ws-statusline.sh" ]; then
+  _WS_DIR="${DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
+  WS_PLUGIN=$(bash "$HOME/.claude/ws-statusline.sh" "$_WS_DIR" 2>/dev/null)
+  [ -n "$WS_PLUGIN" ] && OUT="$OUT $WS_PLUGIN"
+fi
+# <<< work-system:ws-statusline <<<
+EOF
+)"
+
+# ---- helpers ----------------------------------------------------------------
+
+die() { printf '%s\n' "$*" >&2; exit 1; }
+
+require_python3() {
+  command -v python3 >/dev/null 2>&1 \
+    || die "python3 not on PATH — required by /statusline $1"
+}
+
+# Resolve a path's real target (handles symlink chains; returns the input even
+# for broken chains, matching os.path.realpath — callers re-check existence).
+realpath_of() {
+  python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"
+}
+
+# Project dir for per-project sentinel ops. Uses CLAUDE_PROJECT_DIR (the dir
+# Claude Code sets for the session this runs in), falling back to cwd. We do NOT
+# prefer $DIR here even though the renderer's _WS_DIR does: at render time $DIR
+# is a host-statusline-local variable, but it is not exported into this script's
+# environment, so honouring it would let a stray shell $DIR silently redirect the
+# sentinel. The rare case where a host sets $DIR to a non-project subdir at
+# render time is an accepted limitation.
+project_dir() { printf '%s' "${CLAUDE_PROJECT_DIR:-$(pwd)}"; }
+
+# Extract X.Y.Z from a script's `readonly WS_STATUSLINE_VERSION=` line.
+# Missing or malformed → 0.0.0.
+script_version() {
+  local v
+  v=$(grep -m1 '^readonly WS_STATUSLINE_VERSION=' "$1" 2>/dev/null \
+    | sed -E 's/.*=[[:space:]]*"?([0-9]+\.[0-9]+\.[0-9]+)"?.*/\1/')
+  if printf '%s' "$v" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+    printf '%s' "$v"
+  else
+    printf '0.0.0'
+  fi
+}
+
+# Compare two X.Y.Z versions. Echoes: newer (a>b), equal, older (a<b).
+version_cmp() {
+  local a=$1 b=$2 highest
+  [ "$a" = "$b" ] && { echo equal; return; }
+  highest=$(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -1)
+  [ "$highest" = "$a" ] && echo newer || echo older
+}
+
+resolve_target() {
+  STATUSLINE_TARGET=$(realpath_of "$STATUSLINE")
+  if [ -L "$STATUSLINE" ]; then
+    printf 'Note: %s is a symlink → resolved to %s. Edits modify the link target.\n' \
+      "$STATUSLINE" "$STATUSLINE_TARGET"
+  fi
+}
+
+backup_target() {
+  # mktemp gives a unique name (sub-second reruns can't collide / clobber).
+  BACKUP=$(mktemp "${STATUSLINE_TARGET}.bak-XXXXXX") \
+    || die "Failed to create a backup file next to $STATUSLINE_TARGET."
+  cp "$STATUSLINE_TARGET" "$BACKUP" || die "Failed to write backup at $BACKUP."
+}
+
+# Restore the backup over the target, then die. The restore status is reported
+# truthfully: a failed cp is surfaced loudly instead of a false "restored".
+restore_and_die() {
+  local msg=$1
+  if [ -n "$BACKUP" ] && cp "$BACKUP" "$STATUSLINE_TARGET" 2>/dev/null; then
+    die "$msg Restored $STATUSLINE_TARGET from backup ($BACKUP)."
+  fi
+  die "$msg FAILED to restore from backup ($BACKUP) — $STATUSLINE_TARGET may be in a broken state; restore it by hand."
+}
+
+# Ensure +x on a file; report (never silently). ctx: preflight | post-write.
+# A preflight chmod failure is fatal (Claude Code needs +x to exec); a
+# post-write failure only warns — the marker block is already correctly written.
+ensure_executable() {
+  local f=$1 ctx=$2
+  [ -x "$f" ] && return 0
+  if chmod +x "$f" 2>/dev/null; then
+    if [ "$ctx" = "preflight" ]; then
+      printf 'Set executable bit on %s (was missing — would have caused silent statusline failure).\n' "$f"
+    else
+      printf 'Re-set executable bit on %s (was dropped during write).\n' "$f"
+    fi
+    return 0
+  fi
+  if [ "$ctx" = "preflight" ]; then
+    die "Failed to set executable bit on $f. Claude Code needs +x to exec the statusline. Fix permissions and re-run."
+  fi
+  printf 'WARNING: could not set +x on %s after write — the statusline may silently fail until you run: chmod +x %s\n' "$f" "$f" >&2
+  return 0
+}
+
+# Count lines containing a fixed string (0 on missing file / no match).
+count_fixed() {
+  local n
+  n=$(grep -cF "$1" "$2" 2>/dev/null || true)
+  printf '%s' "${n:-0}"
+}
+
+# First line number of a fixed string (empty if absent).
+line_of_fixed() {
+  grep -nF "$1" "$2" 2>/dev/null | head -1 | cut -d: -f1
+}
+
+# Inspect the marker pair in a file — the single classifier shared by install,
+# uninstall, and status so they can never disagree on what "valid" means.
+# Sets globals: MK_NB/MK_NE (counts), MK_BL/MK_EL (line numbers, only for an
+# ordered pair), MK_STATE ∈ present | absent | invalid. "present" requires
+# exactly one BEGIN, one END, and BEGIN line < END line.
+inspect_markers() {
+  local file=$1
+  MK_NB=$(count_fixed "$BEGIN_MARKER" "$file")
+  MK_NE=$(count_fixed "$END_MARKER" "$file")
+  MK_BL=""; MK_EL=""
+  if [ "$MK_NB" = "1" ] && [ "$MK_NE" = "1" ]; then
+    MK_BL=$(line_of_fixed "$BEGIN_MARKER" "$file")
+    MK_EL=$(line_of_fixed "$END_MARKER" "$file")
+    if [ "$MK_BL" -lt "$MK_EL" ]; then
+      MK_STATE="present"
+    else
+      MK_STATE="invalid"   # markers reordered: deleting BEGIN..END would over-delete
+    fi
+  elif [ "$MK_NB" = "0" ] && [ "$MK_NE" = "0" ]; then
+    MK_STATE="absent"
+  else
+    MK_STATE="invalid"     # mismatched counts (corrupt prior install)
+  fi
+}
+
+# Standard "refuse to mutate" message for an invalid marker pair. arg1 = verb.
+marker_invalid_msg() {
+  printf 'Marker pair invalid in %s (%s BEGIN, %s END, BEGIN@%s, END@%s). Resolve manually before re-running %s.' \
+    "$STATUSLINE_TARGET" "$MK_NB" "$MK_NE" "${MK_BL:-?}" "${MK_EL:-?}" "$1"
+}
+
+# Replace lines START..END (inclusive, 1-based) of STATUSLINE_TARGET with the
+# marker text (arg 3). Empty marker = pure deletion. Pure insertion before line
+# L: pass START=L END=L-1. Atomic via os.replace on the resolved real path.
+mutate_file() {
+  local start=$1 end=$2 marker=${3:-}
+  PATH_TARGET="$STATUSLINE_TARGET" MARKER="$marker" \
+    START_LINE="$start" END_LINE="$end" \
+    python3 - <<'PY'
+import os, sys
+path = os.environ['PATH_TARGET']
+tmp = path + f".tmp.{os.getpid()}"
+try:
+    marker = os.environ.get('MARKER', '')
+    start = int(os.environ['START_LINE'])  # 1-based, inclusive
+    end = int(os.environ['END_LINE'])      # 1-based, inclusive; start-1 = insert-only
+    # Read/write BYTES so the host file's encoding and line endings (CRLF,
+    # non-ASCII comments) survive untouched outside the marker region. Text mode
+    # would normalize newlines globally and raise UnicodeDecodeError under a C
+    # locale.
+    with open(path, 'rb') as f:
+        data = f.read()
+    # Split on \n ONLY (keeping the delimiter) so Python's line indices match
+    # grep -n's exactly — grep delimits strictly by \n, whereas
+    # bytes.splitlines() would also break on a lone \r and desync the indices
+    # the bash side computed.
+    segs = data.split(b'\n')
+    lines = [s + b'\n' for s in segs[:-1]]
+    if segs[-1]:
+        lines.append(segs[-1])  # final segment with no trailing newline
+    block = []
+    if marker:
+        b = marker.encode('utf-8')
+        # MARKER from $() loses its trailing newline; restore one so the block
+        # does not collide with the following line.
+        if not b.endswith(b'\n'):
+            b += b'\n'
+        block = [b]
+    new_lines = lines[:start-1] + block + lines[end:]  # end inclusive
+    with open(tmp, 'wb') as f:
+        f.writelines(new_lines)
+    # Preserve the host file's permission bits. os.replace swaps in the tmp file
+    # (created with default umask perms), which would otherwise drop +x and any
+    # group/other bits — reducing e.g. 0770 to 0644. ensure_executable re-adds +x
+    # as a net, but copying the full mode keeps group/other bits and avoids a
+    # spurious "was dropped during write" message on every run.
+    try:
+        os.chmod(tmp, os.stat(path).st_mode & 0o7777)
+    except OSError:
+        pass
+    os.replace(tmp, path)  # atomic on same filesystem; PATH_TARGET is the real path
+except Exception as e:
+    try: os.unlink(tmp)
+    except FileNotFoundError: pass
+    print(f"FATAL: file mutation failed: {type(e).__name__}: {e}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+# ---- status -----------------------------------------------------------------
+
+cmd_status() {
+  require_python3 status
+  local src_v inst_v="" cmp="" proj sentinel
+
+  src_v=$(script_version "$SOURCE")
+  printf 'ws statusline status\n'
+
+  if [ -e "$SOURCE" ]; then
+    printf -- '- Plugin renderer: %s (v%s)\n' "$SOURCE" "$src_v"
+  else
+    printf -- '- Plugin renderer: MISSING (%s) — reinstall the plugin\n' "$SOURCE"
+  fi
+
+  if [ -e "$INSTALLED" ]; then
+    inst_v=$(script_version "$INSTALLED")
+    cmp=$(version_cmp "$src_v" "$inst_v")
+    case "$cmp" in
+      equal) printf -- '- Installed renderer: %s (v%s, current)\n' "$INSTALLED" "$inst_v" ;;
+      newer) printf -- '- Installed renderer: %s (v%s, older than plugin v%s — run install to upgrade)\n' "$INSTALLED" "$inst_v" "$src_v" ;;
+      older) printf -- '- Installed renderer: %s (v%s, newer than plugin v%s — downgrade scenario)\n' "$INSTALLED" "$inst_v" "$src_v" ;;
+    esac
+  else
+    printf -- '- Installed renderer: missing (%s)\n' "$INSTALLED"
+  fi
+
+  MK_STATE="absent"
+  if [ ! -e "$STATUSLINE" ]; then
+    printf -- '- Host statusline: %s not found (set one up, then run install)\n' "$STATUSLINE"
+    MK_STATE="nohost"
+  else
+    resolve_target
+    if [ ! -r "$STATUSLINE_TARGET" ]; then
+      printf -- '- Marker block: cannot read %s (permissions?)\n' "$STATUSLINE_TARGET"
+      MK_STATE="unreadable"
+    else
+      inspect_markers "$STATUSLINE_TARGET"
+      case "$MK_STATE" in
+        present) printf -- '- Marker block in %s: present (lines %s-%s)\n' "$STATUSLINE_TARGET" "$MK_BL" "$MK_EL" ;;
+        absent)  printf -- '- Marker block in %s: absent\n' "$STATUSLINE_TARGET" ;;
+        invalid) printf -- '- Marker block in %s: INVALID (%s BEGIN / %s END — resolve manually)\n' "$STATUSLINE_TARGET" "$MK_NB" "$MK_NE" ;;
+      esac
+    fi
+  fi
+
+  proj=$(project_dir)
+  sentinel="$proj/.claude/$SENTINEL_NAME"
+  if [ -f "$sentinel" ]; then
+    printf -- '- Project sentinel: present → ws disabled for %s\n' "$proj"
+  else
+    printf -- '- Project sentinel: absent → ws enabled for %s\n' "$proj"
+  fi
+
+  if [ "$MK_STATE" = "unreadable" ]; then
+    printf 'Hint: fix read permissions on %s, then re-run status.\n' "$STATUSLINE_TARGET"
+  elif [ "$MK_STATE" = "invalid" ]; then
+    printf 'Hint: marker block is corrupted — run `uninstall` then `install` to reset it.\n'
+  elif [ ! -e "$INSTALLED" ] || [ "$MK_STATE" != "present" ]; then
+    printf 'Hint: run `install` to set up the ws status block.\n'
+  elif [ "$cmp" = "newer" ]; then
+    printf 'Hint: run `install` to upgrade the renderer (v%s → v%s).\n' "$inst_v" "$src_v"
+  elif [ "$cmp" = "older" ]; then
+    printf 'Hint: installed renderer (v%s) is newer than the plugin (v%s) — fine; use `install --force` only to downgrade.\n' "$inst_v" "$src_v"
+  else
+    printf 'Hint: ws is installed and current.\n'
+  fi
+}
+
+# ---- install ----------------------------------------------------------------
+
+# Copy the renderer to INSTALLED, version-gated. Sets RENDERER_MSG. Honours FORCE
+# for downgrades. Aborts (without touching the marker block) on copy failure.
+copy_renderer() {
+  local src_v dest_v cmp
+  src_v=$(script_version "$SOURCE")
+  if [ ! -e "$INSTALLED" ]; then
+    cp "$SOURCE" "$INSTALLED" \
+      || die "Failed to install renderer to $INSTALLED. Marker block was not touched."
+    chmod +x "$INSTALLED" \
+      || die "Failed to set executable bit on $INSTALLED. Marker block was not touched."
+    RENDERER_MSG="Renderer installed: $INSTALLED (v$src_v)"
+    return
+  fi
+  dest_v=$(script_version "$INSTALLED")
+  cmp=$(version_cmp "$src_v" "$dest_v")
+  case "$cmp" in
+    newer)
+      cp "$SOURCE" "$INSTALLED" \
+        || die "Failed to upgrade renderer at $INSTALLED. Marker block was not touched."
+      chmod +x "$INSTALLED" \
+        || die "Failed to set executable bit on $INSTALLED. Marker block was not touched."
+      RENDERER_MSG="Renderer upgraded: v$dest_v → v$src_v ($INSTALLED)"
+      ;;
+    equal)
+      RENDERER_MSG="Renderer already current (v$src_v)"
+      ;;
+    older)
+      if [ "$FORCE" -eq 1 ]; then
+        cp "$SOURCE" "$INSTALLED" \
+          || die "Failed to overwrite renderer at $INSTALLED. Marker block was not touched."
+        chmod +x "$INSTALLED" \
+          || die "Failed to set executable bit on $INSTALLED. Marker block was not touched."
+        RENDERER_MSG="Renderer force-downgraded: v$dest_v → v$src_v ($INSTALLED)"
+      else
+        RENDERER_MSG="Installed v$dest_v is newer than plugin v$src_v — skipped copy (use --force to overwrite)."
+      fi
+      ;;
+  esac
+}
+
+# Decide where the marker block goes when none exists yet. Sets START_LINE,
+# END_LINE (caller-owned locals via dynamic scope) and PLACEMENT_MSG, or dies.
+determine_placement() {
+  local ph_count ph_line last_out auto_line ph_lines
+  ph_count=$(grep -cE '^[[:space:]]*#[[:space:]]*\{\{ws\}\}[[:space:]]*$' "$STATUSLINE_TARGET" 2>/dev/null || true)
+  ph_count=${ph_count:-0}
+
+  if [ "$ph_count" -gt 1 ]; then
+    ph_lines=$(grep -nE '^[[:space:]]*#[[:space:]]*\{\{ws\}\}[[:space:]]*$' "$STATUSLINE_TARGET" | cut -d: -f1 | paste -sd, -)
+    die "Multiple # {{ws}} placeholders found (lines $ph_lines). Keep only one and re-run install."
+  fi
+
+  if [ "$ph_count" -eq 1 ]; then
+    ph_line=$(grep -nE '^[[:space:]]*#[[:space:]]*\{\{ws\}\}[[:space:]]*$' "$STATUSLINE_TARGET" | head -1 | cut -d: -f1)
+    # Last OUT= or OUT+= assignment. The [+]? is critical: a bare OUT= regex
+    # misses OUT+= and would let the placeholder land before later appends.
+    last_out=$(grep -nE '^[[:space:]]*OUT[+]?=' "$STATUSLINE_TARGET" | tail -1 | cut -d: -f1)
+    if [ -z "$last_out" ]; then
+      die "Could not find any OUT= assignment in $STATUSLINE_TARGET. The injected block appends to \$OUT — your statusline must define it. See the snippet in SKILL.md for the contract."
+    fi
+    if [ "$ph_line" -gt "$last_out" ]; then
+      START_LINE=$ph_line
+      END_LINE=$ph_line
+      PLACEMENT_MSG="placed at user-defined position (# {{ws}} placeholder on line $ph_line)"
+      return
+    fi
+    die "# {{ws}} placeholder on line $ph_line is at or before the last \$OUT assignment (line $last_out). The injected block does OUT=\"\$OUT \$WS_PLUGIN\" — placing it earlier means the later OUT= overwrites it and ws silently disappears. Move the placeholder after line $last_out and re-run install."
+  fi
+
+  # No placeholder → auto-detect: insert before the last line that prints $OUT.
+  auto_line=$(grep -nE '(echo[[:space:]].*\$OUT|printf[[:space:]].*\$OUT)' "$STATUSLINE_TARGET" | tail -1 | cut -d: -f1)
+  if [ -n "$auto_line" ]; then
+    START_LINE=$auto_line
+    END_LINE=$((auto_line - 1))   # empty range → pure insertion before auto_line
+    PLACEMENT_MSG="auto-placed before line $auto_line (add a # {{ws}} comment to choose a different position)"
+    return
+  fi
+
+  die "No # {{ws}} placeholder and no 'echo/printf \$OUT' line found in $STATUSLINE_TARGET.
+Add a # {{ws}} comment where you want the ws block (after your last OUT= assignment) and re-run install, or paste this block manually:
+
+$MARKER_BLOCK"
+}
+
+# Post-write sanity checks. Restore from backup and abort on the first failure.
+verify_after_install() {
+  [ -s "$STATUSLINE_TARGET" ] \
+    || restore_and_die "Post-write check failed: $STATUSLINE_TARGET is empty."
+  inspect_markers "$STATUSLINE_TARGET"
+  [ "$MK_STATE" = "present" ] \
+    || restore_and_die "Post-write check failed: expected exactly one ordered marker pair, found $MK_NB BEGIN / $MK_NE END."
+  if ! bash -n "$STATUSLINE_TARGET" 2>/dev/null; then
+    local err; err=$(bash -n "$STATUSLINE_TARGET" 2>&1 || true)
+    restore_and_die "Post-write check failed: $STATUSLINE_TARGET has a syntax error. ($err)"
+  fi
+  ensure_executable "$STATUSLINE_TARGET" post-write
+}
+
+cmd_install() {
+  require_python3 install
+
+  # a. Preflight
+  [ -e "$STATUSLINE" ] \
+    || die "No ~/.claude/statusline.sh found. Set up your custom status line first (see ~/.claude/settings.json → statusLine.command)."
+  [ -e "$SOURCE" ] \
+    || die "Renderer source not found at $SOURCE. Reinstall the work-system plugin."
+  resolve_target
+  [ -e "$STATUSLINE_TARGET" ] \
+    || die "Symlink $STATUSLINE resolves to $STATUSLINE_TARGET which does not exist (broken link chain?). Fix the symlink and re-run."
+  [ -w "$STATUSLINE_TARGET" ] \
+    || die "$STATUSLINE_TARGET is not writable (permissions/ownership?). Fix and re-run."
+  ensure_executable "$STATUSLINE_TARGET" preflight
+
+  # b. Copy renderer (version-gated)
+  local SRC_VERSION RENDERER_MSG
+  SRC_VERSION=$(script_version "$SOURCE")
+  copy_renderer
+
+  # c/d. Inspect marker pair → refresh, place fresh, or refuse.
+  local START_LINE END_LINE PLACEMENT_MSG
+  inspect_markers "$STATUSLINE_TARGET"
+  case "$MK_STATE" in
+    present)
+      START_LINE=$MK_BL
+      END_LINE=$MK_EL
+      PLACEMENT_MSG="refreshed existing marker block (lines ${MK_BL}-${MK_EL})"
+      ;;
+    absent)
+      # Manual ws block + no marker block → duplication risk; require --force.
+      if grep -nE '\[ws[^]]*\]' "$STATUSLINE_TARGET" >/dev/null 2>&1 && [ "$FORCE" -ne 1 ]; then
+        die "Found an existing [ws ...] block in $STATUSLINE_TARGET but no marker block. Installing would duplicate it. Re-run with --force to inject anyway."
+      fi
+      determine_placement
+      ;;
+    invalid)
+      die "$(marker_invalid_msg install)"
+      ;;
+  esac
+
+  # Failsafe: never hand the Python mutation an empty/garbage line number (catches
+  # a grep misfire before we touch the file). START is 1-based; END may be START-1.
+  case "$START_LINE" in ''|*[!0-9]*|0) die "Internal error: START_LINE='$START_LINE' is not a positive line number (grep misfire). Aborted before mutation." ;; esac
+  case "$END_LINE"   in ''|*[!0-9]*)   die "Internal error: END_LINE='$END_LINE' is not a line number (grep misfire). Aborted before mutation." ;; esac
+
+  # e. Mutate atomically, then verify (both restore-on-failure).
+  backup_target
+  if ! mutate_file "$START_LINE" "$END_LINE" "$MARKER_BLOCK"; then
+    restore_and_die "Marker injection failed."
+  fi
+  verify_after_install
+
+  # f. Confirm
+  printf '✅ Installed.\n'
+  printf -- '- %s\n' "$RENDERER_MSG"
+  printf -- '- Marker block: %s in %s\n' "$PLACEMENT_MSG" "$STATUSLINE_TARGET"
+  printf -- '- Backup: %s\n' "$BACKUP"
+  printf 'Restart Claude Code (or reload the status line) to see [ws ...] in projects with a tasks/ backlog.\n'
+  printf 'Tip: silence ws in a noisy project with `/work-system:statusline disable` (run from inside it).\n'
+}
+
+# ---- enable / disable (per-project) -----------------------------------------
+
+cmd_disable() {
+  local proj; proj=$(project_dir)
+  mkdir -p "$proj/.claude" || die "Failed to create $proj/.claude"
+  touch "$proj/.claude/$SENTINEL_NAME" || die "Failed to create the disable sentinel in $proj/.claude"
+  printf '✅ ws disabled for %s. The renderer will skip output here. Re-enable with `enable`.\n' "$proj"
+  printf 'Note: this is per-project — other projects keep showing [ws ...].\n'
+}
+
+cmd_enable() {
+  local proj; proj=$(project_dir)
+  rm -f "$proj/.claude/$SENTINEL_NAME" 2>/dev/null || true
+  printf '✅ ws enabled for %s.\n' "$proj"
+  printf 'Note: enable does not install the marker block or renderer — run `install` for that.\n'
+}
+
+# ---- uninstall --------------------------------------------------------------
+
+# Post-strip checks. orig_ok=1 means the file parsed cleanly before the strip,
+# so a parse error now is ours → restore. Otherwise the file was already broken.
+verify_after_uninstall() {
+  local orig_ok=$1
+  [ -s "$STATUSLINE_TARGET" ] \
+    || restore_and_die "Post-strip check failed: $STATUSLINE_TARGET is empty."
+  inspect_markers "$STATUSLINE_TARGET"
+  [ "$MK_STATE" = "absent" ] \
+    || restore_and_die "Post-strip check failed: markers still present ($MK_NB BEGIN / $MK_NE END)."
+  if ! bash -n "$STATUSLINE_TARGET" 2>/dev/null; then
+    local err; err=$(bash -n "$STATUSLINE_TARGET" 2>&1 || true)
+    if [ "$orig_ok" = "1" ]; then
+      restore_and_die "Post-strip check failed: strip introduced a syntax error. ($err)"
+    fi
+    printf 'WARNING: %s still has a syntax error after strip, but it was already broken before uninstall — not restoring. (%s)\n' "$STATUSLINE_TARGET" "$err"
+  fi
+  ensure_executable "$STATUSLINE_TARGET" post-write
+}
+
+cmd_uninstall() {
+  require_python3 uninstall
+  local removed_block=0 renderer_msg
+
+  if [ -e "$STATUSLINE" ]; then
+    resolve_target
+    inspect_markers "$STATUSLINE_TARGET"
+    case "$MK_STATE" in
+      absent)
+        printf 'Marker block not found in %s — nothing to strip.\n' "$STATUSLINE_TARGET"
+        ;;
+      present)
+        local orig_ok=0
+        bash -n "$STATUSLINE_TARGET" 2>/dev/null && orig_ok=1
+        backup_target
+        if ! mutate_file "$MK_BL" "$MK_EL"; then
+          restore_and_die "Marker strip failed."
+        fi
+        verify_after_uninstall "$orig_ok"
+        removed_block=1
+        ;;
+      invalid)
+        die "$(marker_invalid_msg uninstall)"
+        ;;
+    esac
+  else
+    printf 'No %s found — skipping marker removal.\n' "$STATUSLINE"
+  fi
+
+  # Remove the global renderer regardless of marker state (no -f: surface real
+  # failures, but warn rather than abort).
+  if [ -e "$INSTALLED" ]; then
+    if rm "$INSTALLED" 2>/dev/null; then
+      renderer_msg="renderer deleted ($INSTALLED)"
+    else
+      renderer_msg="WARNING: failed to delete renderer at $INSTALLED — remove manually"
+    fi
+  else
+    renderer_msg="renderer not present ($INSTALLED)"
+  fi
+
+  printf '✅ Uninstalled.\n'
+  [ "$removed_block" = "1" ] && printf -- '- Marker block removed from %s (backup: %s)\n' "$STATUSLINE_TARGET" "$BACKUP"
+  printf -- '- %s\n' "$renderer_msg"
+  printf -- '- Per-project sentinels (%s) were left in place.\n' "$SENTINEL_NAME"
+}
+
+# ---- argument parsing + dispatch --------------------------------------------
+
+CMD=""
+FORCE=0
+for arg in "$@"; do
+  case "$arg" in
+    "")
+      ;;  # ignore empty tokens (e.g. a quoted empty $ARGUMENTS from the wrapper)
+    install|enable|disable|uninstall|status)
+      [ -z "$CMD" ] && CMD="$arg" ;;
+    --force)
+      FORCE=1 ;;
+    *)
+      die "Unknown argument: $arg (expected: install | enable | disable | uninstall | status [--force])" ;;
+  esac
+done
+[ -z "$CMD" ] && CMD="status"
+
+case "$CMD" in
+  status)    cmd_status ;;
+  install)   cmd_install ;;
+  enable)    cmd_enable ;;
+  disable)   cmd_disable ;;
+  uninstall) cmd_uninstall ;;
+esac

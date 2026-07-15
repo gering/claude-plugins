@@ -34,6 +34,7 @@ Generic task and worktree workflow system for Claude Code. Manage tasks as markd
 | `/status` | Check task status (PRs, branches, commits) |
 | `/close` | Clean up after merge (worktree, branches; archives the task file) |
 | `/list` | Overview of all tasks, worktrees, and status |
+| `/statusline` | Add a `[ws …]` task-backlog segment to Claude Code's status line |
 
 ## How It Works
 
