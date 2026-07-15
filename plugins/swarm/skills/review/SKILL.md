@@ -543,7 +543,7 @@ post. Do **not** re-implement the sanitize/gate/post logic inline.
    and show it in full:
 
    ```sh
-   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/pr-post.py" build --input <json>
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/pr-post.py" build --input "<json>"
    ```
 
    The findings are LLM output derived from an **attacker-controllable PR diff**,
@@ -559,7 +559,7 @@ post. Do **not** re-implement the sanitize/gate/post logic inline.
 
    ```sh
    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/pr-post.py" post \
-     --input <json> --pr <PR_NUM> --head-oid <PR_HEAD_OID>
+     --input "<json>" --pr <PR_NUM> --head-oid <PR_HEAD_OID>
    ```
 
    It re-reads the live head and **stops before posting on a mismatch**, then
@@ -570,9 +570,9 @@ post. Do **not** re-implement the sanitize/gate/post logic inline.
    - `SWARM_PR_STALE=…` → the PR advanced since the review (the script did **not**
      post). Tell the user; a fresh `--pr` review of the new head is usually right.
      Only re-post if they explicitly re-confirm.
-   - `SWARM_PR_WARN=…` → the live head couldn't be read; the script posted the
-     reviewed revision anyway (parity with the old advisory behavior). Surface it
-     alongside the `SWARM_PR_POSTED` line.
+   - `SWARM_PR_HEAD_UNVERIFIED=…` → the live head couldn't be read, so the script
+     **failed closed and did not post** (a stale revision can't be ruled out).
+     Tell the user to re-run once `gh` is reachable.
    - `SWARM_PR_POST_ERR=…` → the post failed (auth/network/permissions/`gh`
      missing). Report the error and **keep the review usable** — it is on screen;
      offer to retry or copy the body. A post failure never discards the review.

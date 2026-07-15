@@ -38,9 +38,13 @@ influenced. `sev`/`v`/`num` are model glyphs; they pass through the same
 sanitizer unharmed (glyphs contain none of the neutralized characters).
 
 Exit-code convention (matches loop-closeout.py + the skill's step-1 block):
-  operational outcomes (stale head, gh missing, post failure) -> token + exit 0,
-  the caller branches on the token;
-  programmer misuse (bad JSON, missing required field) -> stderr + exit 2.
+  operational outcomes (stale head, unverifiable head, gh missing, post failure)
+  -> token + exit 0, the caller branches on the token;
+  programmer misuse (bad JSON, non-list rows, missing field) -> stderr + exit 2.
+
+`post` fails CLOSED: a mismatched head (SWARM_PR_STALE) OR an unreadable live
+head (SWARM_PR_HEAD_UNVERIFIED) both stop before posting — publishing a possibly
+stale review under the user's identity is worse than a retry.
 """
 import argparse
 import json
@@ -75,12 +79,23 @@ def sanitize_prose(text) -> str:
       - flatten all whitespace / control chars -> single spaces (a newline would
         break the table row);
       - ``&`` -> ``&amp;`` (see above);
+    Every neutralized character is **entity-encoded, never backslash-escaped.**
+    Backslash-escaping is defeated by an attacker-supplied backslash: ``\\|``
+    would become ``\\\\|`` — Markdown eats the ``\\\\`` as one literal backslash
+    and the pipe is live again (same for ``\\[label\\](url)`` re-opening a link).
+    An HTML numeric entity has no such bypass: the table row splits on a *literal*
+    ``|`` before inline parsing, and ``&#124;`` carries none, so the delimiter can
+    never re-form; the browser decodes it back to a visible ``|`` on render.
+
+      - ``&`` -> ``&amp;`` FIRST, so an attacker cannot smuggle a live entity
+        (``&#124;`` -> ``&amp;#124;``, shown literally) and our own entities below
+        (inserted after) are not double-encoded;
       - ``<`` ``>`` -> entities: neutralizes ALL raw HTML (no tag can form);
-      - ``[`` ``]`` -> ``\\[`` ``\\]``: breaks ``[text](url)`` / ``![](…)`` link
-        + image syntax;
-      - ``|`` -> ``\\|``: keeps the cell from splitting the table column;
-      - backtick -> ``\\``` ``: a literal backtick, no code span opens;
-      - ``@`` -> ``&#64;``: no ``@mention`` can autolink (no literal ``@`` left);
+      - ``|`` -> ``&#124;``: the cell can never split the table column;
+      - ``[`` ``]`` -> entities: breaks ``[text](url)`` / ``![](…)`` link + image;
+      - backtick -> ``&#96;``: no code span can open;
+      - ``*`` ``_`` ``~`` -> entities: no emphasis / strikethrough can form;
+      - ``@`` -> ``&#64;``: no ``@mention`` can autolink;
       - ``://`` and ``www.`` -> entity-broken: GFM autolinks ``scheme://host``
         and ``www.host``; breaking the trigger de-links a bare URL to inert text.
     """
@@ -89,9 +104,10 @@ def sanitize_prose(text) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     s = s.replace("&", "&amp;")               # must precede our own entities
     s = s.replace("<", "&lt;").replace(">", "&gt;")
-    s = s.replace("[", "\\[").replace("]", "\\]")
-    s = s.replace("|", "\\|")
-    s = s.replace("`", "\\`")
+    s = s.replace("|", "&#124;")
+    s = s.replace("[", "&#91;").replace("]", "&#93;")
+    s = s.replace("`", "&#96;")
+    s = s.replace("*", "&#42;").replace("_", "&#95;").replace("~", "&#126;")
     s = s.replace("@", "&#64;")
     s = s.replace("://", ":&#47;&#47;")
     s = re.sub(r"(?i)\bwww\.", "www&#46;", s)
@@ -101,16 +117,19 @@ def sanitize_prose(text) -> str:
 def sanitize_code(text) -> str:
     """Render an untrusted value (e.g. ``file:line``) as an inert code span.
 
-    A code span never mentions, autolinks, or renders HTML, so the ONLY things
-    to handle are the two characters that would break it or the table: a literal
-    backtick (can't nest in a span) is stripped, and ``|`` is escaped (GFM needs
-    ``\\|`` even inside code within a table cell). Everything else is inert. An
+    A code span never mentions, autolinks, or renders HTML, so the only things
+    to handle are the two characters that would break it or the table. Both are
+    **stripped, not escaped** — entities do not decode inside a code span, and
+    backslash-escaping is bypassable (an attacker ``\\|`` in a filename yields
+    ``\\\\|``, an even backslash count, so the table splitter treats the pipe as
+    a live delimiter). A real ``file:line`` never contains ``|`` or a backtick,
+    so dropping them is lossless in practice and leaves nothing to re-form. An
     empty value yields an empty string, not an empty ``````` span.
     """
     s = "" if text is None else str(text)
     s = re.sub(r"[\x00-\x1f\x7f]+", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
-    s = s.replace("`", "").replace("|", "\\|")
+    s = s.replace("`", "").replace("|", "")
     return f"`{s}`" if s else ""
 
 
@@ -129,9 +148,8 @@ def stale_gate(expected: str, now: str):
       - ``error``   — no reviewed SHA was passed (caller misuse; must not post);
       - ``stale``   — live head differs from the reviewed one -> DO NOT post;
       - ``unknown`` — the live head could not be read (empty ``now``) ->
-                      indeterminate; caller may proceed with a warning (parity
-                      with the prior prose, which only blocked on a definite
-                      mismatch);
+                      indeterminate; the caller fails CLOSED (does not post),
+                      since a stale revision can't be ruled out;
       - ``ok``      — live head matches the reviewed SHA -> safe to post.
     """
     expected = (expected or "").strip()
@@ -149,7 +167,20 @@ def stale_gate(expected: str, now: str):
 # Body assembly.
 # --------------------------------------------------------------------------- #
 def _short(oid: str) -> str:
-    return (oid or "").strip()[:7]
+    """Short SHA for the header — hex only, so an embedded newline or markdown in
+    a JSON `head_oid` can't split or inject the single-line header."""
+    return re.sub(r"[^0-9a-fA-F]", "", oid or "")[:7]
+
+
+def _safe_pr_num(pr_num):
+    """A header-safe PR number. A bare integer string passes through; anything
+    else (a JSON `pr_num` like ``29\\n\\n**evil**``) is run through the cell
+    sanitizer so it can't inject markdown into the header outside the table."""
+    if pr_num is None:
+        return None
+    if re.fullmatch(r"[0-9]+", str(pr_num)):
+        return str(pr_num)
+    return sanitize_prose(pr_num)
 
 
 def render_body(data: dict) -> str:
@@ -170,7 +201,7 @@ def render_body(data: dict) -> str:
     # PR # + title identify the reviewed PR in the posted comment. The title is
     # UNTRUSTED contributor input, so it goes through the SAME per-cell sanitizer
     # before it lands in this header (resolves the title-escaping finding).
-    pr_num = data.get("pr_num")
+    pr_num = _safe_pr_num(data.get("pr_num"))
     title = sanitize_prose(data.get("title", ""))
     if pr_num is not None or title:
         label = f"PR #{pr_num}" if pr_num is not None else "PR"
@@ -246,10 +277,22 @@ def _gh_comment(pr_num: str, body_file: str):
 # Input + subcommands.
 # --------------------------------------------------------------------------- #
 def _load_input(path: str) -> dict:
-    raw = sys.stdin.read() if path == "-" else open(path, encoding="utf-8").read()
+    if path == "-":
+        raw = sys.stdin.read()
+    else:
+        with open(path, encoding="utf-8") as f:   # closed on any parse/validate failure
+            raw = f.read()
     data = json.loads(raw)
     if not isinstance(data, dict):
         raise ValueError("input must be a JSON object")
+    # `rows` must be a list of objects — render_body indexes each row with
+    # `.get`, so a non-list or a non-dict element would raise an uncaught
+    # AttributeError/TypeError and exit 1 with a traceback instead of the
+    # documented misuse contract (clean stderr + exit 2). Validate at the seam.
+    rows = data.get("rows")
+    if rows is not None:
+        if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows):
+            raise ValueError("input.rows must be a list of objects")
     return data
 
 
@@ -276,13 +319,25 @@ def cmd_post(a: argparse.Namespace) -> int:
         return 2
     expected = a.head_oid if a.head_oid is not None else data.get("head_oid", "")
 
+    # Thread the RESOLVED target (after CLI overrides) back into `data` so the
+    # rendered body's header labels the same PR/revision the gate checks and the
+    # post targets — a `--pr`/`--head-oid` override must not leave the body
+    # showing the stale JSON values.
+    pr_num = str(pr_num)
+    data["pr_num"] = pr_num
+    data["head_oid"] = expected
+
     if shutil.which("gh") is None:
         print("SWARM_PR_POST_ERR=gh CLI not found")
         return 0
 
-    # Stale-head gate FIRST — re-read the live head and act on it. A mismatch
-    # stops here (no post); an unreadable head is indeterminate and proceeds
-    # with a warning (the caller already confirmed the reviewed revision).
+    # Build the body first so the stale-head gate is the LAST thing before the
+    # post — the render is in-memory (no I/O), shrinking the gate→post window to
+    # the `gh pr comment` call itself. A residual TOCTOU remains (a push can land
+    # between this read and the comment; `gh pr comment` cannot pin to a head) —
+    # accepted, since the confirm gate + this check catch the common case.
+    body = render_body(data)
+
     status, msg = stale_gate(expected, _gh_live_head(pr_num))
     if status == "error":
         print(f"pr-post: {msg} (pass --head-oid or head_oid in the input)", file=sys.stderr)
@@ -291,11 +346,15 @@ def cmd_post(a: argparse.Namespace) -> int:
         print(f"SWARM_PR_STALE={msg} — NOT posting")
         return 0
     if status == "unknown":
-        print(f"SWARM_PR_WARN={msg}; posting the reviewed revision {_short(expected)}")
+        # Fail CLOSED: the live head could not be read, so we cannot rule out
+        # that the PR advanced past the reviewed revision. Publishing a possibly
+        # stale review under the user's identity is worse than a retry — do not
+        # post; the caller can re-run once `gh` is reachable.
+        print(f"SWARM_PR_HEAD_UNVERIFIED={msg} — NOT posting (re-run to retry)")
+        return 0
 
-    # Rebuild the body from the SAME input into a self-cleaning temp file, so
-    # what was shown at `build` time is exactly what is posted.
-    body = render_body(data)
+    # Write the body to a self-cleaning temp file (rebuilt above from the SAME
+    # input, so what was shown at `build` time is exactly what is posted).
     tmp = tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", suffix=".md", prefix="swarm-pr-body.", delete=False
     )
