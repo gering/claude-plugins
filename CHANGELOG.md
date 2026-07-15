@@ -173,6 +173,9 @@ entries are grouped per plugin, newest first.
 
 ## swarm
 
+### 0.4.1 — 2026-07-15
+- Extract the `/swarm:review --pr` publish path into a deterministic, unit-tested `scripts/pr-post.py` (per-cell sanitizer, stale-head gate, `gh` post); shrink `SKILL.md` step 5 to orchestration + the human confirm gate.
+
 ### 0.4.0 — 2026-07-13
 - Add `/swarm:review --pr`: review a PR diff and post the gated result via `gh`.
 
