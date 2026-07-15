@@ -1,9 +1,9 @@
 ---
 title: "Swarm Backend Adapter Layer"
 createdAt: 2026-07-03
-updatedAt: 2026-07-12
+updatedAt: 2026-07-15
 createdFrom: "PR #21"
-updatedFrom: "session: 2026-07-12"
+updatedFrom: "session: 2026-07-15"
 pluginVersion: 1.8.2
 prime: false
 reindexedAt: 2026-07-12
@@ -19,7 +19,7 @@ The script header documents the per-backend mechanics; this entry captures the
 *verified* CLI behavior the adapter is built on and the gotchas that cost a
 debugging round.
 
-## Verified CLI facts (codex 0.128 / grok 0.2.77, 2026-07)
+## Verified CLI facts (codex 0.128 / grok 0.2.101, 2026-07)
 
 - **Uniform findings JSON** is achievable from both CLIs: `codex exec
   --output-schema <file>` and `grok --json-schema '<inline>'` both enforce a
@@ -32,10 +32,15 @@ debugging round.
   `--output-last-message <file>` (stdout carries the agent transcript,
   stderr the progress log); grok prints a response **envelope** on stdout —
   the validated object is its `.structuredOutput` field.
-- **grok's default model rejects `--effort`** (`grok-composer-2.5-fast` errors
-  with "does not support parameter reasoningEffort"). The adapter must pin
-  `-m grok-build`. grok's effort ladder (low…max) matches code-review's;
-  codex has no `max` tier → map `max`→`xhigh` (`-c model_reasoning_effort=…`).
+- **The adapter pins `-m grok-4.5`** — the schema-capable model. grok 0.2.101
+  renamed it from `grok-build` (same upstream pin-rename class as codex's
+  `gpt-5.6-terra`; verified drop-in: identical envelope/`structuredOutput`
+  shape, `--single` unchanged). `grok-composer-2.5-fast` still rejects
+  `--effort` ("does not support parameter reasoningEffort").
+- **Effort ladders**: grok is `low|medium|high` since 0.2.101 (the `max` tier
+  is gone) → the adapter maps `xhigh`/`max`→`high`; codex has no `max` tier →
+  map `max`→`xhigh` (`-c model_reasoning_effort=…`). Both mappings degrade a
+  stale caller instead of erroring.
 - **codex model is pinned** to `CODEX_DEFAULT_MODEL` (`gpt-5.6-terra`, the adapter
   passes `-m` on every call), overridable per call via `--model` — so a review is
   reproducible instead of tracking the user's ambient `~/.codex/config` default.
@@ -46,18 +51,18 @@ debugging round.
   still usable as a second grok voice. Given a strict-JSON *prompt* (the adapter
   appends the schema text and drops `--json-schema`/`--effort`), it emits **pure
   `{"findings":[...]}` directly on stdout — no response envelope, no
-  `structuredOutput`** (verified P2, grok 0.2.82; simpler than grok-build's
+  `structuredOutput`** (verified P2, grok 0.2.82; simpler than grok-4.5's
   envelope). The adapter routes `--model grok-composer-2.5-fast` to a separate
   `run_grok_composer` path that parses the answer **defensively**: collect ALL
   balanced `{...}` objects (whole string, fenced blocks, every `{` run), pick the
   first **non-empty** `findings` object (a leading `{"note":…}`/`{"findings":[]}`
   would otherwise mask the real one), and **validate every item against
-  `finding.schema.json`** (composer, unlike codex/grok-build, is not CLI-schema-
+  `finding.schema.json`** (composer, unlike codex/grok-4.5, is not CLI-schema-
   enforced — a malformed item must ERROR, not reach merge/verify). Both the
   first-object bug and the missing per-item validation were caught by swarm
   reviewing its own diff. composer is
-  ~2× faster than grok-build. It is same-family-correlated, so consumers must
-  count consensus by **model family**, not backend (composer + grok-build
+  ~2× faster than grok-4.5. It is same-family-correlated, so consumers must
+  count consensus by **model family**, not backend (composer + grok-4.5
   agreeing is one grok vote — see [swarm-review-pipeline](swarm-review-pipeline.md)).
 - **Headless tool execution**: both CLIs run read-only commands (e.g.
   `git diff`) without extra approval flags — codex inside `-s read-only`

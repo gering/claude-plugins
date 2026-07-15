@@ -1,9 +1,9 @@
 ---
 title: "Swarm Review Pipeline (/swarm:review)"
 createdAt: 2026-07-08
-updatedAt: 2026-07-14
+updatedAt: 2026-07-15
 createdFrom: "PR #24"
-updatedFrom: "session: 2026-07-14"
+updatedFrom: "session: 2026-07-15"
 pluginVersion: 1.8.2
 prime: false
 reindexedAt: 2026-07-12
@@ -15,7 +15,7 @@ P2 turns the blueprint into a working review: a **Workflow-tool script**
 (`plugins/swarm/workflows/swarm-review.js`) launched by the `/swarm:review`
 skill. Shape: `scope+gate → fan-out (4 voices) → merge (file,mechanism) →
 verify solos → output-gated synthesis`. Four voices: Claude lenses ∥ codex ∥
-grok-build ∥ composer (see [swarm-backend-adapter](swarm-backend-adapter.md)).
+grok-4.5 ∥ composer (see [swarm-backend-adapter](swarm-backend-adapter.md)).
 
 ## The skill ↔ workflow wiring (the non-obvious parts)
 
@@ -41,7 +41,7 @@ grok-build ∥ composer (see [swarm-backend-adapter](swarm-backend-adapter.md)).
 - **Consensus counts model *families*, not backends.** A cross-family cluster
   (≥2 of claude / openai / grok) is CONFIRMED without extra verify; everything
   else is solo and goes through the adversarial 3-state verifier. composer +
-  grok-build agreeing is one grok vote — they cannot alone mint consensus.
+  grok-4.5 agreeing is one grok vote — they cannot alone mint consensus.
 - **Security is intentionally minimal** (user directive: no cannons-at-sparrows).
   The P1 adapter floor stays (sandbox, tool-less grok, secret scrub, env filter,
   caps); P2 adds only three cheap things — **fencing** the diff as data
@@ -60,7 +60,7 @@ grok-build ∥ composer (see [swarm-backend-adapter](swarm-backend-adapter.md)).
   the delimiter); the workflow only collision-checks it against the returned
   findings and extends it deterministically (`nonce-1`, `-2`…) on collision.
 
-- **`args.claude: false`** runs an **external-only control** (codex + grok-build
+- **`args.claude: false`** runs an **external-only control** (codex + grok-4.5
   + composer, no Claude finder lenses, no gate; merge/verify still in-session).
   Proven useful: a control run found real bugs the with-Claude run missed (an
   `aws_secret_access_key` scrub-list drift, `git diff` omitting untracked files)
@@ -95,11 +95,12 @@ the diff out of the script, above). Claude applies edits between rounds.
   the report table contract this entry defines above (P2 reserved them).
 - **`--max` profile** (`INPUT.max` in the workflow): lifts every voice to its
   ceiling — codex `gpt-5.6-sol`@`xhigh` (codex has NO `max` tier, xhigh is its
-  top), grok-build `max`, Claude finder lenses + verifier `xhigh`; gate/merge
-  and composer (no effort control) unchanged. Orthogonal to `--fix`/`--loop`,
-  composes with both. Both max-tier settings were verified live before wiring
-  (`gpt-5.6-sol`@xhigh + grok `--effort max` end-to-end) — the "no silent fail
-  on a non-existent model/effort" rule.
+  top), Claude finder lenses + verifier `xhigh`; gate/merge, grok (`high` is
+  its ceiling since grok 0.2.101 dropped `max` — it runs there on both
+  profiles) and composer (no effort control) unchanged. Orthogonal to `--fix`/`--loop`,
+  composes with both. The profile's live settings are verified end-to-end
+  (`gpt-5.6-sol`@`xhigh` at wiring time; grok re-verified at `--effort high` on
+  0.2.101) — the "no silent fail on a non-existent model/effort" rule.
 
 ## `--pr`: review a PR diff and post the result (swarm 0.4.0)
 

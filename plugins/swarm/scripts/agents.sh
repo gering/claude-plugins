@@ -14,7 +14,7 @@
 #       --model <name>      Backend model override
 #       --schema <file>     JSON schema to enforce (default: bundled finding.schema.json)
 #
-# Backend notes (probed against codex 0.128 / grok 0.2.77, 2026-07):
+# Backend notes (probed against codex 0.128 / grok 0.2.101, 2026-07):
 #   claude — probe-only: reviews run in-session via the Agent tool, so
 #            `run claude` is a usage error. available/ready/list include it.
 #   codex  — `codex exec --output-schema` in a read-only sandbox; the pure
@@ -23,13 +23,15 @@
 #            Reasoning effort has no "max" tier -> max maps to xhigh.
 #   grok   — headless `-p` with inline --json-schema; the validated object is
 #            the `.structuredOutput` field of a response envelope. Needs an
-#            explicit model (-m): grok-build is the schema-capable default and
-#            accepts --effort. The one other accepted model is
+#            explicit model (-m): grok-4.5 is the schema-capable default and
+#            accepts --effort (ladder is low|medium|high — no max tier, so the
+#            adapter maps xhigh/max down to high, mirroring codex's missing
+#            max). The one other accepted model is
 #            grok-composer-2.5-fast (`--model grok-composer-2.5-fast`): it
 #            ignores --json-schema/--effort, so the adapter drives it with a
 #            strict-JSON prompt and parses the findings defensively (verified:
 #            emits pure {"findings":[...]} on stdout, no envelope). It is a
-#            second, ~2x-faster grok voice — same family as grok-build, so a
+#            second, ~2x-faster grok voice — same family as grok-4.5, so a
 #            caller must treat their agreement as one family, not consensus.
 #            Auth heuristic: non-empty ~/.grok/auth.json (no status command).
 #
@@ -40,7 +42,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_SCHEMA="$SCRIPT_DIR/schema/finding.schema.json"
 CODEX_DEFAULT_MODEL="gpt-5.6-terra"
-GROK_DEFAULT_MODEL="grok-build"
+GROK_DEFAULT_MODEL="grok-4.5"
 GROK_COMPOSER_MODEL="grok-composer-2.5-fast"
 # Default HOME so `$HOME` expansions below (auth file, sandbox deny paths) don't
 # abort the whole script under `set -u` when HOME is unset.
@@ -395,7 +397,7 @@ subcmd_run() {
   esac
   [[ -f "$schema" ]] || { echo "Schema not found: $schema" >&2; exit 2; }
   # composer has no reasoning-effort control; say so if the caller set --effort
-  # explicitly, so review depth isn't misjudged against grok-build.
+  # explicitly, so review depth isn't misjudged against grok-4.5.
   if [[ "$backend" == "grok" && "$model" == "$GROK_COMPOSER_MODEL" && -n "$effort_set" ]]; then
     echo "note: --effort is ignored for $GROK_COMPOSER_MODEL (it has no reasoning-effort control)" >&2
   fi
@@ -484,6 +486,10 @@ if not (isinstance(d, dict) and isinstance(d.get("findings"), list)):
 
 run_grok() {
   local prompt="$1" effort="$2" model="$3" schema="$4"
+  # grok's effort ladder is low|medium|high (0.2.101 dropped max) — map the two
+  # higher adapter tiers down so a stale caller degrades instead of erroring,
+  # mirroring codex's max→xhigh mapping.
+  case "$effort" in xhigh|max) effort="high" ;; esac
   local grok_model="${model:-$GROK_DEFAULT_MODEL}"
 
   # grok-composer-2.5-fast is the one non-default model the adapter supports; it
@@ -493,7 +499,7 @@ run_grok() {
     return
   fi
 
-  # Preflight-reject any OTHER non-default model: only grok-build enforces
+  # Preflight-reject any OTHER non-default model: only grok-4.5 enforces
   # --json-schema (and accepts --effort). An unlisted model would silently
   # return structuredOutput:null and fail late with no schema output — so reject
   # up front with a usage error rather than burn a review on it.
@@ -516,7 +522,11 @@ run_grok() {
       --json-schema "$(cat "$schema")" \
       --single="$prompt" </dev/null 2>/dev/null)" || rc=$?
   if (( rc != 0 )); then
-    (( rc == 124 )) && echo "grok timed out after ${ADAPTER_TIMEOUT}s" >&2 || echo "grok failed" >&2
+    # stderr is deliberately discarded (injection guard), so name the likely
+    # cause: an older CLI that predates the pinned model reports Ready (auth
+    # heuristic) yet rejects the model id at runtime.
+    (( rc == 124 )) && echo "grok timed out after ${ADAPTER_TIMEOUT}s" >&2 \
+      || echo "grok failed — check that the installed grok CLI knows model '$grok_model' ($GROK_DEFAULT_MODEL needs grok >= 0.2.101)" >&2
     exit 1
   fi
   printf '%s' "$raw" | python3 -c '
@@ -548,12 +558,12 @@ print()
 }
 
 run_grok_composer() {
-  # grok-composer-2.5-fast: ~2x faster than grok-build but ignores
+  # grok-composer-2.5-fast: ~2x faster than grok-4.5 but ignores
   # --json-schema/--effort (would return plain text with structuredOutput:null).
   # So we DON'T pass those flags — instead we append a strict-JSON directive
   # (the schema itself) to the prompt and parse the answer defensively. Verified:
   # composer then emits pure {"findings":[...]} on stdout (no envelope). Same
-  # sandbox + env filter + scrub as grok-build; only the schema mechanism differs.
+  # sandbox + env filter + scrub as grok-4.5; only the schema mechanism differs.
   local prompt="$1" schema="$2"
   local full
   full="$prompt
@@ -645,7 +655,7 @@ KEYS = {"file", "line", "severity", "summary", "failure_scenario", "confidence",
 
 def valid_item(f):
     # Mirror finding.schema.json EXACTLY. composer is not CLI-schema-enforced
-    # (unlike codex/grok-build), so a malformed item must ERROR here rather than
+    # (unlike codex/grok-4.5), so a malformed item must ERROR here rather than
     # reach merge/verify, which rely on the uniform-findings contract. Check the
     # exact key set (additionalProperties:false + all required), maxLength, and
     # enums — a hand-rolled type-only subset would drop valid rows and pass
