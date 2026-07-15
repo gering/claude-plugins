@@ -19,7 +19,7 @@ This is a **Claude Code plugin marketplace** (monorepo) containing plugins that 
 ## Current Plugins
 
 - **knowledge-system** (v1.5.x) — Knowledge management with three layers: Rules, Knowledge, Memory. Skills: `/init`, `/query`, `/curate`, `/reindex`, `/backfill-knowledge`, `/migrate`, `/statusline`
-- **work-system** (v1.2.x) — Task and worktree workflow. Skills: `/define`, `/kickoff`, `/adopt`, `/continue`, `/status`, `/close`, `/list`
+- **work-system** (v1.7.x) — Task and worktree workflow. Skills: `/define`, `/kickoff`, `/adopt`, `/continue`, `/status`, `/close`, `/list`, `/statusline`
 - **pr-flow** (v1.1.x) — PR review feedback loop. Skills: `/open`, `/cycle`, `/check`, `/fix`, `/rebase`, `/merge`
 - **swarm** (v0.4.x) — Local mixture-of-agents code review (external `codex`/`grok` CLIs — grok-4.5 + composer — plus Claude lenses). P2: `/swarm:review` pipeline (scope→fan-out→merge→verify); P5: `--fix`/`--loop` apply the findings you agreed with. Skills: `/swarm:review`, `/swarm:agents`
 
