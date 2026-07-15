@@ -14,7 +14,7 @@ Complementary to [pr-flow](../pr-flow/): pr-flow drives the GitHub-PR
 
 **Phase 5 of 6** — the pipeline can now **act** (P3/P4 lens presets still to
 come). `/swarm:review` fans a diff
-across four voices (Claude lenses + `codex` + `grok-build` + `composer`),
+across four voices (Claude lenses + `codex` + `grok-4.5` + `composer`),
 merges by mechanism, verifies solo findings, presents one ranked report, and —
 with `--fix` / `--loop` — applies the findings you agreed with.
 
@@ -25,7 +25,8 @@ with `--fix` / `--loop` — applies the findings you agreed with.
   default branch (including uncommitted work). `--fix` applies the agreed
   findings once; `--loop[=N]` re-reviews after each fix round until it converges
   (cap default `10`); `--max` runs the deepest-effort profile (codex
-  `gpt-5.6-sol`/`xhigh`, grok `max`, Claude lenses + verifier `xhigh`) — slower,
+  `gpt-5.6-sol`/`xhigh`, Claude lenses + verifier `xhigh`; grok already runs
+  at `high`, its ceiling) — slower,
   more thorough, composes with `--fix`/`--loop`.
 - `/swarm:review --pr [<number>]` — run the same ensemble against a **GitHub
   PR's diff** (`gh pr diff`; bare `--pr` resolves the current branch's PR) and,
@@ -43,7 +44,7 @@ presets).
 ## The pipeline (`/swarm:review`)
 
 ```
-Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok-build ∥ composer)
+Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok-4.5 ∥ composer)
           → Merge (file, mechanism) → Verify solos → Ranked synthesis
 ```
 
@@ -51,13 +52,13 @@ Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok-build ∥ composer)
    lenses are worth running (security is never gated out when code/args/files
    flow to an external process).
 2. **Fan-out** — four voices in parallel: one Claude finder per gated lens plus
-   `codex`, `grok-build` and `composer` as full reviews through the adapter.
+   `codex`, `grok-4.5` and `composer` as full reviews through the adapter.
 3. **Merge** — an LLM step clusters findings by `(file, mechanism)`, not
    `(file, line)` (external CLIs number against the inlined diff).
 4. **Verify** — solo clusters go through an adversarial 3-state verifier
    (`CONFIRMED`/`PLAUSIBLE`/`REFUTED`; only `REFUTED` is dropped).
 
-**Consensus counts model *families*, not backends.** `grok-build` and
+**Consensus counts model *families*, not backends.** `grok-4.5` and
 `composer` are both grok, so their agreement is one vote — a `CONSENSUS` tag
 requires ≥2 of *claude / openai / grok*. Everything else is a solo and earns
 its place through the verifier.
@@ -93,7 +94,7 @@ Backends:
 |---------|------|-----------|
 | `claude` | probe-only | reviews run in-session via the Agent tool |
 | `codex` | external reviewer | `codex exec --output-schema` (model `gpt-5.6-terra`, effort `xhigh`) in a read-only sandbox; auth via `codex login status` |
-| `grok` | external reviewer | headless `-p` with inline `--json-schema` (model `grok-build`); findings extracted from the response envelope. `--model grok-composer-2.5-fast` takes a separate defensive-parse path (a ~2×-faster second grok voice, no schema flag). |
+| `grok` | external reviewer | headless `-p` with inline `--json-schema` (model `grok-4.5`); findings extracted from the response envelope. `--model grok-composer-2.5-fast` takes a separate defensive-parse path (a ~2×-faster second grok voice, no schema flag). |
 
 Unavailable backends drop from the ensemble — `claude` alone still works.
 `/swarm:review` reports a backend that *errored* mid-run distinctly from one

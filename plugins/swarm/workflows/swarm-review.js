@@ -1,9 +1,9 @@
 export const meta = {
   name: 'swarm-review',
-  description: 'Local mixture-of-agents review: scope+gate → fan-out (Claude lenses + codex + grok-build + composer) → (file,mechanism) merge with family-aware consensus → verify solos → output-gated ranked synthesis.',
+  description: 'Local mixture-of-agents review: scope+gate → fan-out (Claude lenses + codex + grok + composer) → (file,mechanism) merge with family-aware consensus → verify solos → output-gated ranked synthesis.',
   phases: [
     { title: 'Scope', detail: 'classify diff + gate lenses' },
-    { title: 'Fan-out', detail: 'Claude lenses + codex + grok-build + composer in parallel' },
+    { title: 'Fan-out', detail: 'Claude lenses + codex + grok + composer in parallel' },
     { title: 'Merge', detail: 'cluster by (file, mechanism), consensus by family' },
     { title: 'Verify', detail: '3-state verify of solo clusters' },
   ],
@@ -43,8 +43,9 @@ const FINDING_NONCE_RAW = FINDING_NONCE  // remember what was passed, to explain
 if (FINDING_NONCE && !/^[a-f0-9]{16,}$/.test(FINDING_NONCE)) FINDING_NONCE = ''
 const fenceDegraded = !FINDING_NONCE  // no structural fence at merge/verify — surfaced in the return payload
 // `--max` profile: lift every voice to its ceiling for a deepest-effort review.
-// codex has no `max` tier (xhigh is its top) + gets the stronger model; grok
-// goes to `max`; the in-session Claude finders and verifier go to `xhigh`.
+// codex has no `max` tier (xhigh is its top) + gets the stronger model; grok's
+// ladder is low|medium|high since 0.2.101, so `high` is already its ceiling on
+// both profiles; the in-session Claude finders and verifier go to `xhigh`.
 // Strict === true: the skill always passes a boolean, and a stray truthy value
 // (max:1 / "true") should NOT silently trigger a slower, costlier run.
 // MAX_CODEX_MODEL must be a model the local codex CLI can load — if it's been
@@ -277,7 +278,7 @@ const claudeThunks = runLensesSafe.map((lens) => () =>
 // backend is visible, not mistaken for a clean empty review.
 const EXTERNAL_VOICES = [
   { backend: 'codex', label: 'codex:full', cmd: `bash "${ADAPTER}" run codex ${MAX ? `--model ${MAX_CODEX_MODEL} --effort xhigh` : '--effort high'} --prompt-file "${EXTERNAL_PROMPT}"` },
-  { backend: 'grok', label: 'grok-build:full', cmd: `bash "${ADAPTER}" run grok --effort ${MAX ? 'max' : 'high'} --prompt-file "${EXTERNAL_PROMPT}"` },
+  { backend: 'grok', label: 'grok:full', cmd: `bash "${ADAPTER}" run grok --effort high --prompt-file "${EXTERNAL_PROMPT}"` },
   { backend: 'composer', label: 'composer:full', cmd: `bash "${ADAPTER}" run grok --model grok-composer-2.5-fast --prompt-file "${EXTERNAL_PROMPT}"` },
 ]
 // Only spawn transports for backends the skill reported live (probed via the
@@ -353,7 +354,7 @@ if (pool.length > 0) {
     members.forEach((i) => assigned.add(i))
     const backends = Array.from(new Set(members.map((i) => pool[i].backend))).sort()
     const families = Array.from(new Set(members.map((i) => pool[i].family))).sort()
-    // Consensus requires >=2 distinct FAMILIES (composer+grok-build = one family).
+    // Consensus requires >=2 distinct FAMILIES (composer+grok-4.5 = one family).
     return { ...c, member_indices: members, backends, families, consensus: families.length >= 2 ? 'CONFIRMED' : 'solo' }
   }).filter((c) => c.backends.length > 0)  // drop clusters whose member_indices all filtered out — no backing voice
 
@@ -435,7 +436,7 @@ const findings = gatedFindings.sort((a, b) => (sevOf(a) - sevOf(b)) || (conRank(
 // Per-backend rollup for the balance "Agents" line: concrete short model label
 // + voice/finding counts + whether it ran clean. Wall-time (per-agent durationMs)
 // needs a registered workflow to surface — tracked as P4 wiring.
-const MODEL_LABEL = { claude: 'opus', codex: 'gpt', grok: 'grok', composer: 'composer' }
+const MODEL_LABEL = { claude: 'opus', codex: 'gpt', grok: 'grok-4.5', composer: 'composer' }
 const agents = {}
 for (const v of voices) {
   const a = agents[v.backend] || (agents[v.backend] = { backend: v.backend, model: MODEL_LABEL[v.backend] || v.backend, voices: 0, failedVoices: 0, findings: 0, ok: true })

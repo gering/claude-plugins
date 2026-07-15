@@ -287,11 +287,11 @@ credential mid-review) converged on these non-negotiable mitigations:
 
 - **Registered workflow** (not inline) so per-agent `durationMs` is available
   for the timing balance line.
-- **Model labels** in the balance line (`Opus-4.8`/`GPT-5.5`/`grok-build`),
+- **Model labels** in the balance line (`Opus-4.8`/`GPT-5.5`/`grok-4.5`),
   read from each backend's review output.
 - **Optional composer lens-gate**: `grok-composer-2.5-fast` can't enforce
   `--json-schema`/`--effort`, but a strict-JSON prompt makes it emit valid JSON
-  and reason on demand (tested 2/2). It's ~2× faster than grok-build but its
+  and reason on demand (tested 2/2). It's ~2× faster than grok-4.5 but its
   ~20s CLI cost undercuts a Haiku gate; keep it optional, with a defensive
   parser + fallback-to-all-lenses.
 - **Balance / footer / loop-round box:** render deterministically from the

@@ -173,6 +173,9 @@ entries are grouped per plugin, newest first.
 
 ## swarm
 
+### 0.4.2 — 2026-07-15
+- Fix grok CLI 0.2.101 compat: pin `grok-4.5` (upstream renamed `grok-build`), cap grok effort at `high` (the `max` tier is gone; the adapter maps `xhigh`/`max` → `high` so stale callers degrade instead of erroring).
+
 ### 0.4.1 — 2026-07-15
 - Extract the `/swarm:review --pr` publish path into a deterministic, unit-tested `scripts/pr-post.py` (per-cell sanitizer, stale-head gate, `gh` post); shrink `SKILL.md` step 5 to orchestration + the human confirm gate.
 

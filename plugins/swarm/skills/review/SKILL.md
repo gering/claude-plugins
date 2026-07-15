@@ -1,7 +1,7 @@
 ---
 name: review
 description: |
-  Local mixture-of-agents review: Claude lenses plus codex and grok (build +
+  Local mixture-of-agents review: Claude lenses plus codex and grok (grok-4.5 +
   composer), one ranked report. --fix/--loop applies agreed findings; --pr reviews
   a GitHub PR diff and posts the result.
   Trigger: "swarm review", "review my changes", "review this PR".
@@ -10,7 +10,7 @@ user_invocable: true
 
 # Swarm Review
 
-> Fan one code review across Claude lenses + codex + grok-build + composer,
+> Fan one code review across Claude lenses + codex + grok-4.5 + composer,
 > merge by mechanism, verify solos, and present one ranked report.
 
 ## Arguments
@@ -47,9 +47,10 @@ branch delta).
   slowest, most thorough review (costs more time + tokens). Orthogonal to
   `--fix`/`--loop` — composes with both (`--max --loop` = max-depth fix loop).
   Set `max: true` in the workflow args (step 2). It bumps: codex →
-  `gpt-5.6-sol` at `xhigh` (codex has no `max` tier), grok-build → `max`,
-  Claude finder lenses + the adversarial verifier → `xhigh`. gate/merge and the
-  composer voice (no effort control) are unchanged.
+  `gpt-5.6-sol` at `xhigh` (codex has no `max` tier), Claude finder lenses +
+  the adversarial verifier → `xhigh`. gate/merge, the grok voice (`high` is
+  grok's ceiling — it runs there on both profiles) and the composer voice (no
+  effort control) are unchanged.
 - Anything left after removing the flags → the scope argument for step 1.
 
 Without either flag the review is **read-only**: present the report and offer to
@@ -282,7 +283,7 @@ Workflow({
 Fill `<DIFF>`/`<PROMPT>`/`<FINDING_NONCE>` from the echoed values. Add `max: true` to `args` when
 `--max` was given (step 1 stripped it) — the deepest-effort profile. Add
 `claude: false` to `args`
-for an **external-only control run** (codex + grok-build + composer, no Claude
+for an **external-only control run** (codex + grok-4.5 + composer, no Claude
 finder lenses — merge/verify still run in-session); default is the full ensemble.
 The workflow runs in the background for several minutes — **tell the user they
 can watch live progress with `/workflows`** while it runs. It returns
@@ -589,7 +590,7 @@ post. Do **not** re-implement the sanitize/gate/post logic inline.
 ## Notes
 
 - **Consensus = cross-family agreement** (≥2 of claude / openai / grok). Two
-  grok voices (grok-build + composer) agreeing count as one family, so they
+  grok voices (grok-4.5 + composer) agreeing count as one family, so they
   cannot alone mint a CONSENSUS — solos go through the adversarial verifier.
 - **Security floor** (inherited from the adapter, plus this pipeline): the diff
   is fenced as data, external CLIs run sandboxed + tool-less (grok) with a
