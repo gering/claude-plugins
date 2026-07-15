@@ -1,17 +1,17 @@
 ---
 title: "Status-Line Integration"
 createdAt: 2026-06-18
-updatedAt: 2026-07-12
+updatedAt: 2026-07-15
 createdFrom: "PR #3"
-updatedFrom: "session: 2026-07-12"
-pluginVersion: 1.8.2
+updatedFrom: "session: 2026-07-15"
+pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
 ---
 
 # Status-Line Integration
 
-How the `/statusline` skill surfaces knowledge-system info (`[cks rules|knowledge]`)
+How the `/statusline` skill surfaces knowledge-system info (`[ks §rules ◈knowledge]`)
 in the Claude Code status line.
 
 ## The design
@@ -55,7 +55,7 @@ work-system reuses this whole pattern for its task backlog: `/work-system:status
 injects a **second** marker block (`# >>> work-system:ws-statusline >>>`) that renders
 `[ws ○… ●… ◇… ✓…]` — `tasks/*.md` counts by state (not-started / active / in-review /
 merged) with muted single-width glyphs, zero columns dropped. It owns a distinct
-marker segment and coexists with `[cks …]` in one `~/.claude/statusline.sh`; the two
+marker segment and coexists with `[ks …]` in one `~/.claude/statusline.sh`; the two
 installers are near-identical clones (a deliberate, accepted duplication over building
 a shared host library).
 

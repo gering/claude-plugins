@@ -90,11 +90,11 @@ Separately, **before** dispatching that agent, `/reindex` runs a quick foregroun
 
 ### `/statusline` — see your knowledge base in the status line
 
-**What it does.** `/statusline install` adds a `[cks RULES|KNOWLEDGE]` block to Claude Code's status line — live counts of `.claude/rules/**/*.md` and `.claude/knowledge/**/*.md` for the current project, plus `*N` (tracked changes — staged or unstaged) and `+N` (untracked) modifiers from `git status`. An optional third column appears for projects with a repo-root `knowledge/_index.md` (legacy layout from before `.claude/knowledge`). The renderer is copied to a stable path (`~/.claude/cks-statusline.sh`) and a marker block is injected into your `~/.claude/statusline.sh` — both reversible via `uninstall`. Per-project disable via a sentinel file (`<project>/.claude/.cks-statusline-off`) for noisy repos.
+**What it does.** `/statusline install` adds a `[ks §RULES ◈KNOWLEDGE]` block to Claude Code's status line — live counts of `.claude/rules/**/*.md` and `.claude/knowledge/**/*.md` for the current project, plus `*N` (tracked changes — staged or unstaged) and `+N` (untracked) modifiers from `git status`. An optional third `❖` column appears for projects with a repo-root `knowledge/_index.md` (legacy layout from before `.claude/knowledge`). The renderer is copied to a stable path (`~/.claude/cks-statusline.sh`) and a marker block is injected into your `~/.claude/statusline.sh` — both reversible via `uninstall`. Per-project disable via a sentinel file (`<project>/.claude/.cks-statusline-off`) for noisy repos.
 
-**Why it matters.** Always-visible reminder that the knowledge system is set up here, with the modifier dots making it obvious when you have uncurated rules/knowledge changes sitting in your working tree. Opt-in: `/init` mentions it, but the cks block doesn't appear unless you explicitly install it. Subcommands: `install`, `enable`, `disable`, `uninstall`, `status` — versioned via a header in the script so `install` can safely upgrade an older copy.
+**Why it matters.** Always-visible reminder that the knowledge system is set up here, with the modifier dots making it obvious when you have uncurated rules/knowledge changes sitting in your working tree. Opt-in: `/init` mentions it, but the ks block doesn't appear unless you explicitly install it. Subcommands: `install`, `enable`, `disable`, `uninstall`, `status` — versioned via a header in the script so `install` can safely upgrade an older copy.
 
-**Placement.** Drop a `# {{cks}}` comment anywhere in `~/.claude/statusline.sh` to control exactly where the cks block lands; without one, `install` auto-places it before your final `echo "$OUT"`. The renderer (`~/.claude/cks-statusline.sh`) also stands alone — if you use a third-party statusline tool (ccstatusline, ccusage, etc.), call the renderer from there via its custom-command slot instead of using the marker block.
+**Placement.** Drop a `# {{cks}}` comment anywhere in `~/.claude/statusline.sh` to control exactly where the ks block lands; without one, `install` auto-places it before your final `echo "$OUT"`. The renderer (`~/.claude/cks-statusline.sh`) also stands alone — if you use a third-party statusline tool (ccstatusline, ccusage, etc.), call the renderer from there via its custom-command slot instead of using the marker block.
 
 ### Clean uninstall — markers, not guesswork
 
@@ -122,7 +122,7 @@ Separately, **before** dispatching that agent, `/reindex` runs a quick foregroun
 | `/reindex` | Thorough QA pass: rebuild indexes, validate cross-refs, backfill frontmatter, log |
 | `/backfill-knowledge` | Mine merged PR history for significant learnings (features, architecture, major insights); proposes a batch for approval before curating |
 | `/migrate` | Migrate from ByteRover to native knowledge system |
-| `/statusline` | Optional: show `[cks rules\|knowledge]` counts (with `*mod` / `+untracked` modifiers) in Claude Code's status line. Subcommands: `install`, `enable`, `disable`, `uninstall`, `status` — disable per-project via `<project>/.claude/.cks-statusline-off` |
+| `/statusline` | Optional: show `[ks §rules ◈knowledge]` counts (with `*mod` / `+untracked` modifiers) in Claude Code's status line. Subcommands: `install`, `enable`, `disable`, `uninstall`, `status` — disable per-project via `<project>/.claude/.cks-statusline-off` |
 
 ## How it works
 
