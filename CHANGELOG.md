@@ -190,6 +190,12 @@ entries are grouped per plugin, newest first.
 
 ## swarm
 
+### 0.5.0 — 2026-07-16
+- Grow the review lens set from 5 to 11 (all default-on): methodological `removed-behavior` + `cross-file-trace` (factual, normal verify) and design-quality `reuse` / `simplification` / `efficiency` / `altitude` (suggestion-shaped, `kind: "design"`).
+- Organize the lenses into 4 clusters (`LENS_CLUSTERS` — single source of truth): breakage / threat / design / consistency. Claude fan-out runs one finder per cluster by default (≤4 agents); `--max` splits to one finder per lens (≤11). The gate still prunes per-lens.
+- Verify design findings with a kind-aware applicability prompt (reuse target real? simpler form behavior-identical?) through the same 3-state verifier; report them in their own `Design` table so they never dilute the defect ranking (`balance.design` counts them).
+- Extend the external backend prompt with the six new angles so cross-family consensus can form on design findings too.
+
 ### 0.4.3 — 2026-07-17
 - Remove the `grok-composer-2.5-fast` backend: grok CLI 0.2.101 dropped the model, so the composer voice (adapter path, defensive parser, workflow voice, docs) failed at runtime. `grok-4.5` is now the only grok model, and the ensemble is three voices (Claude lenses + codex + grok-4.5).
 - Make grok readiness model-aware: `ready`/`list` now require `grok-4.5` to appear in `grok models`, not just auth — so a dropped or renamed model reads as "not ready" with an actionable hint instead of failing mid-review. The probe runs unjailed like the sibling `codex login status` check (a readiness check passes no untrusted diff, so it needs no sandbox and stays free of the review path's python3 profile-build), bounded by `SWARM_PROBE_TIMEOUT` (10s, `timeout -k` so a SIGTERM-ignoring CLI can't hang it; separate from the review-length `SWARM_TIMEOUT`). It falls back to the auth check — with a warning on stderr, never silently — whenever it can't produce a clean answer (no coreutils `timeout`, non-zero exit, timeout, or an empty/unparseable list), rather than dropping grok from the fan-out.

@@ -3,7 +3,7 @@ title: "Swarm Review Pipeline (/swarm:review)"
 createdAt: 2026-07-08
 updatedAt: 2026-07-17
 createdFrom: "PR #24"
-updatedFrom: "PR #37"
+updatedFrom: "PR #35"
 pluginVersion: 1.8.2
 prime: false
 reindexedAt: 2026-07-12
@@ -18,6 +18,44 @@ verify solos → output-gated synthesis`. Three voices: Claude lenses ∥ codex 
 grok-4.5 (see [swarm-backend-adapter](swarm-backend-adapter.md)). A fourth,
 `grok-composer-2.5-fast`, was removed in swarm 0.4.3 — the grok CLI dropped the
 model.
+
+## Lens set: 11 lenses in 4 clusters (swarm 0.5.0)
+
+Grown from 5 topical lenses by importing `/code-review`'s other two
+decomposition axes — methodological (HOW to look) and design quality — all
+**default-on** (user directive 2026-07-15: maintainability reviewed on every
+run, not opt-in). `LENS_CLUSTERS` in the workflow is the **single source of
+truth** (the per-cluster externals follow-up consumes it):
+
+| cluster | lenses | guiding question |
+|---|---|---|
+| `breakage` | correctness, removed-behavior, cross-file-trace | what breaks? |
+| `threat` | security, adversarial | what's exploitable / which assumption fails? |
+| `design` | reuse, simplification, efficiency, altitude | is this good, maintainable code? |
+| `consistency` | style, conventions | does it fit the codebase? |
+
+- **The cluster is the Claude fan-out unit** (≤4 finders); `--max` splits to
+  one finder per lens (≤11) — the granularity ladder is `--quick` (future) =
+  one broad pass → default = per-cluster → `--max` = per-lens. The **gate
+  stays per-lens** (a fully-pruned cluster spawns no agent); design lenses are
+  first-class in the gate prompt, skipped only when the diff can't pay off.
+- **`kind` is derived from the lens name** (`design` vs `defect`) — no
+  finding-schema change, so the 3-place schema mirror is untouched. A merged
+  cluster's kind comes from its members: any defect member ⇒ defect (a design
+  suggestion merged with a real defect must not leave the defect ranking).
+- **Verify path decision: kind-aware prompt, not bypass.** Design findings are
+  suggestion-shaped, but each has a falsifiable applicability core (reuse
+  target exists? simpler form behavior-identical? claimed waste real?) — the
+  same 3-state verifier runs with an applicability prompt. Bypassing into an
+  unverified "maintainability" section would have surfaced unchecked
+  suggestions from precisely the noisiest lenses. Methodological lenses are
+  factual → normal defect verify.
+- **Report keeps kinds apart**: defects table first, then a same-format
+  `Design` table (shared numbering — the workflow sorts defects first);
+  `balance.design` counts the subset. Lens prefixes are parsed with `[\w-]`
+  (hyphenated names like `removed-behavior` — plain `\w` misses them).
+- Effort: design lenses run at the **same effort** as defect lenses (`xhigh`
+  under `--max` — user call: depth applies to design thinking too).
 
 ## The skill ↔ workflow wiring (the non-obvious parts)
 
@@ -164,15 +202,15 @@ filled* — `gh pr diff <n>` (bare `--pr` resolves the current branch's PR via
   incl. non-list `rows`, → stderr + exit 2). Pure functions
   (`sanitize_prose`/`sanitize_code`/`stale_gate`/`render_body`) keep it unit-tested.
 
-## Future idea (P3+): per-lens external prompts
+## Future idea (P3+): per-cluster external prompts
 
-Today externals run ONE broad multi-lens review each; Claude fans out per lens.
-Running externals per-lens too would add depth-per-lens + symmetry + authoritative
-lens tags + let the gate prune external calls. **But** it multiplies external CLI
-calls ~5× (backends × lenses) — steep cost + CLI overhead, against the efficiency
-goal. Verdict: make it an **opt-in `lensMode`**, gate the external lenses when on,
-and for routine depth prefer higher external `--effort` / grok `--best-of-n` (one
-call, more thinking) over N calls. Not a default.
+Today externals run ONE broad multi-lens review each (the prompt names all 11
+lenses); Claude fans out per cluster. Running externals **per cluster** too
+(re-scoped 2026-07-15 from the original per-lens idea — clusters cap the
+multiplier at 4×, not 11×) would add depth + symmetry + authoritative lens tags
++ let the gate prune external calls. That is the `swarm-per-lens-externals`
+follow-up task, built on `LENS_CLUSTERS`; for routine depth prefer higher
+external `--effort` / grok `--best-of-n` (one call, more thinking) over N calls.
 
 ## Verified end-to-end (2026-07-05)
 
