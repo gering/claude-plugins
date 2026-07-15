@@ -118,6 +118,8 @@ check("pr_num injection defanged", "**evil**" not in inj and "\n\n**evil**" not 
 # _short is hex-only, so an embedded newline can't split the single-line header
 check("short oid hex-only", pr_post._short("abc\n123def") == "abc123d")
 check("short oid strips junk", pr_post._short("9fd980cXYZ!!") == "9fd980c")
+# a non-string JSON head_oid/pr_num must not raise in re.sub / .strip
+check("short oid coerces non-string", pr_post._short(123) == "123" and pr_post._short(None) == "")
 
 # empty -> "No issues raised.", no table
 empty_body = pr_post.render_body({"head_oid": "9fd980c", "rows": [], "balance": "Bilanz: 0"})
@@ -152,6 +154,9 @@ r = build_rc('{"rows": [null]}')
 check("rows[null] -> exit 2", r.returncode == 2 and "Traceback" not in r.stderr)
 r = build_rc('{"rows": "corrupt"}')
 check("rows non-list -> exit 2", r.returncode == 2 and "Traceback" not in r.stderr)
+# a non-string cell value is a valid dict row: render, don't crash on .strip()
+r = build_rc('{"rows": [{"quelle": 1, "befund": 2}], "head_oid": 9}')
+check("non-string cell renders", r.returncode == 0 and "Traceback" not in r.stderr)
 
 if FAILS:
     print("pr-post tests FAILED:", file=sys.stderr)

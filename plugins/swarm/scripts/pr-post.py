@@ -166,10 +166,11 @@ def stale_gate(expected: str, now: str):
 # --------------------------------------------------------------------------- #
 # Body assembly.
 # --------------------------------------------------------------------------- #
-def _short(oid: str) -> str:
+def _short(oid) -> str:
     """Short SHA for the header — hex only, so an embedded newline or markdown in
-    a JSON `head_oid` can't split or inject the single-line header."""
-    return re.sub(r"[^0-9a-fA-F]", "", oid or "")[:7]
+    a JSON `head_oid` can't split or inject the single-line header. `str(...)`
+    first so a non-string JSON value (e.g. an int) can't raise in `re.sub`."""
+    return re.sub(r"[^0-9a-fA-F]", "", str(oid) if oid else "")[:7]
 
 
 def _safe_pr_num(pr_num):
@@ -193,7 +194,9 @@ def render_body(data: dict) -> str:
     rows = data.get("rows") or []
     has_quelle = data.get("has_quelle")
     if has_quelle is None:
-        has_quelle = any((r.get("quelle") or "").strip() for r in rows)
+        # str(...) so a non-string cell value (e.g. {"quelle": 1}) can't raise
+        # AttributeError here — cells are otherwise coerced by the sanitizers.
+        has_quelle = any(str(r.get("quelle") or "").strip() for r in rows)
 
     head_short = _short(data.get("head_oid", ""))
     parts = [f"## \U0001f41d Swarm review (local ensemble) · reviewed at {head_short}", ""]
@@ -354,14 +357,24 @@ def cmd_post(a: argparse.Namespace) -> int:
         return 0
 
     # Write the body to a self-cleaning temp file (rebuilt above from the SAME
-    # input, so what was shown at `build` time is exactly what is posted).
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", suffix=".md", prefix="swarm-pr-body.", delete=False
-    )
+    # input, so what was shown at `build` time is exactly what is posted). An
+    # OSError creating/writing the file is an OPERATIONAL failure (full/read-only
+    # temp dir) — surface it as a token, not a traceback + exit 1, per the
+    # module's exit-code convention.
+    try:
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".md", prefix="swarm-pr-body.", delete=False
+        )
+    except OSError as e:
+        print(f"SWARM_PR_POST_ERR=could not create temp body file: {e}")
+        return 0
     try:
         tmp.write(body)
         tmp.close()
         ok, result = _gh_comment(pr_num, tmp.name)
+    except OSError as e:
+        print(f"SWARM_PR_POST_ERR=could not write temp body file: {e}")
+        return 0
     finally:
         try:
             os.unlink(tmp.name)
