@@ -1,23 +1,22 @@
 ---
 name: statusline
 description: |
-  Manages a `[cks N|M]` block in Claude Code's status line showing
-  `.claude/rules/` and `.claude/knowledge/` file counts with dirty-state
-  modifiers. Subcommands: install, enable, disable, uninstall, status.
-  Per-project opt-out via `disable`.
-  Trigger: "statusline cks", "show/hide cks", "knowledge status indicator".
+  Manages a `[ks §N ◈M]` status-line block showing `.claude/rules/` and
+  `.claude/knowledge/` file counts with dirty-state modifiers.
+  Subcommands: install, enable, disable, uninstall, status.
+  Trigger: "statusline ks", "show/hide ks", "knowledge status indicator".
 user_invocable: true
 ---
 
 # Knowledge System Status Line Integration
 
-> Append `[cks RULES|KNOW]` to Claude Code's status line, with `*N` (tracked changes) / `+N` (untracked) modifiers when files are dirty.
+> Append `[ks §RULES ◈KNOW]` to Claude Code's status line, with `*N` (tracked changes) / `+N` (untracked) modifiers when files are dirty.
 
 All install/enable/disable/uninstall/status logic lives in a deterministic, locally-testable script — `scripts/statusline-install.sh`. This skill parses the argument, runs the script, and relays its output. **Do not re-implement the logic here**; the script is the source of truth.
 
 ## Arguments
 
-`$ARGUMENTS` — one of `install`, `enable`, `disable`, `uninstall`, `status` (default: `status`). `install` accepts a trailing `--force` to overwrite a pre-existing manual cks block or to force a downgrade of the installed renderer.
+`$ARGUMENTS` — one of `install`, `enable`, `disable`, `uninstall`, `status` (default: `status`). `install` accepts a trailing `--force` to overwrite a pre-existing manual ks block or to force a downgrade of the installed renderer.
 
 ## How to run
 
@@ -33,9 +32,9 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/statusline-install.sh" $ARGUMENTS
 
 ## Output format
 
-`[cks 12|34]` — first column = `.claude/rules/**/*.md` count, second = `.claude/knowledge/**/*.md` count (both recursive, excluding `_index.md` / `README.md`). A third column appears when a project-level `knowledge/_index.md` exists at the repo root (a legacy layout predating `.claude/knowledge`).
+`[ks §12 ◈34]` — one type-glyph per count: `§` = `.claude/rules/**/*.md` count, `◈` = `.claude/knowledge/**/*.md` count (both recursive, excluding `_index.md` / `README.md`). A third `❖` column appears when a project-level `knowledge/_index.md` exists at the repo root (a legacy layout predating `.claude/knowledge`).
 
-Each column may carry `*N` (tracked changes) and `+N` (untracked) suffixes from `git status --porcelain`. When a project has neither `.claude/rules/` nor `.claude/knowledge/`, the renderer emits nothing — no cks block appears in unrelated projects.
+Each column may carry `*N` (tracked changes) and `+N` (untracked) suffixes from `git status --porcelain`. When a project has neither `.claude/rules/` nor `.claude/knowledge/`, the renderer emits nothing — no ks block appears in unrelated projects.
 
 ## What each subcommand does
 
@@ -46,7 +45,7 @@ Each column may carry `*N` (tracked changes) and `+N` (untracked) suffixes from 
 
 ## Custom placement
 
-Drop a `# {{cks}}` comment into `~/.claude/statusline.sh` exactly where you want the block — it must sit **after** your last `OUT=` assignment, otherwise a later `OUT=` would overwrite the cks output. Then run `install`; the placeholder line is replaced in place. Without a placeholder, `install` falls back to inserting before the last line that prints `$OUT`. `uninstall` strips the block but does not restore the placeholder.
+Drop a `# {{cks}}` comment into `~/.claude/statusline.sh` exactly where you want the block — it must sit **after** your last `OUT=` assignment, otherwise a later `OUT=` would overwrite the ks output. Then run `install`; the placeholder line is replaced in place. Without a placeholder, `install` falls back to inserting before the last line that prints `$OUT`. `uninstall` strips the block but does not restore the placeholder.
 
 ## Other statusline tools
 

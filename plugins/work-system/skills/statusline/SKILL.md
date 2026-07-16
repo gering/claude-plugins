@@ -51,7 +51,7 @@ PR state comes from a short-TTL cache (`<git-dir>/ws-statusline-prs`) refreshed 
 
 ## Composing with other segments
 
-The ws block owns its own marker pair (`# >>> work-system:ws-statusline >>>`) and never touches another plugin's block — it coexists with the knowledge-system `[cks …]` segment in one `~/.claude/statusline.sh`. Drop a `# {{ws}}` comment where you want the block — it must sit **after** your last `OUT=` assignment, otherwise a later `OUT=` would overwrite the ws output. Then run `install`; the placeholder line is replaced in place. Without a placeholder, `install` falls back to inserting before the last line that prints `$OUT`. `uninstall` strips the block but does not restore the placeholder.
+The ws block owns its own marker pair (`# >>> work-system:ws-statusline >>>`) and never touches another plugin's block — it coexists with the knowledge-system `[ks …]` segment in one `~/.claude/statusline.sh`. Drop a `# {{ws}}` comment where you want the block — it must sit **after** your last `OUT=` assignment, otherwise a later `OUT=` would overwrite the ws output. Then run `install`; the placeholder line is replaced in place. Without a placeholder, `install` falls back to inserting before the last line that prints `$OUT`. `uninstall` strips the block but does not restore the placeholder.
 
 ## Other statusline tools
 

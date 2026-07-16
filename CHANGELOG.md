@@ -11,6 +11,9 @@ entries are grouped per plugin, newest first.
 
 ## knowledge-system
 
+### 1.9.0 — 2026-07-15
+- Modernize the statusline segment: rename the visible label `[cks …]` → `[ks …]` and replace the positional `RULES|KNOW` layout with type glyphs (`§` rules, `◈` knowledge, `❖` legacy project knowledge). Display-only (renderer 1.1.0) — no identifiers, paths, or markers change.
+
 ### 1.8.2 — 2026-06-21
 - Sharper knowledge curation grounding and staleness detection.
 

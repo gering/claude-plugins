@@ -189,5 +189,5 @@ Next:
 - Query knowledge: /query "<question>"
 - Prime context with the foundational docs: /prime
 - Run a QA pass: /reindex
-- Optional: show `[cks rules|knowledge]` in your status line — `/knowledge-system:statusline install`
+- Optional: show `[ks §rules ◈knowledge]` in your status line — `/knowledge-system:statusline install`
 ```

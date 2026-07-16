@@ -12,7 +12,7 @@
       "name": "knowledge-system",
       "source": "./plugins/knowledge-system",
       "description": "Lightweight, native knowledge management for Claude Code projects. Three layers of persistent knowledge: Rules (always active), Knowledge (on demand), and Memory (automatic).",
-      "version": "1.8.2"
+      "version": "1.9.0"
     },
     {
       "name": "work-system",

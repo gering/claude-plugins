@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# statusline-install.sh — install/manage the [cks N|M] knowledge-system status
+# statusline-install.sh — install/manage the [ks §N ◈M] knowledge-system status
 # block in Claude Code's custom status line.
 #
 # The render half is scripts/statusline-cks.sh; this is the install half. It is
@@ -16,7 +16,7 @@
 #   uninstall  strip the marker block and delete the installed renderer.
 #
 # Flags:
-#   --force    (install only) overwrite a pre-existing manual cks block, or
+#   --force    (install only) overwrite a pre-existing manual ks block, or
 #              force a downgrade of the installed renderer.
 #
 # python3 is required (symlink resolution + atomic file mutation). BSD awk on
@@ -256,7 +256,7 @@ cmd_status() {
   local src_v inst_v="" cmp="" proj sentinel
 
   src_v=$(script_version "$SOURCE")
-  printf 'cks statusline status\n'
+  printf 'ks statusline status\n'
 
   if [ -e "$SOURCE" ]; then
     printf -- '- Plugin renderer: %s (v%s)\n' "$SOURCE" "$src_v"
@@ -298,9 +298,9 @@ cmd_status() {
   proj=$(project_dir)
   sentinel="$proj/.claude/$SENTINEL_NAME"
   if [ -f "$sentinel" ]; then
-    printf -- '- Project sentinel: present → cks disabled for %s\n' "$proj"
+    printf -- '- Project sentinel: present → ks disabled for %s\n' "$proj"
   else
-    printf -- '- Project sentinel: absent → cks enabled for %s\n' "$proj"
+    printf -- '- Project sentinel: absent → ks enabled for %s\n' "$proj"
   fi
 
   if [ "$MK_STATE" = "unreadable" ]; then
@@ -308,13 +308,13 @@ cmd_status() {
   elif [ "$MK_STATE" = "invalid" ]; then
     printf 'Hint: marker block is corrupted — run `uninstall` then `install` to reset it.\n'
   elif [ ! -e "$INSTALLED" ] || [ "$MK_STATE" != "present" ]; then
-    printf 'Hint: run `install` to set up the cks status block.\n'
+    printf 'Hint: run `install` to set up the ks status block.\n'
   elif [ "$cmp" = "newer" ]; then
     printf 'Hint: run `install` to upgrade the renderer (v%s → v%s).\n' "$inst_v" "$src_v"
   elif [ "$cmp" = "older" ]; then
     printf 'Hint: installed renderer (v%s) is newer than the plugin (v%s) — fine; use `install --force` only to downgrade.\n' "$inst_v" "$src_v"
   else
-    printf 'Hint: cks is installed and current.\n'
+    printf 'Hint: ks is installed and current.\n'
   fi
 }
 
@@ -386,7 +386,7 @@ determine_placement() {
       PLACEMENT_MSG="placed at user-defined position (# {{cks}} placeholder on line $ph_line)"
       return
     fi
-    die "# {{cks}} placeholder on line $ph_line is at or before the last \$OUT assignment (line $last_out). The injected block does OUT=\"\$OUT \$CKS_PLUGIN\" — placing it earlier means the later OUT= overwrites it and cks silently disappears. Move the placeholder after line $last_out and re-run install."
+    die "# {{cks}} placeholder on line $ph_line is at or before the last \$OUT assignment (line $last_out). The injected block does OUT=\"\$OUT \$CKS_PLUGIN\" — placing it earlier means the later OUT= overwrites it and the ks block silently disappears. Move the placeholder after line $last_out and re-run install."
   fi
 
   # No placeholder → auto-detect: insert before the last line that prints $OUT.
@@ -399,7 +399,7 @@ determine_placement() {
   fi
 
   die "No # {{cks}} placeholder and no 'echo/printf \$OUT' line found in $STATUSLINE_TARGET.
-Add a # {{cks}} comment where you want the cks block (after your last OUT= assignment) and re-run install, or paste this block manually:
+Add a # {{cks}} comment where you want the ks block (after your last OUT= assignment) and re-run install, or paste this block manually:
 
 $MARKER_BLOCK"
 }
@@ -448,9 +448,12 @@ cmd_install() {
       PLACEMENT_MSG="refreshed existing marker block (lines ${MK_BL}-${MK_EL})"
       ;;
     absent)
-      # Manual cks block + no marker block → duplication risk; require --force.
-      if grep -nE '\[cks[^]]*\]' "$STATUSLINE_TARGET" >/dev/null 2>&1 && [ "$FORCE" -ne 1 ]; then
-        die "Found an existing [cks ...] block in $STATUSLINE_TARGET but no marker block. Installing would duplicate it. Re-run with --force to inject anyway."
+      # Manual ks block + no marker block → duplication risk; require --force.
+      # c? also matches the legacy [cks ...] label from pre-1.9.0 manual blocks.
+      # The space after the label is required so unrelated bracketed text
+      # ("[ksz]", "${counts[ks]}") cannot false-positive the guard.
+      if grep -nE '\[c?ks [^]]*\]' "$STATUSLINE_TARGET" >/dev/null 2>&1 && [ "$FORCE" -ne 1 ]; then
+        die "Found an existing [ks ...] (or legacy [cks ...]) block in $STATUSLINE_TARGET but no marker block. Installing would duplicate it. Re-run with --force to inject anyway."
       fi
       determine_placement
       ;;
@@ -476,8 +479,8 @@ cmd_install() {
   printf -- '- %s\n' "$RENDERER_MSG"
   printf -- '- Marker block: %s in %s\n' "$PLACEMENT_MSG" "$STATUSLINE_TARGET"
   printf -- '- Backup: %s\n' "$BACKUP"
-  printf 'Restart Claude Code (or reload the status line) to see [cks ...] in projects with .claude/knowledge or .claude/rules.\n'
-  printf 'Tip: silence cks in a noisy project with `/knowledge-system:statusline disable` (run from inside it).\n'
+  printf 'Restart Claude Code (or reload the status line) to see [ks ...] in projects with .claude/knowledge or .claude/rules.\n'
+  printf 'Tip: silence the ks block in a noisy project with `/knowledge-system:statusline disable` (run from inside it).\n'
 }
 
 # ---- enable / disable (per-project) -----------------------------------------
@@ -486,14 +489,14 @@ cmd_disable() {
   local proj; proj=$(project_dir)
   mkdir -p "$proj/.claude" || die "Failed to create $proj/.claude"
   touch "$proj/.claude/$SENTINEL_NAME" || die "Failed to create the disable sentinel in $proj/.claude"
-  printf '✅ cks disabled for %s. The renderer will skip output here. Re-enable with `enable`.\n' "$proj"
-  printf 'Note: this is per-project — other projects keep showing [cks ...].\n'
+  printf '✅ ks disabled for %s. The renderer will skip output here. Re-enable with `enable`.\n' "$proj"
+  printf 'Note: this is per-project — other projects keep showing [ks ...].\n'
 }
 
 cmd_enable() {
   local proj; proj=$(project_dir)
   rm -f "$proj/.claude/$SENTINEL_NAME" 2>/dev/null || true
-  printf '✅ cks enabled for %s.\n' "$proj"
+  printf '✅ ks enabled for %s.\n' "$proj"
   printf 'Note: enable does not install the marker block or renderer — run `install` for that.\n'
 }
 
