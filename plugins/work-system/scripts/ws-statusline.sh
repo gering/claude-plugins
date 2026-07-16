@@ -67,16 +67,28 @@ refresh_needed() {
   [ -z "$(find "$CACHE" -mmin -1 2>/dev/null)" ]
 }
 
+# Run "$@" with a 20s bound. `timeout` isn't on stock macOS, so fall back to
+# perl's alarm (perl ships with macOS; the alarm timer survives exec). Only a
+# host with NEITHER tool runs unbounded — states mode sits inline on a skill's
+# critical path (the async render path detaches, where a hang is harmless), so
+# an unconditional bound matters more there; accepted residual on such hosts.
+run_bounded() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 20 "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'alarm shift; exec @ARGV' 20 "$@"
+  else
+    "$@"
+  fi
+}
+
 # One gh invocation shared by both refresh paths (async render / sync states).
-# Prints "headRef\tstate" rows; non-zero when gh fails. Bounded so a hung gh
-# can't stall a caller — `timeout` isn't on stock macOS, use it only if present.
+# Prints "headRef\tstate" rows; non-zero when gh fails/times out.
 fetch_prs() {
-  local gh_to=""
-  command -v timeout >/dev/null 2>&1 && gh_to="timeout 20"
   # --limit 500 is a bounded cache: a repo with more matching PRs than this
   # could drop a task's branch from the window, but backlog tasks have recent
   # PRs and 500 is far above the old 100 cliff — acceptable for a glance segment.
-  (cd "$DIR" && $gh_to gh pr list --state all --limit 500 \
+  (cd "$DIR" && run_bounded gh pr list --state all --limit 500 \
      --json state,headRefName \
      --jq '.[] | "\(.headRefName)\t\(.state)"' 2>/dev/null)
 }
@@ -180,6 +192,10 @@ while IFS= read -r -d '' f; do
   name="$(basename "$f" .md)"
   state="$(task_state "$name")"
   if [ "$MODE" = states ]; then
+    # A name embedding a tab/newline would forge or split rows in the TSV this
+    # mode emits (the consumer could stamp another task's state from the forged
+    # row) — skip such names entirely; render mode still counts them above.
+    case "$name" in (*$'\t'*|*$'\n'*) continue ;; esac
     printf '%s\t%s\t%s\n' "$name" "$state" "$(glyph_of "$state")"
     continue
   fi

@@ -7,9 +7,10 @@
 # The state→glyph mapping and its precedence live in ws-statusline.sh
 # (`states` mode) — the ONE source both surfaces read; this script only
 # applies the result to herdr agent names. Everything is best-effort: prefix
-# and refresh exit 0 and degrade silently when they cannot act (no herdr, no
-# python3, not a git repo, no backlog) — callers are launch paths and skill
-# triggers that must never fail on cosmetics.
+# and refresh exit 0 and degrade silently when they cannot act (outside a
+# herdr session, no herdr/python3, herdr unreachable, not a git repo, no
+# backlog) — callers are launch paths and skill triggers that must never fail
+# on cosmetics.
 #
 # Subcommands:
 #   prefix <label> <worktree-abs-path>
@@ -44,20 +45,31 @@ strip_glyph() {
   printf '%s' "$l"
 }
 
+# Exact-match TSV lookup: print field 3 of the row whose field 1 == $1, from
+# stdin. The needle travels via ENVIRON, NOT `awk -v` — -v escape-expands
+# backslashes (a name like `fix\net` would silently never match).
+glyph_lookup() {
+  T="$1" awk -F'\t' '$1==ENVIRON["T"] { print $3; exit }'
+}
+
 # Glyph for task $1 of the repo containing dir $2, via ws-statusline.sh states
 # (which sync-refreshes the PR cache first). Empty when unresolvable.
 task_glyph() {
   local ws="$SCRIPT_DIR/ws-statusline.sh"
   [ -f "$ws" ] || return 0
-  bash "$ws" states "$2" 2>/dev/null \
-    | awk -F'\t' -v t="$1" '$1==t { print $3; exit }'
+  bash "$ws" states "$2" 2>/dev/null | glyph_lookup "$1"
 }
 
 # Emit "pane_id\ttask\tcurrent_name" for every agent whose realpath(cwd) is
 # EXACTLY <main>/.claude/worktrees/<task> (argv[1] = main repo path). Exact
 # match mirrors herdr-teardown.sh's cwd philosophy: an unrelated agent merely
 # cd'd into a worktree subdir is never renamed. Malformed JSON emits nothing.
-extract_task_agents='import sys, json, os
+# The agent fields are UNTRUSTED (any tool in the session can set a name): a
+# tab/newline embedded in a field would forge extra TSV records and aim a
+# rename at an arbitrary pane — so the pane id must match herdr shape, a task
+# name that would break the framing is skipped, and the free-form name is
+# scrubbed (it is display data; a space is a faithful stand-in).
+extract_task_agents='import sys, json, os, re
 main = sys.argv[1] if len(sys.argv) > 1 else ""
 if not main.strip():
     sys.exit(0)
@@ -69,11 +81,16 @@ except Exception:
 for a in agents:
     cwd = (a.get("cwd") or "").rstrip("/")
     pane = a.get("pane_id") or ""
-    if not cwd or not pane:
+    if not cwd or not re.fullmatch(r"[A-Za-z0-9:_.-]+", pane):
         continue
     cwd = os.path.realpath(cwd)
-    if os.path.dirname(cwd) == wtdir:
-        print("\t".join([pane, os.path.basename(cwd), a.get("name") or ""]))'
+    if os.path.dirname(cwd) != wtdir:
+        continue
+    task = os.path.basename(cwd)
+    if re.search(r"[\t\r\n]", task):
+        continue
+    name = re.sub(r"[\t\r\n]", " ", a.get("name") or "")
+    print("\t".join([pane, task, name]))'
 
 cmd_prefix() {
   local label="${1:-}" worktree="${2:-}" base name glyph
@@ -96,17 +113,26 @@ cmd_prefix() {
 
 cmd_refresh() {
   local dir="${1:-$PWD}"
+  # The documented contract (and the pr-flow shim + kickoff/close/continue
+  # precedent): outside a herdr session this is a silent no-op — the herdr CLI
+  # could reach a server via its default socket even without the env, but
+  # renaming tabs from outside the session would contradict the skills' prose.
+  [ "${HERDR_ENV:-}" = "1" ]   || return 0
   command -v herdr   >/dev/null 2>&1 || return 0
   command -v python3 >/dev/null 2>&1 || return 0
   git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 || return 0
   # Main worktree (first porcelain entry) — the backlog + worktrees live there.
-  local main states agents
+  local main states list agents
   main="$(git -C "$dir" worktree list --porcelain 2>/dev/null | head -1)"
   main="${main#worktree }"
   [ -n "$main" ] || return 0
   states="$(bash "$SCRIPT_DIR/ws-statusline.sh" states "$dir" 2>/dev/null || true)"
   [ -n "$states" ] || return 0     # no backlog → nothing to stamp
-  agents="$(herdr agent list 2>/dev/null \
+  # Empty list output = herdr unreachable (binary present, server down) →
+  # silent no-op, NOT `checked=0` — that line means "reachable, nothing to do".
+  list="$(herdr agent list 2>/dev/null || true)"
+  [ -n "$list" ] || return 0
+  agents="$(printf '%s' "$list" \
     | python3 -c "$extract_task_agents" "$main" 2>/dev/null || true)"
   if [ -z "$agents" ]; then
     echo "checked=0 updated=0"
@@ -115,8 +141,7 @@ cmd_refresh() {
   local checked=0 updated=0 pane task name glyph base new
   while IFS=$'\t' read -r pane task name; do
     [ -n "$pane" ] && [ -n "$task" ] || continue
-    glyph="$(printf '%s\n' "$states" \
-      | awk -F'\t' -v t="$task" '$1==t { print $3; exit }')"
+    glyph="$(printf '%s\n' "$states" | glyph_lookup "$task")"
     [ -n "$glyph" ] || continue    # worktree without a backlog task — leave alone
     checked=$((checked + 1))
     base="$(strip_glyph "$name")"

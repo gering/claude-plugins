@@ -2,7 +2,7 @@
 title: "herdr Tab State Glyphs"
 createdAt: 2026-07-16
 createdFrom: "session: 2026-07-16"
-pluginVersion: 1.8.0
+pluginVersion: 1.9.0
 prime: false
 ---
 

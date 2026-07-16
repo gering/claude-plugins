@@ -181,6 +181,10 @@ case "$mode" in
         # resume: a cwd match can't tell a live Claude from a bare shell that survived
         # a prior `/exit`. resumed is left EMPTY so the caller tells the user to run
         # `claude -c` if the tab is just a shell.
+        # Re-stamp the reused tab's state glyph first: it may predate a PR state
+        # change (stamped ● at kickoff, PR opened/merged meanwhile), and this path
+        # otherwise never renames. Best-effort, like the launch stamp above.
+        [ -f "$glyph_helper" ] && bash "$glyph_helper" refresh "$worktree" >/dev/null 2>&1 || true
         focused=yes
         herdr tab focus "$state" >/dev/null 2>&1 || focused=no
         printf 'pane=\ntab=%s\nmoved=yes\nreused=yes\nresumed=\nfocused=%s\n' "$state" "$focused"
