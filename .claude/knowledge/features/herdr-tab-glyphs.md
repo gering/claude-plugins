@@ -9,8 +9,12 @@ prime: false
 # herdr Tab State Glyphs
 
 work-system prefixes each task tab's herdr agent name with the task's state
-glyph (`○` not-started · `●` active · `◇` in review · `✓` merged), so the
-sidebar mirrors the `[ws …]` statusline (e.g. `● close-herdr`, `◇ ks-label`).
+glyph (`○` not-started · `●` active · `◇` in review · `◆` approved · `✓`
+merged), so the sidebar mirrors the `[ws …]` statusline (e.g. `● close-herdr`,
+`◇ ks-label`, `◆ ready-pr`). `◆` (open PR whose `reviewDecision == APPROVED`,
+ready to `/merge`) is the one state needing a second `gh` field beyond
+`state`: the PR cache carries `headRef\tstate\treviewDecision`, and an old
+two-column cache row degrades safely to `◇` (empty field 3 is never `APPROVED`).
 
 ## Single source without a shared sibling
 
@@ -23,14 +27,23 @@ in the same file*: `ws-statusline.sh states <dir>` prints
 `glyph_of()` functions the render path aggregates. One file — the surfaces
 cannot drift. `herdr-tab-glyph.sh` only *applies* the result to agent names.
 
-## Sync vs async PR refresh
+## Sync vs cache-only PR refresh
 
 The render path keeps its never-block rule (detached background `gh` refresh,
-see [statusline-integration](statusline-integration.md)). `states` mode does
-the opposite **deliberately**: it refreshes the PR cache *inline* before
-reading. Its callers are skill triggers that fire right after a PR changed
-state (`/open` → `◇`, `/merge` → `✓`); the async TTL path would serve them the
-pre-change state and the glyph would flip one survey late.
+see [statusline-integration](statusline-integration.md)). `states` mode has
+**two policies**, chosen by the caller:
+
+- **Default (sync):** refresh the PR cache *inline* before reading — for
+  triggers that fire right after a PR changed state (`/open` → `◇`, `/merge` →
+  `✓`, `/cycle` → possibly `◆`). The async TTL path would serve the pre-change
+  state and the glyph would flip one survey late. The inline `gh` call is
+  bounded (`run_bounded`: `timeout`, else a `perl -e 'alarm'` fallback, 8s).
+- **`--cached`:** read the cache only + kick off the same non-blocking
+  background refresh the render path uses — for pure-survey callers (`/status`,
+  `/list`, `/check`, `/close`) whose state didn't just change and that must not
+  block. `/check` especially: it re-runs during CI polling. The flag threads
+  `herdr-tab-glyph.sh refresh --cached` → `ws-statusline.sh states --cached`,
+  and through the pr-flow shim `refresh-task-glyphs.sh --cached`.
 
 ## Renamer rules (herdr-tab-glyph.sh)
 

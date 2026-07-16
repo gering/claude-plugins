@@ -214,20 +214,27 @@ task name to reopen that one's tab from here). The reopen shares the tested
 ### Task tabs carry their state glyph
 
 Inside herdr, every task tab's sidebar name is prefixed with the task's state
-glyph — the same `○ ● ◇ ✓` set (not-started / active / in-review / merged) the
-`[ws …]` statusline segment renders, so both surfaces speak one visual
-language (e.g. `● close-herdr`, `◇ ks-label`, `✓ dark-mode`). The mapping and
-its precedence live in `scripts/ws-statusline.sh` (a `states` mode next to the
-render mode — one file, so sidebar and statusline can never disagree);
-`scripts/herdr-tab-glyph.sh` applies it to herdr agent names.
+glyph — the same `○ ● ◇ ◆ ✓` set the `[ws …]` statusline segment renders, so
+both surfaces speak one visual language (e.g. `● close-herdr`, `◇ ks-label`,
+`◆ ready-pr`, `✓ dark-mode`):
+
+- `○` not-started · `●` active (worktree) · `◇` in review (PR open) ·
+  `◆` approved (PR review APPROVED — ready to `/merge`) · `✓` merged.
+
+The mapping and its precedence live in `scripts/ws-statusline.sh` (a `states`
+mode next to the render mode — one file, so sidebar and statusline can never
+disagree); `scripts/herdr-tab-glyph.sh` applies it to herdr agent names.
 
 The glyph is stamped when `/kickoff` or `/continue` opens the tab, and
 re-stamped — idempotently, only when it changed — whenever you survey or move
-task state: `/status`, `/list`, and `/close` (for the remaining tabs) refresh
-every open task tab of the repo, and the pr-flow skills (`/open`, `/merge`,
-`/cycle`, `/check`) trigger the same refresh after PR state changes, so `●`
-flips to `◇` when the PR opens and to `✓` when it merges. Agents outside task
-worktrees are never renamed; outside herdr everything is a silent no-op.
+task state: `/status`, `/list`, and `/close` refresh every open task tab of the
+repo, and the pr-flow skills (`/open`, `/merge`, `/cycle`, `/check`) trigger the
+same refresh, so `●` flips to `◇` when the PR opens, to `◆` when it is approved,
+and to `✓` when it merges. Survey surfaces (`/status`, `/list`, `/check`,
+`/close`) read the PR cache and never block; the state-changing skills (`/open`,
+`/merge`, `/cycle`) do a bounded synchronous `gh` refresh so the new state shows
+at once. Agents outside task worktrees are never renamed; outside herdr
+everything is a silent no-op.
 
 ## Adopting Existing Branches
 

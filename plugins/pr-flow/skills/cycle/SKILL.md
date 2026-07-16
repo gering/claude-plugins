@@ -112,9 +112,11 @@ Strip the flags first; whatever is left over is the commit message.
 11. **Sync task-tab glyphs** (best-effort, silent):
     - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/refresh-task-glyphs.sh"`
     - Inside herdr with the work-system plugin installed, this re-stamps the
-      task tabs' sidebar state glyphs (`○ ● ◇ ✓`); otherwise it is a silent
-      no-op. Ignore its output — never block or report on it. In loop mode run
-      it once per invocation (not per round).
+      task tabs' sidebar state glyphs (`○ ● ◇ ◆ ✓`); otherwise it is a silent
+      no-op. No `--cached` — `/cycle` pushes and re-triggers review, so it needs
+      a fresh `gh` read (e.g. an approval since flips `◇` → `◆`). Ignore its
+      output — never block or report on it. In loop mode run it once per
+      invocation (not per round).
 
 ## Loop mode (`--loop`)
 

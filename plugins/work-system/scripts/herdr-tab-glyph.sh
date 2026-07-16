@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # herdr-tab-glyph.sh — mirror work-system task states onto herdr tab/agent
 # names as a leading state glyph (○ not-started · ● active · ◇ in review ·
-# ✓ merged), so the herdr sidebar speaks the same visual language as the
-# [ws …] status-line segment.
+# ◆ approved · ✓ merged), so the herdr sidebar speaks the same visual language
+# as the [ws …] status-line segment.
 #
 # The state→glyph mapping and its precedence live in ws-statusline.sh
 # (`states` mode) — the ONE source both surfaces read; this script only
@@ -19,7 +19,7 @@
 #       used by herdr-launch.sh. Strips any existing leading glyph first
 #       (idempotent, re-runs never stack) and prints the plain label when the
 #       state cannot be resolved. Always exits 0.
-#   refresh [<dir>]
+#   refresh [--cached] [<dir>]
 #       Re-stamp the glyph on every herdr agent whose cwd IS a task worktree
 #       of the repo containing <dir> (default: $PWD) — exact realpath match on
 #       <main>/.claude/worktrees/<task>, across ALL workspaces of this herdr
@@ -27,6 +27,10 @@
 #       outside task worktrees are never touched; a rename is only issued when
 #       the name actually changes. Prints `checked=N updated=M` when herdr was
 #       reachable; silent no-op otherwise. Always exits 0.
+#       --cached forwards to `ws-statusline.sh states --cached` (read the PR
+#       cache + non-blocking background refresh, never a synchronous gh call) —
+#       for pure-survey callers (/status, /list, /check, /close). Without it the
+#       state is refreshed synchronously, for callers reacting to a PR change.
 set -u
 
 SCRIPT_DIR="${0%/*}"
@@ -38,7 +42,7 @@ strip_glyph() {
   local l="$1"
   while :; do
     case "$l" in
-      "○ "*|"● "*|"◇ "*|"✓ "*) l="${l#* }" ;;
+      "○ "*|"● "*|"◇ "*|"◆ "*|"✓ "*) l="${l#* }" ;;
       *) break ;;
     esac
   done
@@ -115,6 +119,8 @@ cmd_prefix() {
 }
 
 cmd_refresh() {
+  local cached=""
+  [ "${1:-}" = "--cached" ] && { cached="--cached"; shift; }
   local dir="${1:-$PWD}"
   # The documented contract (and the pr-flow shim + kickoff/close/continue
   # precedent): outside a herdr session this is a silent no-op — the herdr CLI
@@ -129,7 +135,8 @@ cmd_refresh() {
   main="$(git -C "$dir" worktree list --porcelain 2>/dev/null | head -1)"
   main="${main#worktree }"
   [ -n "$main" ] || return 0
-  states="$(bash "$SCRIPT_DIR/ws-statusline.sh" states "$dir" 2>/dev/null || true)"
+  # $cached is unquoted so an empty value expands to no argument (not "").
+  states="$(bash "$SCRIPT_DIR/ws-statusline.sh" states $cached "$dir" 2>/dev/null || true)"
   [ -n "$states" ] || return 0     # no backlog → nothing to stamp
   # Empty list output = herdr unreachable (binary present, server down) →
   # silent no-op, NOT `checked=0` — that line means "reachable, nothing to do".
@@ -166,7 +173,7 @@ case "${1:-}" in
   prefix)  shift; cmd_prefix "$@" ;;
   refresh) shift; cmd_refresh "$@" ;;
   *)
-    echo "usage: ${0##*/} {prefix <label> <worktree>|refresh [<dir>]}" >&2
+    echo "usage: ${0##*/} {prefix <label> <worktree>|refresh [--cached] [<dir>]}" >&2
     exit 2
     ;;
 esac

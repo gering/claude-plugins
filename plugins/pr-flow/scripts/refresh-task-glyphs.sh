@@ -1,25 +1,30 @@
 #!/usr/bin/env bash
 # refresh-task-glyphs.sh — soft-coupling shim: if the work-system plugin is
-# installed, refresh the herdr task-tab state glyphs (○ ● ◇ ✓) after a PR
+# installed, refresh the herdr task-tab state glyphs (○ ● ◇ ◆ ✓) after a PR
 # state change or survey (/open, /merge, /cycle, /check).
 #
 # work-system is DETECTED, never required (skill-composition rule: plugins
 # stay independently installable): silent no-op when it is absent, outside
-# herdr, or on any error — this must never fail the calling skill. The refresh
-# it delegates to makes one gh call (bounded via timeout/perl-alarm inside
-# work-system's ws-statusline.sh where available — the network call lives
-# there, not here). All real logic is in work-system's herdr-tab-glyph.sh;
-# this shim only locates it.
+# herdr, or on any error — this must never fail the calling skill. Without
+# --cached the delegated refresh makes one synchronous gh call (bounded via
+# timeout/perl-alarm inside work-system's ws-statusline.sh — the network call
+# lives there, not here); a transition caller (/open, /merge, /cycle) needs the
+# post-change state. With --cached it is cache-only + a non-blocking background
+# refresh — for a pure-survey caller (/check) that must not block. All real
+# logic is in work-system's herdr-tab-glyph.sh; this shim only locates it.
 #
-# Usage: refresh-task-glyphs.sh [<dir>]   (dir defaults to $PWD)
+# Usage: refresh-task-glyphs.sh [--cached] [<dir>]   (dir defaults to $PWD)
 set -u
 
 [ "${HERDR_ENV:-}" = "1" ] || exit 0
+cached=""
+[ "${1:-}" = "--cached" ] && { cached="--cached"; shift; }
 dir="${1:-$PWD}"
 root="${CLAUDE_PLUGIN_ROOT:-}"
 [ -n "$root" ] || exit 0
 
-run_helper() { bash "$1" refresh "$dir" 2>/dev/null || true; exit 0; }
+# $cached unquoted so an empty value expands to no argument.
+run_helper() { bash "$1" refresh $cached "$dir" 2>/dev/null || true; exit 0; }
 
 # Dev layout (repo checkout): plugins/pr-flow and plugins/work-system siblings.
 t="$root/../work-system/scripts/herdr-tab-glyph.sh"

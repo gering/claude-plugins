@@ -2,20 +2,24 @@
 # Emit the [ws ...] work-system status block for a given workspace dir.
 #
 # Usage: ws-statusline.sh <workspace-dir>
-# Output: ANSI-coloured string like "[ws ○2 ●1 ◇1 ✓1]" — no trailing newline.
+# Output: ANSI-coloured string like "[ws ○2 ●1 ◇1 ◆1 ✓1]" — no trailing newline.
 #         Single-width glyphs (only non-zero columns shown):
 #           ○ not-started · ● active (has a worktree) · ◇ in review (open PR) ·
+#           ◆ approved (open PR, review APPROVED — ready to /merge) ·
 #           ✓ merged (ready to /close).
 #         Empty when DIR is not a git repo, has no tasks/ backlog, an empty
 #         backlog, or the <DIR>/.claude/.ws-statusline-off sentinel is present.
 #
 # Second mode (used by herdr-tab-glyph.sh, NOT by the status line):
-#   ws-statusline.sh states <workspace-dir>
+#   ws-statusline.sh states [--cached] <workspace-dir>
 # prints one "<task>\t<state>\t<glyph>" line per backlog task (state ∈
-# not-started|active|review|merged) and refreshes the PR cache SYNCHRONOUSLY
-# first — its callers are skill triggers reacting to a PR state change and need
-# the post-change state, not the cached one. Same tasks, same precedence, same
-# glyphs as the rendered segment: one file, so the two surfaces cannot drift.
+# not-started|active|review|approved|merged). Without --cached it refreshes the
+# PR cache SYNCHRONOUSLY first — for callers reacting to a PR state change
+# (/open, /merge, /cycle) that need the post-change state. With --cached it only
+# reads the cache and kicks off the same non-blocking background refresh the
+# render path uses — for pure-survey callers (/status, /list, /check, /close)
+# that must not block on the network. Same tasks, precedence, and glyphs as the
+# rendered segment: one file, so the two surfaces cannot drift.
 #
 # Self-contained by design: the installer copies THIS file to
 # ~/.claude/ws-statusline.sh with no siblings, so it must not source other
@@ -23,10 +27,12 @@
 
 # Parsed by /work-system:statusline install — bump in lockstep with plugin.json.
 # Format must stay `readonly WS_STATUSLINE_VERSION="X.Y.Z"`.
-readonly WS_STATUSLINE_VERSION="1.1.0"
+readonly WS_STATUSLINE_VERSION="1.2.0"
 
 MODE=render
 [ "${1:-}" = "states" ] && { MODE=states; shift; }
+CACHED=0
+[ "${1:-}" = "--cached" ] && { CACHED=1; shift; }
 
 DIR="${1:-}"
 [ -z "$DIR" ] && exit 0
@@ -85,14 +91,16 @@ run_bounded() {
 }
 
 # One gh invocation shared by both refresh paths (async render / sync states).
-# Prints "headRef\tstate" rows; non-zero when gh fails/times out.
+# Prints "headRef\tstate\treviewDecision" rows; non-zero when gh fails/times
+# out. reviewDecision (APPROVED / CHANGES_REQUESTED / REVIEW_REQUIRED / "")
+# distinguishes ◆ approved from ◇ in-review among OPEN PRs.
 fetch_prs() {
   # --limit 500 is a bounded cache: a repo with more matching PRs than this
   # could drop a task's branch from the window, but backlog tasks have recent
   # PRs and 500 is far above the old 100 cliff — acceptable for a glance segment.
   (cd "$DIR" && run_bounded gh pr list --state all --limit 500 \
-     --json state,headRefName \
-     --jq '.[] | "\(.headRefName)\t\(.state)"' 2>/dev/null)
+     --json state,headRefName,reviewDecision \
+     --jq '.[] | "\(.headRefName)\t\(.state)\t\(.reviewDecision)"' 2>/dev/null)
 }
 
 maybe_refresh_prs() {
@@ -133,40 +141,53 @@ sync_refresh_prs() {
   fi
 }
 
-# State of the PR whose head branch == $1, from the cache. A branch reused across
-# PRs has several rows (`gh --state all`) in no guaranteed order, so pick the most
-# authoritative state (MERGED > OPEN > CLOSED > other) instead of the first row —
-# a first-match `exit` could surface a stale CLOSED over a newer OPEN/MERGED.
+# State of the PR whose head branch == $1, from the cache, as "<state>\t<rd>"
+# (rd = reviewDecision, possibly empty). A branch reused across PRs has several
+# rows (`gh --state all`) in no guaranteed order, so pick the most authoritative
+# state (MERGED > OPEN > CLOSED > other) instead of the first row — a first-match
+# `exit` could surface a stale CLOSED over a newer OPEN/MERGED. An old two-column
+# cache yields an empty rd (field $3 absent) → treated as ◇, never ◆.
 pr_state_of() {
   [ -n "$CACHE" ] && [ -f "$CACHE" ] || return 0
   awk -F'\t' -v b="$1" '
     $1==b {
       p = ($2=="MERGED")?3 : ($2=="OPEN")?2 : ($2=="CLOSED")?1 : 0
-      if (p > best) { best=p; st=$2 }
+      if (p > best) { best=p; st=$2; rd=$3 }
     }
-    END { if (st != "") print st }
+    END { if (st != "") print st "\t" rd }
   ' "$CACHE" 2>/dev/null
 }
 
-if [ "$MODE" = states ]; then sync_refresh_prs; else maybe_refresh_prs; fi
+# Refresh policy: render always non-blocking; states syncs by default (callers
+# reacting to a state change need it fresh) but reads cache-only + non-blocking
+# background refresh under --cached (pure-survey callers must not block).
+if [ "$MODE" = states ]; then
+  if [ "$CACHED" = 1 ]; then maybe_refresh_prs; else sync_refresh_prs; fi
+else
+  maybe_refresh_prs
+fi
 
 # ---- task state (single decision for BOTH modes) ----------------------------
 
 # Does branch $1 currently have a linked worktree?
 has_worktree() { printf '%s\n' "$WORKTREE_BRANCHES" | grep -qxF "$1"; }
 
-# State of the task named $1: PR state wins (merged > open); a PR closed
-# WITHOUT merging means the task is not done and falls back to the local
-# signals — a linked worktree → active, otherwise back in the backlog.
-# Branch is the /kickoff convention; adopt-renamed branches are an accepted
-# blind spot for this glance surface.
-task_state() {  # echoes not-started | active | review | merged
-  local branch="task/$1" pr
+# State of the task named $1: PR state wins (merged > open); an OPEN PR that is
+# review-APPROVED is `approved` (ready to /merge), otherwise `review`. A PR
+# closed WITHOUT merging means the task is not done and falls back to the local
+# signals — a linked worktree → active, otherwise back in the backlog. Branch is
+# the /kickoff convention; adopt-renamed branches are an accepted blind spot.
+task_state() {  # echoes not-started | active | review | approved | merged
+  local branch="task/$1" pr st rd
   pr="$(pr_state_of "$branch")"
-  if [ "$pr" = "MERGED" ]; then echo merged        # ✓ ready to /close
-  elif [ "$pr" = "OPEN" ]; then echo review        # ◇ in review
-  elif has_worktree "$branch"; then echo active    # ● has a worktree
-  else echo not-started                            # ○ backlog
+  st="${pr%%$'\t'*}"        # everything before the first TAB
+  rd="${pr#*$'\t'}"; [ "$rd" = "$pr" ] && rd=""   # after it, or "" if no TAB
+  if [ "$st" = "MERGED" ]; then echo merged                    # ✓ ready to /close
+  elif [ "$st" = "OPEN" ]; then
+    if [ "$rd" = "APPROVED" ]; then echo approved              # ◆ ready to /merge
+    else echo review; fi                                       # ◇ in review
+  elif has_worktree "$branch"; then echo active                # ● has a worktree
+  else echo not-started                                        # ○ backlog
   fi
 }
 
@@ -174,10 +195,11 @@ task_state() {  # echoes not-started | active | review | merged
 # herdr tab glyphs (herdr-tab-glyph.sh consumes it via states mode).
 glyph_of() {
   case "$1" in
-    merged) printf '✓' ;;
-    review) printf '◇' ;;
-    active) printf '●' ;;
-    *)      printf '○' ;;
+    merged)   printf '✓' ;;
+    approved) printf '◆' ;;
+    review)   printf '◇' ;;
+    active)   printf '●' ;;
+    *)        printf '○' ;;
   esac
 }
 
@@ -185,7 +207,7 @@ glyph_of() {
 # Non-recursive tasks/*.md, excluding index/readme; tasks/archive/ is a subdir
 # and so is naturally excluded by -maxdepth 1.
 
-TOTAL=0; NS=0; ACT=0; PR=0; DONE=0
+TOTAL=0; NS=0; ACT=0; PR=0; APP=0; DONE=0
 # -print0 + `read -d ''` so a task filename with an embedded newline can't split
 # into two iterations; process substitution (not a pipe) keeps the counters in
 # THIS shell.
@@ -202,10 +224,11 @@ while IFS= read -r -d '' f; do
     continue
   fi
   case "$state" in
-    merged) DONE=$((DONE + 1)) ;;
-    review) PR=$((PR + 1)) ;;
-    active) ACT=$((ACT + 1)) ;;
-    *)      NS=$((NS + 1)) ;;
+    merged)   DONE=$((DONE + 1)) ;;
+    approved) APP=$((APP + 1)) ;;
+    review)   PR=$((PR + 1)) ;;
+    active)   ACT=$((ACT + 1)) ;;
+    *)        NS=$((NS + 1)) ;;
   esac
 done < <(find "$MAIN/tasks" -maxdepth 1 -type f -name '*.md' \
     ! -name '_index.md' ! -name 'README.md' -print0 2>/dev/null)
@@ -221,6 +244,7 @@ LABEL='\033[38;5;170m'    # ws label — purple
 C_NS='\033[38;5;245m'     # ○ not started — grey (passive backlog)
 C_AC='\033[38;5;39m'      # ● active — blue (in progress)
 C_RV='\033[38;5;179m'     # ◇ in review — amber (waiting on a PR)
+C_AP='\033[38;5;43m'      # ◆ approved — cyan-green (approved, ready to /merge)
 C_MG='\033[38;5;40m'      # ✓ merged — green (ready to /close)
 RESET='\033[0m'
 
@@ -232,6 +256,7 @@ add_col() {   # count color glyph
 add_col "$NS"   "$C_NS" "$(glyph_of not-started)"
 add_col "$ACT"  "$C_AC" "$(glyph_of active)"
 add_col "$PR"   "$C_RV" "$(glyph_of review)"
+add_col "$APP"  "$C_AP" "$(glyph_of approved)"
 add_col "$DONE" "$C_MG" "$(glyph_of merged)"
 
 printf '%b[ws %b%b]%b' "$LABEL" "$SEG" "$LABEL" "$RESET"
