@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
-# herdr-launch.sh — open a Claude session for a work-system task inside herdr.
+# herdr-launch.sh — open a worker session for a work-system task inside herdr.
 #
 # Two modes share one precondition/JSON-parse/output contract:
 #
-#   launch  (/kickoff)  — spawn Claude as ARGV via `agent start … -- claude … /continue`,
-#                         then move it into its own background tab. Claude is the
-#                         tab's ROOT pane, so a later clean /exit ends the pane and
-#                         herdr closes the tab. Argv-exec structurally avoids the
-#                         shell-startup keystroke race (see the kickoff knowledge
-#                         entry) — a fresh interactive shell can eat the leading
-#                         keystrokes of a typed command.
+#   launch  (/kickoff)  — spawn the chosen worker as ARGV via `agent start … --
+#                         <worker-argv>`, then move it into its own background tab.
+#                         The worker is the tab's ROOT pane, so a later clean /exit
+#                         ends the pane and herdr closes the tab. Argv-exec
+#                         structurally avoids the shell-startup keystroke race (see
+#                         the kickoff knowledge entry) — a fresh interactive shell
+#                         can eat the leading keystrokes of a typed command.
+#                         The worker argv is resolved from an agent SELECTOR via
+#                         agent-registry.sh (claude/codex/grok × model); with no
+#                         selector it stays the legacy `claude … /continue`. The
+#                         registry owns every per-CLI launch detail, so this script
+#                         is CLI-agnostic — it just execs the resolved argv.
 #
 #   resume  (/continue) — reopen a tab at the worktree and run `claude -c` INSIDE a
 #                         shell pane, then focus it. Because Claude runs inside a
@@ -23,23 +28,31 @@
 #                         — no session id needs stashing at kickoff.
 #
 # Usage:
-#   herdr-launch.sh launch <label> <worktree-abs-path> <workspace-id> [session-name]
+#   herdr-launch.sh launch <label> <worktree-abs-path> <workspace-id> [agent-selector] [session-name]
 #   herdr-launch.sh resume <label> <worktree-abs-path> <workspace-id>
-#     label         short, sidebar-friendly agent/tab name (e.g. close-herdr).
-#                   Pass it PLAIN — this helper prefixes the task's state glyph
-#                   (○ ● ◇ ◆ ✓, via herdr-tab-glyph.sh) itself, best-effort,
-#                   onto the TAB LABEL only; the agent and session names keep
-#                   the plain label (see the stamping block below).
-#     worktree      absolute path to the worktree (becomes the new pane's cwd)
-#     workspace-id  herdr workspace to open the tab in (e.g. $HERDR_WORKSPACE_ID)
-#     session-name  (launch only) `claude -n` name; defaults to <label>
+#     label          short, sidebar-friendly agent/tab name (e.g. close-herdr).
+#                    Pass it PLAIN — this helper prefixes the task's state glyph
+#                    (○ ● ◇ ◆ ✓, via herdr-tab-glyph.sh) itself, best-effort,
+#                    onto the TAB LABEL only; the agent and session names keep
+#                    the plain label (see the stamping block below).
+#     worktree       absolute path to the worktree (becomes the new pane's cwd)
+#     workspace-id   herdr workspace to open the tab in (e.g. $HERDR_WORKSPACE_ID)
+#     agent-selector (launch only) agent-registry selector: a shorthand flag
+#                    (--fable/--opus/--codex/--sol/--grok/--composer), a name
+#                    (claude:opus), or a bare cli. Empty → legacy claude default.
+#     session-name   (launch only) `claude -n` name; defaults to <label>
 #
 # On success (exit 0) prints key=value lines on stdout:
 #   pane=<pane_id>   (empty on a resume that reused an already-open tab)
 #   tab=<tab_id>     (launch: empty when the move into a dedicated tab failed;
 #                     resume: the reused or freshly-created tab, empty only if unparsable)
-#   moved=<yes|no>   (launch: no → Claude is a split in the CALLER's tab;
+#   moved=<yes|no>   (launch: no → the worker is a split in the CALLER's tab;
 #                     resume: always yes — its own tab)
+#   agent=<name>     (launch only) the resolved CLI×model (e.g. codex:gpt-5.6-sol,
+#                     or plain `claude` for the legacy no-selector path)
+# launch selector errors (nothing spawned): exit 2 = unknown selector; exit 3 =
+# the CLI is not available, with stdout `unavailable=<name>` + `note=<hint>` so
+# the caller can print a clear "run: … login".
 # resume adds three keys so the caller never reports a resume that didn't happen:
 #   reused=<yes|no>  (yes → a tab already existed at this worktree and was focused,
 #                     NOT a new one — no second `claude -c` was started. Its LIVE
@@ -74,14 +87,16 @@ esac
 label="${1:-}"
 worktree="${2:-}"
 workspace="${3:-}"
-session="${4:-$label}"
+# launch-only positionals (resume ignores both — it always runs `claude -c`):
+selector="${4:-}"        # agent-registry selector; empty = legacy claude default
+session="${5:-$label}"   # claude -n session name (default: the label)
 
 # Preconditions (shared). Any miss means "cannot automate" → caller falls back to
 # the manual block.
 command -v herdr   >/dev/null 2>&1 || { echo "herdr not on PATH" >&2; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "python3 not on PATH" >&2; exit 1; }
-# launch takes an optional session-name; resume does not (it runs `claude -c`).
-[ "$mode" = launch ] && usage_tail=" [session-name]" || usage_tail=""
+# launch takes an optional agent selector + session-name; resume takes neither.
+[ "$mode" = launch ] && usage_tail=" [agent-selector] [session-name]" || usage_tail=""
 [ -n "$label" ] && [ -n "$worktree" ] && [ -n "$workspace" ] || {
   echo "usage: ${0##*/} $mode <label> <worktree> <workspace-id>$usage_tail" >&2
   exit 1
@@ -135,22 +150,57 @@ except Exception:
 
 case "$mode" in
   launch)
-    # Spawn Claude as argv and read back the pane id.
+    # Build the worker argv. The registry is the single source of truth for the
+    # per-CLI launch shape; herdr-launch stays argv-exec (no shell-typing race)
+    # and CLI-agnostic — it just execs whatever argv the registry resolves.
+    #   no selector → legacy path: claude on the user's default model.
+    #   a selector  → resolve it (claude/codex/grok, per model). exit 2 on an
+    #                 unknown selector; exit 3 (with note) if the CLI is not
+    #                 available, so the caller shows a clear "run: … login".
+    worker_argv=()
+    agent_name="claude"
+    note=""
+    if [ -z "$selector" ]; then
+      worker_argv=(claude -n "$session" "/continue")
+    else
+      registry="${0%/*}/agent-registry.sh"
+      [ -f "$registry" ] || { echo "agent-registry.sh not found next to herdr-launch.sh" >&2; exit 1; }
+      rc=0
+      resolve_out="$(bash "$registry" resolve "$selector" --session "$session" 2>/dev/null)" || rc=$?
+      [ "$rc" = 2 ] && { echo "unknown agent selector: $selector" >&2; exit 2; }
+      while IFS= read -r line; do
+        case "$line" in
+          argv=*) worker_argv+=("${line#argv=}") ;;
+          name=*) agent_name="${line#name=}" ;;
+          note=*) note="${line#note=}" ;;
+        esac
+      done <<EOF_RESOLVE
+$resolve_out
+EOF_RESOLVE
+      if [ "$rc" = 3 ]; then
+        echo "agent $agent_name is not available${note:+ — $note}" >&2
+        printf 'unavailable=%s\nnote=%s\n' "$agent_name" "$note"
+        exit 3
+      fi
+      [ ${#worker_argv[@]} -gt 0 ] || { echo "agent-registry resolved no argv for $selector" >&2; exit 1; }
+    fi
+
+    # Spawn the worker as argv and read back the pane id.
     start_json="$(herdr agent start "$label" --workspace "$workspace" \
-      --cwd "$worktree" --no-focus -- claude -n "$session" "/continue" 2>/dev/null || true)"
+      --cwd "$worktree" --no-focus -- "${worker_argv[@]}" 2>/dev/null || true)"
     pane="$(printf '%s' "$start_json" | python3 -c "$extract_agent_pane" 2>/dev/null || true)"
 
     # Empty pane id → the agent did not start (broken socket / bad response).
     [ -n "$pane" ] || { echo "herdr agent start did not return a pane id" >&2; exit 1; }
 
-    # Relocate the agent into its own background tab (agent start splits the
-    # caller's tab). If the move fails, Claude is still running — report it in
-    # place rather than claiming a tab that does not exist.
+    # caller's tab). If the move fails, the worker is still running — report it in
+    # place rather than claiming a tab that does not exist. `agent=` tells the
+    # caller which CLI×model was launched; the tab uses the glyph-stamped label.
     if move_json="$(herdr pane move "$pane" --new-tab --label "$tab_label" --no-focus 2>/dev/null)"; then
       tab="$(printf '%s' "$move_json" | python3 -c "$extract_moved_tab" 2>/dev/null || true)"
-      printf 'pane=%s\ntab=%s\nmoved=yes\n' "$pane" "$tab"
+      printf 'pane=%s\ntab=%s\nmoved=yes\nagent=%s\n' "$pane" "$tab" "$agent_name"
     else
-      printf 'pane=%s\ntab=\nmoved=no\n' "$pane"
+      printf 'pane=%s\ntab=\nmoved=no\nagent=%s\n' "$pane" "$agent_name"
     fi
     ;;
 
