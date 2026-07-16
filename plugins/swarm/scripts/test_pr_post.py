@@ -147,9 +147,17 @@ check("defect befund not prefixed", "&#91;correctness&#93;" not in kbody)
 # design row without a lens falls back to the [design] prefix
 nolens = pr_post.render_body({"rows": [{"num": "1", "befund": "x", "kind": "design"}]})
 check("design w/o lens -> [design]", "&#91;design&#93; x" in nolens)
-# junk / missing kind is a defect (safe bucket): renders unprefixed, no crash
+# kind lost in the handoff: a design LENS is the backup signal -> design row
+lensonly = pr_post.render_body({"rows": [{"num": "1", "befund": "y", "lens": "reuse"}]})
+check("lens-only reuse -> design, prefixed", "&#91;reuse&#93; y" in lensonly)
 junk = pr_post.render_body({"rows": [{"num": "1", "befund": "y", "kind": 42, "lens": "reuse"}]})
-check("junk kind -> defect, unprefixed", "&#91;" not in junk and " y " in junk)
+check("junk kind + design lens -> design", "&#91;reuse&#93; y" in junk)
+# an explicit defect kind WINS over a design lens (mixed-cluster defect vote)
+expl = pr_post.render_body({"rows": [{"num": "1", "befund": "z", "kind": "defect", "lens": "reuse"}]})
+check("explicit defect beats design lens", "&#91;" not in expl and " z " in expl)
+# junk kind + non-design lens stays a defect (safe bucket)
+junk2 = pr_post.render_body({"rows": [{"num": "1", "befund": "w", "kind": 42, "lens": "correctness"}]})
+check("junk kind + defect lens -> defect", "&#91;" not in junk2 and " w " in junk2)
 # an attacker-shaped lens value goes through the full cell sanitizer
 evil = pr_post.render_body({"rows": [{"num": "1", "befund": "z", "kind": "design", "lens": "x|@y"}]})
 check("evil lens sanitized", "&#91;x&#124;&#64;y&#93; z" in evil and "@y" not in evil)

@@ -14,10 +14,10 @@ reindexedAt: 2026-07-12
 P2 turns the blueprint into a working review: a **Workflow-tool script**
 (`plugins/swarm/workflows/swarm-review.js`) launched by the `/swarm:review`
 skill. Shape: `scope+gate → fan-out (3 voices) → merge (file,mechanism) →
-verify solos → output-gated synthesis`. Three voices: Claude lenses ∥ codex ∥
-grok-4.5 (see [swarm-backend-adapter](swarm-backend-adapter.md)). A fourth,
-`grok-composer-2.5-fast`, was removed in swarm 0.4.3 — the grok CLI dropped the
-model.
+verify solos + design clusters → output-gated synthesis`. Three voices: Claude
+lenses ∥ codex ∥ grok-4.5 (see [swarm-backend-adapter](swarm-backend-adapter.md)).
+A fourth, `grok-composer-2.5-fast`, was removed in swarm 0.4.3 — the grok CLI
+dropped the model.
 
 ## Lens set: 11 lenses in 4 clusters (swarm 0.5.0)
 
@@ -41,8 +41,12 @@ truth** (the per-cluster externals follow-up consumes it):
   first-class in the gate prompt, skipped only when the diff can't pay off.
 - **`kind` is derived from the lens name** (`design` vs `defect`) — no
   finding-schema change, so the 3-place schema mirror is untouched. A merged
-  cluster's kind comes from its members: any defect member ⇒ defect (a design
-  suggestion merged with a real defect must not leave the defect ranking).
+  cluster's kind comes from its TAGGED members (design only when every tagged
+  member is design — a design suggestion merged with a real defect must not
+  leave the defect ranking); untagged (`unspecified`) members don't vote, and
+  an **all-untagged cluster is never auto-accepted** — its "consensus" is
+  backed by no lens, so it is verified like a solo (the `--max` dogfooding
+  round found exactly this hole).
 - **Verify path decision: kind-aware prompt, not bypass.** Design findings are
   suggestion-shaped, but each has a falsifiable applicability core (reuse
   target exists? simpler form behavior-identical? claimed waste real?) — the
@@ -81,16 +85,16 @@ truth** (the per-cluster externals follow-up consumes it):
 
 ## Design decisions
 
-- **Consensus counts model *families*, not voices.** A cross-family cluster
-  (≥2 of claude / openai / grok) is CONFIRMED without extra verify; everything
-  else is solo and goes through the adversarial 3-state verifier. The `FAMILY`
-  map (`workflows/swarm-review.js`) survives the composer removal deliberately:
-  with composer gone the backend→family mapping is 1:1, so *for consensus
-  counting* it is currently a no-op — but the fan-out is many-voices-per-family
-  (one Claude finder per gated lens), so the rule "same vendor agreeing with
-  itself is one vote, not a cross-check" is still the load-bearing invariant.
-  Collapsing consensus onto backends/voices would silently re-introduce
-  correlated self-agreement the day a second same-vendor voice returns.
+- **Consensus counts model *families*, not backends.** A cross-family cluster
+  (≥2 of claude / openai / grok) of TAGGED defect findings is CONFIRMED without
+  extra verify; everything else goes through the 3-state verifier — solos
+  (adversarial), all design clusters (applicability — consensus included, see
+  the 0.5.0 lens-set section), and all-untagged clusters (no lens backs their
+  "consensus"). With composer removed (0.4.3) the backend→family map is 1:1, so
+  for consensus counting it is a no-op today — but the fan-out is
+  many-voices-per-family (one Claude finder per gated lens), so "same vendor
+  agreeing with itself is one vote, not a cross-check" stays the load-bearing
+  invariant the day a second same-vendor voice returns.
 - **Security is intentionally minimal** (user directive: no cannons-at-sparrows).
   The P1 adapter floor stays (sandbox, tool-less grok, secret scrub, env filter,
   caps); P2 adds only three cheap things — **fencing** the diff as data

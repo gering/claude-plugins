@@ -193,10 +193,23 @@ def _safe_pr_num(pr_num):
     return sanitize_prose(pr_num)
 
 
+# DRIFT WARNING: hand-mirrors LENS_CLUSTERS.design in workflows/swarm-review.js
+# (edit together; test_lens_sync.py asserts the two sets stay equal).
+DESIGN_LENSES = {"reuse", "simplification", "efficiency", "altitude"}
+
+
 def _row_kind(r: dict) -> str:
-    """Row kind: 'design' only when explicitly tagged; anything else (missing,
-    junk, non-string) is a defect — the safe bucket, mirroring the workflow."""
-    return "design" if str(r.get("kind") or "").strip().lower() == "design" else "defect"
+    """Row kind. 'design' when explicitly tagged; an explicit 'defect' always
+    wins (the workflow's kind vote can defect a mixed cluster whose dominant
+    lens is a design lens). With kind missing/junk — the model-mediated step-5
+    handoff can drop it — the LENS is the backup signal: a design lens implies
+    design, anything else is a defect (the safe bucket)."""
+    kind = str(r.get("kind") or "").strip().lower()
+    if kind == "design":
+        return "design"
+    if kind != "defect" and str(r.get("lens") or "").strip().lower() in DESIGN_LENSES:
+        return "design"
+    return "defect"
 
 
 def render_body(data: dict) -> str:
@@ -210,8 +223,11 @@ def render_body(data: dict) -> str:
     # Defects first, design after — a stable partition, so the caller's
     # severity order survives within each kind. Enforced here (not by the
     # calling prose) so a posted comment can never interleave suggestions
-    # into the defect ranking.
-    rows = [r for r in rows if _row_kind(r) == "defect"] + [r for r in rows if _row_kind(r) == "design"]
+    # into the defect ranking. Single pass: one _row_kind call per row.
+    defect_rows, design_rows = [], []
+    for r in rows:
+        (design_rows if _row_kind(r) == "design" else defect_rows).append(r)
+    rows = defect_rows + design_rows
     has_quelle = data.get("has_quelle")
     if has_quelle is None:
         # str(...) so a non-string cell value (e.g. {"quelle": 1}) can't raise

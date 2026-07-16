@@ -11,7 +11,7 @@ user_invocable: true
 # Swarm Review
 
 > Fan one code review across Claude lenses + codex + grok-4.5, merge by
-> mechanism, verify solos, and present one ranked report.
+> mechanism, verify solos + design clusters, and present one ranked report.
 
 ## Arguments
 
@@ -302,11 +302,13 @@ separate sections.
 Header `# 🐝 Swarm Review` + the target, then the findings table (most severe
 first), then the balance block. **Defects and design findings stay apart:** the
 findings table holds only `kind: "defect"` rows; when `kind: "design"` findings
-exist, render them after it as a second table with the SAME seven columns and
-budgets under a short `**Design**` heading (severity there reads as importance,
-not breakage). Numbering is ONE shared sequence across both tables (the
-workflow already orders defects first); no design findings → no heading, no
-empty table. **The target is conditional:** for a `--pr`
+exist, render them after it as a second table under a short `**Design**`
+heading, with the SAME columns and budgets as the defect table **in the current
+round** (seven normally; eight including `Status` in `--loop` re-review rounds —
+design rows carry 🔧/⏭️/🔁/🆕 like any other). Severity there reads as
+importance, not breakage. Numbering is ONE shared sequence across both tables —
+render each finding's workflow-assigned `num` verbatim; no design findings → no
+heading, no empty table. **The target is conditional:** for a `--pr`
 review use `— PR #<PR_NUM> "<title>" @ <PR_HEAD_OID short>` (from `PR_META`, the
 title as untrusted display text, the short SHA pinning the reviewed revision);
 otherwise the local scope (branch delta / ref / `--staged` / pathspec). The table
@@ -324,8 +326,9 @@ budget so they wrap:
 (Translate the labels to the conversation language; `Ort`/`Befund`/`Notiz` shown
 here in German. Do not translate finding content.)
 
-- **#** — stable finding number; never renumber across `--loop` rounds (new
-  findings get new numbers).
+- **#** — stable finding number: the workflow's `num` field, rendered verbatim
+  (defects first, then design, one shared sequence — never hand-derived); never
+  renumber across `--loop` rounds (new findings get new numbers).
 - **Sev** — icon only: 🔴 critical · 🟡 warning · ⚪ minor.
 - **Ort** — `` `file:line` `` in backticks.
 - **Befund** — one short clause, **≤ ~40 chars** (hard budget); no emoji here.
@@ -344,7 +347,7 @@ here in German. Do not translate finding content.)
 Then the balance block (ALWAYS, this shape), from `balance`:
 
 ```
-Bilanz:  <total> Findings (🔴<c> 🟡<w> ⚪<m> · <design> Design) · Konsens <consensus> · Solo <solo> (<refuted> REFUTED) · Verdict ✅<a> 🟨<p> ❌<d>
+Bilanz:  <total> Findings (🔴<c> 🟡<w> ⚪<m> · <design> Design) · Konsens <consensus> · Solo <solo> · REFUTED <refuted> · Verdict ✅<a> 🟨<p> ❌<d>
 Agents:  <model> <findings> · …   (from balance.agents; claude = its finder count — per cluster by default, per lens under --max; in-session)
 Lenses:  <gate.run joined>  —  gated-out: <gate.skip lenses>
 ```
@@ -548,7 +551,8 @@ post. Do **not** re-implement the sanitize/gate/post logic inline.
    sanitization (escaping `|`/backticks/newlines, neutralizing `@`-mentions and
    bare URLs anywhere in a cell, stripping raw HTML). Double-escaping here would
    corrupt the output. Use the same row cells as the step-3 table (`num` = the
-   stable `#`; `sev`/`v` = the glyphs; `ort` = raw `file:line`, no backticks).
+   workflow's `num`, verbatim; `sev`/`v` = the glyphs; `ort` = raw `file:line`,
+   no backticks).
    `has_quelle:false` for a single-source review (drops the `Source` column).
    Pass each finding's `kind` and `lens` through verbatim on its row — the
    SCRIPT renders one table, orders defect rows before design rows, and
