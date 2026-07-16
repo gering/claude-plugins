@@ -72,6 +72,18 @@ if hm:
             hdr_lenses.add(lm.group(1))
 check("SKILL.md HDR lenses == LENS_CLUSTERS lenses", hdr_lenses == set(cluster_lenses))
 
+# METHODOLOGICAL_LENSES: the verify-gating list must name only real lenses, or a
+# rename in LENS_CLUSTERS would silently orphan it (a methodological consensus
+# would stop being verified). Pin it as a subset of the cluster lens set.
+mm = re.search(r"const METHODOLOGICAL_LENSES = \[([^\]]*)\]", js)
+check("workflow: METHODOLOGICAL_LENSES found", mm)
+methodological = set(re.findall(r"'([a-z][a-z-]*)'", mm.group(1) if mm else ""))
+check("METHODOLOGICAL_LENSES non-empty", bool(methodological))
+check(
+    "METHODOLOGICAL_LENSES subset of LENS_CLUSTERS lenses",
+    methodological <= set(cluster_lenses),
+)
+
 # pr-post.py DESIGN_LENSES mirror == LENS_CLUSTERS.design.
 pp = PR_POST.read_text(encoding="utf-8")
 dm = re.search(r"DESIGN_LENSES = \{([^}]*)\}", pp)

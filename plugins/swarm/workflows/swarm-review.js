@@ -125,6 +125,14 @@ for (const l of CANDIDATE_LENSES) {
 // that get the applicability verify + their own report section; all other
 // lenses (incl. the methodological two) are factual defects.
 const lensKind = (lens) => (LENS_CLUSTERS.design.includes(lens) ? 'design' : 'defect')
+// Methodological lenses (the non-topical members of the breakage cluster) assert
+// REPO-WIDE facts a diff-only external voice cannot confirm: it never opens repo
+// files, so two external families can agree on a stale-caller / removed-API claim
+// that nobody checked — correlated hallucination, exactly like a design reuse
+// target. Such a consensus is verified (needsVerify below) UNLESS a repo-reading
+// Claude voice tagged the same lens. test_lens_sync.py pins these names to
+// LENS_CLUSTERS so a lens rename can't silently orphan this list.
+const METHODOLOGICAL_LENSES = ['removed-behavior', 'cross-file-trace']
 
 // One finding. DRIFT WARNING: this schema is hand-mirrored in TWO places —
 // scripts/schema/finding.schema.json (canonical, CLI-enforced on codex/grok)
@@ -438,13 +446,18 @@ if (pool.length > 0) {
     const kind = known.length > 0 && known.every((i) => pool[i].kind === 'design') ? 'design' : 'defect'
     const untaggedOnly = known.length === 0
     // The merge agent's `lens` is free text (schema caps length, not values):
-    // pin it to a known lens or fall back to the majority MEMBER lens, so junk
-    // can't leak into the report / PR-comment [lens] prefix or mint phantom
-    // survivingPerLens keys. (pool-level findings are already validated above.)
+    // accept it ONLY when it is a known lens AND some cluster member actually
+    // carries it — a globally-valid lens no member tagged (merge says `security`
+    // on an all-`[reuse]` cluster) would otherwise corrupt the report / PR-comment
+    // [lens] prefix and mint phantom survivingPerLens keys. Else fall back to the
+    // plurality TAGGED member lens; 'unspecified' never WINS a tally (an untagged
+    // external must not set the display lens), it is only the last-resort default
+    // when no member was tagged. (pool-level findings are validated above.)
+    const memberLenses = members.map((i) => pool[i].lens)
     let lens = c.lens
-    if (!CANDIDATE_LENSES.includes(lens)) {
+    if (!CANDIDATE_LENSES.includes(lens) || !memberLenses.includes(lens)) {
       const counts = {}
-      for (const i of members) counts[pool[i].lens] = (counts[pool[i].lens] || 0) + 1
+      for (const l of memberLenses) if (l !== 'unspecified') counts[l] = (counts[l] || 0) + 1
       lens = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0] || 'unspecified'
     }
     // Consensus requires >=2 distinct FAMILIES (see FAMILY: same-vendor voices
@@ -491,15 +504,28 @@ log(`Merge: ${clusters.length} clusters — ${consensusClusters.length} cross-fa
 phase('Verify')
 const VERDICT_SCHEMA = {
   type: 'object', additionalProperties: false, required: ['verdict', 'evidence'],
-  properties: { verdict: { enum: ['CONFIRMED', 'PLAUSIBLE', 'REFUTED'] }, evidence: { type: 'string' } },
+  properties: {
+    verdict: { enum: ['CONFIRMED', 'PLAUSIBLE', 'REFUTED'] },
+    evidence: { type: 'string' },
+    // Set ONLY by the design verifier's mis-filed-bug exception: the observation
+    // is a genuine defect wearing a design lens, so promote it out of the Design
+    // table (a PLAUSIBLE verdict alone would leave it buried among suggestions).
+    reclassifyToDefect: { type: 'boolean' },
+  },
 }
 // ONE verify/auto-accept predicate — the two lists below are derived as
 // filter(needsVerify) / filter(!needsVerify), so the exactly-once partition is
 // structural (a one-sided edit can't duplicate or drop a cluster). Verified:
 // every solo; every design cluster (consensus attests agreement, not
 // applicability); every all-untagged cluster (no tagged lens backs it — its
-// "defect consensus" may be an unverifiable suggestion nobody prefixed).
-const needsVerify = (c) => c.consensus === 'solo' || c.kind === 'design' || c.untaggedOnly === true
+// "defect consensus" may be an unverifiable suggestion nobody prefixed); every
+// methodological-lens consensus not backed by a repo-reading Claude voice (two
+// diff-only externals can agree on a repo fact neither could check).
+const needsVerify = (c) =>
+  c.consensus === 'solo' ||
+  c.kind === 'design' ||
+  c.untaggedOnly === true ||
+  (METHODOLOGICAL_LENSES.includes(c.lens) && !c.families.includes('claude'))
 const verifyClusters = clusters.filter(needsVerify)
 const verified = await parallel(verifyClusters.map((c) => () => {
   // EVERY finding field is untrusted backend text — including `file`/`line`. The
@@ -528,17 +554,26 @@ const verified = await parallel(verifyClusters.map((c) => () => {
       : `Do NOT open the claimed path; run only read-only checks inside the repo. `) +
     (design
       ? `Verdict: CONFIRMED (the suggestion clearly applies — target exists / behavior identical / waste real) / REFUTED (target absent, behavior would differ, or the claim is mistaken) / PLAUSIBLE (default when unsure) + one-sentence evidence. ` +
-        `EXCEPTION — a design tag must not bury a bug: if the underlying observation actually describes a genuine DEFECT mis-filed under a design lens (e.g. the "simpler form" differs precisely because the current code is broken), do NOT refute it — return PLAUSIBLE and say so in the evidence.`
+        `EXCEPTION — a design tag must not bury a bug: if the underlying observation actually describes a genuine DEFECT mis-filed under a design lens (e.g. the "simpler form" differs precisely because the current code is broken), do NOT refute it — return PLAUSIBLE, set reclassifyToDefect: true, and say so in the evidence.`
       : `Verdict: CONFIRMED (clearly real) / REFUTED (clearly wrong) / PLAUSIBLE (default when unsure) + one-sentence evidence.`),
     { label: `verify:${(c.file || '').split('/').pop()}`, phase: 'Verify', schema: VERDICT_SCHEMA, effort: MAX ? 'xhigh' : 'medium' }
-  ).then((v) => ({ ...c, verifier: v?.verdict || 'PLAUSIBLE', evidence: v?.evidence || '' }))
+  ).then((v) => ({
+    ...c,
+    verifier: v?.verdict || 'PLAUSIBLE',
+    evidence: v?.evidence || '',
+    // Promote a mis-filed bug out of the Design section so it ranks + renders as
+    // the defect it is; its design lens stays as `lens` (harmless on a defect —
+    // pr-post keys the [lens] prefix on kind, so a defect gets none).
+    kind: (design && v?.reclassifyToDefect) ? 'defect' : c.kind,
+  }))
    .catch(() => ({ ...c, verifier: 'PLAUSIBLE', evidence: 'verifier error → PLAUSIBLE' }))
 }))
 
-// TAGGED defect cross-family consensus is the strong signal (>=2 independent
-// families agreed on a lens-backed defect), so it is accepted without a
-// separate verify; design + all-untagged consensus went through the verifier
-// above (see needsVerify). Only REFUTED clusters are dropped.
+// TAGGED topical-defect cross-family consensus is the strong signal (>=2
+// independent families agreed on a lens-backed defect), so it is accepted without
+// a separate verify; design, all-untagged, and Claude-less methodological
+// consensus went through the verifier above (see needsVerify). Only REFUTED
+// clusters are dropped.
 const autoAccepted = clusters.filter((c) => !needsVerify(c))
   .map((c) => ({ ...c, verifier: 'CONFIRMED', evidence: `agreed across families: ${c.families.join('+')}` }))
 const kept = verified.filter(Boolean).filter((c) => c.verifier !== 'REFUTED')
