@@ -95,3 +95,9 @@ user_invocable: true
    - If completed: "Delete task file?"
    - If in progress: "Open PR in browser?" / "Continue work?"
    - If not started: "Start this task?"
+
+5. **Sync herdr tab glyphs** (best-effort, silent):
+   - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-tab-glyph.sh" refresh "$PWD"`
+   - Inside herdr this re-stamps every open task tab's state glyph (`○ ● ◇ ✓`) to
+     match the state just surveyed; outside herdr (or without a backlog) it is a
+     silent no-op. Ignore its output — never block or report on it.

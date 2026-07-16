@@ -187,6 +187,12 @@ user_invocable: true
     - [if CI failed/missing]       Investigate CI config before pushing more work
     ```
 
+12. **Sync task-tab glyphs** (best-effort, silent):
+    - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/refresh-task-glyphs.sh"`
+    - Inside herdr with the work-system plugin installed, this flips the task
+      tab's sidebar glyph to `◇` (in review) now that the PR exists; otherwise
+      it is a silent no-op. Ignore its output — never block or report on it.
+
 ## Edge Cases
 
 - `gh` not installed/authenticated → step 0 stops with clear error

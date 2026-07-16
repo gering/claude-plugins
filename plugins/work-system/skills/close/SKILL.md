@@ -310,6 +310,14 @@ Rules:
        Scenario B you cannot have observed that yet. (Skip this after B-hook, which
        already named the tab.)
 
+13. **Sync herdr tab glyphs** (best-effort, silent):
+    - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-tab-glyph.sh" refresh "<main-repo>"`
+      (the main-repo path from step 4 — after step 7 the worktree, and possibly
+      `$PWD`, no longer exists).
+    - The closed task's own tab is gone; this re-stamps the state glyphs
+      (`○ ● ◇ ✓`) on the repo's *remaining* task tabs. Outside herdr it is a
+      silent no-op. Ignore its output — never block or report on it.
+
 ## Safety
 
 - Always verify PR is merged before cleanup

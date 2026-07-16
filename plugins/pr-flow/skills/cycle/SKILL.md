@@ -109,6 +109,13 @@ Strip the flags first; whatever is left over is the commit message.
     - **Do NOT immediately start fixing anything** — wait for the user to indicate which items to address.
     - If findings exist, append one tip line: `💡 /cycle --loop auto-fixes everything you'd agree with and re-cycles until the review is clean.` (Skip the tip if the review is already clean, or if this run is already in loop mode.)
 
+11. **Sync task-tab glyphs** (best-effort, silent):
+    - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/refresh-task-glyphs.sh"`
+    - Inside herdr with the work-system plugin installed, this re-stamps the
+      task tabs' sidebar state glyphs (`○ ● ◇ ✓`); otherwise it is a silent
+      no-op. Ignore its output — never block or report on it. In loop mode run
+      it once per invocation (not per round).
+
 ## Loop mode (`--loop`)
 
 When `--loop` (alias `--auto`) is present, `/cycle` stops being a single pass and becomes an autonomous converge-the-review loop. Invoking it **authorizes the autonomous commit + push cycle** — the same way a plain `/cycle` invocation authorizes its rebase + force-push. The only step still gated behind a confirmation is the final squash (it rewrites history and force-pushes).

@@ -25,7 +25,9 @@
 # Usage:
 #   herdr-launch.sh launch <label> <worktree-abs-path> <workspace-id> [session-name]
 #   herdr-launch.sh resume <label> <worktree-abs-path> <workspace-id>
-#     label         short, sidebar-friendly agent/tab name (e.g. close-herdr)
+#     label         short, sidebar-friendly agent/tab name (e.g. close-herdr).
+#                   Pass it PLAIN — this helper prefixes the task's state glyph
+#                   (○ ● ◇ ✓, via herdr-tab-glyph.sh) itself, best-effort.
 #     worktree      absolute path to the worktree (becomes the new pane's cwd)
 #     workspace-id  herdr workspace to open the tab in (e.g. $HERDR_WORKSPACE_ID)
 #     session-name  (launch only) `claude -n` name; defaults to <label>
@@ -83,6 +85,17 @@ command -v python3 >/dev/null 2>&1 || { echo "python3 not on PATH" >&2; exit 1; 
   exit 1
 }
 [ -d "$worktree" ] || { echo "worktree dir not found: $worktree" >&2; exit 1; }
+
+# Stamp the task's CURRENT state glyph onto the sidebar label (○ ● ◇ ✓ — the
+# same mapping the [ws …] statusline renders; ws-statusline.sh is the single
+# source, applied via herdr-tab-glyph.sh). Best-effort: any failure keeps the
+# plain label. The Claude session name (launch mode) was already defaulted from
+# the PLAIN label above — glyphs would clutter /resume.
+glyph_helper="${0%/*}/herdr-tab-glyph.sh"
+if [ -f "$glyph_helper" ]; then
+  stamped="$(bash "$glyph_helper" prefix "$label" "$worktree" 2>/dev/null || true)"
+  [ -n "$stamped" ] && label="$stamped"
+fi
 
 # JSON extractors. null / missing / malformed all yield empty, and a stray
 # traceback can never reach the user's terminal.

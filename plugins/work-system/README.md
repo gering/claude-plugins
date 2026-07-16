@@ -211,6 +211,24 @@ task name to reopen that one's tab from here). The reopen shares the tested
 `scripts/herdr-launch.sh` with `/kickoff` (a `resume` mode alongside `launch`); see
 `skills/continue/SKILL.md`.
 
+### Task tabs carry their state glyph
+
+Inside herdr, every task tab's sidebar name is prefixed with the task's state
+glyph — the same `○ ● ◇ ✓` set (not-started / active / in-review / merged) the
+`[ws …]` statusline segment renders, so both surfaces speak one visual
+language (e.g. `● close-herdr`, `◇ ks-label`, `✓ dark-mode`). The mapping and
+its precedence live in `scripts/ws-statusline.sh` (a `states` mode next to the
+render mode — one file, so sidebar and statusline can never disagree);
+`scripts/herdr-tab-glyph.sh` applies it to herdr agent names.
+
+The glyph is stamped when `/kickoff` or `/continue` opens the tab, and
+re-stamped — idempotently, only when it changed — whenever you survey or move
+task state: `/status`, `/list`, and `/close` (for the remaining tabs) refresh
+every open task tab of the repo, and the pr-flow skills (`/open`, `/merge`,
+`/cycle`, `/check`) trigger the same refresh after PR state changes, so `●`
+flips to `◇` when the PR opens and to `✓` when it merges. Agents outside task
+worktrees are never renamed; outside herdr everything is a silent no-op.
+
 ## Adopting Existing Branches
 
 Already started work on a branch outside the work system? Use `/adopt` to bring it in:
