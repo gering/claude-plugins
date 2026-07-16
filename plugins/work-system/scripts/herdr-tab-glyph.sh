@@ -68,7 +68,10 @@ task_glyph() {
 # tab/newline embedded in a field would forge extra TSV records and aim a
 # rename at an arbitrary pane — so the pane id must match herdr shape, a task
 # name that would break the framing is skipped, and the free-form name is
-# scrubbed (it is display data; a space is a faithful stand-in).
+# scrubbed (it is display data; a space is a faithful stand-in). The pane
+# pattern forbids a LEADING dash (first char excludes `-`) so a value like
+# `-x`/`--foo` can never reach `herdr agent rename` as an option flag; herdr
+# ids are `wN:pM` and never start with a dash, so nothing legitimate is lost.
 extract_task_agents='import sys, json, os, re
 main = sys.argv[1] if len(sys.argv) > 1 else ""
 if not main.strip():
@@ -81,7 +84,7 @@ except Exception:
 for a in agents:
     cwd = (a.get("cwd") or "").rstrip("/")
     pane = a.get("pane_id") or ""
-    if not cwd or not re.fullmatch(r"[A-Za-z0-9:_.-]+", pane):
+    if not cwd or not re.fullmatch(r"[A-Za-z0-9:_.][A-Za-z0-9:_.-]*", pane):
         continue
     cwd = os.path.realpath(cwd)
     if os.path.dirname(cwd) != wtdir:
@@ -148,6 +151,10 @@ cmd_refresh() {
     [ -n "$base" ] || base="$task" # unnamed agent → fall back to the task name
     new="$glyph $base"
     [ "$new" = "$name" ] && continue   # already correct — no rename churn
+    # No `--` guard here: `herdr agent rename` treats `--` as the target itself
+    # (verified), so it can't end option parsing. The no-leading-dash pane regex
+    # in extract_task_agents is the sole (and sufficient) injection guard — pane
+    # can never be a `-`-prefixed value that rename would read as a flag.
     if herdr agent rename "$pane" "$new" >/dev/null 2>&1; then
       updated=$((updated + 1))
     fi

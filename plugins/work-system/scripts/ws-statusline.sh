@@ -67,16 +67,18 @@ refresh_needed() {
   [ -z "$(find "$CACHE" -mmin -1 2>/dev/null)" ]
 }
 
-# Run "$@" with a 20s bound. `timeout` isn't on stock macOS, so fall back to
+# Run "$@" with an 8s bound. `timeout` isn't on stock macOS, so fall back to
 # perl's alarm (perl ships with macOS; the alarm timer survives exec). Only a
 # host with NEITHER tool runs unbounded — states mode sits inline on a skill's
 # critical path (the async render path detaches, where a hang is harmless), so
 # an unconditional bound matters more there; accepted residual on such hosts.
+# 8s comfortably covers a healthy `gh pr list` (~0.5–2s) while keeping a hung
+# network from stalling the invoking skill for long — the glyph is cosmetic.
 run_bounded() {
   if command -v timeout >/dev/null 2>&1; then
-    timeout 20 "$@"
+    timeout 8 "$@"
   elif command -v perl >/dev/null 2>&1; then
-    perl -e 'alarm shift; exec @ARGV' 20 "$@"
+    perl -e 'alarm shift; exec @ARGV' 8 "$@"
   else
     "$@"
   fi

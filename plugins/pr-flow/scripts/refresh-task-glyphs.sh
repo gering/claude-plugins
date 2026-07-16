@@ -25,23 +25,34 @@ run_helper() { bash "$1" refresh "$dir" 2>/dev/null || true; exit 0; }
 t="$root/../work-system/scripts/herdr-tab-glyph.sh"
 [ -f "$t" ] && run_helper "$t"
 
-# Marketplace layout — prefer the ENABLED work-system install from Claude
-# Code's installed-plugins manifest: the version cache is never pruned, so a
-# newest-cached glob would keep executing a version the user rolled back from.
+# Marketplace layout — resolve the installed work-system from Claude Code's
+# installed-plugins manifest, which lists only INSTALLED versions (unlike the
+# version cache, which is never pruned, so a newest-cached glob keeps executing
+# a version the user rolled back from). The manifest holds every historical
+# record in insertion order across scopes, so pick the HIGHEST version (not
+# entries[0], an arbitrary first record) — that matches a rollback (the
+# rolled-back-from version leaves the manifest even while it lingers in cache).
 if command -v python3 >/dev/null 2>&1; then
   t="$(python3 - <<'PY' 2>/dev/null
-import json, os
+import json, os, re
 p = os.path.expanduser("~/.claude/plugins/installed_plugins.json")
 try:
     plugins = json.load(open(p))["plugins"]
 except Exception:
     raise SystemExit
+def vkey(v):
+    # numeric-aware version sort; non-numeric segments sink below any real version
+    return [int(x) if x.isdigit() else -1 for x in re.split(r"[.\-+]", str(v))]
+best = None
 for key, entries in plugins.items():
-    if key.split("@", 1)[0] == "work-system" and entries:
-        ip = entries[0].get("installPath") or ""
-        if ip:
-            print(os.path.join(ip, "scripts", "herdr-tab-glyph.sh"))
-        break
+    if key.split("@", 1)[0] != "work-system":
+        continue
+    for e in entries or []:
+        ip = e.get("installPath") or ""
+        if ip and (best is None or vkey(e.get("version", "")) > best[0]):
+            best = (vkey(e.get("version", "")), ip)
+if best:
+    print(os.path.join(best[1], "scripts", "herdr-tab-glyph.sh"))
 PY
 )"
   [ -n "$t" ] && [ -f "$t" ] && run_helper "$t"

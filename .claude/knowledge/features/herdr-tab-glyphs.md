@@ -52,9 +52,14 @@ pre-change state and the glyph would flip one survey late.
 ## pr-flow coupling stays soft
 
 pr-flow never imports work-system: `scripts/refresh-task-glyphs.sh` *locates*
-`herdr-tab-glyph.sh` (dev layout `../work-system/scripts/`, else marketplace
-cache `../../work-system/<version>/…` — newest version via line-wise `sort
--V`) and no-ops silently when work-system or herdr is absent. Same rule as
+`herdr-tab-glyph.sh` and no-ops silently when work-system or herdr is absent.
+Resolution order: (1) dev layout `../work-system/scripts/`; (2) the installed
+work-system from `~/.claude/plugins/installed_plugins.json`, picking the
+**highest version** across the manifest's insertion-ordered records — the
+manifest lists only installed versions, so this survives a rollback (unlike the
+never-pruned cache); (3) fallback glob `../../work-system/<version>/…`, newest
+via line-wise `sort -V` (used only when the manifest is missing/unparsable —
+can pick a newer-than-enabled version, the accepted residual). Same rule as
 [skill-composition](../architecture/skill-composition.md) §4.
 
 Related: [herdr-kickoff-automation](herdr-kickoff-automation.md),
