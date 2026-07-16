@@ -193,8 +193,9 @@ entries are grouped per plugin, newest first.
 ### 0.5.0 — 2026-07-16
 - Grow the review lens set from 5 to 11 (all default-on): methodological `removed-behavior` + `cross-file-trace` (factual, normal verify) and design-quality `reuse` / `simplification` / `efficiency` / `altitude` (suggestion-shaped, `kind: "design"`).
 - Organize the lenses into 4 clusters (`LENS_CLUSTERS` — single source of truth): breakage / threat / design / consistency. Claude fan-out runs one finder per cluster by default (≤4 agents); `--max` splits to one finder per lens (≤11). The gate still prunes per-lens.
-- Verify design findings with a kind-aware applicability prompt (reuse target real? simpler form behavior-identical?) through the same 3-state verifier; report them in their own `Design` table so they never dilute the defect ranking (`balance.design` counts them).
+- Verify design findings with a kind-aware applicability prompt (reuse target real? simpler form behavior-identical?) through the same 3-state verifier — consensus design clusters included (agreement isn't applicability); report them in their own `Design` table so they never dilute the defect ranking (`balance.design` counts them).
 - Extend the external backend prompt with the six new angles so cross-family consensus can form on design findings too.
+- Harden the lens plumbing after the first dogfooding run (swarm reviewed its own diff): keep validly tagged off-cluster lens prefixes (validate against the global set, not the finder's subset), derive `CANDIDATE_LENSES` from `LENS_CLUSTERS` (one list), untagged external findings no longer re-kind a merged cluster, and `pr-post.py` owns design-row ordering + `[lens]` prefixing via new optional `kind`/`lens` row fields (unit-tested).
 
 ### 0.4.3 — 2026-07-17
 - Remove the `grok-composer-2.5-fast` backend: grok CLI 0.2.101 dropped the model, so the composer voice (adapter path, defensive parser, workflow voice, docs) failed at runtime. `grok-4.5` is now the only grok model, and the ensemble is three voices (Claude lenses + codex + grok-4.5).

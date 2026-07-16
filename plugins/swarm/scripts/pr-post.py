@@ -26,7 +26,7 @@ Input JSON (via --input <path>, or --input - for stdin):
     "pr_num": 29,
     "title": "<PR title — UNTRUSTED contributor input>",
     "head_oid": "<full reviewed SHA>",
-    "rows": [ {num,sev,ort,befund,quelle,v,notiz}, ... ],  # gated findings
+    "rows": [ {num,sev,ort,befund,quelle,v,notiz[,kind,lens]}, ... ],  # gated findings
     "has_quelle": true,        # optional; defaults to: any row has a quelle
     "balance": "Bilanz: …\nAgents: …\nLenses: …",
     "notes": ["Redactions: …", "Backend error: …"],        # optional extra lines
@@ -36,6 +36,15 @@ Input JSON (via --input <path>, or --input - for stdin):
 Every finding cell (ort/befund/quelle/notiz) and the title are attacker-
 influenced. `sev`/`v`/`num` are model glyphs; they pass through the same
 sanitizer unharmed (glyphs contain none of the neutralized characters).
+
+Row `kind`/`lens` are optional pass-throughs from the workflow's findings:
+`kind: "design"` rows render AFTER all defect rows (design suggestions must not
+dilute the defect ranking) and their finding cell gets a visible `[lens]`
+prefix — ordering + prefixing are enforced HERE, deterministically, so the
+caller passes rows through verbatim and never hand-orders or hand-prefixes
+(the prose version of that rule is exactly the drift class this script exists
+to close). Any other/missing `kind` is a defect — the safe bucket, matching
+the workflow's lensKind derivation.
 
 Exit-code convention (matches loop-closeout.py + the skill's step-1 block):
   operational outcomes (stale head, unverifiable head, gh missing, post failure)
@@ -184,6 +193,12 @@ def _safe_pr_num(pr_num):
     return sanitize_prose(pr_num)
 
 
+def _row_kind(r: dict) -> str:
+    """Row kind: 'design' only when explicitly tagged; anything else (missing,
+    junk, non-string) is a defect — the safe bucket, mirroring the workflow."""
+    return "design" if str(r.get("kind") or "").strip().lower() == "design" else "defect"
+
+
 def render_body(data: dict) -> str:
     """Assemble the full comment body (GitHub-flavored Markdown) from `data`.
 
@@ -192,6 +207,11 @@ def render_body(data: dict) -> str:
     the same JSON and be guaranteed identical.
     """
     rows = data.get("rows") or []
+    # Defects first, design after — a stable partition, so the caller's
+    # severity order survives within each kind. Enforced here (not by the
+    # calling prose) so a posted comment can never interleave suggestions
+    # into the defect ranking.
+    rows = [r for r in rows if _row_kind(r) == "defect"] + [r for r in rows if _row_kind(r) == "design"]
     has_quelle = data.get("has_quelle")
     if has_quelle is None:
         # str(...) so a non-string cell value (e.g. {"quelle": 1}) can't raise
@@ -220,11 +240,20 @@ def render_body(data: dict) -> str:
         parts.append("| " + " | ".join(header) + " |")
         parts.append("|" + "|".join("---" for _ in header) + "|")
         for r in rows:
+            # Design rows carry their lens as a visible "[lens] " prefix on the
+            # finding cell (one table, kind still readable). Prefix BEFORE
+            # sanitizing: the brackets come out entity-encoded like any other
+            # cell content and render back as literal [lens] — an untrusted
+            # lens value gets the full sanitizer, same as the finding text.
+            befund = r.get("befund")
+            if _row_kind(r) == "design":
+                lens = str(r.get("lens") or "").strip() or "design"
+                befund = f"[{lens}] {'' if befund is None else befund}".rstrip()
             cells = [
                 sanitize_prose(r.get("num", "")),
                 sanitize_prose(r.get("sev", "")),
                 sanitize_code(r.get("ort", "")),
-                sanitize_prose(r.get("befund", "")),
+                sanitize_prose(befund),
             ]
             if has_quelle:
                 cells.append(sanitize_prose(r.get("quelle", "")))

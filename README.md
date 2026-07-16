@@ -30,9 +30,9 @@ PR review feedback loop. Create PRs with readiness checks, commit + push + trigg
 
 ### Swarm
 
-Local mixture-of-agents code review. Fans out one review across Claude lens subagents (11 lenses in 4 clusters — defects, exploits, design quality, consistency) plus the `codex` and `grok` CLIs (grok-4.5), merges and verifies their findings, and presents a single ranked report — defects and design suggestions kept apart — before anything is pushed. With `--fix` / `--loop` it also applies the findings you agreed with (only Claude edits; the external agents stay review-only). `--pr [<number>]` runs the same ensemble against a GitHub PR's diff and posts the gated result as a PR comment (via your own `gh` auth, after one confirmation) — no CI or API-token setup. Complementary to PR Flow's GitHub-side loop. *(Phase 5: `/swarm:review` pipeline + fix loop + PR posting.)*
+Local mixture-of-agents code review. Fans out one review across Claude lens subagents (11 lenses in 4 clusters — breakage, threat, design, consistency) plus the `codex` and `grok` CLIs (grok-4.5), merges and verifies their findings, and presents a single ranked report — defects and design suggestions kept apart — before anything is pushed. With `--fix` / `--loop` it also applies the findings you agreed with (only Claude edits; the external agents stay review-only). `--pr [<number>]` runs the same ensemble against a GitHub PR's diff and posts the gated result as a PR comment (via your own `gh` auth, after one confirmation) — no CI or API-token setup. Complementary to PR Flow's GitHub-side loop. *(Phase 5: `/swarm:review` pipeline + fix loop + PR posting.)*
 
-**Commands:** `/swarm:review [--fix | --loop[=N]] [--max]`, `/swarm:review --pr [<number>]`, `/swarm:agents` *(more to come: `/swarm:adversarial`, `/swarm:style`, `/swarm:security`)*
+**Commands:** `/swarm:review [--fix | --loop[=N]] [--max]`, `/swarm:review --pr [<number>]`, `/swarm:agents` *(planned: `/swarm:adversarial`, `/swarm:style`, `/swarm:security` — thin subset presets of the default lens set)*
 
 [Documentation →](plugins/swarm/)
 

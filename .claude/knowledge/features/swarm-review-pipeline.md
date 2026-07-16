@@ -46,10 +46,13 @@ truth** (the per-cluster externals follow-up consumes it):
 - **Verify path decision: kind-aware prompt, not bypass.** Design findings are
   suggestion-shaped, but each has a falsifiable applicability core (reuse
   target exists? simpler form behavior-identical? claimed waste real?) — the
-  same 3-state verifier runs with an applicability prompt. Bypassing into an
-  unverified "maintainability" section would have surfaced unchecked
+  same 3-state verifier runs with an applicability prompt, **even for design
+  clusters with cross-family consensus** (agreement ≠ applicability: externals
+  only see the diff, so two of them can agree on a nonexistent reuse target —
+  the first live swarm run over this very feature caught that gap). Bypassing
+  into an unverified "maintainability" section would have surfaced unchecked
   suggestions from precisely the noisiest lenses. Methodological lenses are
-  factual → normal defect verify.
+  factual → normal defect verify; defect consensus stays auto-accepted.
 - **Report keeps kinds apart**: defects table first, then a same-format
   `Design` table (shared numbering — the workflow sorts defects first);
   `balance.design` counts the subset. Lens prefixes are parsed with `[\w-]`
@@ -201,6 +204,10 @@ filled* — `gh pr diff <n>` (bare `--pr` resolves the current branch's PR via
   Same two-tier exit as `loop-closeout.py` (operational → token + exit 0; misuse,
   incl. non-list `rows`, → stderr + exit 2). Pure functions
   (`sanitize_prose`/`sanitize_code`/`stale_gate`/`render_body`) keep it unit-tested.
+  0.5.0 moved one more rule from prose to code the same way: rows carry optional
+  `kind`/`lens`, and the script orders defect rows before design rows and
+  prefixes design finding cells with `[lens]` — the caller passes findings
+  through verbatim, never hand-orders or hand-prefixes.
 
 ## Future idea (P3+): per-cluster external prompts
 
