@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "knowledge-system settings",
+  "x-plugin": "knowledge-system",
+  "x-config-file": ".knowledge-system.toml",
+  "type": "object",
+  "properties": {
+    "paths": {
+      "type": "object",
+      "description": "Where knowledge-system stores rules, knowledge, and the index. Defaults match today's Claude-specific layout.",
+      "properties": {
+        "knowledge_dir": {
+          "type": "string",
+          "default": ".claude/knowledge",
+          "description": "Directory holding knowledge entries."
+        },
+        "rules_dir": {
+          "type": "string",
+          "default": ".claude/rules",
+          "description": "Directory holding auto-loaded rule files."
+        },
+        "index_file": {
+          "type": "string",
+          "default": "_index.md",
+          "description": "Index filename inside knowledge_dir."
+        },
+        "claude_md": {
+          "type": "string",
+          "default": "CLAUDE.md",
+          "description": "Project instructions file the index is injected into."
+        }
+      }
+    },
+    "behavior": {
+      "type": "object",
+      "properties": {
+        "auto_prime_via_claude_md": {
+          "type": "boolean",
+          "default": true,
+          "description": "Inject the knowledge index into claude_md so it auto-loads each session."
+        }
+      }
+    },
+    "mode": {
+      "type": "object",
+      "description": "How knowledge storage binds to the host tool.",
+      "properties": {
+        "knowledge_mode": {
+          "type": "string",
+          "enum": ["claude", "neutral", "symlinked"],
+          "default": "claude",
+          "description": "claude = .claude/* paths; neutral = tool-agnostic paths; symlinked = neutral store with .claude/* symlinks. Storage only in this phase."
+        }
+      }
+    }
+  }
+}
