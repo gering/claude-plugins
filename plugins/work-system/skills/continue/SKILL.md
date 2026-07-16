@@ -50,6 +50,17 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
 
 ### Reopen mode (main session + `<task>` arg)
 
+> **Worker degradation.** Reopen resumes a **claude** worker (`claude -c` — the
+> most-recent claude session for the worktree cwd). If the task was kicked off
+> with a **codex/grok** worker (`/kickoff … --codex`/`--grok`/…), `claude -c`
+> would start a *new claude* session, not resume that CLI. The work-system can't
+> reliably tell which worker a worktree used (per-task agent memory is a later
+> idea), so **don't fake it**: the tab-reopen itself is CLI-agnostic (it just
+> reopens a tab at the worktree), but tell the user to resume the actual worker
+> in that tab — `codex resume --last` (codex) or `grok -c` (grok) — instead of
+> `claude -c`. Everything git/PR-derived (`/status`, `/list`, the `[ws]`
+> statusline) already works for any worker; only session-resume is claude-shaped.
+
 1. **Resolve the task's worktree:**
    - Get the prefix-stripped `task_name`: if you arrived here from the `linked` branch
      above you already have it as `ARG_TASK` (and `$MAIN_REPO` / the confirmed worktree)
