@@ -1,7 +1,7 @@
 {
   "name": "work-system",
-  "description": "Generic task and worktree workflow system for Claude Code. Manage tasks as markdown files, work in isolated git worktrees, and track progress through the full lifecycle: create, start, continue, check, close.",
-  "version": "1.8.1",
+  "description": "Generic task and worktree workflow system for Claude Code. Manage tasks as markdown files, run them in isolated git worktrees with a choice of worker agent (Claude, codex, or grok), and track progress across the define/kickoff/continue/status/close lifecycle.",
+  "version": "1.9.0",
   "author": {
     "name": "gering"
   },

@@ -1,10 +1,10 @@
 ---
 title: "herdr /kickoff + /continue-reopen Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-07-12
+updatedAt: 2026-07-18
 createdFrom: "PR #17"
-updatedFrom: "session: 2026-07-12"
-pluginVersion: 1.8.2
+updatedFrom: "session: 2026-07-18 (kickoff agent selection)"
+pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -14,7 +14,7 @@ reindexedAt: 2026-07-12
 Inside a herdr session, `/kickoff` replaces its manual "open a terminal yourself"
 block with an automated tab launch. The launch lives in one shared, testable
 helper — `plugins/work-system/scripts/herdr-launch.sh` — with two subcommands:
-`launch` (called from `skills/kickoff/SKILL.md` step 12) and `resume` (called from
+`launch` (called from `skills/kickoff/SKILL.md` step 13) and `resume` (called from
 `skills/continue/SKILL.md`'s reopen path — the main session with a `<task>` arg, or
 a *different* task's name given from inside a worktree). The helper is the source of
 truth; this entry captures the durable design and one non-obvious gotcha.
@@ -27,12 +27,17 @@ truth; this entry captures the durable design and one non-obvious gotcha.
   future `/adopt` automation), per the project's helper-script convention and the
   "prose skill logic drifts" memory. The skill only derives the label and branches
   on the helper's `moved=yes|no` / exit code.
-- **Spawn Claude as argv, never type it into a shell.** The launch is
-  `herdr agent start "<label>" … -- claude -n "<label>" "/continue"`, which execs
-  the `claude` binary directly. The `-- argv` form sidesteps the interactive shell
-  entirely, so there is no keystroke race against shell startup (see the gotcha
-  below) and no readiness handshake to maintain. `-n` names the real session and
-  `/continue` is the launch prompt, run on startup.
+- **Spawn the worker as argv, never type it into a shell.** The launch is
+  `herdr agent start "<label>" … -- <worker argv>`, which execs the worker binary
+  directly. As of work-system 1.9.0 the worker argv is **resolved from the chosen
+  agent** by `agent-registry.sh` (`emit_argv`), not hardcoded: a claude worker is
+  `claude --model <m> -n "<label>" "/continue"`, while codex/grok get their own
+  `-m` form — `codex -m <model> "<bootstrap prompt>"` /
+  `grok -m <model> "<bootstrap prompt>"` (see [[kickoff-agent-selection]]).
+  herdr-launch stays CLI-agnostic — it just execs the resolved `argv=` words. The
+  `-- argv` form sidesteps the interactive shell entirely, so there is no keystroke
+  race against shell startup (see the gotcha below) and no readiness handshake to
+  maintain.
 - **`agent start` splits the caller's tab → move it out.** `herdr agent start`
   (without `--tab`) lands the agent as a split pane in the *invoking* tab, so a
   second step `herdr pane move "<pane>" --new-tab --label "<label>"` relocates it

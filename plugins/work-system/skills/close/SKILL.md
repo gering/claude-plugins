@@ -229,7 +229,18 @@ Rules:
 
 12. **Tear down the herdr tab** — only when step 7 captured a non-empty `WT_TAB`
     (you are in a herdr session and the task had a tab). Outside herdr, or when no
-    tab matched, `/close` is already done — stop here. **Only proceed if the cleanup
+    tab matched, `/close` is already done — stop here.
+
+    **Worker-agent degradation (why this is CLI-safe).** `/kickoff` can launch a
+    codex/grok worker, not just claude — but the teardown needs no per-worker
+    branching. Scenario A closes a *different* tab with `close-tab`, a tab-level
+    herdr op that works for any CLI (the idle worker dies with the tab). Scenario B
+    (`self-exit` injects `/exit`, backed by the plugin `SessionEnd` hook) is
+    claude-specific — but it is only ever reached from *inside* a claude session
+    (`SELF=yes` means this Claude Code session **is** the worktree tab, and only a
+    claude session can run `/close`). So `/exit` is never injected into a codex/grok
+    worker: a non-claude worker tab is always the *other* tab and closes via
+    Scenario A. Do **not** add a self-exit path for non-claude workers. **Only proceed if the cleanup
     above (steps 7–10) actually completed**: if any step stopped for a confirmation
     you haven't resolved, or you aborted, do **not** run any teardown below
     (*especially* never `self-exit`) — leave the session alive so the user can act.
