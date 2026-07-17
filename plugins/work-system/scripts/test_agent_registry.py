@@ -125,10 +125,9 @@ check("codex bootstrap prompt is one argv word", len(r["argv"]) == 4)
 check("codex bootstrap mentions TASK.md", "TASK.md" in r["argv"][3])
 check("codex supports commit,pr only", r.get("supports") == "commit,pr")
 
-r = kv(e.run("resolve", "--composer").stdout)
-check("--composer -> grok composer",
-      r.get("name") == "grok:grok-composer-2.5-fast")
-check("grok argv shape", r["argv"][:3] == ["grok", "-m", "grok-composer-2.5-fast"])
+r = kv(e.run("resolve", "--grok").stdout)
+check("--grok -> grok:grok-4.5", r.get("name") == "grok:grok-4.5")
+check("grok argv shape", r["argv"][:3] == ["grok", "-m", "grok-4.5"])
 
 # canonical name and bare-cli-default selectors
 check("name selector claude:sonnet",
@@ -162,24 +161,23 @@ check("resolve unavailable available=no", rr.get("available") == "no")
 e.close()
 
 # --- grok model-level availability (gated on `grok models`) ---------------- #
-# grok authed, but `grok models` lists only grok-4.5 -> composer is unavailable
-# even though the CLI + auth are fine (mirrors a grok CLI that dropped composer).
+# grok authed + `grok models` lists grok-4.5 -> available.
 e = Env(grok_models=("grok-4.5",))
 by = {r["name"]: r for r in json.loads(e.run("list", "--json").stdout)}
 check("grok-4.5 listed -> available", by["grok:grok-4.5"]["available"] is True)
-check("composer not listed -> unavailable",
-      by["grok:grok-composer-2.5-fast"]["available"] is False)
-check("composer note mentions the model list",
-      "grok models" in by["grok:grok-composer-2.5-fast"]["note"])
-check("resolve --composer unavailable -> exit 3", e.run("resolve", "--composer").returncode == 3)
 check("resolve --grok available -> exit 0", e.run("resolve", "--grok").returncode == 0)
 e.close()
 
-# grok models that DO include composer -> composer becomes available (the probe
-# is data-driven, not a hardcoded drop).
-e = Env(grok_models=("grok-4.5", "grok-composer-2.5-fast"))
+# grok authed but the model is NOT in `grok models` (a model dropped/renamed
+# between releases) -> unavailable at probe time, so the launch is refused
+# cleanly instead of erroring at runtime with "unknown model id". Data-driven,
+# not a hardcoded drop.
+e = Env(grok_models=("grok-9.9-imaginary",))
 by = {r["name"]: r for r in json.loads(e.run("list", "--json").stdout)}
-check("composer listed -> available", by["grok:grok-composer-2.5-fast"]["available"] is True)
+check("grok-4.5 not listed -> unavailable", by["grok:grok-4.5"]["available"] is False)
+check("unlisted-model note mentions the model list",
+      "grok models" in by["grok:grok-4.5"]["note"])
+check("resolve --grok unavailable -> exit 3", e.run("resolve", "--grok").returncode == 3)
 e.close()
 
 # --- auto ranking ---------------------------------------------------------- #

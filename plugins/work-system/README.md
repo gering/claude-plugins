@@ -162,7 +162,7 @@ of truth). With no flag you get an interactive picker; a flag skips it:
 | `--last` | the agent you used last |
 | `--fable` / `--opus` | claude on fable / opus |
 | `--codex` / `--sol` | codex on gpt-5.6-terra / gpt-5.6-sol |
-| `--grok` / `--composer` | grok-4.5 / grok-composer-2.5-fast |
+| `--grok` | grok-4.5 |
 | `--agent <cli[:model]>` | any registry entry, e.g. `--agent claude:sonnet` or `--agent codex` |
 
 State and ranking live in `~/.claude/work-system-agent` (default/last) and are

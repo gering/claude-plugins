@@ -38,7 +38,7 @@
 #     worktree       absolute path to the worktree (becomes the new pane's cwd)
 #     workspace-id   herdr workspace to open the tab in (e.g. $HERDR_WORKSPACE_ID)
 #     agent-selector (launch only) agent-registry selector: a shorthand flag
-#                    (--fable/--opus/--codex/--sol/--grok/--composer), a name
+#                    (--fable/--opus/--codex/--sol/--grok), a name
 #                    (claude:opus), or a bare cli. Empty → legacy claude default.
 #     session-name   (launch only) `claude -n` name; defaults to <label>
 #

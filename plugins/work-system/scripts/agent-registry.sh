@@ -12,7 +12,7 @@
 #   resolve <selector> [--session <name>]
 #                                 Map a selector to launch argv + metadata.
 #                                 Selectors: a shorthand flag (--fable, --opus,
-#                                 --codex, --sol, --grok, --composer), a
+#                                 --codex, --sol, --grok), a
 #                                 canonical name (claude:opus), a bare CLI
 #                                 (codex -> that CLI's default model), or
 #                                 cli:model (the --agent escape hatch).
@@ -73,13 +73,12 @@ REGISTRY='--fable|claude|fable|continue,close-exit,statusline,commit,pr
 -|claude|sonnet|continue,close-exit,statusline,commit,pr
 --codex|codex|gpt-5.6-terra|commit,pr
 --sol|codex|gpt-5.6-sol|commit,pr
---grok|grok|grok-4.5|commit,pr
---composer|grok|grok-composer-2.5-fast|commit,pr'
+--grok|grok|grok-4.5|commit,pr'
 
 # Shipped default --auto ranking (first available wins). Deterministic, not an
 # LLM judgment; override via WORK_SYSTEM_AGENT_RANK[_FILE]. This list is also the
 # hook where future task-aware routing plugs in.
-DEFAULT_RANK='claude:fable claude:opus codex:gpt-5.6-sol codex:gpt-5.6-terra grok:grok-4.5 grok:grok-composer-2.5-fast'
+DEFAULT_RANK='claude:fable claude:opus codex:gpt-5.6-sol codex:gpt-5.6-terra grok:grok-4.5'
 
 usage() {
   # Usage = header comment from line 2 up to (not including) the registry
@@ -144,8 +143,9 @@ row_for_selector() {
 #           the model is trusted (both shipped codex models are stable).
 #   grok:   install + auth + the model must appear in `grok models` — the CLI
 #           rejects an unlisted `-m` id at launch ("unknown model id"), so a
-#           per-CLI auth check alone would mislabel e.g. a dropped composer model
-#           as available. This is the one CLI with a usable model-list command.
+#           per-CLI auth check alone would mislabel a model the CLI no longer
+#           offers (grok drops/renames models between releases) as available.
+#           This is the one CLI with a usable model-list command.
 
 # grok's model list, memoized for the process (it may be a network call — fetch
 # at most once, with a short timeout so `list` never hangs on it).
@@ -227,7 +227,7 @@ subcmd_resolve() {
   local record
   record="$(row_for_selector "$selector")" || {
     echo "Unknown agent selector: $selector" >&2
-    echo "Try: --fable --opus --codex --sol --grok --composer, a name (claude:opus), or a cli (codex)" >&2
+    echo "Try: --fable --opus --codex --sol --grok, a name (claude:opus), or a cli (codex)" >&2
     exit 2
   }
   local flag cli model supports

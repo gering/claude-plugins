@@ -41,7 +41,7 @@ CLI×model — a `--…` token is never the task name:
 | `--last` | the last-used agent |
 | `--fable` / `--opus` | claude on fable / opus |
 | `--codex` / `--sol` | codex on gpt-5.6-terra / gpt-5.6-sol |
-| `--grok` / `--composer` | grok-4.5 / grok-composer-2.5-fast |
+| `--grok` | grok-4.5 |
 | `--agent <cli[:model]>` | any registry entry, e.g. `--agent claude:sonnet` or `--agent codex` |
 
 This table mirrors `agent-registry.sh` for reader convenience only — **never
@@ -114,7 +114,7 @@ which is the single source of truth for aliases, models, and availability.
     `REG="${CLAUDE_PLUGIN_ROOT}/scripts/agent-registry.sh"`.
 
     - **A selector flag was given** (`--fable`, `--opus`, `--codex`, `--sol`,
-      `--grok`, `--composer`, or `--agent <cli[:model]>`): `SELECTOR` is that flag
+      `--grok`, or `--agent <cli[:model]>`): `SELECTOR` is that flag
       (for `--agent`, `SELECTOR` is the `cli[:model]` value, e.g. `claude:sonnet`).
     - **`--auto`**: `SELECTOR="$(bash "$REG" auto)"` — the first available agent in
       the ranking. (Always resolves: claude is available in-session.)
