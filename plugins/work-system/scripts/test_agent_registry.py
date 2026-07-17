@@ -202,7 +202,7 @@ e.close()
 e = Env(grok_models=(), grok_models_ok=True)
 by = {r["name"]: r for r in json.loads(e.run("list", "--json").stdout)}
 check("grok models empty-but-ok -> assumed available", by["grok:grok-4.5"]["available"] is True)
-check("unparseable note is soft", "unparseable" in by["grok:grok-4.5"]["note"])
+check("empty note is soft", "assumed" in by["grok:grok-4.5"]["note"])
 e.close()
 
 # --- project default (the only persisted state) ---------------------------- #

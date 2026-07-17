@@ -31,8 +31,9 @@ truth; this entry captures the durable design and one non-obvious gotcha.
   `herdr agent start "<label>" … -- <worker argv>`, which execs the worker binary
   directly. As of work-system 1.9.0 the worker argv is **resolved from the chosen
   agent** by `agent-registry.sh` (`emit_argv`), not hardcoded: a claude worker is
-  `claude --model <m> -n "<label>" "/continue"`, while codex/grok get
-  `codex -m <model> "<bootstrap prompt>"` (see [[kickoff-agent-selection]]).
+  `claude --model <m> -n "<label>" "/continue"`, while codex/grok get their own
+  `-m` form — `codex -m <model> "<bootstrap prompt>"` /
+  `grok -m <model> "<bootstrap prompt>"` (see [[kickoff-agent-selection]]).
   herdr-launch stays CLI-agnostic — it just execs the resolved `argv=` words. The
   `-- argv` form sidesteps the interactive shell entirely, so there is no keystroke
   race against shell startup (see the gotcha below) and no readiness handshake to

@@ -52,7 +52,17 @@ HOME="${HOME:-$(cd ~ 2>/dev/null && pwd || echo /nonexistent)}"
 # <repo-root>/.claude/work-system-agent; overridable for tests.
 PROJECT_STATE="${WORK_SYSTEM_AGENT_PROJECT_STATE:-}"
 if [ -z "$PROJECT_STATE" ]; then
-  _repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  # The default belongs in the MAIN repo, not a linked worktree — a `default set`
+  # run from inside a worktree must still land (and commit) in the main checkout,
+  # not the disposable copy that `/close` removes. `--git-common-dir` points at the
+  # main repo's `.git` from anywhere; its parent is the main worktree root. Fall
+  # back to `--show-toplevel` when that can't be resolved (older git / odd layout).
+  _common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  if [ -n "$_common" ] && [ "$(basename "$_common")" = ".git" ]; then
+    _repo_root="$(dirname "$_common")"
+  else
+    _repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  fi
   [ -n "$_repo_root" ] && PROJECT_STATE="$_repo_root/.claude/work-system-agent"
 fi
 GROK_AUTH_FILE="${GROK_AUTH_FILE:-$HOME/.grok/auth.json}"
@@ -157,36 +167,48 @@ row_for_selector() {
 # holding the captured pipe would make $(...) block until it exits.
 run_bounded() {
   local secs="$1"; shift
-  if command -v timeout  >/dev/null 2>&1; then timeout  "$secs" "$@"; return $?; fi
-  if command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"; return $?; fi
-  # cmd stdout -> a temp file, NOT this function's stdout: if the killer has to
-  # SIGKILL the cmd, an orphaned grandchild (e.g. a `sleep` the cmd spawned)
-  # inherits the cmd's fds — and if that were the command-substitution pipe, the
-  # capturing $(...) would block until the orphan dies. Writing to $tmp means the
-  # only thing on our stdout is the final `cat`, so $() returns as soon as we do.
-  local tmp; tmp="$(mktemp)"
-  "$@" >"$tmp" &
-  local pid=$! rc=0
-  ( sleep "$secs"; kill "$pid" 2>/dev/null; sleep 2; kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 &
-  local killer=$!
-  if wait "$pid" 2>/dev/null; then rc=0; else rc=$?; fi
-  kill "$killer" 2>/dev/null || true
-  cat "$tmp"; rm -f "$tmp"
+  local rc=0
+  # `-k 1`: GNU timeout only SIGTERMs at the deadline then waits — a child that
+  # ignores SIGTERM would run forever on the COMMON path (any host with timeout/
+  # gtimeout). --kill-after escalates to SIGKILL, matching the self-watchdog below.
+  if command -v timeout >/dev/null 2>&1; then
+    timeout  -k 1 "$secs" "$@" || rc=$?
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout -k 1 "$secs" "$@" || rc=$?
+  else
+    # No timeout binary — self-bound. cmd stdout -> a temp file, NOT this
+    # function's stdout: if the killer has to SIGKILL the cmd, an orphaned
+    # grandchild (e.g. a `sleep` the cmd spawned) inherits the cmd's fds — and if
+    # that were the command-substitution pipe, the capturing $(...) would block
+    # until the orphan dies. Writing to $tmp means the only thing on our stdout is
+    # the final `cat`, so $() returns as soon as we do. The killer escalates
+    # SIGTERM -> SIGKILL so a process ignoring SIGTERM still can't hang the caller.
+    local tmp; tmp="$(mktemp)"
+    "$@" >"$tmp" &
+    local pid=$!
+    ( sleep "$secs"; kill "$pid" 2>/dev/null; sleep 2; kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+    local killer=$!
+    if wait "$pid" 2>/dev/null; then rc=0; else rc=$?; fi
+    kill "$killer" 2>/dev/null || true
+    cat "$tmp"; rm -f "$tmp"
+  fi
+  # Normalize a bounded kill to ONE "timed out" code (124): GNU timeout reports
+  # 124 (SIGTERM) or 137 (needed SIGKILL); the watchdog's `wait` yields 137/143.
+  # Callers use 124 to treat a slow probe as inconclusive, distinct from a real
+  # non-zero exit (e.g. genuine auth failure).
+  case "$rc" in 137|143) rc=124 ;; esac
   return "$rc"
 }
 
-# Print grok's model ids (one per line) on stdout; RETURN 0 iff `grok models`
-# succeeded, non-zero if it was unreachable/timed out. The caller reads that exit
-# code (a failed fetch is inconclusive, not proof a model is gone — see
-# entry_status). Status travels via the exit code, NOT a global: entry_status
-# runs this in a command substitution (its own subshell), so a global flag set
-# here would never propagate back. Bounded via run_bounded so `list` never hangs.
-grok_model_list() {
-  local raw rc=0
-  raw="$(run_bounded 10 grok models 2>/dev/null)" || rc=$?
-  # Lines look like "  * grok-4.5 (default)" — take the id after the bullet.
-  printf '%s\n' "$raw" | awk '/^[[:space:]]*\*/ {print $2}'
-  return "$rc"
+# Print `grok models` RAW output on stdout; RETURN 0 iff the fetch succeeded,
+# non-zero if it was unreachable/timed out. entry_status substring-matches the
+# model id against this raw text (not a positional field) so a reformatted
+# listing — a moved/renamed column, a dropped `*` bullet — doesn't yield a wrong
+# token and a false "model not offered". Status travels via the exit code, NOT a
+# global: entry_status runs this in a command substitution (its own subshell), so
+# a global flag would never propagate back. Bounded via run_bounded (never hangs).
+grok_models_raw() {
+  run_bounded 10 grok models 2>/dev/null
 }
 
 entry_status() {
@@ -199,28 +221,33 @@ entry_status() {
       ;;
     codex)
       # Bounded like grok: `codex login status` can touch the network, so an
-      # unbounded call could hang `list`/the picker just as a grok probe could.
+      # unbounded call could hang `list`/the picker. A run_bounded TIMEOUT (124)
+      # is inconclusive → trust install and assume available (mirrors grok), NOT a
+      # genuine auth failure — a slow probe must not tell a logged-in user to
+      # re-login and disable the backend.
+      local crc=0
       if ! command -v codex >/dev/null 2>&1; then note="not installed"
-      elif run_bounded 10 codex login status >/dev/null 2>&1; then avail=yes
-      else note="run: codex login"; fi
+      else
+        run_bounded 10 codex login status >/dev/null 2>&1 || crc=$?
+        if [ "$crc" -eq 0 ]; then avail=yes
+        elif [ "$crc" -eq 124 ]; then avail=yes; note="codex login status timed out — availability assumed"
+        else note="run: codex login"; fi
+      fi
       ;;
     grok)
       if ! command -v grok >/dev/null 2>&1; then note="not installed"
       elif [ ! -s "$GROK_AUTH_FILE" ]; then note="run: grok login"
       else
-        local _list fetch_rc=0
-        _list="$(grok_model_list)" || fetch_rc=$?   # exit code = fetch status
-        if [ "$fetch_rc" -ne 0 ]; then
-          # `grok models` was unreachable/timed out — inconclusive, not a drop.
-          # Trust auth so a network hiccup doesn't wrongly block launch.
+        local _raw grc=0
+        _raw="$(grok_models_raw)" || grc=$?   # exit code = fetch status
+        if [ "$grc" -ne 0 ]; then
+          # unreachable/timed out — inconclusive, not a drop. Trust auth so a
+          # network hiccup doesn't wrongly block launch.
           avail=yes; note="grok models unreachable — availability assumed"
-        elif [ -z "$_list" ]; then
-          # Fetch succeeded but the parser found no ids — grok reformatted its
-          # `models` output (dropped the `*` bullet / moved the id). That's format
-          # drift, NOT "the model is gone", so treat it as inconclusive too rather
-          # than silently marking every grok entry unavailable.
-          avail=yes; note="grok models unparseable — availability assumed"
-        elif printf '%s\n' "$_list" | grep -qxF "$model"; then avail=yes
+        elif [ -z "$_raw" ]; then
+          # succeeded but produced nothing — inconclusive too, not "model gone".
+          avail=yes; note="grok models empty — availability assumed"
+        elif grep -qF -- "$model" <<<"$_raw"; then avail=yes   # substring, drift-tolerant
         else note="model not offered by this grok CLI (see: grok models)"; fi
       fi
       ;;

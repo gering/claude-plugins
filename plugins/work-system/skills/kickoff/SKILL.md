@@ -256,9 +256,12 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     **If `OFFER_DEFAULT=yes`** (the picker path): do **not** auto-persist here —
     unlike the herdr path, this block only *prints* a command for the user to run
     in a separate terminal, so no launch is confirmed, and the rule is "persist a
-    default only after a worker actually started." Instead tell the user: once the
-    worker is up, run `bash "$REG" default set "<name>"` (the resolved `name=`) to
-    save it as the project default (a committed change to `.claude/work-system-agent`).
+    default only after a worker actually started." Instead tell the user to confirm
+    once the worker is up, then **you** (this main-repo session) run
+    `bash "$REG" default set "<name>"` (the resolved `name=`) to save it — run it
+    here, not in the user's terminal (where `$REG` is undefined and the cwd would be
+    the worktree). It writes the committed `.claude/work-system-agent` in the main
+    repo; mention it's an uncommitted change to commit when ready.
 
 ## Remember
 
