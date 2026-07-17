@@ -84,42 +84,48 @@ debugging round.
     same "promise that doesn't hold at runtime" bug the composer removal exists
     to fix.
   - **Route every degrade through ONE audible exit.** This one spot was fixed
-    across FOUR consecutive swarm rounds, each catching the previous round's
+    across FIVE consecutive swarm rounds, each catching the previous round's
     miss: (1) the no-timeout branch ran uncapped; (2) it was capped but skipped
     *silently*, while the docs were tightened to "never silently"; (3) `|| true`
     still swallowed a *failed* probe, so the strengthened promise was false on
     two of three routes; (4) with warnings finally on every route, `rc` was only
     read **when the list came back empty** — so a probe killed mid-stream with
-    partial output skipped the degrade entirely and its truncated list was
-    treated as authoritative ("model gone", update an already-current CLI).
-    The invariants that survive:
+    partial output skipped the degrade entirely and its truncated list read as
+    "model gone" (update an already-current CLI); (5) the probe was routed
+    through the review jail, which dragged `_init_sandbox`'s python3
+    profile-build into the local `ready`/`list` paths — where a missing python3
+    then misreported as "grok models failed". The invariants that survive:
       - If N routes end in the same degrade, they need **one shared exit**
-        (`_probe_degraded`), not N hand-written warnings. The same rule applies
-        to the no-jail warning: it belongs in `_build_jail` (where the condition
-        arises), not in one of its two callers.
+        (`_probe_degraded`), not N hand-written warnings.
       - **Check `rc` before the output, and discard partial output.** Only a
         clean exit is an answer; anything else is a degrade.
       - "The probe answered honestly" (model genuinely gone → `not ready` +
         update-the-CLI hint) must stay distinguishable from "the probe never
         answered" (→ trust auth + warning).
-    The meta-lesson: a fix that keeps coming back is a shape problem, not a
-    patch problem — this converged only once the branching collapsed to
-    rc-first + one exit.
-  - **Bound it with its own knob, not `SWARM_TIMEOUT`.** That caps a *review*
-    (600s, and `0` disables it entirely) — useless for a probe that `list`
-    blocks on. `SWARM_PROBE_TIMEOUT` (10s) is separate, and a malformed or `0`
-    value falls back to 10 rather than becoming uncapped.
-  - **Jail the probe like any other external call, minus the timeout.** It runs
-    a networked third-party binary on a path that previously ran none, so it
-    goes through the same env-secret filter + read-deny jail. `sandboxed()`
-    can't be reused as-is (it hard-wires the review-length cap), hence
-    `_build_jail` — the jail prefix without the timeout, shared by both. Two
-    traps this split created, both caught by review: the no-jail warning must
-    live in `_build_jail`, or the probe runs unjailed and silent on a host
-    without sandbox-exec/bwrap; and `_init_sandbox`'s memo must key on the
-    **backend** (with a sentinel no backend name equals), or the second entry
-    point pins the jail to whichever backend built it first — handing one
-    backend another's cred dir.
+    The meta-lesson (the one that actually ended the loop): **a fix that keeps
+    coming back is a shape problem, not a patch problem.** Rounds 1–4 patched a
+    probe that had a security jail bolted on; round 5 deleted the jail instead,
+    and the findings stopped. The composer removal itself — the PR's actual
+    subject — drew zero findings across all five rounds. When a *feature you
+    added to be safe* generates every round's bugs, cutting it beats hardening
+    it.
+  - **A readiness check is not a review — don't jail it.** The probe was first
+    built to go through `sandboxed()` (env-secret filter + sandbox-exec
+    read-deny jail), by analogy to the `run` calls. Wrong analogy: `sandboxed()`
+    exists because a *review* feeds grok the untrusted diff; a readiness check
+    passes **no** untrusted input, exactly like the sibling `codex login status`
+    a few lines away, which is also unjailed. Routing it through the jail bought
+    nothing and cost a hard python3 dependency on the formerly-local `ready`/
+    `list` paths (plus a shared-warning bug and a cross-backend memo bug — all
+    three vanished when the jail came back out). The probe runs grok directly.
+  - **Bound it with `timeout -k`, its own knob.** `SWARM_TIMEOUT` caps a
+    *review* (600s, `0` disables) — useless for a probe that `list` blocks on;
+    `SWARM_PROBE_TIMEOUT` (10s) is separate and a malformed/`0` value falls back
+    to 10, never uncapped. Plain `timeout` only SIGTERMs, so a grok that ignores
+    SIGTERM (or forks a stdout-inheriting child) keeps the `$(...)` substitution
+    blocking past the deadline — the "must never hang" hole. `-k <grace>` sends
+    SIGKILL after the grace period; treat both rc 124 (SIGTERM) and 137
+    (SIGKILL) as "timed out".
   - **Memoize by call convention, not by wishing.** `list="$(grok_model_list)"`
     runs the function in a *subshell*, so its cache-global assignments vanish
     and every caller silently re-pays the network call. The cache only works if

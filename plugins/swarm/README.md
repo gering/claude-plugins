@@ -94,7 +94,7 @@ Backends:
 |---------|------|-----------|
 | `claude` | probe-only | reviews run in-session via the Agent tool |
 | `codex` | external reviewer | `codex exec --output-schema` (model `gpt-5.6-terra`, effort `xhigh`) in a read-only sandbox; auth via `codex login status` |
-| `grok` | external reviewer | headless `-p` with inline `--json-schema` (model `grok-4.5`, the only supported grok model); findings extracted from the response envelope. Readiness is model-aware: auth **and** `grok-4.5` present in `grok models`, since the CLI drops/renames models between releases. The model check falls back to auth alone — with a warning, never silently — if the probe can't run (no coreutils `timeout`, or an unreadable list). |
+| `grok` | external reviewer | headless `-p` with inline `--json-schema` (model `grok-4.5`, the only supported grok model); findings extracted from the response envelope. Readiness is model-aware: auth **and** `grok-4.5` present in `grok models`, since the CLI drops/renames models between releases. The model check falls back to auth alone — with a warning, never silently — if the probe can't produce a clean answer (no coreutils `timeout`, non-zero exit, or an unparseable list). |
 
 Unavailable backends drop from the ensemble — `claude` alone still works.
 `/swarm:review` reports a backend that *errored* mid-run distinctly from one

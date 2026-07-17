@@ -154,9 +154,8 @@ _init_sandbox() {
   # a bare "already built" flag: the profile encodes which cred dir stays
   # readable, so reusing another backend's jail would deny a backend its OWN
   # token and leave a sibling's readable — the exact cross-backend theft the
-  # denylist prevents. "One backend per process" held when only run_* built a
-  # jail; the readiness probe added a second entry point (_build_jail grok), so
-  # rebuild whenever the backend changes rather than trusting that invariant.
+  # denylist prevents. Only sandboxed() (a `run` call) reaches here today, but
+  # keying on the backend keeps it correct if a second entry point returns.
   local backend="${1:-}"
   [[ "$_sandbox_ready" == "$backend" ]] && return
   _sandbox_ready="$backend"
@@ -208,19 +207,14 @@ _env_filter_args() {
   done < <(env)
 }
 
-JAIL_CMD=()
-_build_jail() {
-  # Fill JAIL_CMD with the `env -u <secrets…> [sandbox-exec -p <profile>]` prefix
-  # for $1 — every word a real binary, never a shell function: `timeout` execs
-  # its argument, so a function here would not survive.
-  # Split out of sandboxed() so the readiness probe can reuse the SAME jail while
-  # keeping its own short bound (sandboxed() hard-wires ADAPTER_TIMEOUT, which is
-  # a review-length cap, not a probe-length one).
-  # The no-jail warning lives HERE, not in sandboxed(): both callers reach the
-  # same "runs unjailed" condition, so both must announce it. Putting it in one
-  # caller is how the probe ended up running a networked binary unjailed and
-  # silent.
-  local backend="$1"
+sandboxed() {
+  # OS jail + env filter around an external call. $1 = backend (its own cred dir
+  # stays readable; siblings' are denied). Warn once if no jail is available.
+  # Wraps a review, which processes the untrusted diff — that is why it carries
+  # the full jail; the readiness probe deliberately does NOT go through here
+  # (it processes no diff, and _init_sandbox's python3 profile-build must not
+  # become a dependency of the local `ready`/`list` paths — see grok_model_fetch).
+  local backend="$1"; shift
   _init_sandbox "$backend"
   if ((${#SANDBOX_CMD[@]} == 0)) && [[ -z "$_sandbox_warned" ]]; then
     echo "warning: no sandbox-exec/bwrap — external calls run without an OS read-deny jail (secret scrub + env filter still apply)" >&2
@@ -228,16 +222,8 @@ _build_jail() {
   fi
   local env_args=() _e
   while IFS= read -r _e; do env_args+=("$_e"); done < <(_env_filter_args)
-  JAIL_CMD=(env ${env_args[@]+"${env_args[@]}"} ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"})
-}
-
-sandboxed() {
-  # OS jail + env filter around an external call. $1 = backend (its own cred dir
-  # stays readable; siblings' are denied).
-  local backend="$1"; shift
-  _build_jail "$backend"
   # order: timeout → env (strip secrets) → sandbox-exec (jail) → backend
-  with_timeout "${JAIL_CMD[@]}" "$@"
+  with_timeout env ${env_args[@]+"${env_args[@]}"} ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"} "$@"
 }
 
 scrub_secrets() {
@@ -318,10 +304,11 @@ PROBE_TIMEOUT="${SWARM_PROBE_TIMEOUT:-10}"
 _grok_models_done=""
 _grok_models=""
 _probe_degraded() {
-  # The ONE exit for every "the model check did not happen" route. Each one ends
-  # in the same trust-auth degrade, so each one must be equally audible: the
-  # docs promise the check "never silently" falls back, and a promise that holds
-  # on only one of three routes is exactly the runtime-lie this branch removes.
+  # The ONE exit for every "the model check did not happen" route (no timeout
+  # binary, probe failed, probe timed out, unparseable list). Each ends in the
+  # same trust-auth degrade, so each must be equally audible: the docs promise
+  # the check falls back "never silently", and a promise that holds on only some
+  # routes is the runtime-lie this branch removes.
   echo "warning: grok model probe unavailable ($1) — readiness falls back to auth alone; the ${GROK_DEFAULT_MODEL} check did not run" >&2
 }
 grok_model_fetch() {
@@ -341,13 +328,17 @@ grok_model_fetch() {
     _probe_degraded "no timeout/gtimeout on PATH — install coreutils to restore it"
     return 0
   fi
-  # Same jail as every other external call (env secret filter + read-deny), with
-  # the probe's own short bound instead of sandboxed()'s review-length one.
-  _build_jail grok
+  # Run grok DIRECTLY, not through sandboxed(): this is a readiness check, not a
+  # review — it passes no untrusted diff to grok, so it needs no read-deny jail,
+  # exactly like the sibling `codex login status` check a few lines down. Going
+  # through sandboxed() would also drag _init_sandbox's python3 profile-build
+  # into the `ready`/`list` paths (a hard dep they never had), whose failure the
+  # degrade branch would then misreport as "grok models failed".
+  # `-k` (SIGKILL after a grace period) is what actually enforces the bound: a
+  # grok that ignores SIGTERM, or forks a stdout-inheriting child, would keep the
+  # `$(...)` substitution blocking past the timeout — the "must never hang" hole.
   local raw rc=0
-  # Capture the status instead of `|| true`: a swallowed failure here would
-  # degrade to auth-only with no signal.
-  raw="$("$to" "$PROBE_TIMEOUT" "${JAIL_CMD[@]}" grok models </dev/null 2>/dev/null)" || rc=$?
+  raw="$("$to" -k 3 "$PROBE_TIMEOUT" grok models </dev/null 2>/dev/null)" || rc=$?
   # Check rc BEFORE looking at the output, and discard whatever arrived: a probe
   # killed mid-stream (timeout) or erroring late can still have flushed a PARTIAL
   # list. Reading that as authoritative is worse than not probing — a truncated
@@ -355,24 +346,32 @@ grok_model_fetch() {
   # already-current CLI. Only a clean exit produces an answer; everything else is
   # a degrade.
   if (( rc != 0 )); then
+    # GNU timeout: 124 = SIGTERM ended the job at the deadline (a definite
+    # timeout). 137 (128+9) = the job was SIGKILLed — almost always our own `-k`
+    # firing on a SIGTERM-ignoring grok, but an OS OOM-kill or an external
+    # SIGKILL yields the same code, so don't assert a timeout that may not have
+    # happened; word it for both.
     if (( rc == 124 )); then _probe_degraded "\`grok models\` timed out after ${PROBE_TIMEOUT}s"
+    elif (( rc == 137 )); then _probe_degraded "\`grok models\` was killed (SIGKILL — likely the ${PROBE_TIMEOUT}s \`-k\` bound)"
     else _probe_degraded "\`grok models\` failed (rc=$rc)"
     fi
     return 0
   fi
-  # Pull the model id out of each bullet line by SHAPE, not position: the
-  # documented form is "  * grok-4.5 (default)", but keying on $2 would turn a
-  # reworded line ("  * default: grok-4.5") into garbage tokens — which read as
-  # "grok-4.5 is gone" and fail closed. Match the id SUBSTRING (not the raw
-  # field) so glued-on punctuation — "grok-4.5," / "grok-4.5." / backticks /
-  # ANSI codes — doesn't ride along and break the exact-match below. The id
-  # pattern ends on alphanumerics, so a trailing separator is never captured.
-  # A line with no id-shaped token contributes nothing → empty list → degrade.
+  # One model id PER BULLET LINE: the id is the FIRST grok-shaped token after the
+  # `*` marker (documented form "  * grok-4.5 (default)"). Take only the first —
+  # scanning the whole line would also pick up a grok-4.5 mentioned in trailing
+  # PROSE on another model's line ("* grok-5 (successor to grok-4.5)"), reporting
+  # a retired model as still offered. Match the id SUBSTRING, not the raw field,
+  # so glued-on punctuation ("grok-4.5," / "grok-4.5." / backticks) doesn't ride
+  # along and break the exact-match below; the pattern ends on alphanumerics, so
+  # a trailing separator is never captured. No id-shaped token → empty → degrade.
   _grok_models="$(printf '%s\n' "$raw" | awk '
     /^[[:space:]]*\*/ {
       for (i = 1; i <= NF; i++)
-        if (match($i, /grok-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*/))
+        if (match($i, /grok-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*/)) {
           print substr($i, RSTART, RLENGTH)
+          break
+        }
     }')"
   if [[ -z "$_grok_models" ]]; then
     _probe_degraded "\`grok models\` returned no model ids — output format may have changed"

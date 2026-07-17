@@ -13,7 +13,7 @@ export const meta = {
 // args.adapter            absolute path to scripts/agents.sh
 // args.diffFile           file the Claude finders read (raw unified diff)
 // args.externalPromptFile file the external CLIs get (review instr + fenced diff)
-// args.externalVoices     which external backends are live (subset of the three)
+// args.externalVoices     which external backends are live (subset of codex, grok)
 // args.claude             false → external-only control run (no Claude lenses)
 // args.max                true (strict boolean) → deepest-effort profile below
 // Normalize: the runtime may deliver `args` as an object OR a JSON string.
