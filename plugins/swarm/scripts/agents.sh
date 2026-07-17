@@ -23,17 +23,15 @@
 #            Reasoning effort has no "max" tier -> max maps to xhigh.
 #   grok   — headless `-p` with inline --json-schema; the validated object is
 #            the `.structuredOutput` field of a response envelope. Needs an
-#            explicit model (-m): grok-4.5 is the schema-capable default and
+#            explicit model (-m): grok-4.5 is the sole schema-capable model and
 #            accepts --effort (ladder is low|medium|high — no max tier, so the
 #            adapter maps xhigh/max down to high, mirroring codex's missing
-#            max). The one other accepted model is
-#            grok-composer-2.5-fast (`--model grok-composer-2.5-fast`): it
-#            ignores --json-schema/--effort, so the adapter drives it with a
-#            strict-JSON prompt and parses the findings defensively (verified:
-#            emits pure {"findings":[...]} on stdout, no envelope). It is a
-#            second, ~2x-faster grok voice — same family as grok-4.5, so a
-#            caller must treat their agreement as one family, not consensus.
-#            Auth heuristic: non-empty ~/.grok/auth.json (no status command).
+#            max). Readiness is model-aware: auth (non-empty ~/.grok/auth.json —
+#            there is no status command) AND grok-4.5 must appear in
+#            `grok models`. The CLI rejects an unlisted -m id at launch
+#            ("unknown model id"), and it drops/renames models between releases
+#            (0.2.101 removed grok-composer-2.5-fast), so an auth-only check
+#            would advertise a model the CLI no longer offers.
 #
 # Exit codes: 0 ok · 1 unavailable / not ready / run failed · 2 usage error
 
@@ -43,7 +41,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_SCHEMA="$SCRIPT_DIR/schema/finding.schema.json"
 CODEX_DEFAULT_MODEL="gpt-5.6-terra"
 GROK_DEFAULT_MODEL="grok-4.5"
-GROK_COMPOSER_MODEL="grok-composer-2.5-fast"
 # Default HOME so `$HOME` expansions below (auth file, sandbox deny paths) don't
 # abort the whole script under `set -u` when HOME is unset.
 HOME="${HOME:-$(cd ~ 2>/dev/null && pwd || echo /nonexistent)}"
@@ -278,12 +275,62 @@ available_version() {
   return 0
 }
 
+# grok's model list, memoized for the process (`grok models` may be a network
+# call — fetch at most once). `ready`/`list` were purely local before this probe
+# existed, so it must never be the thing that hangs them: without a coreutils
+# timeout to bound the call we skip the probe entirely and return an empty list,
+# which grok_model_offered reads as "unusable → trust auth" (the same degrade as
+# an offline fetch). Bounding it is not optional — the whole adapter treats an
+# uncapped external call as a bug (see with_timeout).
+_grok_models_done=""
+_grok_models=""
+grok_model_list() {
+  if [[ -z "$_grok_models_done" ]]; then
+    _grok_models_done=1
+    local to=""
+    if command -v timeout >/dev/null; then to="timeout"
+    elif command -v gtimeout >/dev/null; then to="gtimeout"
+    fi
+    if [[ -n "$to" ]]; then
+      local raw
+      raw="$("$to" 10 grok models 2>/dev/null || true)"
+      # Lines look like "  * grok-4.5 (default)" — take the id after the bullet.
+      _grok_models="$(printf '%s\n' "$raw" | awk '/^[[:space:]]*\*/ {print $2}')"
+    fi
+  fi
+  printf '%s\n' "$_grok_models"
+}
+
+grok_model_offered() {
+  # Three-state, collapsed to an exit code: 0 = the CLI lists grok-4.5, 1 = it
+  # lists models but NOT grok-4.5 (an honest "gone"), 0 = the list is empty /
+  # unparseable (probe unusable — e.g. offline, or a future CLI renaming the
+  # subcommand). The empty case deliberately trusts auth instead of failing
+  # closed: silently dropping grok from every fan-out is worse than letting
+  # run_grok surface its explicit "unknown model id" error.
+  local list
+  list="$(grok_model_list)"
+  # Substring match on newline-fenced text, NOT `grep -qxF`: an early-exiting
+  # `grep -q` can SIGPIPE the writer, and pipefail would then report failure
+  # even on a hit.
+  case "$list" in
+    "") return 0 ;;
+    *) case $'\n'"$list"$'\n' in
+         *$'\n'"$GROK_DEFAULT_MODEL"$'\n'*) return 0 ;;
+         *) return 1 ;;
+       esac ;;
+  esac
+}
+
 ready_check() {
   local backend="$1"
   case "$backend" in
     claude) return 0 ;;  # in-session, no separate auth
     codex)  codex login status >/dev/null 2>&1 ;;
-    grok)   [[ -s "$GROK_AUTH_FILE" ]] ;;
+    # Model-aware: auth alone would advertise grok even when the CLI no longer
+    # offers the one model the adapter can drive (grok drops/renames models
+    # between releases — 0.2.101 removed grok-composer-2.5-fast).
+    grok)   [[ -s "$GROK_AUTH_FILE" ]] && grok_model_offered ;;
   esac
 }
 
@@ -291,7 +338,13 @@ ready_hint() {
   # claude needs no hint: it is always available + ready in-session.
   case "$1" in
     codex) echo "run: codex login" ;;
-    grok)  echo "run: grok login" ;;
+    grok)
+      if [[ ! -s "$GROK_AUTH_FILE" ]]; then
+        echo "run: grok login"
+      else
+        echo "this grok CLI does not offer $GROK_DEFAULT_MODEL (see: grok models) — update the grok CLI"
+      fi
+      ;;
   esac
 }
 
@@ -380,12 +433,12 @@ subcmd_run() {
     exit 2
   fi
 
-  local prompt_file="" effort="xhigh" effort_set="" model="" schema="$DEFAULT_SCHEMA"
+  local prompt_file="" effort="xhigh" model="" schema="$DEFAULT_SCHEMA"
   while [[ $# -gt 0 ]]; do
     [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
     case "$1" in
       --prompt-file) prompt_file="$2"; shift 2 ;;
-      --effort)      effort="$2"; effort_set=1; shift 2 ;;
+      --effort)      effort="$2"; shift 2 ;;
       --model)       model="$2";       shift 2 ;;
       --schema)      schema="$2";      shift 2 ;;
       *) echo "Unknown flag: $1" >&2; exit 2 ;;
@@ -396,11 +449,6 @@ subcmd_run() {
     *) echo "Invalid effort: $effort (low|medium|high|xhigh|max)" >&2; exit 2 ;;
   esac
   [[ -f "$schema" ]] || { echo "Schema not found: $schema" >&2; exit 2; }
-  # composer has no reasoning-effort control; say so if the caller set --effort
-  # explicitly, so review depth isn't misjudged against grok-4.5.
-  if [[ "$backend" == "grok" && "$model" == "$GROK_COMPOSER_MODEL" && -n "$effort_set" ]]; then
-    echo "note: --effort is ignored for $GROK_COMPOSER_MODEL (it has no reasoning-effort control)" >&2
-  fi
 
   # The prompt travels as ONE argv word, so the binding limit is the per-argument
   # cap, not total ARG_MAX: Linux MAX_ARG_STRLEN is 128 KiB (macOS has no
@@ -492,19 +540,12 @@ run_grok() {
   case "$effort" in xhigh|max) effort="high" ;; esac
   local grok_model="${model:-$GROK_DEFAULT_MODEL}"
 
-  # grok-composer-2.5-fast is the one non-default model the adapter supports; it
-  # ignores --json-schema/--effort, so it takes a separate defensive-parse path.
-  if [[ "$grok_model" == "$GROK_COMPOSER_MODEL" ]]; then
-    run_grok_composer "$prompt" "$schema"
-    return
-  fi
-
-  # Preflight-reject any OTHER non-default model: only grok-4.5 enforces
-  # --json-schema (and accepts --effort). An unlisted model would silently
-  # return structuredOutput:null and fail late with no schema output — so reject
-  # up front with a usage error rather than burn a review on it.
+  # Preflight-reject any non-default model: only grok-4.5 enforces --json-schema
+  # (and accepts --effort). Another model would silently return
+  # structuredOutput:null and fail late with no schema output — so reject up
+  # front with a usage error rather than burn a review on it.
   if [[ "$grok_model" != "$GROK_DEFAULT_MODEL" ]]; then
-    echo "grok model '$grok_model' does not enforce --json-schema — the adapter requires schema output; use $GROK_DEFAULT_MODEL (default) or $GROK_COMPOSER_MODEL" >&2
+    echo "grok model '$grok_model' does not enforce --json-schema — the adapter requires schema output; use $GROK_DEFAULT_MODEL (the only supported grok model)" >&2
     exit 2
   fi
 
@@ -553,141 +594,6 @@ if not (isinstance(out, dict) and isinstance(out.get("findings"), list)):
     sys.stderr.write("grok structuredOutput is not a {findings:[...]} object\n")
     sys.exit(1)
 json.dump(out, sys.stdout)
-print()
-' | scrub_secrets
-}
-
-run_grok_composer() {
-  # grok-composer-2.5-fast: ~2x faster than grok-4.5 but ignores
-  # --json-schema/--effort (would return plain text with structuredOutput:null).
-  # So we DON'T pass those flags — instead we append a strict-JSON directive
-  # (the schema itself) to the prompt and parse the answer defensively. Verified:
-  # composer then emits pure {"findings":[...]} on stdout (no envelope). Same
-  # sandbox + env filter + scrub as grok-4.5; only the schema mechanism differs.
-  local prompt="$1" schema="$2"
-  local full
-  full="$prompt
-
----
-Respond with ONLY a single JSON object conforming to this JSON Schema — no prose,
-no explanation, no markdown code fences:
-$(cat "$schema")"
-
-  # The assembled prompt travels as ONE argv word (--single=), so re-check it
-  # against Linux MAX_ARG_STRLEN (128 KiB): subcmd_run caps the *prompt* at 120
-  # KiB, but this path appends the schema+directive into the SAME word, eating
-  # that headroom. Only a large custom --schema realizes the gap (the bundled
-  # schema is ~2.4 KiB); guard at 126 KiB so a genuine overflow errors cleanly.
-  local full_bytes
-  full_bytes=$(printf '%s' "$full" | wc -c)
-  if (( full_bytes > 129024 )); then
-    echo "grok(composer) prompt+schema is $(( full_bytes / 1024 )) KiB — over the 126 KiB single-argument limit; narrow the diff or use a smaller --schema" >&2
-    exit 1
-  fi
-
-  local raw rc=0
-  raw="$(sandboxed grok grok -m "$GROK_COMPOSER_MODEL" \
-      --tools "" --disable-web-search \
-      --single="$full" </dev/null 2>/dev/null)" || rc=$?
-  if (( rc != 0 )); then
-    (( rc == 124 )) && echo "grok(composer) timed out after ${ADAPTER_TIMEOUT}s" >&2 \
-                    || echo "grok(composer) failed" >&2
-    exit 1
-  fi
-  # Cap the output before parsing: the defensive brace-scan below is O(n^2) in
-  # the number of '{' and runs OUTSIDE with_timeout (which wraps only the grok
-  # subprocess), so a multi-MB brace-dense blob could spin for minutes. A valid
-  # findings payload (<=100 items, capped fields) stays well under 512 KiB.
-  local raw_bytes
-  raw_bytes=$(printf '%s' "$raw" | wc -c)
-  if (( raw_bytes > 524288 )); then
-    echo "grok(composer) output too large ($(( raw_bytes / 1024 )) KiB) — refusing to parse" >&2
-    exit 1
-  fi
-  # Defensive parse: composer is not schema-enforced, so the answer may arrive as
-  # bare JSON (observed), wrapped in ```json fences, or as a grok envelope with a
-  # .structuredOutput field. Extract a {"findings":[...]} object from any of those,
-  # or fail non-zero (so the caller records an ERROR, never a false empty review).
-  printf '%s' "$raw" | python3 -c '
-import json, re, sys
-
-def findings_from(o):
-    # Return the findings-bearing object: the object itself, or a nested
-    # structuredOutput, else None.
-    if isinstance(o, dict):
-        if isinstance(o.get("findings"), list):
-            return o
-        inner = o.get("structuredOutput")
-        if isinstance(inner, dict) and isinstance(inner.get("findings"), list):
-            return inner
-    return None
-
-def all_objects(s):
-    # Every JSON object we can pull out, in priority order: whole string, each
-    # fenced block, then every balanced {...} run. We collect ALL of them (not
-    # the first decodable one) so a leading non-findings object cannot mask the
-    # real findings object later in the stream.
-    objs = []
-    for cand in (s.strip(), *[m.strip() for m in re.findall(r"```(?:json)?\s*(.*?)```", s, re.S)]):
-        try:
-            objs.append(json.loads(cand))
-        except Exception:
-            pass
-    start = s.find("{")
-    while start != -1:
-        try:
-            obj, _ = json.JSONDecoder().raw_decode(s[start:])
-            objs.append(obj)
-        except Exception:
-            pass
-        start = s.find("{", start + 1)
-    return objs
-
-SEV = {"critical", "warning", "minor"}
-CONF = {"high", "medium", "low"}
-# DRIFT WARNING: these caps/keys hand-mirror finding.schema.json (and
-# FINDING_ITEM in swarm-review.js). The caps double as injection limits, so the
-# three copies must stay in sync — edit them together. MAXITEMS mirrors the
-# schema findings maxItems.
-MAXLEN = {"file": 500, "summary": 400, "failure_scenario": 1200, "recommendation": 800}
-MAXITEMS = 100
-KEYS = {"file", "line", "severity", "summary", "failure_scenario", "confidence", "recommendation"}
-
-def valid_item(f):
-    # Mirror finding.schema.json EXACTLY. composer is not CLI-schema-enforced
-    # (unlike codex/grok-4.5), so a malformed item must ERROR here rather than
-    # reach merge/verify, which rely on the uniform-findings contract. Check the
-    # exact key set (additionalProperties:false + all required), maxLength, and
-    # enums — a hand-rolled type-only subset would drop valid rows and pass
-    # oversized/extra-key ones.
-    if not isinstance(f, dict) or set(f) != KEYS:
-        return False
-    for k, m in MAXLEN.items():
-        v = f.get(k)
-        if not isinstance(v, str) or len(v) > m:
-            return False
-    ln = f.get("line")
-    if not isinstance(ln, int) or isinstance(ln, bool) or ln < 0:
-        return False
-    return f.get("severity") in SEV and f.get("confidence") in CONF
-
-objs = all_objects(sys.stdin.read())
-cands = [f for f in (findings_from(o) for o in objs) if f is not None]
-if not cands:
-    sys.stderr.write("grok(composer) returned no {findings:[...]} object (content withheld)\n")
-    sys.exit(1)
-# Prefer a NON-EMPTY findings object over an empty preamble object that would
-# otherwise mask the real answer (a leading {"findings":[]} or {"note":...});
-# fall back to the first object if every candidate is empty.
-d = next((c for c in cands if c["findings"]), cands[0])
-if len(d["findings"]) > MAXITEMS:
-    sys.stderr.write("grok(composer) emitted %d findings (> %d maxItems)\n" % (len(d["findings"]), MAXITEMS))
-    sys.exit(1)
-bad = [i for i, f in enumerate(d["findings"]) if not valid_item(f)]
-if bad:
-    sys.stderr.write("grok(composer) emitted %d finding(s) violating finding.schema.json\n" % len(bad))
-    sys.exit(1)
-json.dump({"findings": d["findings"]}, sys.stdout)
 print()
 ' | scrub_secrets
 }

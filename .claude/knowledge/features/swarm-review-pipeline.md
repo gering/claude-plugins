@@ -13,9 +13,11 @@ reindexedAt: 2026-07-12
 
 P2 turns the blueprint into a working review: a **Workflow-tool script**
 (`plugins/swarm/workflows/swarm-review.js`) launched by the `/swarm:review`
-skill. Shape: `scope+gate → fan-out (4 voices) → merge (file,mechanism) →
-verify solos → output-gated synthesis`. Four voices: Claude lenses ∥ codex ∥
-grok-4.5 ∥ composer (see [swarm-backend-adapter](swarm-backend-adapter.md)).
+skill. Shape: `scope+gate → fan-out (3 voices) → merge (file,mechanism) →
+verify solos → output-gated synthesis`. Three voices: Claude lenses ∥ codex ∥
+grok-4.5 (see [swarm-backend-adapter](swarm-backend-adapter.md)). A fourth,
+`grok-composer-2.5-fast`, was removed in swarm 0.4.3 — the grok CLI dropped the
+model.
 
 ## The skill ↔ workflow wiring (the non-obvious parts)
 
@@ -38,10 +40,16 @@ grok-4.5 ∥ composer (see [swarm-backend-adapter](swarm-backend-adapter.md)).
 
 ## Design decisions
 
-- **Consensus counts model *families*, not backends.** A cross-family cluster
+- **Consensus counts model *families*, not voices.** A cross-family cluster
   (≥2 of claude / openai / grok) is CONFIRMED without extra verify; everything
-  else is solo and goes through the adversarial 3-state verifier. composer +
-  grok-4.5 agreeing is one grok vote — they cannot alone mint consensus.
+  else is solo and goes through the adversarial 3-state verifier. The `FAMILY`
+  map (`workflows/swarm-review.js`) survives the composer removal deliberately:
+  with composer gone the backend→family mapping is 1:1, so *for consensus
+  counting* it is currently a no-op — but the fan-out is many-voices-per-family
+  (one Claude finder per gated lens), so the rule "same vendor agreeing with
+  itself is one vote, not a cross-check" is still the load-bearing invariant.
+  Collapsing consensus onto backends/voices would silently re-introduce
+  correlated self-agreement the day a second same-vendor voice returns.
 - **Security is intentionally minimal** (user directive: no cannons-at-sparrows).
   The P1 adapter floor stays (sandbox, tool-less grok, secret scrub, env filter,
   caps); P2 adds only three cheap things — **fencing** the diff as data
@@ -60,8 +68,8 @@ grok-4.5 ∥ composer (see [swarm-backend-adapter](swarm-backend-adapter.md)).
   the delimiter); the workflow only collision-checks it against the returned
   findings and extends it deterministically (`nonce-1`, `-2`…) on collision.
 
-- **`args.claude: false`** runs an **external-only control** (codex + grok-4.5
-  + composer, no Claude finder lenses, no gate; merge/verify still in-session).
+- **`args.claude: false`** runs an **external-only control** (codex + grok-4.5,
+  no Claude finder lenses, no gate; merge/verify still in-session).
   Proven useful: a control run found real bugs the with-Claude run missed (an
   `aws_secret_access_key` scrub-list drift, `git diff` omitting untracked files)
   — the "different models catch different defects" premise, live.
@@ -95,9 +103,9 @@ the diff out of the script, above). Claude applies edits between rounds.
   the report table contract this entry defines above (P2 reserved them).
 - **`--max` profile** (`INPUT.max` in the workflow): lifts every voice to its
   ceiling — codex `gpt-5.6-sol`@`xhigh` (codex has NO `max` tier, xhigh is its
-  top), Claude finder lenses + verifier `xhigh`; gate/merge, grok (`high` is
+  top), Claude finder lenses + verifier `xhigh`; gate/merge and grok (`high` is
   its ceiling since grok 0.2.101 dropped `max` — it runs there on both
-  profiles) and composer (no effort control) unchanged. Orthogonal to `--fix`/`--loop`,
+  profiles) unchanged. Orthogonal to `--fix`/`--loop`,
   composes with both. The profile's live settings are verified end-to-end
   (`gpt-5.6-sol`@`xhigh` at wiring time; grok re-verified at `--effort high` on
   0.2.101) — the "no silent fail on a non-existent model/effort" rule.
@@ -170,7 +178,9 @@ call, more thinking) over N calls. Not a default.
 
 Real background runs on this branch: a Claude-only smoke run proved the wiring
 (6 agents, correct return shape); the review **found a real bug in its own
-composer parser** (first-object-vs-findings-object), which was then fixed. Only
+grok-composer parser** (first-object-vs-findings-object), which was then fixed
+— that parser has since been removed with the composer backend (0.4.3), but it
+stands as the proof that swarm can catch a genuine bug in its own diff. Only
 `REFUTED` solos are dropped; consensus/solo/refuted counts + per-lens raw→
 surviving ship in the `balance` block the skill renders. Iterating a
 `/swarm:review` loop over the branch caught several fix-induced regressions

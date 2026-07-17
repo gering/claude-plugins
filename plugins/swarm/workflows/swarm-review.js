@@ -1,9 +1,9 @@
 export const meta = {
   name: 'swarm-review',
-  description: 'Local mixture-of-agents review: scope+gate → fan-out (Claude lenses + codex + grok + composer) → (file,mechanism) merge with family-aware consensus → verify solos → output-gated ranked synthesis.',
+  description: 'Local mixture-of-agents review: scope+gate → fan-out (Claude lenses + codex + grok) → (file,mechanism) merge with family-aware consensus → verify solos → output-gated ranked synthesis.',
   phases: [
     { title: 'Scope', detail: 'classify diff + gate lenses' },
-    { title: 'Fan-out', detail: 'Claude lenses + codex + grok + composer in parallel' },
+    { title: 'Fan-out', detail: 'Claude lenses + codex + grok in parallel' },
     { title: 'Merge', detail: 'cluster by (file, mechanism), consensus by family' },
     { title: 'Verify', detail: '3-state verify of solo clusters' },
   ],
@@ -88,11 +88,10 @@ const LENS_BRIEF = {
   conventions: 'repo conventions: naming, doc/README sync, version-sync, sibling-script idioms',
 }
 
-// One finding. DRIFT WARNING: this schema is hand-mirrored in THREE places —
-// scripts/schema/finding.schema.json (canonical, CLI-enforced on codex/grok),
-// this FINDING_ITEM, and agents.sh's composer validator (KEYS/MAXLEN/SEV/CONF).
-// The caps double as injection limits, so all three must stay in sync — edit
-// them together.
+// One finding. DRIFT WARNING: this schema is hand-mirrored in TWO places —
+// scripts/schema/finding.schema.json (canonical, CLI-enforced on codex/grok)
+// and this FINDING_ITEM. The caps double as injection limits, so both must stay
+// in sync — edit them together.
 const FINDING_ITEM = {
   type: 'object', additionalProperties: false,
   required: ['file', 'line', 'severity', 'summary', 'failure_scenario', 'confidence', 'recommendation'],
@@ -118,9 +117,10 @@ const EXTERNAL_SCHEMA = {
   },
 }
 
-// backend label -> model family (consensus counts distinct FAMILIES, so two
-// grok voices agreeing is one vote, not independent cross-check).
-const FAMILY = { claude: 'claude', codex: 'openai', grok: 'grok', composer: 'grok' }
+// backend label -> model family. Consensus counts distinct FAMILIES, not
+// backends: if two voices ever share a vendor again (as grok-4.5 + composer
+// did), their agreement must count once, not as an independent cross-check.
+const FAMILY = { claude: 'claude', codex: 'openai', grok: 'grok' }
 
 // ---- output gate: last-line secret scrub over surviving findings ------------
 // Runs on EVERY finding (incl. Claude finders, which never pass the adapter)
@@ -279,11 +279,10 @@ const claudeThunks = runLensesSafe.map((lens) => () =>
 const EXTERNAL_VOICES = [
   { backend: 'codex', label: 'codex:full', cmd: `bash "${ADAPTER}" run codex ${MAX ? `--model ${MAX_CODEX_MODEL} --effort xhigh` : '--effort high'} --prompt-file "${EXTERNAL_PROMPT}"` },
   { backend: 'grok', label: 'grok:full', cmd: `bash "${ADAPTER}" run grok --effort high --prompt-file "${EXTERNAL_PROMPT}"` },
-  { backend: 'composer', label: 'composer:full', cmd: `bash "${ADAPTER}" run grok --model grok-composer-2.5-fast --prompt-file "${EXTERNAL_PROMPT}"` },
 ]
 // Only spawn transports for backends the skill reported live (probed via the
 // adapter); absent CLIs would otherwise show up as noisy "errors".
-const wantVoices = Array.isArray(INPUT.externalVoices) ? INPUT.externalVoices : ['codex', 'grok', 'composer']
+const wantVoices = Array.isArray(INPUT.externalVoices) ? INPUT.externalVoices : ['codex', 'grok']
 const externalThunks = EXTERNAL_VOICES.filter((v) => wantVoices.includes(v.backend)).map((v) => () =>
   agent(
     `You are a thin transport wrapper — do NOT review the code yourself, do NOT modify the command. Run EXACTLY this with the Bash tool (timeout 600000) and wait for it to finish:\n\n` +
@@ -354,7 +353,8 @@ if (pool.length > 0) {
     members.forEach((i) => assigned.add(i))
     const backends = Array.from(new Set(members.map((i) => pool[i].backend))).sort()
     const families = Array.from(new Set(members.map((i) => pool[i].family))).sort()
-    // Consensus requires >=2 distinct FAMILIES (composer+grok-4.5 = one family).
+    // Consensus requires >=2 distinct FAMILIES (see FAMILY: same-vendor voices
+    // count once; Claude's many lens voices are one family, not a quorum).
     return { ...c, member_indices: members, backends, families, consensus: families.length >= 2 ? 'CONFIRMED' : 'solo' }
   }).filter((c) => c.backends.length > 0)  // drop clusters whose member_indices all filtered out — no backing voice
 
@@ -436,7 +436,7 @@ const findings = gatedFindings.sort((a, b) => (sevOf(a) - sevOf(b)) || (conRank(
 // Per-backend rollup for the balance "Agents" line: concrete short model label
 // + voice/finding counts + whether it ran clean. Wall-time (per-agent durationMs)
 // needs a registered workflow to surface — tracked as P4 wiring.
-const MODEL_LABEL = { claude: 'opus', codex: 'gpt', grok: 'grok-4.5', composer: 'composer' }
+const MODEL_LABEL = { claude: 'opus', codex: 'gpt', grok: 'grok-4.5' }
 const agents = {}
 for (const v of voices) {
   const a = agents[v.backend] || (agents[v.backend] = { backend: v.backend, model: MODEL_LABEL[v.backend] || v.backend, voices: 0, failedVoices: 0, findings: 0, ok: true })

@@ -1,7 +1,7 @@
 {
   "name": "swarm",
-  "description": "Local mixture-of-agents code review for Claude Code. Fans a diff across Claude lenses plus the codex and grok CLIs (grok-4.5 + composer models), merges by mechanism with cross-family consensus, verifies solo findings, and presents one ranked report. Optional --fix / --loop applies the findings you agreed with; --pr reviews a GitHub PR diff and posts the result. Skills: /swarm:review, /swarm:agents.",
-  "version": "0.4.2",
+  "description": "Local mixture-of-agents code review for Claude Code. Fans a diff across Claude lenses plus the codex and grok CLIs (grok-4.5), merges by mechanism with cross-family consensus, verifies solo findings, and presents one ranked report. Optional --fix / --loop applies the findings you agreed with; --pr reviews a GitHub PR diff and posts the result. Skills: /swarm:review, /swarm:agents.",
+  "version": "0.4.3",
   "author": {
     "name": "gering"
   },

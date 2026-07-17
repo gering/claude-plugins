@@ -30,7 +30,7 @@ PR review feedback loop. Create PRs with readiness checks, commit + push + trigg
 
 ### Swarm
 
-Local mixture-of-agents code review. Fans out one review across Claude lens subagents plus the `codex` and `grok` CLIs (grok in `grok-4.5` + `composer` modes), merges and verifies their findings, and presents a single ranked report — before anything is pushed. With `--fix` / `--loop` it also applies the findings you agreed with (only Claude edits; the external agents stay review-only). `--pr [<number>]` runs the same ensemble against a GitHub PR's diff and posts the gated result as a PR comment (via your own `gh` auth, after one confirmation) — no CI or API-token setup. Complementary to PR Flow's GitHub-side loop. *(Phase 5: `/swarm:review` pipeline + fix loop + PR posting.)*
+Local mixture-of-agents code review. Fans out one review across Claude lens subagents plus the `codex` and `grok` CLIs (grok-4.5), merges and verifies their findings, and presents a single ranked report — before anything is pushed. With `--fix` / `--loop` it also applies the findings you agreed with (only Claude edits; the external agents stay review-only). `--pr [<number>]` runs the same ensemble against a GitHub PR's diff and posts the gated result as a PR comment (via your own `gh` auth, after one confirmation) — no CI or API-token setup. Complementary to PR Flow's GitHub-side loop. *(Phase 5: `/swarm:review` pipeline + fix loop + PR posting.)*
 
 **Commands:** `/swarm:review [--fix | --loop[=N]] [--max]`, `/swarm:review --pr [<number>]`, `/swarm:agents` *(more to come: `/swarm:adversarial`, `/swarm:style`, `/swarm:security`)*
 

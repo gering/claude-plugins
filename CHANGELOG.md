@@ -185,6 +185,10 @@ entries are grouped per plugin, newest first.
 
 ## swarm
 
+### 0.4.3 — 2026-07-17
+- Remove the `grok-composer-2.5-fast` backend: grok CLI 0.2.101 dropped the model, so the composer voice (adapter path, defensive parser, workflow voice, docs) failed at runtime. `grok-4.5` is now the only grok model, and the ensemble is three voices (Claude lenses + codex + grok-4.5).
+- Make grok readiness model-aware: `ready`/`list` now require `grok-4.5` to appear in `grok models`, not just auth — so a dropped or renamed model reads as "not ready" with an actionable hint instead of failing mid-review. An empty/unreadable model list falls back to the auth check rather than silently dropping grok from the fan-out.
+
 ### 0.4.2 — 2026-07-15
 - Fix grok CLI 0.2.101 compat: pin `grok-4.5` (upstream renamed `grok-build`), cap grok effort at `high` (the `max` tier is gone; the adapter maps `xhigh`/`max` → `high` so stale callers degrade instead of erroring).
 
