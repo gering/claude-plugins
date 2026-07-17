@@ -19,17 +19,10 @@
 #                                 Emits key=value lines incl. one `argv=` line
 #                                 per exec word. Exit 3 if the entry's CLI is
 #                                 unavailable (still prints available=no + note).
-#   default get [--project|--global]
-#                                 No level: the EFFECTIVE default that no-flag
-#                                 /kickoff uses — project default > global
-#                                 default > the shipped fallback (claude:opus).
-#                                 --project/--global: the raw value at one level.
-#   default set <name> [--project|--global]
-#                                 Persist the default. --global (the default
-#                                 target) = per-user; --project = committed in
-#                                 the repo's .claude/, overrides global here.
-#   last    get | last    set <name>
-#                                 Per-user last-used agent (recency shortcut).
+#   default get                   Print the repo's default agent name, or empty
+#                                 if none is set (then no-flag /kickoff picks).
+#   default set <name>            Persist the default in the repo's committed
+#                                 .claude/work-system-agent.
 #
 # Launch shape per CLI (resolve builds the argv; the launch helper just execs
 # the `argv=` words, so the argv-exec path — no shell-typing race — is kept):
@@ -43,28 +36,25 @@
 #   for non-claude workers instead of faking claude-only behavior.
 #
 # State & config (override for tests / relocation):
-#   WORK_SYSTEM_AGENT_STATE          global state file (default + last)
-#                                    default: ~/.claude/work-system-agent
-#   WORK_SYSTEM_AGENT_PROJECT_STATE  project state file (default only)
+#   WORK_SYSTEM_AGENT_PROJECT_STATE  the repo's default-agent file
 #                                    default: <repo-root>/.claude/work-system-agent
-#   the shipped fallback default (no config anywhere) is claude:opus.
+#   No global state and no shipped fallback — a repo with no default gets the
+#   picker instead.
 #
 # Exit codes: 0 ok · 1 not-available / no-op · 2 usage / unknown selector ·
 #             3 resolved but the entry's CLI is unavailable
 set -euo pipefail
 
 HOME="${HOME:-$(cd ~ 2>/dev/null && pwd || echo /nonexistent)}"
-# Global (per-user) state: the `default` fallback + `last`-used agent.
-STATE_FILE="${WORK_SYSTEM_AGENT_STATE:-$HOME/.claude/work-system-agent}"
-# Project (per-repo) state: a committed `default` that overrides the global one.
-# Defaults to <repo-root>/.claude/work-system-agent; overridable for tests.
+# The ONLY persisted state: the per-repo committed `default` agent. No global
+# state, no shipped fallback — if a repo has no default, /kickoff shows the
+# picker (and offers to save the pick here). Defaults to
+# <repo-root>/.claude/work-system-agent; overridable for tests.
 PROJECT_STATE="${WORK_SYSTEM_AGENT_PROJECT_STATE:-}"
 if [ -z "$PROJECT_STATE" ]; then
   _repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
   [ -n "$_repo_root" ] && PROJECT_STATE="$_repo_root/.claude/work-system-agent"
 fi
-# Built-in fallback default when neither project nor global config sets one.
-SHIPPED_DEFAULT="claude:opus"
 GROK_AUTH_FILE="${GROK_AUTH_FILE:-$HOME/.grok/auth.json}"
 
 # The bootstrap prompt for CLIs without work-system skills (codex, grok). One
@@ -318,61 +308,20 @@ validate_name() {
     echo "unknown agent name '$1' (see \`list\`)" >&2; exit 2; }
 }
 
-effective_default() {
-  # No-flag /kickoff resolves this: project default > global default > shipped.
-  local v
-  v="$(_kv_get "$PROJECT_STATE" default)"; [ -n "$v" ] && { printf '%s\n' "$v"; return 0; }
-  v="$(_kv_get "$STATE_FILE" default)";    [ -n "$v" ] && { printf '%s\n' "$v"; return 0; }
-  printf '%s\n' "$SHIPPED_DEFAULT"
-}
-
 subcmd_default() {
-  # default get [--project|--global]  → effective, or the raw value at one level
-  # default set <name> [--project|--global]  → write (global unless --project)
-  local op="${1:-get}"; shift || true
-  local level="" name=""
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --project) level=project; shift ;;
-      --global)  level=global;  shift ;;
-      -*) echo "default: unknown flag $1" >&2; exit 2 ;;
-      *)  name="$1"; shift ;;
-    esac
-  done
-  case "$op" in
-    get)
-      case "$level" in
-        project) _kv_get "$PROJECT_STATE" default ;;
-        global)  _kv_get "$STATE_FILE" default ;;
-        "")      effective_default ;;
-      esac
-      ;;
-    set)
-      [ -n "$name" ] || { echo "default set: missing <name>" >&2; exit 2; }
-      validate_name "$name"
-      if [ "$level" = project ]; then
-        [ -n "$PROJECT_STATE" ] || { echo "default set --project: not inside a git repo (no project config location)" >&2; exit 2; }
-        _kv_set "$PROJECT_STATE" default "$name"
-      else
-        _kv_set "$STATE_FILE" default "$name"
-      fi
-      ;;
-    *) echo "default: expected get|set" >&2; exit 2 ;;
-  esac
-}
-
-subcmd_last() {
-  # last is per-user (recency), so it only ever lives in the global state file.
+  # default get         → the repo's default agent name, or empty if none set
+  # default set <name>  → persist it in the project state file
   local op="${1:-get}"; shift || true
   case "$op" in
-    get) _kv_get "$STATE_FILE" last ;;
+    get) _kv_get "$PROJECT_STATE" default ;;
     set)
       local name="${1:-}"
-      [ -n "$name" ] || { echo "last set: missing <name>" >&2; exit 2; }
+      [ -n "$name" ] || { echo "default set: missing <name>" >&2; exit 2; }
       validate_name "$name"
-      _kv_set "$STATE_FILE" last "$name"
+      [ -n "$PROJECT_STATE" ] || { echo "default set: no project config location (not inside a git repo)" >&2; exit 2; }
+      _kv_set "$PROJECT_STATE" default "$name"
       ;;
-    *) echo "last: expected get|set" >&2; exit 2 ;;
+    *) echo "default: expected get|set" >&2; exit 2 ;;
   esac
 }
 
@@ -383,7 +332,6 @@ main() {
     list)     subcmd_list "$@" ;;
     resolve)  subcmd_resolve "$@" ;;
     default)  subcmd_default "$@" ;;
-    last)     subcmd_last "$@" ;;
     -h|--help) usage ;;
     "")       usage ;;
     *)        echo "Unknown subcommand: $cmd" >&2; usage ;;

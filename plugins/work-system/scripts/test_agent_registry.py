@@ -6,7 +6,7 @@ Guards the registry's contract: alias/name/cli selector resolution, the per-CLI
 launch argv shape (claude `/continue` vs codex/grok bootstrap prompt), the
 availability probe (codex login status + grok auth file + grok model-list), the
 exit-code map (2 unknown selector, 3 resolved-but-unavailable), and the
-two-level default resolution (project > global > shipped) plus last state.
+project-default state (set/get, bogus rejection, no-git-repo error).
 
 Availability is made deterministic with fake `codex`/`grok`/`claude` stubs on a
 prepended PATH, so the test does not depend on what is really installed/authed.
@@ -68,20 +68,23 @@ class Env:
         self.grok_auth = root / "grok_auth.json"
         if grok_authed:
             self.grok_auth.write_text("{}\n")
-        self.state = self.home / ".claude" / "work-system-agent"          # global
         self.project_state = root / "repo" / ".claude" / "work-system-agent"
 
         self.env = dict(os.environ)
         self.env["PATH"] = f"{bindir}:{self.env['PATH']}"
         self.env["HOME"] = str(self.home)
         self.env["GROK_AUTH_FILE"] = str(self.grok_auth)
-        self.env["WORK_SYSTEM_AGENT_STATE"] = str(self.state)
         self.env["WORK_SYSTEM_AGENT_PROJECT_STATE"] = str(self.project_state)
 
-    def run(self, *args):
+    def run(self, *args, project_state=True):
+        env = dict(self.env)
+        if not project_state:
+            # Force the "no project config location" path: drop the override and
+            # run from a non-git cwd so `git rev-parse` finds no repo root.
+            env.pop("WORK_SYSTEM_AGENT_PROJECT_STATE", None)
         return subprocess.run(
             ["bash", str(SCRIPT), *args],
-            env=self.env, capture_output=True, text=True,
+            env=env, cwd=str(self.home), capture_output=True, text=True,
         )
 
     def close(self):
@@ -180,33 +183,31 @@ check("unlisted-model note mentions the model list",
 check("resolve --grok unavailable -> exit 3", e.run("resolve", "--grok").returncode == 3)
 e.close()
 
-# --- two-level default resolution (project > global > shipped) ------------- #
+# --- project default (the only persisted state) ---------------------------- #
 e = Env()
-# no config anywhere -> the shipped fallback (claude:opus)
-check("no config -> shipped opus", e.run("default", "get").stdout.strip() == "claude:opus")
-# global default overrides the shipped fallback
-e.run("default", "set", "claude:sonnet")
-check("global default wins over shipped", e.run("default", "get").stdout.strip() == "claude:sonnet")
-# project default overrides the global one
-e.run("default", "set", "codex:gpt-5.6-sol", "--project")
-check("project default wins over global", e.run("default", "get").stdout.strip() == "codex:gpt-5.6-sol")
-check("raw --global unchanged", e.run("default", "get", "--global").stdout.strip() == "claude:sonnet")
-check("raw --project", e.run("default", "get", "--project").stdout.strip() == "codex:gpt-5.6-sol")
-# last is per-user and independent of the default
-e.run("last", "set", "grok:grok-4.5")
-check("last persisted", e.run("last", "get").stdout.strip() == "grok:grok-4.5")
-check("last write preserves global default",
-      e.run("default", "get", "--global").stdout.strip() == "claude:sonnet")
-# bogus name rejected at both levels
-check("bogus global default rejected", e.run("default", "set", "bogus:model").returncode == 2)
-check("bogus project default rejected", e.run("default", "set", "bogus:model", "--project").returncode == 2)
-check("bogus last rejected", e.run("last", "set", "bogus:model").returncode == 2)
+# nothing set -> empty (no-flag /kickoff then shows the picker)
+check("no default set -> empty", e.run("default", "get").stdout.strip() == "")
+# set -> get round-trips, and it lands in the project state file
+e.run("default", "set", "codex:gpt-5.6-sol")
+check("default set persisted", e.run("default", "get").stdout.strip() == "codex:gpt-5.6-sol")
+check("default lives in the project file",
+      "default=codex:gpt-5.6-sol" in e.project_state.read_text())
+# overwriting replaces it
+e.run("default", "set", "claude:opus")
+check("default overwrite", e.run("default", "get").stdout.strip() == "claude:opus")
+# bogus name rejected
+check("bogus default rejected", e.run("default", "set", "bogus:model").returncode == 2)
+# no project location (not a git repo, no override) -> clear error, exit 2
+r = e.run("default", "set", "claude:opus", project_state=False)
+check("no project location -> exit 2", r.returncode == 2)
+check("no project location message", "no project config location" in r.stderr)
 e.close()
 
-# --- removed subcommands (auto / rank are gone) ---------------------------- #
+# --- removed subcommands (auto / rank / last are gone) --------------------- #
 e = Env()
 check("auto removed -> exit 2", e.run("auto").returncode == 2)
 check("rank removed -> exit 2", e.run("rank").returncode == 2)
+check("last removed -> exit 2", e.run("last", "get").returncode == 2)
 e.close()
 
 

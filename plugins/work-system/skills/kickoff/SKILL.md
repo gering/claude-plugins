@@ -35,9 +35,8 @@ CLI×model — a `--…` token is never the task name:
 
 | selector | worker |
 |----------|--------|
-| *(none)* | the **default** agent: project default → global default → shipped fallback (`claude:opus`) |
-| `--pick` | interactive picker over the available agents |
-| `--last` | the last-used agent |
+| *(none)* | the repo's **project default** if set; otherwise the interactive picker |
+| `--pick` | the interactive picker (even when a default is set) |
 | `--fable` / `--opus` | claude on fable / opus |
 | `--codex` / `--sol` | codex on gpt-5.6-terra / gpt-5.6-sol |
 | `--grok` | grok-4.5 |
@@ -46,8 +45,10 @@ CLI×model — a `--…` token is never the task name:
 This table mirrors `agent-registry.sh` for reader convenience only — **never
 hardcode it in a decision**. Step 12 resolves the selector through the script,
 which is the single source of truth for aliases, models, availability, and the
-default. The default is set with `agent-registry.sh default set <name>`
-(`--global` per-user, or `--project` committed in the repo's `.claude/`).
+project default. There is **no** global default and no shipped fallback: a repo
+with no default gets the picker, which then offers to save the pick. The default
+is a per-repo committed file (`.claude/work-system-agent`), set via
+`agent-registry.sh default set <name>`.
 
 1. **Check current location** (shared helper — robust against paths with spaces and symlinks):
    - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" linked` → `main` or `linked`.
@@ -111,25 +112,25 @@ default. The default is set with `agent-registry.sh default set <name>`
     - If they differ, **stop and report an error**: "Session CWD drifted into the worktree during kickoff — investigate which step ran a persistent `cd`." Do not silently continue; a contaminated session will mislead every subsequent command.
 
 12. **Select the worker agent** — turn the argument selector into a concrete
-    `SELECTOR`, which step 13 passes straight to the launch helper.
+    `SELECTOR`, which step 13 passes straight to the launch helper. Also set
+    `OFFER_DEFAULT=no` (flipped to `yes` only on the picker path below).
     `REG="${CLAUDE_PLUGIN_ROOT}/scripts/agent-registry.sh"`.
 
-    - **No flag → the default.** `SELECTOR="$(bash "$REG" default get)"` — the
-      helper resolves project default → global default → shipped fallback
-      (`claude:opus`), so it always prints something. This is the common path: no
-      picker, just launch the configured default.
-    - **A selector flag was given** (`--fable`, `--opus`, `--codex`, `--sol`,
-      `--grok`, or `--agent <cli[:model]>`): `SELECTOR` is that flag
-      (for `--agent`, `SELECTOR` is the `cli[:model]` value, e.g. `claude:sonnet`).
-    - **`--last`**: `SELECTOR="$(bash "$REG" last get)"`. If it prints nothing
-      (never used yet), say so and fall back to the default (`default get`).
-    - **`--pick` → interactive picker.** Run `bash "$REG" list` and present the rows
-      with **AskUserQuestion**: one option per entry, label = the `NAME`
-      (`cli:model`), description = the model plus its availability
-      (append the `NOTE`, e.g. "unavailable — run: grok login", for any row with
-      `AVAILABLE=no`). **List unavailable entries too — do not hide them** (mark
-      them), and order available ones first. The user's pick is `SELECTOR` (its
-      `NAME`).
+    - **An explicit flag was given** (`--fable`, `--opus`, `--codex`, `--sol`,
+      `--grok`, or `--agent <cli[:model]>`): `SELECTOR` is that flag (for
+      `--agent`, the `cli[:model]` value, e.g. `claude:sonnet`). One-off — no
+      default offer.
+    - **No flag:** read the repo default: `SELECTOR="$(bash "$REG" default get)"`.
+      - **Non-empty** → use it directly (the common path: no picker).
+      - **Empty** (no project default set) → fall through to the **picker** below.
+    - **`--pick`, or no flag with no default set → the picker.** Run
+      `bash "$REG" list` and present the rows with **AskUserQuestion**: one option
+      per entry, label = the `NAME` (`cli:model`), description = the model plus its
+      availability (append the `NOTE`, e.g. "unavailable — run: grok login", for
+      any row with `AVAILABLE=no`). **List unavailable entries too — do not hide
+      them** (mark them), order available first. In the **same** AskUserQuestion
+      call add a second question, "Save this as the project default?" (Yes / No).
+      Set `SELECTOR` = the picked `NAME` and `OFFER_DEFAULT` = the Yes/No answer.
 
     Do not resolve models, the default, or availability yourself — the helper owns
     that. Step 13 passes `SELECTOR` to `herdr-launch.sh`, which resolves +
@@ -175,11 +176,15 @@ default. The default is set with `agent-registry.sh default set <name>`
     parsing, graceful fallback, exit codes); do not re-implement the herdr commands
     or the resolution inline. Branch on its result:
     - **exit 0 with `moved=yes`** → the task is running in its own background tab
-      (`tab=<id>`) with worker `agent=<cli:model>`. Report success (template below),
-      then remember the pick: `bash "$REG" last set "<agent>"` (the `agent=` value).
+      (`tab=<id>`) with worker `agent=<cli:model>`. Report success (template below).
     - **exit 0 with `moved=no`** → the worker started but the tab move failed, so it
       is running as a split in *this* session's tab — tell the user it's here, not in
-      a new tab. Still record `last set "<agent>"`.
+      a new tab.
+    - **After a successful launch (either `moved=` value), if `OFFER_DEFAULT=yes`**
+      (the picker path, user chose to save): `bash "$REG" default set "<agent>"`
+      (the `agent=` value) to write the repo's committed default. Mention it, and
+      that it's an uncommitted change to `.claude/work-system-agent` to commit when
+      ready. Skip on any non-zero launch (don't persist a default that didn't run).
     - **exit 2** → unknown/invalid selector. Tell the user and re-offer the picker.
     - **exit 3** → the chosen agent is unavailable (stdout `unavailable=<name>` +
       `note=<hint>`). Report it verbatim (e.g. "codex not ready — run: codex login")

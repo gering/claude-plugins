@@ -101,15 +101,15 @@ Branches follow the pattern `task/<task-name>`:
 ```
 
 Creates a worktree, copies the task file, and opens a worker session in it. With
-no flag `/kickoff` launches your **default** agent; a flag picks another:
+no flag `/kickoff` launches the repo's **default** agent — or, if none is set,
+shows a picker and offers to save your choice as the default:
 
 ```
-> /kickoff add-dark-mode             # the default agent (project > global > claude:opus)
+> /kickoff add-dark-mode             # the project default (or picker if none set)
 > /kickoff add-dark-mode --opus      # claude on opus
 > /kickoff add-dark-mode --sol       # codex on gpt-5.6-sol
 > /kickoff add-dark-mode --grok      # grok-4.5
-> /kickoff add-dark-mode --last      # the agent you used last
-> /kickoff add-dark-mode --pick      # interactive picker
+> /kickoff add-dark-mode --pick      # force the interactive picker
 ```
 
 See [Worker agent selection](#worker-agent-selection) below for the full set.
@@ -151,32 +151,25 @@ count in its summary.
 
 `/kickoff` doesn't hardcode Claude as the worktree worker. Each agent is a
 CLI × model, with availability probed by a script (`scripts/agent-registry.sh`,
-the single source of truth). With no flag it launches your **default**; a flag
-picks another:
+the single source of truth). With no flag it launches the repo's **default**; a
+flag picks another:
 
 | flag | worker |
 |------|--------|
-| *(none)* | the default agent (project → global → shipped `claude:opus`) |
-| `--pick` | interactive picker (unavailable agents are marked, not hidden) |
-| `--last` | the agent you used last |
+| *(none)* | the repo's project default if set; otherwise the picker (which offers to save the pick) |
+| `--pick` | the interactive picker, even when a default is set (unavailable agents are marked, not hidden) |
 | `--fable` / `--opus` | claude on fable / opus |
 | `--codex` / `--sol` | codex on gpt-5.6-terra / gpt-5.6-sol |
 | `--grok` | grok-4.5 |
 | `--agent <cli[:model]>` | any registry entry, e.g. `--agent claude:sonnet` or `--agent codex` |
 
-**The default resolves in three tiers:** a **project** default committed in the
-repo's `.claude/work-system-agent` overrides a **global** per-user default in
-`~/.claude/work-system-agent`, which overrides the shipped fallback
-`claude:opus`. Set them with:
-
-```
-agent-registry.sh default set <name>            # global (per-user)
-agent-registry.sh default set <name> --project  # committed for this repo
-```
-
-`--last` is updated automatically after each kickoff. Everything is
-registry-driven — no ranking or LLM call; the default is a simple, explicit
-choice (the hook where future task-aware routing can plug in).
+**The default is a single per-repo setting** — no global default, no shipped
+fallback. It lives in a committed `.claude/work-system-agent` file, so it travels
+with the repo. Set it explicitly with `agent-registry.sh default set <name>`, or
+just let the picker offer to save your choice the first time you kickoff a task
+in a repo with no default yet. Everything is registry-driven — no ranking, no LLM
+call; the default is a simple, explicit choice (the hook where future task-aware
+routing can plug in).
 
 **Non-Claude workers degrade honestly.** codex/grok have no work-system skills,
 so a launched worker gets a bootstrap prompt (read `TASK.md`, commit, open a PR)
