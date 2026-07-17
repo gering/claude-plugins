@@ -79,7 +79,17 @@ debugging round.
     trust-auth in ~25ms — but it **warns on stderr**, because a silent skip
     would make the documented model-aware guarantee false on that host: the
     same "promise that doesn't hold at runtime" bug the composer removal exists
-    to fix. Own review caught first the uncapped branch, then the silent skip.
+    to fix.
+  - **Route every degrade through ONE audible exit.** The fix above was made
+    three times and shipped wrong twice: first the branch was uncapped, then the
+    skip was silent, then — with the docs already tightened to "never silently"
+    — `|| true` still swallowed a *failed* probe (offline / non-zero / garbage
+    output), so the strengthened promise was false on two of three routes.
+    Consecutive swarm rounds caught each. The invariant that survives: if N
+    routes end in the same degrade, they need one shared exit (`_probe_degraded`),
+    not N hand-written warnings — and "the probe ran and answered honestly"
+    (model genuinely gone → `not ready` + update-the-CLI hint) must stay
+    distinguishable from "the probe never answered" (→ trust auth + warning).
   - **Bound it with its own knob, not `SWARM_TIMEOUT`.** That caps a *review*
     (600s, and `0` disables it entirely) — useless for a probe that `list`
     blocks on. `SWARM_PROBE_TIMEOUT` (10s) is separate, and a malformed or `0`

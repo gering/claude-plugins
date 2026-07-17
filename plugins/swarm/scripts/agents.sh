@@ -146,11 +146,17 @@ SANDBOX_CMD=()
 _sandbox_warned=""
 _sandbox_ready=""
 _init_sandbox() {
-  # Lazy, per-backend (needs python3 for realpath). One backend per process, so
-  # building once is fine.
-  [[ -n "$_sandbox_ready" ]] && return
-  _sandbox_ready=1
+  # Lazy, per-backend (needs python3 for realpath). Memoized ON THE BACKEND, not
+  # a bare "already built" flag: the profile encodes which cred dir stays
+  # readable, so reusing another backend's jail would deny a backend its OWN
+  # token and leave a sibling's readable — the exact cross-backend theft the
+  # denylist prevents. "One backend per process" held when only run_* built a
+  # jail; the readiness probe added a second entry point (_build_jail grok), so
+  # rebuild whenever the backend changes rather than trusting that invariant.
   local backend="${1:-}"
+  [[ "$_sandbox_ready" == "$backend" ]] && return
+  _sandbox_ready="$backend"
+  SANDBOX_CMD=()
   if command -v sandbox-exec >/dev/null; then
     # Build the deny profile via python: realpath each path (defeats symlinks
     # like /tmp→/private/tmp, /etc→/private/etc — sandbox-exec matches the
@@ -303,7 +309,13 @@ PROBE_TIMEOUT="${SWARM_PROBE_TIMEOUT:-10}"
 # fetch at most once).
 _grok_models_done=""
 _grok_models=""
-_grok_probe_skipped=""
+_probe_degraded() {
+  # The ONE exit for every "the model check did not happen" route. Each one ends
+  # in the same trust-auth degrade, so each one must be equally audible: the
+  # docs promise the check "never silently" falls back, and a promise that holds
+  # on only one of three routes is exactly the runtime-lie this branch removes.
+  echo "warning: grok model probe unavailable ($1) — readiness falls back to auth alone; the ${GROK_DEFAULT_MODEL} check did not run" >&2
+}
 grok_model_fetch() {
   # Populates the cache globals. Call it DIRECTLY — never as `$(grok_model_fetch)`:
   # a command substitution runs it in a subshell, the assignments die with that
@@ -316,19 +328,18 @@ grok_model_fetch() {
   fi
   if [[ -z "$to" ]]; then
     # `ready`/`list` were purely local before this probe, so it must never be the
-    # thing that hangs them: with no way to bound the call, skip it and degrade
-    # to auth-only. SAY so — a silent skip would make the documented model-aware
-    # guarantee a lie on this host, which is the same "promise that doesn't hold
-    # at runtime" bug this whole change exists to remove.
-    _grok_probe_skipped=1
-    echo "warning: no timeout/gtimeout on PATH — skipping the grok model probe; grok readiness falls back to auth alone (install coreutils to restore the ${GROK_DEFAULT_MODEL} check)" >&2
+    # thing that hangs them: with no way to bound the call, skip it rather than
+    # run it uncapped.
+    _probe_degraded "no timeout/gtimeout on PATH — install coreutils to restore it"
     return 0
   fi
   # Same jail as every other external call (env secret filter + read-deny), with
   # the probe's own short bound instead of sandboxed()'s review-length one.
   _build_jail grok
-  local raw
-  raw="$("$to" "$PROBE_TIMEOUT" "${JAIL_CMD[@]}" grok models </dev/null 2>/dev/null || true)"
+  local raw rc=0
+  # Capture the status instead of `|| true`: a swallowed failure here would
+  # degrade to auth-only with no signal — the gap that shipped in the first cut.
+  raw="$("$to" "$PROBE_TIMEOUT" "${JAIL_CMD[@]}" grok models </dev/null 2>/dev/null)" || rc=$?
   # Pull the model id out of each bullet line by SHAPE, not position: the
   # documented form is "  * grok-4.5 (default)", but keying on $2 would turn a
   # reworded line ("  * default: grok-4.5") into a non-empty list of garbage
@@ -337,6 +348,12 @@ grok_model_fetch() {
   # id-shaped token contributes nothing → empty list → the trust-auth degrade.
   _grok_models="$(printf '%s\n' "$raw" \
     | awk '/^[[:space:]]*\*/ { for (i = 1; i <= NF; i++) if ($i ~ /^grok-/) print $i }')"
+  if [[ -z "$_grok_models" ]]; then
+    if (( rc == 124 )); then _probe_degraded "\`grok models\` timed out after ${PROBE_TIMEOUT}s"
+    elif (( rc != 0 )); then _probe_degraded "\`grok models\` failed (rc=$rc)"
+    else _probe_degraded "\`grok models\` returned no model ids — output format may have changed"
+    fi
+  fi
 }
 
 grok_model_offered() {
