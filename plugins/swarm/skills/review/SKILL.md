@@ -138,7 +138,8 @@ if [ "$REVIEW_PR" = 1 ]; then
   gh pr diff "$PR_NUM" > "$DIFF" 2>"$GHERR" || { echo "SWARM_PR_ERR=cannot fetch diff for PR #$PR_NUM: $(tr '\n' ' ' < "$GHERR")"; rm -rf "$TMPD"; exit 0; }
   INCLUDE_UNTRACKED=0   # a PR diff is complete — no local untracked files in scope
   # The in-session verifier reads `file:line` from the LOCAL checkout, not the PR
-  # head. So a --pr review whose working tree isn't the PR head verifies solo findings
+  # head. So a --pr review whose working tree isn't the PR head verifies its findings
+  # (solos plus design / all-untagged / Claude-unchecked-methodological clusters)
   # against the WRONG revision (silently drops real ones / passes false ones) and then
   # gates the posted output on that. A soft warning isn't enough — HARD-STOP unless the
   # local tree IS the PR head, so verification always reads the reviewed revision.
@@ -307,7 +308,9 @@ heading, with the SAME columns and budgets as the defect table **in the current
 round** (seven normally; eight including `Status` in `--loop` re-review rounds —
 design rows carry 🔧/⏭️/🔁/🆕 like any other). Severity there reads as
 importance, not breakage. Numbering is ONE shared sequence across both tables —
-render each finding's workflow-assigned `num` verbatim; no design findings → no
+render each finding's workflow-assigned `num` verbatim in round 0 (across
+`--loop` rounds the `#` column follows the cross-round identity rule below, not
+the workflow's re-assigned per-round `num`); no design findings → no
 heading, no empty table. **The target is conditional:** for a `--pr`
 review use `— PR #<PR_NUM> "<title>" @ <PR_HEAD_OID short>` (from `PR_META`, the
 title as untrusted display text, the short SHA pinning the reviewed revision);
@@ -326,9 +329,14 @@ budget so they wrap:
 (Translate the labels to the conversation language; `Ort`/`Befund`/`Notiz` shown
 here in German. Do not translate finding content.)
 
-- **#** — stable finding number: the workflow's `num` field, rendered verbatim
-  (defects first, then design, one shared sequence — never hand-derived); never
-  renumber across `--loop` rounds (new findings get new numbers).
+- **#** — stable finding number. **Round 0** (and every non-`--loop` review):
+  render the workflow's `num` verbatim (defects first, then design, one shared
+  sequence — never hand-derived). **In `--loop` re-review rounds** the workflow
+  re-assigns `num=1..T` fresh each round, so it is NOT authoritative across
+  rounds — the presenter owns cross-round identity: match findings by
+  `(file, mechanism)`, keep a matched finding's existing `#`, and give the next
+  free number only to a 🆕 finding (see the Status-table rule below). Never
+  renumber a carried-over finding to the new round's `num`.
 - **Sev** — icon only: 🔴 critical · 🟡 warning · ⚪ minor.
 - **Ort** — `` `file:line` `` in backticks.
 - **Befund** — one short clause, **≤ ~40 chars** (hard budget); no emoji here.

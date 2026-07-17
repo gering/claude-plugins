@@ -9,7 +9,9 @@ but two runtime surfaces hand-mirror it and cannot be derived at runtime:
   - the SKILL.md external-prompt HDR ("Cover ALL of these lenses: ...") — a
     lens missing there is never reviewed by codex/grok, so cross-family
     consensus can silently never form on it;
-  - pr-post.py's DESIGN_LENSES — the backup kind signal for posted rows.
+  - swarm-review.js's METHODOLOGICAL_LENSES — the hand-maintained verify-gating
+    subset of the breakage cluster; a methodological lens missing here stops
+    being verified on a cross-family external consensus.
 
 Prose DRIFT WARNINGs mark both mirrors; this test makes the sync mechanical
 (the same pattern as test_pr_post.py for the publish path).
@@ -72,24 +74,24 @@ if hm:
             hdr_lenses.add(lm.group(1))
 check("SKILL.md HDR lenses == LENS_CLUSTERS lenses", hdr_lenses == set(cluster_lenses))
 
-# METHODOLOGICAL_LENSES: the verify-gating list must name only real lenses, or a
-# rename in LENS_CLUSTERS would silently orphan it (a methodological consensus
-# would stop being verified). Pin it as a subset of the cluster lens set.
+# METHODOLOGICAL_LENSES: the verify-gating list of breakage-cluster lenses that
+# assert repo-wide facts (everything in `breakage` EXCEPT the diff-local topical
+# `correctness`). A COMPLETENESS check, not just a subset: a new methodological
+# lens added to `breakage` but forgotten here would silently stop being verified
+# on a cross-family external consensus (the correlated-hallucination hole the
+# constant exists to close), and green CI would give false assurance. Coupling it
+# to `breakage - {correctness}` forces a conscious test edit either way — add a
+# methodological lens and it must appear here; add a topical one and it must be
+# named in the exclusion below.
+TOPICAL_BREAKAGE = {"correctness"}
 mm = re.search(r"const METHODOLOGICAL_LENSES = \[([^\]]*)\]", js)
 check("workflow: METHODOLOGICAL_LENSES found", mm)
 methodological = set(re.findall(r"'([a-z][a-z-]*)'", mm.group(1) if mm else ""))
 check("METHODOLOGICAL_LENSES non-empty", bool(methodological))
 check(
-    "METHODOLOGICAL_LENSES subset of LENS_CLUSTERS lenses",
-    methodological <= set(cluster_lenses),
+    "METHODOLOGICAL_LENSES == breakage cluster minus topical lenses",
+    methodological == set(clusters.get("breakage", [])) - TOPICAL_BREAKAGE,
 )
-
-# pr-post.py DESIGN_LENSES mirror == LENS_CLUSTERS.design.
-pp = PR_POST.read_text(encoding="utf-8")
-dm = re.search(r"DESIGN_LENSES = \{([^}]*)\}", pp)
-check("pr-post: DESIGN_LENSES found", dm)
-design = set(re.findall(r'"([a-z-]+)"', dm.group(1) if dm else ""))
-check("pr-post DESIGN_LENSES == LENS_CLUSTERS.design", design == set(clusters.get("design", [])))
 
 if FAILS:
     print("lens-sync tests FAILED:", file=sys.stderr)

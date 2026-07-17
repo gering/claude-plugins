@@ -147,17 +147,18 @@ check("defect befund not prefixed", "&#91;correctness&#93;" not in kbody)
 # design row without a lens falls back to the [design] prefix
 nolens = pr_post.render_body({"rows": [{"num": "1", "befund": "x", "kind": "design"}]})
 check("design w/o lens -> [design]", "&#91;design&#93; x" in nolens)
-# kind lost in the handoff: a design LENS is the backup signal -> design row
+# kind lost in the handoff: the lens is NOT a backup signal — a dropped kind
+# falls to defect (safe bucket), NEVER guessed 'design' from a design lens (that
+# could hide a reclassified/mixed-cluster bug in the Design table). No [reuse]
+# prefix, no design bucketing.
 lensonly = pr_post.render_body({"rows": [{"num": "1", "befund": "y", "lens": "reuse"}]})
-check("lens-only reuse -> design, prefixed", "&#91;reuse&#93; y" in lensonly)
+check("lens-only reuse -> defect (no lens guess)", "&#91;" not in lensonly and " y " in lensonly)
 junk = pr_post.render_body({"rows": [{"num": "1", "befund": "y", "kind": 42, "lens": "reuse"}]})
-check("junk kind + design lens -> design", "&#91;reuse&#93; y" in junk)
-# an explicit defect kind WINS over a design lens (mixed-cluster defect vote)
+check("junk kind + design lens -> defect", "&#91;" not in junk and " y " in junk)
+# an explicit defect kind stays a defect even with a design lens (mixed-cluster
+# defect vote / reclassified bug) — the bug is never re-promoted into Design.
 expl = pr_post.render_body({"rows": [{"num": "1", "befund": "z", "kind": "defect", "lens": "reuse"}]})
-check("explicit defect beats design lens", "&#91;" not in expl and " z " in expl)
-# junk kind + non-design lens stays a defect (safe bucket)
-junk2 = pr_post.render_body({"rows": [{"num": "1", "befund": "w", "kind": 42, "lens": "correctness"}]})
-check("junk kind + defect lens -> defect", "&#91;" not in junk2 and " w " in junk2)
+check("explicit defect keeps a design lens in defects", "&#91;" not in expl and " z " in expl)
 # an attacker-shaped lens value goes through the full cell sanitizer
 evil = pr_post.render_body({"rows": [{"num": "1", "befund": "z", "kind": "design", "lens": "x|@y"}]})
 check("evil lens sanitized", "&#91;x&#124;&#64;y&#93; z" in evil and "@y" not in evil)

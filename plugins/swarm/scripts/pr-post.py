@@ -37,14 +37,17 @@ Every finding cell (ort/befund/quelle/notiz) and the title are attacker-
 influenced. `sev`/`v`/`num` are model glyphs; they pass through the same
 sanitizer unharmed (glyphs contain none of the neutralized characters).
 
-Row `kind`/`lens` are optional pass-throughs from the workflow's findings:
-`kind: "design"` rows render AFTER all defect rows (design suggestions must not
-dilute the defect ranking) and their finding cell gets a visible `[lens]`
-prefix — ordering + prefixing are enforced HERE, deterministically, so the
-caller passes rows through verbatim and never hand-orders or hand-prefixes
-(the prose version of that rule is exactly the drift class this script exists
-to close). Any other/missing `kind` is a defect — the safe bucket, matching
-the workflow's lensKind derivation.
+Row `kind`/`lens` are pass-throughs from the workflow's findings: `kind:
+"design"` rows render AFTER all defect rows (design suggestions must not dilute
+the defect ranking) and their finding cell gets a visible `[lens]` prefix —
+ordering + prefixing are enforced HERE, deterministically, so the caller passes
+rows through verbatim and never hand-orders or hand-prefixes (the prose version
+of that rule is exactly the drift class this script exists to close). Bucketing
+keys on `kind` ALONE: anything other than an explicit `"design"` — including a
+missing/dropped kind — is a defect, the safe bucket. The lens is NOT a fallback
+signal (it can't tell a genuine design row that lost its kind from a defect
+carrying a design lens, so guessing from it could hide a bug in the Design
+table); the workflow emits kind on every finding, so a real design row has it.
 
 Exit-code convention (matches loop-closeout.py + the skill's step-1 block):
   operational outcomes (stale head, unverifiable head, gh missing, post failure)
@@ -193,23 +196,17 @@ def _safe_pr_num(pr_num):
     return sanitize_prose(pr_num)
 
 
-# DRIFT WARNING: hand-mirrors LENS_CLUSTERS.design in workflows/swarm-review.js
-# (edit together; test_lens_sync.py asserts the two sets stay equal).
-DESIGN_LENSES = {"reuse", "simplification", "efficiency", "altitude"}
-
-
 def _row_kind(r: dict) -> str:
-    """Row kind. 'design' when explicitly tagged; an explicit 'defect' always
-    wins (the workflow's kind vote can defect a mixed cluster whose dominant
-    lens is a design lens). With kind missing/junk — the model-mediated step-5
-    handoff can drop it — the LENS is the backup signal: a design lens implies
-    design, anything else is a defect (the safe bucket)."""
-    kind = str(r.get("kind") or "").strip().lower()
-    if kind == "design":
-        return "design"
-    if kind != "defect" and str(r.get("lens") or "").strip().lower() in DESIGN_LENSES:
-        return "design"
-    return "defect"
+    """Row kind. 'design' ONLY when explicitly tagged `kind: "design"`; anything
+    else — including a missing/junk kind — is a defect, the safe bucket. The lens
+    is deliberately NOT a backup signal: a lens can't distinguish a genuine design
+    row that dropped its kind from a defect that keeps a design lens (a mixed
+    cluster resolved to defect with a design plurality lens, or a reclassified
+    bug), so guessing 'design' from the lens could hide a real defect in the
+    Design table. Hiding a bug is worse than showing a suggestion among defects,
+    so an absent kind falls to defect — the workflow emits kind on every finding
+    and step 5 passes it through, so a real design row carries it explicitly."""
+    return "design" if str(r.get("kind") or "").strip().lower() == "design" else "defect"
 
 
 def render_body(data: dict) -> str:
