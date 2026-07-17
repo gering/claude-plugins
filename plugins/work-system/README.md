@@ -28,7 +28,7 @@ Generic task and worktree workflow system for Claude Code. Manage tasks as markd
 | Command | Description |
 |---------|-------------|
 | `/define` | Create a new task (markdown file with Goal/Context/Requirements) |
-| `/kickoff` | Start a task in an isolated git worktree |
+| `/kickoff` | Start a task in an isolated git worktree, with a choice of worker agent (Claude/codex/grok) |
 | `/adopt` | Adopt an existing branch into the work system |
 | `/continue` | Resume the current task (in a worktree); or `/continue <task>` from the main session reopens the task's herdr tab and resumes it |
 | `/status` | Check task status (PRs, branches, commits) |
@@ -100,7 +100,19 @@ Branches follow the pattern `task/<task-name>`:
 > /kickoff
 ```
 
-Creates a worktree, copies the task file, and shows how to open a new Claude session in it.
+Creates a worktree, copies the task file, and opens a worker session in it. By
+default `/kickoff` shows a **picker** of the available worker agents; a flag
+skips it:
+
+```
+> /kickoff add-dark-mode --opus      # claude on opus
+> /kickoff add-dark-mode --sol       # codex on gpt-5.6-sol
+> /kickoff add-dark-mode --grok      # grok-4.5
+> /kickoff add-dark-mode --auto      # first available, by a configurable ranking
+> /kickoff add-dark-mode --last      # the agent you used last
+```
+
+See [Worker agent selection](#worker-agent-selection) below for the full set.
 
 ### 3. Continue in the worktree
 
@@ -135,6 +147,38 @@ once to commit **and** fast-forward-push it to `main` (so local `main` never
 diverges; a failed push just leaves the commit local). `/list` shows the archived
 count in its summary.
 
+## Worker agent selection
+
+`/kickoff` doesn't hardcode Claude as the worktree worker. At kickoff time you
+pick from the **known, available agents** — each a CLI × model, with
+availability probed by a script (`scripts/agent-registry.sh`, the single source
+of truth). With no flag you get an interactive picker; a flag skips it:
+
+| flag | worker |
+|------|--------|
+| *(none)* | interactive picker (unavailable agents are marked, not hidden) |
+| `--auto` | first available agent in a configurable ranking (deterministic, not an LLM pick) |
+| `--default` | your configured default |
+| `--last` | the agent you used last |
+| `--fable` / `--opus` | claude on fable / opus |
+| `--codex` / `--sol` | codex on gpt-5.6-terra / gpt-5.6-sol |
+| `--grok` / `--composer` | grok-4.5 / grok-composer-2.5-fast |
+| `--agent <cli[:model]>` | any registry entry, e.g. `--agent claude:sonnet` or `--agent codex` |
+
+State and ranking live in `~/.claude/work-system-agent` (default/last) and are
+overridable via `WORK_SYSTEM_AGENT_RANK[_FILE]`. The shipped `--auto` ranking
+prefers `claude:fable → claude:opus → codex:sol → …`; it is the hook where
+future task-aware routing can plug in.
+
+**Non-Claude workers degrade honestly.** codex/grok have no work-system skills,
+so a launched worker gets a bootstrap prompt (read `TASK.md`, commit, open a PR)
+instead of `/continue`. Everything git/PR-derived (`/status`, `/list`, the
+`[ws]` statusline, `/close`'s tab teardown) works for any worker; only
+claude-session concepts differ — `/continue`'s reopen resumes a claude worker
+with `claude -c`, while a codex/grok task resumes with `codex resume --last` /
+`grok -c`. Since both CLIs read `AGENTS.md`, dropping a short `AGENTS.md` note
+into the worktree is an optional way to give them standing task guidance.
+
 ## herdr integration
 
 When you run the work system inside a **herdr** session (herdr is a terminal
@@ -152,13 +196,15 @@ instructions — it opens a new herdr **tab** in the *same* workspace, with the
 worktree as its cwd, and starts the task there for you:
 
 - The tab is **named after the task** (shortened for a readable sidebar — see
-  `skills/kickoff/SKILL.md` step 12 for the exact rule), so the sidebar shows one
-  clear entry per task instead of a wall of identical `claude` agents. The same
-  short label names the herdr agent and the Claude session; the underlying
-  `task/<name>` branch is unchanged, so `/continue` still resolves the task.
-- Claude is launched directly (`herdr agent start … -- claude -n "<label>"
-  "/continue"`), so the real `claude` process is what herdr's agent-state
-  detection sees, and `/continue` loads the task context automatically on startup.
+  `skills/kickoff/SKILL.md` step 13 for the exact rule), so the sidebar shows one
+  clear entry per task instead of a wall of identical agents. The same short label
+  names the herdr agent (and, for a claude worker, the `-n` session); the
+  underlying `task/<name>` branch is unchanged, so `/continue` still resolves the task.
+- The chosen worker is launched directly as argv (`herdr agent start … --
+  <resolved worker command>`), so the real CLI process is what herdr's agent-state
+  detection sees. A claude worker gets `claude --model <m> -n "<label>" "/continue"`
+  and loads the task context automatically; a codex/grok worker gets a bootstrap
+  prompt (read `TASK.md`, drive the task to a PR) since they have no work-system skills.
 - The new tab opens in the background (`--no-focus`), so your kickoff session
   stays in front; switch to the tab when you're ready to work there.
 

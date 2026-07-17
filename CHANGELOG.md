@@ -52,6 +52,9 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.9.0 — 2026-07-17
+- `/kickoff` no longer hardcodes Claude as the worktree worker. At kickoff you pick a worker agent (CLI × model) — an interactive picker by default, or a flag: `--auto`/`--default`/`--last`, `--fable`/`--opus`, `--codex`/`--sol`, `--grok`, or `--agent <cli[:model]>`. New `scripts/agent-registry.sh` is the single source of truth (registry-driven aliases, per-CLI availability probe, launch-argv resolution, `default`/`last` state, and a configurable `--auto` ranking); `herdr-launch.sh` execs the resolved worker argv instead of a hardcoded `claude`. Non-Claude workers degrade honestly: they get a bootstrap prompt (read `TASK.md`, drive to a PR) instead of `/continue`, `/close` teardown stays CLI-agnostic, and `/continue`'s reopen documents the per-CLI resume command. Covered by `test_agent_registry.py`.
+
 ### 1.8.1 — 2026-07-17
 - Mark the main-repo session in the herdr sidebar: a tab sitting exactly at the main repo root is now prefixed with `◉` — the Manager hub among the `○ ● ◇ ◆ ✓` task satellites. Stateless and non-exclusive (it marks the location, so every tab at the root gets it), stamped by the existing `refresh` sweep — no new trigger. The chosen tab label is preserved (prefix only) and `◉` joins the idempotency strip, so hub↔task moves swap glyphs cleanly.
 - Fix: state-glyph refreshes never reached the sidebar. herdr keeps two names per tab — the tab label (what the sidebar renders) and the agent registry's own name — and 1.8.0's `refresh` rewrote the latter, so a tab kept its launch-time glyph forever (a task sat at `●` while its PR was in review). `refresh` now rewrites the tab label, joining `herdr agent list` (carries `cwd`) with `herdr tab list` (carries `label`).
