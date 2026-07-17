@@ -1,9 +1,9 @@
 ---
 title: "Swarm Backend Adapter Layer"
 createdAt: 2026-07-03
-updatedAt: 2026-07-15
+updatedAt: 2026-07-17
 createdFrom: "PR #21"
-updatedFrom: "session: 2026-07-15"
+updatedFrom: "PR #37"
 pluginVersion: 1.8.2
 prime: false
 reindexedAt: 2026-07-12
@@ -57,12 +57,15 @@ debugging round.
   grok-4.5 in `grok models` (grok is the one backend with a usable model-list
   command; codex has none, so its model is trusted). The gotchas, all live-
   verified:
-  - **Parse the bullet list by SHAPE, not position**: lines read
-    `  * grok-4.5 (default)`, but keying on `$2` turns a reworded line
-    (`  * default: grok-4.5`) into a non-empty list of garbage tokens — which
-    reads as "the model is gone" and fails closed. Match `grok-*` anywhere in a
-    bullet line instead; a line with no id-shaped token then contributes
-    nothing, landing in the trust-auth degrade below.
+  - **Parse the bullet list by SHAPE, not position — and match the id
+    SUBSTRING, not the field.** Lines read `  * grok-4.5 (default)`, but keying
+    on `$2` turns a reworded line (`  * default: grok-4.5`) into garbage tokens
+    that read as "the model is gone" and fail closed. Matching whole
+    whitespace-fields starting `grok-` fixes that but still drags glued-on
+    punctuation along (`grok-4.5,`, `` `grok-4.5` ``, ANSI codes), which breaks
+    the exact-match the same way. Extract with a pattern ending on
+    alphanumerics (`grok-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*`); a line with no
+    id-shaped token then contributes nothing, landing in the trust-auth degrade.
   - **Match without a pipe to `grep -q`**: an early-exiting `grep -q` can
     SIGPIPE the writer, and under `set -o pipefail` a *hit* would then report
     failure. Newline-fence the list and use a `case` substring match.
@@ -80,16 +83,28 @@ debugging round.
     would make the documented model-aware guarantee false on that host: the
     same "promise that doesn't hold at runtime" bug the composer removal exists
     to fix.
-  - **Route every degrade through ONE audible exit.** The fix above was made
-    three times and shipped wrong twice: first the branch was uncapped, then the
-    skip was silent, then — with the docs already tightened to "never silently"
-    — `|| true` still swallowed a *failed* probe (offline / non-zero / garbage
-    output), so the strengthened promise was false on two of three routes.
-    Consecutive swarm rounds caught each. The invariant that survives: if N
-    routes end in the same degrade, they need one shared exit (`_probe_degraded`),
-    not N hand-written warnings — and "the probe ran and answered honestly"
-    (model genuinely gone → `not ready` + update-the-CLI hint) must stay
-    distinguishable from "the probe never answered" (→ trust auth + warning).
+  - **Route every degrade through ONE audible exit.** This one spot was fixed
+    across FOUR consecutive swarm rounds, each catching the previous round's
+    miss: (1) the no-timeout branch ran uncapped; (2) it was capped but skipped
+    *silently*, while the docs were tightened to "never silently"; (3) `|| true`
+    still swallowed a *failed* probe, so the strengthened promise was false on
+    two of three routes; (4) with warnings finally on every route, `rc` was only
+    read **when the list came back empty** — so a probe killed mid-stream with
+    partial output skipped the degrade entirely and its truncated list was
+    treated as authoritative ("model gone", update an already-current CLI).
+    The invariants that survive:
+      - If N routes end in the same degrade, they need **one shared exit**
+        (`_probe_degraded`), not N hand-written warnings. The same rule applies
+        to the no-jail warning: it belongs in `_build_jail` (where the condition
+        arises), not in one of its two callers.
+      - **Check `rc` before the output, and discard partial output.** Only a
+        clean exit is an answer; anything else is a degrade.
+      - "The probe answered honestly" (model genuinely gone → `not ready` +
+        update-the-CLI hint) must stay distinguishable from "the probe never
+        answered" (→ trust auth + warning).
+    The meta-lesson: a fix that keeps coming back is a shape problem, not a
+    patch problem — this converged only once the branching collapsed to
+    rc-first + one exit.
   - **Bound it with its own knob, not `SWARM_TIMEOUT`.** That caps a *review*
     (600s, and `0` disables it entirely) — useless for a probe that `list`
     blocks on. `SWARM_PROBE_TIMEOUT` (10s) is separate, and a malformed or `0`
@@ -98,7 +113,13 @@ debugging round.
     a networked third-party binary on a path that previously ran none, so it
     goes through the same env-secret filter + read-deny jail. `sandboxed()`
     can't be reused as-is (it hard-wires the review-length cap), hence
-    `_build_jail` — the jail prefix without the timeout, shared by both.
+    `_build_jail` — the jail prefix without the timeout, shared by both. Two
+    traps this split created, both caught by review: the no-jail warning must
+    live in `_build_jail`, or the probe runs unjailed and silent on a host
+    without sandbox-exec/bwrap; and `_init_sandbox`'s memo must key on the
+    **backend** (with a sentinel no backend name equals), or the second entry
+    point pins the jail to whichever backend built it first — handing one
+    backend another's cred dir.
   - **Memoize by call convention, not by wishing.** `list="$(grok_model_list)"`
     runs the function in a *subshell*, so its cache-global assignments vanish
     and every caller silently re-pays the network call. The cache only works if

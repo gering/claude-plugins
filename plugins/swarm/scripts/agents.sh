@@ -144,7 +144,11 @@ _sandbox_deny_paths() {
 
 SANDBOX_CMD=()
 _sandbox_warned=""
-_sandbox_ready=""
+# Sentinel no backend name can equal: the memo below compares against the
+# backend, so an empty initial value would collide with an empty/unset argument
+# and skip jail construction entirely — failing OPEN, the one direction a
+# sandbox must never fail.
+_sandbox_ready="<none>"
 _init_sandbox() {
   # Lazy, per-backend (needs python3 for realpath). Memoized ON THE BACKEND, not
   # a bare "already built" flag: the profile encodes which cred dir stays
@@ -212,8 +216,16 @@ _build_jail() {
   # Split out of sandboxed() so the readiness probe can reuse the SAME jail while
   # keeping its own short bound (sandboxed() hard-wires ADAPTER_TIMEOUT, which is
   # a review-length cap, not a probe-length one).
+  # The no-jail warning lives HERE, not in sandboxed(): both callers reach the
+  # same "runs unjailed" condition, so both must announce it. Putting it in one
+  # caller is how the probe ended up running a networked binary unjailed and
+  # silent.
   local backend="$1"
   _init_sandbox "$backend"
+  if ((${#SANDBOX_CMD[@]} == 0)) && [[ -z "$_sandbox_warned" ]]; then
+    echo "warning: no sandbox-exec/bwrap — external calls run without an OS read-deny jail (secret scrub + env filter still apply)" >&2
+    _sandbox_warned=1
+  fi
   local env_args=() _e
   while IFS= read -r _e; do env_args+=("$_e"); done < <(_env_filter_args)
   JAIL_CMD=(env ${env_args[@]+"${env_args[@]}"} ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"})
@@ -221,13 +233,9 @@ _build_jail() {
 
 sandboxed() {
   # OS jail + env filter around an external call. $1 = backend (its own cred dir
-  # stays readable; siblings' are denied). Warn once if no jail is available.
+  # stays readable; siblings' are denied).
   local backend="$1"; shift
   _build_jail "$backend"
-  if ((${#SANDBOX_CMD[@]} == 0)) && [[ -z "$_sandbox_warned" ]]; then
-    echo "warning: no sandbox-exec/bwrap — external calls run without an OS read-deny jail (secret scrub + env filter still apply)" >&2
-    _sandbox_warned=1
-  fi
   # order: timeout → env (strip secrets) → sandbox-exec (jail) → backend
   with_timeout "${JAIL_CMD[@]}" "$@"
 }
@@ -338,21 +346,36 @@ grok_model_fetch() {
   _build_jail grok
   local raw rc=0
   # Capture the status instead of `|| true`: a swallowed failure here would
-  # degrade to auth-only with no signal — the gap that shipped in the first cut.
+  # degrade to auth-only with no signal.
   raw="$("$to" "$PROBE_TIMEOUT" "${JAIL_CMD[@]}" grok models </dev/null 2>/dev/null)" || rc=$?
+  # Check rc BEFORE looking at the output, and discard whatever arrived: a probe
+  # killed mid-stream (timeout) or erroring late can still have flushed a PARTIAL
+  # list. Reading that as authoritative is worse than not probing — a truncated
+  # list missing grok-4.5 reports "model gone" and tells the user to update an
+  # already-current CLI. Only a clean exit produces an answer; everything else is
+  # a degrade.
+  if (( rc != 0 )); then
+    if (( rc == 124 )); then _probe_degraded "\`grok models\` timed out after ${PROBE_TIMEOUT}s"
+    else _probe_degraded "\`grok models\` failed (rc=$rc)"
+    fi
+    return 0
+  fi
   # Pull the model id out of each bullet line by SHAPE, not position: the
   # documented form is "  * grok-4.5 (default)", but keying on $2 would turn a
-  # reworded line ("  * default: grok-4.5") into a non-empty list of garbage
-  # tokens — which reads as "grok-4.5 is gone" and fails closed. Matching
-  # `grok-*` anywhere in the line survives that drift, and a line with no
-  # id-shaped token contributes nothing → empty list → the trust-auth degrade.
-  _grok_models="$(printf '%s\n' "$raw" \
-    | awk '/^[[:space:]]*\*/ { for (i = 1; i <= NF; i++) if ($i ~ /^grok-/) print $i }')"
+  # reworded line ("  * default: grok-4.5") into garbage tokens — which read as
+  # "grok-4.5 is gone" and fail closed. Match the id SUBSTRING (not the raw
+  # field) so glued-on punctuation — "grok-4.5," / "grok-4.5." / backticks /
+  # ANSI codes — doesn't ride along and break the exact-match below. The id
+  # pattern ends on alphanumerics, so a trailing separator is never captured.
+  # A line with no id-shaped token contributes nothing → empty list → degrade.
+  _grok_models="$(printf '%s\n' "$raw" | awk '
+    /^[[:space:]]*\*/ {
+      for (i = 1; i <= NF; i++)
+        if (match($i, /grok-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*/))
+          print substr($i, RSTART, RLENGTH)
+    }')"
   if [[ -z "$_grok_models" ]]; then
-    if (( rc == 124 )); then _probe_degraded "\`grok models\` timed out after ${PROBE_TIMEOUT}s"
-    elif (( rc != 0 )); then _probe_degraded "\`grok models\` failed (rc=$rc)"
-    else _probe_degraded "\`grok models\` returned no model ids — output format may have changed"
-    fi
+    _probe_degraded "\`grok models\` returned no model ids — output format may have changed"
   fi
 }
 

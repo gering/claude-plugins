@@ -1,9 +1,9 @@
 ---
 title: "Swarm Review Pipeline (/swarm:review)"
 createdAt: 2026-07-08
-updatedAt: 2026-07-15
+updatedAt: 2026-07-17
 createdFrom: "PR #24"
-updatedFrom: "session: 2026-07-15"
+updatedFrom: "PR #37"
 pluginVersion: 1.8.2
 prime: false
 reindexedAt: 2026-07-12
