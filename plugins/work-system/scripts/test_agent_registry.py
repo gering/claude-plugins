@@ -32,7 +32,8 @@ def check(name, cond):
 class Env:
     """A throwaway HOME + fake-bin sandbox controlling CLI availability."""
 
-    def __init__(self, codex_authed=True, grok_authed=True, rank=None):
+    def __init__(self, codex_authed=True, grok_authed=True, rank=None,
+                 grok_models=("grok-4.5",)):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
         self.home = root / "home"
@@ -46,9 +47,21 @@ class Env:
             'if [ "$1" = "login" ] && [ "$2" = "status" ]; then exit %d; fi\n'
             "exit 0\n" % codex_rc
         )
-        # grok/claude stubs: only ever hit by `command -v`; auth is file-based.
-        for name in ("grok", "claude"):
-            (bindir / name).write_text("#!/bin/sh\nexit 0\n")
+        # grok stub: `models` prints a `grok models`-shaped list (drives the
+        # model-level availability probe); other calls just exit 0 (command -v).
+        model_lines = "".join(
+            '  echo "  * %s"\n' % m for m in grok_models
+        )
+        (bindir / "grok").write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "models" ]; then\n'
+            "%s"
+            "  exit 0\n"
+            "fi\n"
+            "exit 0\n" % model_lines
+        )
+        # claude stub: only ever hit by `command -v`.
+        (bindir / "claude").write_text("#!/bin/sh\nexit 0\n")
         for f in bindir.iterdir():
             f.chmod(0o755)
         # grok auth file toggles grok readiness.
@@ -146,6 +159,27 @@ check("resolve unavailable -> exit 3", res.returncode == 3)
 rr = kv(res.stdout)
 check("resolve unavailable still prints argv", len(rr["argv"]) == 4)
 check("resolve unavailable available=no", rr.get("available") == "no")
+e.close()
+
+# --- grok model-level availability (gated on `grok models`) ---------------- #
+# grok authed, but `grok models` lists only grok-4.5 -> composer is unavailable
+# even though the CLI + auth are fine (mirrors a grok CLI that dropped composer).
+e = Env(grok_models=("grok-4.5",))
+by = {r["name"]: r for r in json.loads(e.run("list", "--json").stdout)}
+check("grok-4.5 listed -> available", by["grok:grok-4.5"]["available"] is True)
+check("composer not listed -> unavailable",
+      by["grok:grok-composer-2.5-fast"]["available"] is False)
+check("composer note mentions the model list",
+      "grok models" in by["grok:grok-composer-2.5-fast"]["note"])
+check("resolve --composer unavailable -> exit 3", e.run("resolve", "--composer").returncode == 3)
+check("resolve --grok available -> exit 0", e.run("resolve", "--grok").returncode == 0)
+e.close()
+
+# grok models that DO include composer -> composer becomes available (the probe
+# is data-driven, not a hardcoded drop).
+e = Env(grok_models=("grok-4.5", "grok-composer-2.5-fast"))
+by = {r["name"]: r for r in json.loads(e.run("list", "--json").stdout)}
+check("composer listed -> available", by["grok:grok-composer-2.5-fast"]["available"] is True)
 e.close()
 
 # --- auto ranking ---------------------------------------------------------- #

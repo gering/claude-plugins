@@ -134,12 +134,40 @@ row_for_selector() {
 }
 
 # ---------- availability probes (work-system-owned; no swarm dependency) ----------
-# Availability is per-CLI (install + auth), identical for every model of a CLI.
-# `cli_status <cli>` echoes `<avail>\t<note>` (avail = yes|no). Kept plain (no
-# associative arrays) so the script runs on stock bash 3.2 too; the probes are
-# cheap enough to run per call without a cache.
-cli_status() {
-  local cli="$1" avail=no note=""
+# `entry_status <cli> <model>` echoes `<avail>\t<note>` (avail = yes|no) for a
+# specific CLI×model. Kept plain (no associative arrays) so the script runs on
+# stock bash 3.2 too. Availability is install + auth, and — where the CLI can
+# enumerate its own models — *model-level* too:
+#   claude: available in-session; model aliases (fable/opus/sonnet) aren't
+#           CLI-listable, so they're taken on trust (they're stable).
+#   codex:  install + `codex login status`. No clean CLI model-list command, so
+#           the model is trusted (both shipped codex models are stable).
+#   grok:   install + auth + the model must appear in `grok models` — the CLI
+#           rejects an unlisted `-m` id at launch ("unknown model id"), so a
+#           per-CLI auth check alone would mislabel e.g. a dropped composer model
+#           as available. This is the one CLI with a usable model-list command.
+
+# grok's model list, memoized for the process (it may be a network call — fetch
+# at most once, with a short timeout so `list` never hangs on it).
+_grok_models_done=""
+_grok_models=""
+grok_model_list() {
+  if [ -z "$_grok_models_done" ]; then
+    _grok_models_done=1
+    local raw
+    if command -v timeout >/dev/null 2>&1; then
+      raw="$(timeout 10 grok models 2>/dev/null || true)"
+    else
+      raw="$(grok models 2>/dev/null || true)"
+    fi
+    # Lines look like "  * grok-4.5 (default)" — take the id after the bullet.
+    _grok_models="$(printf '%s\n' "$raw" | awk '/^[[:space:]]*\*/ {print $2}')"
+  fi
+  printf '%s\n' "$_grok_models"
+}
+
+entry_status() {
+  local cli="$1" model="$2" avail=no note=""
   case "$cli" in
     claude)
       # In-session claude is available by definition; PATH only sharpens the note.
@@ -153,8 +181,9 @@ cli_status() {
       ;;
     grok)
       if ! command -v grok >/dev/null 2>&1; then note="not installed"
-      elif [ -s "$GROK_AUTH_FILE" ]; then avail=yes
-      else note="run: grok login"; fi
+      elif [ ! -s "$GROK_AUTH_FILE" ]; then note="run: grok login"
+      elif grok_model_list | grep -qxF "$model"; then avail=yes
+      else note="model not offered by this grok CLI (see: grok models)"; fi
       ;;
     *) note="unknown cli" ;;
   esac
@@ -205,7 +234,7 @@ subcmd_resolve() {
   IFS='|' read -r flag cli model supports <<<"$record"
 
   local avail note
-  IFS=$'\t' read -r avail note < <(cli_status "$cli")
+  IFS=$'\t' read -r avail note < <(entry_status "$cli" "$model")
 
   printf 'name=%s\n' "$cli:$model"
   printf 'cli=%s\n' "$cli"
@@ -230,7 +259,7 @@ subcmd_list() {
   local rows="" flag cli model supports avail note
   while IFS='|' read -r flag cli model supports; do
     [ -n "$cli" ] || continue
-    IFS=$'\t' read -r avail note < <(cli_status "$cli")
+    IFS=$'\t' read -r avail note < <(entry_status "$cli" "$model")
     rows+="$cli:$model	$cli	$model	$avail	$note"$'\n'
   done < <(registry_rows)
 
@@ -281,7 +310,7 @@ subcmd_auto() {
     [ -n "$name" ] || continue
     record="$(row_for_name "$name")" || continue   # skip unknown names in a custom rank
     IFS='|' read -r flag cli model supports <<<"$record"
-    IFS=$'\t' read -r avail note < <(cli_status "$cli")
+    IFS=$'\t' read -r avail note < <(entry_status "$cli" "$model")
     if [ "$avail" = yes ]; then
       printf '%s\n' "$name"
       return 0
