@@ -5,6 +5,7 @@ updatedAt: 2026-07-17
 createdFrom: "session: 2026-07-17 (task/kickoff-agent-selection)"
 updatedFrom: "session: 2026-07-17"
 pluginVersion: 1.9.0
+prime: false
 ---
 
 # Kickoff Agent Selection

@@ -142,7 +142,9 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
       any row with `AVAILABLE=no`). **List unavailable entries too — do not hide
       them** (mark them), order available first. In the **same** AskUserQuestion
       call add a second question, "Save this as the project default?" (Yes / No).
-      Set `SELECTOR` = the picked `NAME` and `OFFER_DEFAULT` = the Yes/No answer.
+      Set `SELECTOR` = the picked `NAME`; set `OFFER_DEFAULT=yes` **only if** the
+      user chose Yes to that second question (otherwise leave it `no`). (Interpret
+      the answer, don't string-match a label — "Yes" means yes.)
 
     Do not resolve models, the default, or availability yourself — the helper owns
     that. Step 13 passes `SELECTOR` to `herdr-launch.sh`, which resolves +
@@ -251,10 +253,12 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     yourself — it is for the user's new terminal. If `resolve` exits non-zero
     (2 unknown / 3 unavailable), surface that instead and re-offer the picker.
 
-    **If `OFFER_DEFAULT=yes`** (the picker path), persist the pick here too, after a
-    successful `resolve` (exit 0) — the save must not be limited to the herdr path:
-    `bash "$REG" default set "<name>"` (the resolved `name=`). Mention it's an
-    uncommitted change to `.claude/work-system-agent` to commit when ready.
+    **If `OFFER_DEFAULT=yes`** (the picker path): do **not** auto-persist here —
+    unlike the herdr path, this block only *prints* a command for the user to run
+    in a separate terminal, so no launch is confirmed, and the rule is "persist a
+    default only after a worker actually started." Instead tell the user: once the
+    worker is up, run `bash "$REG" default set "<name>"` (the resolved `name=`) to
+    save it as the project default (a committed change to `.claude/work-system-agent`).
 
 ## Remember
 

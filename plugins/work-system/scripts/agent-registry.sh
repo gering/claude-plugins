@@ -148,38 +148,42 @@ row_for_selector() {
 #           offers (grok drops/renames models between releases) as available.
 #           This is the one CLI with a usable model-list command.
 
+# run_bounded <seconds> <cmd...> — run cmd with a hard time bound so an external
+# probe can never hang `list`/the picker. Prints cmd's stdout; returns cmd's exit
+# code, or non-zero if it hit the bound. Uses timeout/gtimeout when present; else
+# self-bounds with a detached killer that escalates SIGTERM -> SIGKILL, so a
+# process that ignores SIGTERM still can't block the caller. The killer's fds go
+# to /dev/null: this runs inside a command substitution, and a background job
+# holding the captured pipe would make $(...) block until it exits.
+run_bounded() {
+  local secs="$1"; shift
+  if command -v timeout  >/dev/null 2>&1; then timeout  "$secs" "$@"; return $?; fi
+  if command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"; return $?; fi
+  # cmd stdout -> a temp file, NOT this function's stdout: if the killer has to
+  # SIGKILL the cmd, an orphaned grandchild (e.g. a `sleep` the cmd spawned)
+  # inherits the cmd's fds — and if that were the command-substitution pipe, the
+  # capturing $(...) would block until the orphan dies. Writing to $tmp means the
+  # only thing on our stdout is the final `cat`, so $() returns as soon as we do.
+  local tmp; tmp="$(mktemp)"
+  "$@" >"$tmp" &
+  local pid=$! rc=0
+  ( sleep "$secs"; kill "$pid" 2>/dev/null; sleep 2; kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+  local killer=$!
+  if wait "$pid" 2>/dev/null; then rc=0; else rc=$?; fi
+  kill "$killer" 2>/dev/null || true
+  cat "$tmp"; rm -f "$tmp"
+  return "$rc"
+}
+
 # Print grok's model ids (one per line) on stdout; RETURN 0 iff `grok models`
 # succeeded, non-zero if it was unreachable/timed out. The caller reads that exit
 # code (a failed fetch is inconclusive, not proof a model is gone — see
 # entry_status). Status travels via the exit code, NOT a global: entry_status
 # runs this in a command substitution (its own subshell), so a global flag set
-# here would never propagate back. Bounded by timeout/gtimeout when present so
-# `list` doesn't block; called at most once per grok entry (no cross-call memo,
-# which a subshell can't carry anyway — there is a single grok entry today).
+# here would never propagate back. Bounded via run_bounded so `list` never hangs.
 grok_model_list() {
   local raw rc=0
-  # Always run BOUNDED so the probe both fires (can catch a dropped model) and
-  # can't hang the picker. coreutils `timeout` is `gtimeout` on stock macOS — use
-  # either when present; otherwise self-bound with a background killer (no reliance
-  # on an external timeout binary, so the model check still runs everywhere).
-  if command -v timeout >/dev/null 2>&1; then
-    raw="$(timeout 10 grok models 2>/dev/null)" || rc=$?
-  elif command -v gtimeout >/dev/null 2>&1; then
-    raw="$(gtimeout 10 grok models 2>/dev/null)" || rc=$?
-  else
-    local tmp; tmp="$(mktemp)"
-    grok models >"$tmp" 2>/dev/null &
-    local pid=$!
-    # Killer with fd1/fd2 -> /dev/null: this runs inside a command substitution,
-    # and a background job that still holds the captured pipe would make
-    # $(grok_model_list) block until its `sleep` ends (defeating the bound). grok's
-    # own stdout goes to $tmp, so only the killer needs its fds detached.
-    ( sleep 10; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 &
-    local killer=$!
-    if wait "$pid" 2>/dev/null; then rc=0; else rc=$?; fi   # non-zero if the killer fired
-    kill "$killer" 2>/dev/null || true                       # stop the timer once grok returned
-    raw="$(cat "$tmp")"; rm -f "$tmp"
-  fi
+  raw="$(run_bounded 10 grok models 2>/dev/null)" || rc=$?
   # Lines look like "  * grok-4.5 (default)" — take the id after the bullet.
   printf '%s\n' "$raw" | awk '/^[[:space:]]*\*/ {print $2}'
   return "$rc"
@@ -194,8 +198,10 @@ entry_status() {
       command -v claude >/dev/null 2>&1 || note="in-session"
       ;;
     codex)
+      # Bounded like grok: `codex login status` can touch the network, so an
+      # unbounded call could hang `list`/the picker just as a grok probe could.
       if ! command -v codex >/dev/null 2>&1; then note="not installed"
-      elif codex login status >/dev/null 2>&1; then avail=yes
+      elif run_bounded 10 codex login status >/dev/null 2>&1; then avail=yes
       else note="run: codex login"; fi
       ;;
     grok)
