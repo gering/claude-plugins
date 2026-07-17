@@ -228,7 +228,7 @@ main root carries it. It is stateless — the state glyphs belong to tasks.
 
 The mapping and its precedence live in `scripts/ws-statusline.sh` (a `states`
 mode next to the render mode — one file, so sidebar and statusline can never
-disagree); `scripts/herdr-tab-glyph.sh` applies it to herdr agent names.
+disagree); `scripts/herdr-tab-glyph.sh` applies it to the herdr tab label.
 
 The glyph is stamped when `/kickoff` or `/continue` opens the tab, and
 re-stamped — idempotently, only when it changed — whenever you survey or move

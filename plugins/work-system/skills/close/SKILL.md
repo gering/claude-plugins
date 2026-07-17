@@ -315,9 +315,9 @@ Rules:
       (the main-repo path from step 4 — after step 7 the worktree, and possibly
       `$PWD`, no longer exists).
     - The closed task's own tab is gone; this re-stamps the state glyphs
-      (`○ ● ◇ ◆ ✓`) on the repo's *remaining* task tabs — whose state `/close`
-      didn't change, so `--cached` reads the PR cache instead of a blocking `gh`
-      call. Outside herdr it is a silent no-op. Ignore its output — never block
+      (`○ ● ◇ ◆ ✓`, plus the main-repo tab's `◉` hub mark) on the repo's
+      *remaining* tabs — whose state `/close` didn't change, so `--cached` reads
+      the PR cache instead of a blocking `gh` call. Outside herdr it is a silent no-op. Ignore its output — never block
       or report on it.
 
 ## Safety

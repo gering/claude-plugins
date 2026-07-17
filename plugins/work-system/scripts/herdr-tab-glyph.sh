@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# herdr-tab-glyph.sh — mirror work-system task states onto herdr tab/agent
-# names as a leading state glyph (○ not-started · ● active · ◇ in review ·
+# herdr-tab-glyph.sh — mirror work-system task states onto herdr tab labels
+# as a leading state glyph (○ not-started · ● active · ◇ in review ·
 # ◆ approved · ✓ merged), so the herdr sidebar speaks the same visual language
 # as the [ws …] status-line segment. A session sitting in the MAIN repo root
 # instead gets ◉ — the "Manager" hub among the task satellites. ◉ marks the
@@ -9,11 +9,13 @@
 #
 # The state→glyph mapping and its precedence live in ws-statusline.sh
 # (`states` mode) — the ONE source both surfaces read; this script only
-# applies the result to herdr agent names. Everything is best-effort: prefix
-# and refresh exit 0 and degrade silently when they cannot act (outside a
-# herdr session, no herdr/python3, herdr unreachable, not a git repo, no
-# backlog) — callers are launch paths and skill triggers that must never fail
-# on cosmetics.
+# applies the result to herdr tab labels (never the agent name — see ONE
+# NAMESPACE below). Everything is best-effort: prefix and refresh exit 0 and
+# degrade silently when they cannot act (outside a herdr session, no
+# herdr/python3, herdr unreachable, not a git repo) — callers are launch paths
+# and skill triggers that must never fail on cosmetics. An empty backlog is NOT
+# a degrade condition for refresh: the main-root ◉ is stateless, so it stamps
+# even with zero tasks (only the per-task glyphs have nothing to do).
 #
 # Subcommands:
 #   prefix <label> <worktree-abs-path>
@@ -31,19 +33,19 @@
 #       agent merely cd'd into a subdir of either is never touched, nor is
 #       anything outside the repo. A rename is only issued when the label
 #       actually changes. Prints `checked=N updated=M` when herdr was reachable;
-#       silent no-op otherwise — including for a repo with an empty backlog,
-#       where the ◉ stamp is skipped too (no workers, no manager). Always
-#       exits 0.
+#       silent no-op otherwise. A repo with an empty backlog still stamps ◉ on
+#       its main-root tabs (the mark is stateless); only the per-task glyphs have
+#       nothing to do. Always exits 0.
+#       --cached forwards to `ws-statusline.sh states --cached` (read the PR
+#       cache + non-blocking background refresh, never a synchronous gh call) —
+#       for pure-survey callers (/status, /list, /check, /close). Without it the
+#       state is refreshed synchronously, for callers reacting to a PR change.
 #
 # ONE NAMESPACE: the sidebar renders a tab's LABEL, so both the launch-time
 # stamp (herdr-launch.sh, via `prefix`) and this refresh write the label and
 # nothing else. A herdr *agent* also has a `name` — a different field, in
 # herdr's agent registry, which other tooling owns. Never write it: 1.8.0's
 # refresh did, which is why it silently never showed up in the sidebar.
-#       --cached forwards to `ws-statusline.sh states --cached` (read the PR
-#       cache + non-blocking background refresh, never a synchronous gh call) —
-#       for pure-survey callers (/status, /list, /check, /close). Without it the
-#       state is refreshed synchronously, for callers reacting to a PR change.
 set -u
 
 SCRIPT_DIR="${0%/*}"
@@ -109,13 +111,21 @@ main = sys.argv[1] if len(sys.argv) > 1 else ""
 if not main.strip():
     sys.exit(0)
 root = os.path.realpath(main)
-wtdir = os.path.join(root, ".claude", "worktrees")
+# realpath the whole worktrees path, not just root: cwd is resolved below, so a
+# symlinked .claude/worktrees would otherwise never match (dirname of the resolved
+# cwd follows the symlink, an unresolved wtdir does not) and task tabs would freeze.
+wtdir = os.path.realpath(os.path.join(root, ".claude", "worktrees"))
 try:
     agents = json.load(sys.stdin)["result"]["agents"]
 except Exception:
     sys.exit(0)
+# argv[2] is a FILE PATH, not the JSON itself: `herdr tab list` can be hundreds
+# of KB on a big server, and passing it as an argv element would blow ARG_MAX
+# (E2BIG) — the exec would fail, the caller `|| true` would mask it, and refresh
+# would misreport `checked=0` while herdr is up. A short path never triggers that.
 try:
-    tabs = json.loads(sys.argv[2])["result"]["tabs"]
+    with open(sys.argv[2]) as fh:
+        tabs = json.load(fh)["result"]["tabs"]
 except Exception:
     sys.exit(0)
 labels = {t.get("tab_id"): (t.get("label") or "") for t in tabs}
@@ -177,8 +187,11 @@ cmd_refresh() {
   main="${main#worktree }"
   [ -n "$main" ] || return 0
   # $cached is unquoted so an empty value expands to no argument (not "").
+  # An empty $states (no backlog) is NOT an early exit: ◉ is a stateless location
+  # mark, so a main-root Manager tab must still be stamped even with zero tasks.
+  # Empty states just means the per-task glyph_lookup below finds nothing, so task
+  # tabs are left alone while main-root tabs still get ◉.
   states="$(bash "$SCRIPT_DIR/ws-statusline.sh" states $cached "$dir" 2>/dev/null || true)"
-  [ -n "$states" ] || return 0     # no backlog → nothing to stamp
   # Empty list output = herdr unreachable (binary present, server down) →
   # silent no-op, NOT `checked=0` — that line means "reachable, nothing to do".
   # Agents carry the cwd we match on; tabs carry the label we stamp. Both.
@@ -186,8 +199,26 @@ cmd_refresh() {
   [ -n "$list" ] || return 0
   tablist="$(herdr tab list 2>/dev/null || true)"
   [ -n "$tablist" ] || return 0
+  # Pass the tab-list JSON by FILE, not as a python argv element: on a big server
+  # it is hundreds of KB and would blow ARG_MAX (E2BIG), a failure the `|| true`
+  # below would silently mask as `checked=0`. The agent list stays on stdin (a
+  # pipe has no ARG_MAX limit). mktemp failure → skip this refresh, best-effort.
+  # tabfile is intentionally NOT `local`: the EXIT trap below fires in the global
+  # scope (after cmd_refresh has returned), where a function-local would be gone —
+  # under `set -u` that reads as an unbound-variable error and leaks the file.
+  tabfile="$(mktemp "${TMPDIR:-/tmp}/ws-tablist.XXXXXX")" || return 0
+  # EXIT trap, not just a trailing rm: a Ctrl-C / SIGTERM between mktemp and the
+  # cleanup (refresh runs on every /status, /list, /open, …) would otherwise orphan
+  # the tab-list temp file. The trap fires on any exit path, signals included; the
+  # `${tabfile:-}` guard keeps it safe under `set -u` even if it never got assigned.
+  trap 'rm -f "${tabfile:-}"' EXIT
+  printf '%s' "$tablist" > "$tabfile"
+  # PYTHONUTF8=1 forces UTF-8 for stdin, the tab-list file, AND stdout regardless
+  # of locale: under LC_ALL=C, Python would otherwise decode the glyph bytes (◉ ●
+  # …) in labels as ASCII and raise UnicodeDecodeError — or fail to *encode* them
+  # on the print — and the bare except / `|| true` would mask it as `checked=0`.
   tabs="$(printf '%s' "$list" \
-    | python3 -c "$extract_glyph_tabs" "$main" "$tablist" 2>/dev/null || true)"
+    | PYTHONUTF8=1 python3 -c "$extract_glyph_tabs" "$main" "$tabfile" 2>/dev/null || true)"
   if [ -z "$tabs" ]; then
     echo "checked=0 updated=0"
     return 0
