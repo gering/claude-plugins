@@ -23,16 +23,23 @@
 #       (idempotent, re-runs never stack) and prints the plain label when the
 #       state cannot be resolved. Always exits 0.
 #   refresh [--cached] [<dir>]
-#       Re-stamp the glyph on every herdr agent whose cwd IS a task worktree
-#       of the repo containing <dir> (default: $PWD) — exact realpath match on
-#       <main>/.claude/worktrees/<task> — or IS the main repo root itself (→ ◉),
-#       across ALL workspaces of this herdr server, so one refresh fixes every
-#       open tab of the repo. Both matches are exact: an agent merely cd'd into
-#       a subdir of either is never touched, nor is anything outside the repo.
-#       A rename is only issued when the name actually changes. Prints
-#       `checked=N updated=M` when herdr was reachable; silent no-op otherwise
-#       — including for a repo with an empty backlog, where the ◉ stamp is
-#       skipped too (no workers, no manager). Always exits 0.
+#       Re-stamp the glyph on the LABEL of every herdr tab whose agent cwd IS a
+#       task worktree of the repo containing <dir> (default: $PWD) — exact
+#       realpath match on <main>/.claude/worktrees/<task> — or IS the main repo
+#       root itself (→ ◉), across ALL workspaces of this herdr server, so one
+#       refresh fixes every open tab of the repo. Both matches are exact: an
+#       agent merely cd'd into a subdir of either is never touched, nor is
+#       anything outside the repo. A rename is only issued when the label
+#       actually changes. Prints `checked=N updated=M` when herdr was reachable;
+#       silent no-op otherwise — including for a repo with an empty backlog,
+#       where the ◉ stamp is skipped too (no workers, no manager). Always
+#       exits 0.
+#
+# ONE NAMESPACE: the sidebar renders a tab's LABEL, so both the launch-time
+# stamp (herdr-launch.sh, via `prefix`) and this refresh write the label and
+# nothing else. A herdr *agent* also has a `name` — a different field, in
+# herdr's agent registry, which other tooling owns. Never write it: 1.8.0's
+# refresh did, which is why it silently never showed up in the sidebar.
 #       --cached forwards to `ws-statusline.sh states --cached` (read the PR
 #       cache + non-blocking background refresh, never a synchronous gh call) —
 #       for pure-survey callers (/status, /list, /check, /close). Without it the
@@ -70,25 +77,34 @@ task_glyph() {
   bash "$ws" states "$2" 2>/dev/null | glyph_lookup "$1"
 }
 
-# Emit "pane_id\tkind\tkey\tcurrent_name" for every agent whose realpath(cwd)
-# is EXACTLY <main>/.claude/worktrees/<task> (kind=task, key=<task>) or EXACTLY
-# the main repo root (kind=main, key=the repo dir name) — argv[1] = main repo
-# path. Exact match mirrors herdr-teardown.sh's cwd philosophy: an unrelated
-# agent merely cd'd into a subdir of either is never renamed. `key` doubles as
-# the name fallback for an unnamed agent. Malformed JSON emits nothing.
-# NO FIELD BUT THE LAST MAY EVER BE EMPTY: the consumer reads with IFS=<tab>,
-# and tab is IFS *whitespace* — bash collapses a run of them into one
-# delimiter, so an empty middle field would silently shift every later field
-# left (kind=main once put the name into `key` this way).
-# The agent fields are UNTRUSTED (any tool in the session can set a name): a
-# tab/newline embedded in a field would forge extra TSV records and aim a
-# rename at an arbitrary pane — so the pane id must match herdr shape, a task
-# name that would break the framing is skipped, and the free-form name is
-# scrubbed (it is display data; a space is a faithful stand-in). The pane
-# pattern forbids a LEADING dash (first char excludes `-`) so a value like
-# `-x`/`--foo` can never reach `herdr agent rename` as an option flag; herdr
-# ids are `wN:pM` and never start with a dash, so nothing legitimate is lost.
-extract_glyph_agents='import sys, json, os, re
+# Emit "tab_id\tkind\tkey\tcurrent_label" for every TAB whose agent cwd is
+# EXACTLY <main>/.claude/worktrees/<task> (kind=task, key=<task>) or EXACTLY the
+# main repo root (kind=main, key=the repo dir name). argv[1] = main repo path,
+# argv[2] = `herdr tab list` JSON; stdin = `herdr agent list` JSON. Exact match
+# mirrors herdr-teardown.sh's cwd philosophy: an agent merely cd'd into a subdir
+# of either is never renamed. `key` doubles as the label fallback for an
+# unlabelled tab. Malformed JSON emits nothing.
+#
+# THE SIDEBAR RENDERS THE TAB LABEL, NOT THE AGENT NAME — the two are separate
+# herdr namespaces (`tab rename <tab_id>` vs `agent rename <pane_id>`). We join
+# the two lists because only agents carry `cwd` (the match) while only tabs
+# carry `label` (what we prefix and diff against). Renaming agents instead is
+# invisible; that was the 1.8.0 bug.
+#
+# A tab is emitted ONCE (first matching agent wins). A tab whose panes sit in
+# *different* matching dirs would otherwise flip-flop each refresh; first-wins
+# is stable given herdr's stable agent order — an accepted residual for that
+# rare mixed-pane tab.
+#
+# The agent/tab fields are UNTRUSTED (any tool in the session can set them): a
+# tab/newline embedded in a field would forge extra TSV records and aim a rename
+# at an arbitrary tab — so the tab id must match herdr shape, a task name that
+# would break the framing is skipped, and the free-form label is scrubbed (it is
+# display data; a space is a faithful stand-in). The id pattern forbids a LEADING
+# dash (first char excludes `-`) so a value like `-x`/`--foo` can never reach
+# `herdr tab rename` as an option flag; herdr ids are `wN:tM` and never start
+# with a dash, so nothing legitimate is lost.
+extract_glyph_tabs='import sys, json, os, re
 main = sys.argv[1] if len(sys.argv) > 1 else ""
 if not main.strip():
     sys.exit(0)
@@ -98,10 +114,18 @@ try:
     agents = json.load(sys.stdin)["result"]["agents"]
 except Exception:
     sys.exit(0)
+try:
+    tabs = json.loads(sys.argv[2])["result"]["tabs"]
+except Exception:
+    sys.exit(0)
+labels = {t.get("tab_id"): (t.get("label") or "") for t in tabs}
+seen = set()
 for a in agents:
     cwd = (a.get("cwd") or "").rstrip("/")
-    pane = a.get("pane_id") or ""
-    if not cwd or not re.fullmatch(r"[A-Za-z0-9:_.][A-Za-z0-9:_.-]*", pane):
+    tab = a.get("tab_id") or ""
+    if not cwd or tab in seen:
+        continue
+    if not re.fullmatch(r"[A-Za-z0-9:_.][A-Za-z0-9:_.-]*", tab) or tab not in labels:
         continue
     cwd = os.path.realpath(cwd)
     if cwd == root:
@@ -112,8 +136,9 @@ for a in agents:
         continue
     if not key or re.search(r"[\t\r\n]", key):
         continue
-    name = re.sub(r"[\t\r\n]", " ", a.get("name") or "")
-    print("\t".join([pane, kind, key, name]))'
+    seen.add(tab)
+    label = re.sub(r"[\t\r\n]", " ", labels[tab])
+    print("\t".join([tab, kind, key, label]))'
 
 cmd_prefix() {
   local label="${1:-}" worktree="${2:-}" base name glyph
@@ -147,7 +172,7 @@ cmd_refresh() {
   command -v python3 >/dev/null 2>&1 || return 0
   git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 || return 0
   # Main worktree (first porcelain entry) — the backlog + worktrees live there.
-  local main states list agents
+  local main states list tablist tabs
   main="$(git -C "$dir" worktree list --porcelain 2>/dev/null | head -1)"
   main="${main#worktree }"
   [ -n "$main" ] || return 0
@@ -156,17 +181,20 @@ cmd_refresh() {
   [ -n "$states" ] || return 0     # no backlog → nothing to stamp
   # Empty list output = herdr unreachable (binary present, server down) →
   # silent no-op, NOT `checked=0` — that line means "reachable, nothing to do".
+  # Agents carry the cwd we match on; tabs carry the label we stamp. Both.
   list="$(herdr agent list 2>/dev/null || true)"
   [ -n "$list" ] || return 0
-  agents="$(printf '%s' "$list" \
-    | python3 -c "$extract_glyph_agents" "$main" 2>/dev/null || true)"
-  if [ -z "$agents" ]; then
+  tablist="$(herdr tab list 2>/dev/null || true)"
+  [ -n "$tablist" ] || return 0
+  tabs="$(printf '%s' "$list" \
+    | python3 -c "$extract_glyph_tabs" "$main" "$tablist" 2>/dev/null || true)"
+  if [ -z "$tabs" ]; then
     echo "checked=0 updated=0"
     return 0
   fi
-  local checked=0 updated=0 pane kind key name glyph base new
-  while IFS=$'\t' read -r pane kind key name; do
-    [ -n "$pane" ] && [ -n "$key" ] || continue
+  local checked=0 updated=0 tab kind key label glyph base new
+  while IFS=$'\t' read -r tab kind key label; do
+    [ -n "$tab" ] && [ -n "$key" ] || continue
     if [ "$kind" = "main" ]; then
       glyph="◉"                    # the Manager hub — no state, just the place
     else
@@ -174,18 +202,18 @@ cmd_refresh() {
       [ -n "$glyph" ] || continue  # worktree without a backlog task — leave alone
     fi
     checked=$((checked + 1))
-    base="$(strip_glyph "$name")"
-    [ -n "$base" ] || base="$key"  # unnamed agent → task name / repo dir name
+    base="$(strip_glyph "$label")"
+    [ -n "$base" ] || base="$key"  # unlabelled tab → task name / repo dir name
     new="$glyph $base"
-    [ "$new" = "$name" ] && continue   # already correct — no rename churn
-    # No `--` guard here: `herdr agent rename` treats `--` as the target itself
-    # (verified), so it can't end option parsing. The no-leading-dash pane regex
-    # in extract_task_agents is the sole (and sufficient) injection guard — pane
+    [ "$new" = "$label" ] && continue   # already correct — no rename churn
+    # No `--` guard here: `herdr tab rename` treats `--` as the target itself
+    # (verified), so it can't end option parsing. The no-leading-dash id regex
+    # in extract_glyph_tabs is the sole (and sufficient) injection guard — tab
     # can never be a `-`-prefixed value that rename would read as a flag.
-    if herdr agent rename "$pane" "$new" >/dev/null 2>&1; then
+    if herdr tab rename "$tab" "$new" >/dev/null 2>&1; then
       updated=$((updated + 1))
     fi
-  done <<<"$agents"
+  done <<<"$tabs"
   echo "checked=$checked updated=$updated"
 }
 

@@ -58,17 +58,28 @@ was shipped and caught in review.
 
 ## Renamer rules (herdr-tab-glyph.sh)
 
-- **Trigger points:** stamped at launch (`herdr-launch.sh prefix`, both modes —
-  the Claude *session name* stays plain; glyphs would clutter `/resume`);
-  re-stamped by `refresh` on `/status`, `/list`, `/close` (remaining tabs, main-repo
-  path — `$PWD` may be the just-removed worktree) and pr-flow's `/open`,
-  `/merge`, `/cycle`, `/check`.
+- **The glyph lives in the TAB LABEL — one namespace, and it is not the obvious
+  one.** herdr has two independent names per tab: `tab rename <tab_id> <label>`
+  and `agent rename <pane_id> <name>` (the agent registry's own field, which
+  other tooling owns elsewhere). **The sidebar renders the label.** 1.8.0 shipped
+  `refresh` writing the *agent name* — invisible, so every re-stamp silently did
+  nothing and only the launch-time label survived (a task tab sat at `●` while
+  its PR was long in review). Fixed in 1.8.1: `refresh` writes the label, and
+  `herdr-launch.sh` passes the glyph *only* to `--label`, keeping the agent and
+  `claude -n` session names plain — those are stable identities, and nothing
+  refreshes them, so a glyph there would freeze at its launch value.
+- **Trigger points:** stamped at launch (`herdr-launch.sh` → `prefix`, both
+  modes); re-stamped by `refresh` on `/status`, `/list`, `/close` (remaining tabs,
+  main-repo path — `$PWD` may be the just-removed worktree) and pr-flow's
+  `/open`, `/merge`, `/cycle`, `/check`.
 - **Matching:** exact realpath equality against `<main>/.claude/worktrees/<task>`
   (→ state glyph) or the main repo root itself (→ `◉`) — same philosophy as
   `herdr-teardown.sh`: an agent cd'd into a *subdir* of either is never renamed,
   and anything outside the repo never is. `◉` needs no new trigger — the same
-  `refresh` sweep stamps both. Rename targets the `pane_id`; `herdr agent list`
-  exposes `cwd`, `name`, `pane_id` per agent (verified live 2026-07-16).
+  `refresh` sweep stamps both. The match needs **both** herdr lists joined on
+  `tab_id`: only agents carry `cwd`, only tabs carry `label`. One tab is stamped
+  once (first matching agent wins — a mixed-cwd multi-pane tab would otherwise
+  flip-flop each refresh).
 - **Idempotency:** leading glyphs are stripped before re-prefixing via
   byte-exact `case "○ "*` patterns — a bracket expression (`[○●◇✓]`) would
   match per *byte* for multibyte chars under C locale. The strip set includes

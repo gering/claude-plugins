@@ -241,8 +241,10 @@ and to `✓` when it merges. Survey surfaces (`/status`, `/list`, `/check`,
 at once. The same refreshes stamp `◉` on the main-root tabs — no separate
 trigger. Only tabs sitting *exactly* at a task worktree or the main root are
 renamed (one cd into a subdir and yours is left alone); a tab is renamed only
-when its name actually changes, your chosen name is kept and merely prefixed,
-and outside herdr everything is a silent no-op.
+when its label actually changes, your chosen label is kept and merely prefixed,
+and outside herdr everything is a silent no-op. The glyph lives in the **tab
+label** and nowhere else — the herdr agent name and the `claude -n` session name
+keep the plain label, since those are stable identities.
 
 ## Adopting Existing Branches
 
