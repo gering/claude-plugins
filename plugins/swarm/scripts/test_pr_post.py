@@ -126,6 +126,43 @@ empty_body = pr_post.render_body({"head_oid": "9fd980c", "rows": [], "balance": 
 check("empty text", "No issues raised." in empty_body)
 check("empty has no table row", "| # |" not in empty_body)
 
+# --- design rows: script-owned ordering + [lens] prefix --------------------- #
+KIND_DATA = {
+    "head_oid": "9fd980c",
+    "has_quelle": False,
+    "rows": [
+        # deliberately interleaved: design between two defects
+        {"num": "1", "sev": "🔴", "ort": "a.sh:1", "befund": "real bug", "v": "✅", "notiz": "", "kind": "defect", "lens": "correctness"},
+        {"num": "3", "sev": "🟡", "ort": "b.sh:2", "befund": "reuse helper", "v": "✅", "notiz": "", "kind": "design", "lens": "reuse"},
+        {"num": "2", "sev": "🟡", "ort": "c.sh:3", "befund": "second bug", "v": "✅", "notiz": "", "kind": "defect", "lens": "security"},
+    ],
+}
+kbody = pr_post.render_body(KIND_DATA)
+klines = [ln for ln in kbody.split("\n") if ln.startswith("| ") and "| # |" not in ln]
+check("design row renders last", len(klines) == 3 and "reuse helper" in klines[2])
+check("defect order stable", "real bug" in klines[0] and "second bug" in klines[1])
+# lens prefix is entity-encoded like any cell content (renders back as [reuse])
+check("design befund lens-prefixed", "&#91;reuse&#93; reuse helper" in kbody)
+check("defect befund not prefixed", "&#91;correctness&#93;" not in kbody)
+# design row without a lens falls back to the [design] prefix
+nolens = pr_post.render_body({"rows": [{"num": "1", "befund": "x", "kind": "design"}]})
+check("design w/o lens -> [design]", "&#91;design&#93; x" in nolens)
+# kind lost in the handoff: the lens is NOT a backup signal — a dropped kind
+# falls to defect (safe bucket), NEVER guessed 'design' from a design lens (that
+# could hide a reclassified/mixed-cluster bug in the Design table). No [reuse]
+# prefix, no design bucketing.
+lensonly = pr_post.render_body({"rows": [{"num": "1", "befund": "y", "lens": "reuse"}]})
+check("lens-only reuse -> defect (no lens guess)", "&#91;" not in lensonly and " y " in lensonly)
+junk = pr_post.render_body({"rows": [{"num": "1", "befund": "y", "kind": 42, "lens": "reuse"}]})
+check("junk kind + design lens -> defect", "&#91;" not in junk and " y " in junk)
+# an explicit defect kind stays a defect even with a design lens (mixed-cluster
+# defect vote / reclassified bug) — the bug is never re-promoted into Design.
+expl = pr_post.render_body({"rows": [{"num": "1", "befund": "z", "kind": "defect", "lens": "reuse"}]})
+check("explicit defect keeps a design lens in defects", "&#91;" not in expl and " z " in expl)
+# an attacker-shaped lens value goes through the full cell sanitizer
+evil = pr_post.render_body({"rows": [{"num": "1", "befund": "z", "kind": "design", "lens": "x|@y"}]})
+check("evil lens sanitized", "&#91;x&#124;&#64;y&#93; z" in evil and "@y" not in evil)
+
 # --- build subcommand round-trip via subprocess ---------------------------- #
 with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
     json.dump(DATA, f)

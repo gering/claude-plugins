@@ -40,12 +40,12 @@
           "summary": {
             "type": "string",
             "maxLength": 400,
-            "description": "One-sentence statement of the defect"
+            "description": "One-sentence statement of the defect or improvement, prefixed with its lens in brackets, e.g. [security], [reuse]"
           },
           "failure_scenario": {
             "type": "string",
             "maxLength": 1200,
-            "description": "Concrete inputs/state leading to wrong output or crash. Must be falsifiable — this is what the verifier tests. For style findings: the concrete maintenance cost."
+            "description": "Concrete inputs/state leading to wrong output or crash. Must be falsifiable — this is what the verifier tests. For design/style findings: the concrete cost of not taking the suggestion."
           },
           "confidence": {
             "enum": ["high", "medium", "low"],
