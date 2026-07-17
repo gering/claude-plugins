@@ -33,7 +33,7 @@ class Env:
     """A throwaway HOME + fake-bin sandbox controlling CLI availability."""
 
     def __init__(self, codex_authed=True, grok_authed=True,
-                 grok_models=("grok-4.5",)):
+                 grok_models=("grok-4.5",), grok_models_ok=True):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
         self.home = root / "home"
@@ -48,17 +48,19 @@ class Env:
             "exit 0\n" % codex_rc
         )
         # grok stub: `models` prints a `grok models`-shaped list (drives the
-        # model-level availability probe); other calls just exit 0 (command -v).
+        # model-level availability probe) and exits ok/non-ok to simulate a
+        # reachable vs unreachable fetch; other calls just exit 0 (command -v).
         model_lines = "".join(
             '  echo "  * %s"\n' % m for m in grok_models
         )
+        models_rc = 0 if grok_models_ok else 1
         (bindir / "grok").write_text(
             "#!/bin/sh\n"
             'if [ "$1" = "models" ]; then\n'
             "%s"
-            "  exit 0\n"
+            "  exit %d\n"
             "fi\n"
-            "exit 0\n" % model_lines
+            "exit 0\n" % (model_lines, models_rc)
         )
         # claude stub: only ever hit by `command -v`.
         (bindir / "claude").write_text("#!/bin/sh\nexit 0\n")
@@ -181,6 +183,17 @@ check("grok-4.5 not listed -> unavailable", by["grok:grok-4.5"]["available"] is 
 check("unlisted-model note mentions the model list",
       "grok models" in by["grok:grok-4.5"]["note"])
 check("resolve --grok unavailable -> exit 3", e.run("resolve", "--grok").returncode == 3)
+e.close()
+
+# grok authed but `grok models` fetch FAILS (unreachable/offline/timed out) ->
+# inconclusive, not a drop: trust auth so a network hiccup can't wrongly block a
+# launch. (A global flag can't carry this out of the command-substitution
+# subshell, so the fetch status must ride the function's exit code.)
+e = Env(grok_models=(), grok_models_ok=False)
+by = {r["name"]: r for r in json.loads(e.run("list", "--json").stdout)}
+check("grok models unreachable -> assumed available", by["grok:grok-4.5"]["available"] is True)
+check("unreachable note is soft", "unreachable" in by["grok:grok-4.5"]["note"])
+check("resolve --grok available when fetch fails", e.run("resolve", "--grok").returncode == 0)
 e.close()
 
 # --- project default (the only persisted state) ---------------------------- #

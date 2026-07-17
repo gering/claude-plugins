@@ -211,8 +211,12 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     bash "$REG" resolve "$SELECTOR" --session "<task-name>"
     ```
 
-    Take the `argv=` lines (in order) as the command words, and display this block
-    — it is *not* a command to execute:
+    Take the `argv=` lines (in order) as the command words. **Shell-quote each
+    word** as you render the command — do NOT just space-join the raw values: for
+    codex/grok the whole bootstrap prompt is ONE `argv=` word containing spaces, so
+    without quotes the shell would split it into separate arguments and the CLI
+    would mangle/reject the prompt. Display this block — it is *not* a command to
+    execute:
     ```
     Worktree created!
 
@@ -225,15 +229,20 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
        session — this session stays in the main repo) and run:
 
          cd .claude/worktrees/<task-name>
-         <the argv= words, space-joined>
+         <the argv= words, each shell-quoted — e.g. codex -m gpt-5.6-sol 'Read TASK.md …'>
     ```
     For a **claude** worker the command is `claude --model <m> -n "<task-name>"
     "/continue"` — `-n` names the session (shown in `/resume`), `/continue` runs the
     resume flow (load TASK.md, commits, progress). For **codex/grok** it is
-    `codex -m <model> "<bootstrap prompt>"` (they have no work-system skills, so the
+    `codex -m <model> '<bootstrap prompt>'` (they have no work-system skills, so the
     prompt tells them to read TASK.md and drive to a PR). Do **not** execute the `cd`
     yourself — it is for the user's new terminal. If `resolve` exits non-zero
     (2 unknown / 3 unavailable), surface that instead and re-offer the picker.
+
+    **If `OFFER_DEFAULT=yes`** (the picker path), persist the pick here too, after a
+    successful `resolve` (exit 0) — the save must not be limited to the herdr path:
+    `bash "$REG" default set "<name>"` (the resolved `name=`). Mention it's an
+    uncommitted change to `.claude/work-system-agent` to commit when ready.
 
 ## Remember
 

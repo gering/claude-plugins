@@ -145,23 +145,28 @@ row_for_selector() {
 #           offers (grok drops/renames models between releases) as available.
 #           This is the one CLI with a usable model-list command.
 
-# grok's model list, memoized for the process (it may be a network call — fetch
-# at most once, with a short timeout so `list` never hangs on it).
-_grok_models_done=""
-_grok_models=""
+# Print grok's model ids (one per line) on stdout; RETURN 0 iff `grok models`
+# succeeded, non-zero if it was unreachable/timed out. The caller reads that exit
+# code (a failed fetch is inconclusive, not proof a model is gone — see
+# entry_status). Status travels via the exit code, NOT a global: entry_status
+# runs this in a command substitution (its own subshell), so a global flag set
+# here would never propagate back. Bounded by timeout/gtimeout when present so
+# `list` doesn't block; called at most once per grok entry (no cross-call memo,
+# which a subshell can't carry anyway — there is a single grok entry today).
 grok_model_list() {
-  if [ -z "$_grok_models_done" ]; then
-    _grok_models_done=1
-    local raw
-    if command -v timeout >/dev/null 2>&1; then
-      raw="$(timeout 10 grok models 2>/dev/null || true)"
-    else
-      raw="$(grok models 2>/dev/null || true)"
-    fi
-    # Lines look like "  * grok-4.5 (default)" — take the id after the bullet.
-    _grok_models="$(printf '%s\n' "$raw" | awk '/^[[:space:]]*\*/ {print $2}')"
+  local raw rc=0
+  # coreutils `timeout` is `gtimeout` on stock macOS — try both before falling
+  # back to a bare (unbounded) call, mirroring the swarm adapter's with_timeout.
+  if command -v timeout >/dev/null 2>&1; then
+    raw="$(timeout 10 grok models 2>/dev/null)" || rc=$?
+  elif command -v gtimeout >/dev/null 2>&1; then
+    raw="$(gtimeout 10 grok models 2>/dev/null)" || rc=$?
+  else
+    raw="$(grok models 2>/dev/null)" || rc=$?
   fi
-  printf '%s\n' "$_grok_models"
+  # Lines look like "  * grok-4.5 (default)" — take the id after the bullet.
+  printf '%s\n' "$raw" | awk '/^[[:space:]]*\*/ {print $2}'
+  return "$rc"
 }
 
 entry_status() {
@@ -180,8 +185,16 @@ entry_status() {
     grok)
       if ! command -v grok >/dev/null 2>&1; then note="not installed"
       elif [ ! -s "$GROK_AUTH_FILE" ]; then note="run: grok login"
-      elif grok_model_list | grep -qxF "$model"; then avail=yes
-      else note="model not offered by this grok CLI (see: grok models)"; fi
+      else
+        local _list fetch_rc=0
+        _list="$(grok_model_list)" || fetch_rc=$?   # exit code = fetch status
+        if [ "$fetch_rc" -ne 0 ]; then
+          # `grok models` was unreachable/timed out — inconclusive, not a drop.
+          # Trust auth so a network hiccup doesn't wrongly block launch.
+          avail=yes; note="grok models unreachable — availability assumed"
+        elif printf '%s\n' "$_list" | grep -qxF "$model"; then avail=yes
+        else note="model not offered by this grok CLI (see: grok models)"; fi
+      fi
       ;;
     *) note="unknown cli" ;;
   esac
@@ -213,6 +226,13 @@ subcmd_resolve() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --session) [ $# -ge 2 ] || { echo "Missing value for --session" >&2; exit 2; }
+                 # The session is emitted as an `argv=<session>` line that the
+                 # launch helper re-parses line by line — a newline in it would
+                 # forge extra argv tokens. Reject control chars at the source so
+                 # a crafted task name/label can't inject a worker flag.
+                 case "$2" in
+                   *[[:cntrl:]]*) echo "resolve: --session must not contain control characters" >&2; exit 2 ;;
+                 esac
                  session="$2"; shift 2 ;;
       --*) if [ -z "$selector" ]; then selector="$1"; shift
            else echo "Unexpected argument: $1" >&2; exit 2; fi ;;
