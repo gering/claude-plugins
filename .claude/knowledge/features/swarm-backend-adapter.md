@@ -55,9 +55,14 @@ debugging round.
   auth-only probe kept reporting it Ready until it failed mid-review with
   `Invalid params: "unknown model id"`. `ready`/`list` now also require
   grok-4.5 in `grok models` (grok is the one backend with a usable model-list
-  command; codex has none, so its model is trusted). Three gotchas, all live-
+  command; codex has none, so its model is trusted). The gotchas, all live-
   verified:
-  - **Parse the bullet list**: lines read `  * grok-4.5 (default)` → take `$2`.
+  - **Parse the bullet list by SHAPE, not position**: lines read
+    `  * grok-4.5 (default)`, but keying on `$2` turns a reworded line
+    (`  * default: grok-4.5`) into a non-empty list of garbage tokens — which
+    reads as "the model is gone" and fails closed. Match `grok-*` anywhere in a
+    bullet line instead; a line with no id-shaped token then contributes
+    nothing, landing in the trust-auth degrade below.
   - **Match without a pipe to `grep -q`**: an early-exiting `grep -q` can
     SIGPIPE the writer, and under `set -o pipefail` a *hit* would then report
     failure. Newline-fence the list and use a `case` substring match.
@@ -65,13 +70,30 @@ debugging round.
     future CLI renaming the subcommand would otherwise silently drop grok from
     every fan-out. Empty/unparseable → trust auth and let `run_grok` surface the
     explicit error; a non-empty list *without* grok-4.5 → an honest "not ready"
-    plus an update-the-CLI hint. Memoize the list (it may be a network call).
-  - **A probe added to a local path must not make it hang.** `ready`/`list` were
-    purely local (stat the auth file) before this; the probe puts a network call
-    in every `/swarm:agents` and review start. With no coreutils `timeout`/
-    `gtimeout` to bound it (stock macOS), the probe is **skipped** rather than
-    run uncapped — it degrades to the empty-list/trust-auth case in ~25ms. Own
-    review of this diff caught the uncapped `else` branch.
+    plus an update-the-CLI hint.
+  - **A probe added to a local path must not make it hang — and must not lie
+    when it can't run.** `ready`/`list` were purely local (stat the auth file)
+    before this; the probe puts a network call in every `/swarm:agents` and
+    review start. With no coreutils `timeout`/`gtimeout` to bound it (stock
+    macOS), the probe is **skipped** rather than run uncapped, degrading to
+    trust-auth in ~25ms — but it **warns on stderr**, because a silent skip
+    would make the documented model-aware guarantee false on that host: the
+    same "promise that doesn't hold at runtime" bug the composer removal exists
+    to fix. Own review caught first the uncapped branch, then the silent skip.
+  - **Bound it with its own knob, not `SWARM_TIMEOUT`.** That caps a *review*
+    (600s, and `0` disables it entirely) — useless for a probe that `list`
+    blocks on. `SWARM_PROBE_TIMEOUT` (10s) is separate, and a malformed or `0`
+    value falls back to 10 rather than becoming uncapped.
+  - **Jail the probe like any other external call, minus the timeout.** It runs
+    a networked third-party binary on a path that previously ran none, so it
+    goes through the same env-secret filter + read-deny jail. `sandboxed()`
+    can't be reused as-is (it hard-wires the review-length cap), hence
+    `_build_jail` — the jail prefix without the timeout, shared by both.
+  - **Memoize by call convention, not by wishing.** `list="$(grok_model_list)"`
+    runs the function in a *subshell*, so its cache-global assignments vanish
+    and every caller silently re-pays the network call. The cache only works if
+    the fetch is called directly and callers read the global
+    (`grok_model_fetch; local list="$_grok_models"`).
   This mirrors work-system's `agent-registry.sh`, which learned the same lesson
   at task-launch time.
 - **Headless tool execution**: both CLIs run read-only commands (e.g.

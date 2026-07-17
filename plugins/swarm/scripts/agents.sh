@@ -27,11 +27,14 @@
 #            accepts --effort (ladder is low|medium|high — no max tier, so the
 #            adapter maps xhigh/max down to high, mirroring codex's missing
 #            max). Readiness is model-aware: auth (non-empty ~/.grok/auth.json —
-#            there is no status command) AND grok-4.5 must appear in
-#            `grok models`. The CLI rejects an unlisted -m id at launch
-#            ("unknown model id"), and it drops/renames models between releases
-#            (0.2.101 removed grok-composer-2.5-fast), so an auth-only check
-#            would advertise a model the CLI no longer offers.
+#            there is no status command) AND grok-4.5 listed by `grok models`.
+#            The CLI rejects an unlisted -m id at launch ("unknown model id")
+#            and drops/renames models between releases (0.2.101 removed
+#            grok-composer-2.5-fast), so an auth-only check would advertise a
+#            model the CLI no longer offers. The probe degrades to auth-only —
+#            with a warning, never silently — when it cannot run: no coreutils
+#            timeout to bound it, or an empty/unparseable list. Its bound is
+#            SWARM_PROBE_TIMEOUT (10s), not SWARM_TIMEOUT (a review-length cap).
 #
 # Exit codes: 0 ok · 1 unavailable / not ready / run failed · 2 usage error
 
@@ -195,19 +198,32 @@ _env_filter_args() {
   done < <(env)
 }
 
+JAIL_CMD=()
+_build_jail() {
+  # Fill JAIL_CMD with the `env -u <secrets…> [sandbox-exec -p <profile>]` prefix
+  # for $1 — every word a real binary, never a shell function: `timeout` execs
+  # its argument, so a function here would not survive.
+  # Split out of sandboxed() so the readiness probe can reuse the SAME jail while
+  # keeping its own short bound (sandboxed() hard-wires ADAPTER_TIMEOUT, which is
+  # a review-length cap, not a probe-length one).
+  local backend="$1"
+  _init_sandbox "$backend"
+  local env_args=() _e
+  while IFS= read -r _e; do env_args+=("$_e"); done < <(_env_filter_args)
+  JAIL_CMD=(env ${env_args[@]+"${env_args[@]}"} ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"})
+}
+
 sandboxed() {
   # OS jail + env filter around an external call. $1 = backend (its own cred dir
   # stays readable; siblings' are denied). Warn once if no jail is available.
   local backend="$1"; shift
-  _init_sandbox "$backend"
+  _build_jail "$backend"
   if ((${#SANDBOX_CMD[@]} == 0)) && [[ -z "$_sandbox_warned" ]]; then
     echo "warning: no sandbox-exec/bwrap — external calls run without an OS read-deny jail (secret scrub + env filter still apply)" >&2
     _sandbox_warned=1
   fi
-  local env_args=() _e
-  while IFS= read -r _e; do env_args+=("$_e"); done < <(_env_filter_args)
   # order: timeout → env (strip secrets) → sandbox-exec (jail) → backend
-  with_timeout env ${env_args[@]+"${env_args[@]}"} ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"} "$@"
+  with_timeout "${JAIL_CMD[@]}" "$@"
 }
 
 scrub_secrets() {
@@ -275,41 +291,63 @@ available_version() {
   return 0
 }
 
-# grok's model list, memoized for the process (`grok models` may be a network
-# call — fetch at most once). `ready`/`list` were purely local before this probe
-# existed, so it must never be the thing that hangs them: without a coreutils
-# timeout to bound the call we skip the probe entirely and return an empty list,
-# which grok_model_offered reads as "unusable → trust auth" (the same degrade as
-# an offline fetch). Bounding it is not optional — the whole adapter treats an
-# uncapped external call as a bug (see with_timeout).
+# Wall-clock bound for the readiness probe. Deliberately NOT SWARM_TIMEOUT: that
+# caps a full review (600s default) and may be disabled with 0, neither of which
+# suits a probe that `list`/`ready` block on. Override with SWARM_PROBE_TIMEOUT;
+# a malformed or 0 value falls back to 10 (never uncapped, never a `timeout`
+# usage error that would read as "model missing").
+PROBE_TIMEOUT="${SWARM_PROBE_TIMEOUT:-10}"
+[[ "$PROBE_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || PROBE_TIMEOUT=10
+
+# grok's model list, memoized for the process (`grok models` is a network call —
+# fetch at most once).
 _grok_models_done=""
 _grok_models=""
-grok_model_list() {
-  if [[ -z "$_grok_models_done" ]]; then
-    _grok_models_done=1
-    local to=""
-    if command -v timeout >/dev/null; then to="timeout"
-    elif command -v gtimeout >/dev/null; then to="gtimeout"
-    fi
-    if [[ -n "$to" ]]; then
-      local raw
-      raw="$("$to" 10 grok models 2>/dev/null || true)"
-      # Lines look like "  * grok-4.5 (default)" — take the id after the bullet.
-      _grok_models="$(printf '%s\n' "$raw" | awk '/^[[:space:]]*\*/ {print $2}')"
-    fi
+_grok_probe_skipped=""
+grok_model_fetch() {
+  # Populates the cache globals. Call it DIRECTLY — never as `$(grok_model_fetch)`:
+  # a command substitution runs it in a subshell, the assignments die with that
+  # subshell, and every caller silently re-pays the network call.
+  [[ -n "$_grok_models_done" ]] && return 0
+  _grok_models_done=1
+  local to=""
+  if command -v timeout >/dev/null; then to="timeout"
+  elif command -v gtimeout >/dev/null; then to="gtimeout"
   fi
-  printf '%s\n' "$_grok_models"
+  if [[ -z "$to" ]]; then
+    # `ready`/`list` were purely local before this probe, so it must never be the
+    # thing that hangs them: with no way to bound the call, skip it and degrade
+    # to auth-only. SAY so — a silent skip would make the documented model-aware
+    # guarantee a lie on this host, which is the same "promise that doesn't hold
+    # at runtime" bug this whole change exists to remove.
+    _grok_probe_skipped=1
+    echo "warning: no timeout/gtimeout on PATH — skipping the grok model probe; grok readiness falls back to auth alone (install coreutils to restore the ${GROK_DEFAULT_MODEL} check)" >&2
+    return 0
+  fi
+  # Same jail as every other external call (env secret filter + read-deny), with
+  # the probe's own short bound instead of sandboxed()'s review-length one.
+  _build_jail grok
+  local raw
+  raw="$("$to" "$PROBE_TIMEOUT" "${JAIL_CMD[@]}" grok models </dev/null 2>/dev/null || true)"
+  # Pull the model id out of each bullet line by SHAPE, not position: the
+  # documented form is "  * grok-4.5 (default)", but keying on $2 would turn a
+  # reworded line ("  * default: grok-4.5") into a non-empty list of garbage
+  # tokens — which reads as "grok-4.5 is gone" and fails closed. Matching
+  # `grok-*` anywhere in the line survives that drift, and a line with no
+  # id-shaped token contributes nothing → empty list → the trust-auth degrade.
+  _grok_models="$(printf '%s\n' "$raw" \
+    | awk '/^[[:space:]]*\*/ { for (i = 1; i <= NF; i++) if ($i ~ /^grok-/) print $i }')"
 }
 
 grok_model_offered() {
   # Three-state, collapsed to an exit code: 0 = the CLI lists grok-4.5, 1 = it
   # lists models but NOT grok-4.5 (an honest "gone"), 0 = the list is empty /
-  # unparseable (probe unusable — e.g. offline, or a future CLI renaming the
-  # subcommand). The empty case deliberately trusts auth instead of failing
-  # closed: silently dropping grok from every fan-out is worse than letting
-  # run_grok surface its explicit "unknown model id" error.
-  local list
-  list="$(grok_model_list)"
+  # unparseable / not probed (probe unusable — offline, no timeout binary, or a
+  # future CLI renaming the subcommand). The empty case deliberately trusts auth
+  # instead of failing closed: silently dropping grok from every fan-out is
+  # worse than letting run_grok surface its explicit "unknown model id" error.
+  grok_model_fetch
+  local list="$_grok_models"
   # Substring match on newline-fenced text, NOT `grep -qxF`: an early-exiting
   # `grep -q` can SIGPIPE the writer, and pipefail would then report failure
   # even on a hit.

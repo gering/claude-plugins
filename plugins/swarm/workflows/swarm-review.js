@@ -259,7 +259,7 @@ log(runClaude ? `Gate: ${gate?.change_kind || 'unknown'} — running lenses [${r
               : `Gate: skipped — external-only run (no Claude lenses)`)
 
 // ============================================================================
-// Phase 2 — Ensemble fan-out (4 voices in parallel)
+// Phase 2 — Ensemble fan-out (Claude lenses + the external voices, in parallel)
 // ============================================================================
 phase('Fan-out')
 const claudeThunks = runLensesSafe.map((lens) => () =>

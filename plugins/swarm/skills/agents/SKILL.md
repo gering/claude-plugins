@@ -35,7 +35,12 @@ user_invocable: true
 - `claude` is always ready when Claude Code runs (reviews happen in-session
   via the Agent tool; the external CLIs are called through the adapter).
 - **`grok` Ready is a heuristic** — it means a non-empty `~/.grok/auth.json`
-  exists, NOT that the token is valid/unexpired (codex, by contrast, runs a
-  real `codex login status`). So grok can show Ready yet fail at review time on
-  a stale token; treat it as "credentials present" and let the run surface a
-  real auth error.
+  exists **and** that `grok models` still lists the adapter's model
+  (`grok-4.5`), NOT that the token is valid/unexpired (codex, by contrast, runs
+  a real `codex login status`). So grok can show Ready yet fail at review time
+  on a stale token; treat it as "credentials present" and let the run surface a
+  real auth error. Not-ready with a "does not offer grok-4.5" hint means the
+  grok CLI dropped/renamed the model — update the CLI, it is not an auth
+  problem. The model check degrades to auth-only (with a warning on stderr) when
+  the probe can't run — no coreutils `timeout` to bound it, or an unreadable
+  model list.
