@@ -50,15 +50,17 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
 
 ### Reopen mode (main session + `<task>` arg)
 
-> **Worker degradation.** Reopen resumes a **claude** worker (`claude -c` — the
-> most-recent claude session for the worktree cwd). If the task was kicked off
-> with a **codex/grok** worker (`/kickoff … --codex`/`--grok`/…), `claude -c`
-> would start a *new claude* session, not resume that CLI. The work-system can't
-> reliably tell which worker a worktree used (per-task agent memory is a later
-> idea), so **don't fake it**: the tab-reopen itself is CLI-agnostic (it just
-> reopens a tab at the worktree), but tell the user to resume the actual worker
-> in that tab — `codex resume --last` (codex) or `grok -c` (grok) — instead of
-> `claude -c`. Everything git/PR-derived (`/status`, `/list`, the `[ws]`
+> **Worker degradation — read before reopening.** The reopen helper
+> (`herdr-launch.sh resume`) **always sends `claude -c`** — the work-system does
+> not persist which worker a task used (per-task agent memory is a later idea), so
+> resume can't dispatch per CLI. The tab-reopen itself is CLI-agnostic (it just
+> reopens a tab at the worktree cwd), but the `claude -c` it runs resumes a
+> **claude** worker only. So if the task was kicked off with **codex/grok**
+> (`/kickoff … --codex`/`--grok`/…), that `claude -c` starts a *new claude*
+> session, not the original worker. **Surface this inline** whenever you reopen:
+> tell the user that `claude -c` was sent and, for a codex/grok task, to run the
+> worker's own resume in the tab instead — `codex resume --last` (codex) or
+> `grok -c` (grok). Everything git/PR-derived (`/status`, `/list`, the `[ws]`
 > statusline) already works for any worker; only session-resume is claude-shaped.
 
 1. **Resolve the task's worktree:**
@@ -127,9 +129,14 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
    it. If you land on a bare shell instead: if a shell startup prompt ate the command,
    run `claude -c` there yourself; if this worktree never hosted a session (e.g. it came
    from `/adopt`), `claude -c` has nothing to resume — start fresh with `claude`.
+   If this task was kicked off with a codex/grok worker, that `claude -c` is a NEW
+   Claude session, not your worker — resume the worker instead: `codex resume --last`
+   (codex) or `grok -c` (grok) in the tab.
    ```
    Word it as *sent*, not "is running" — the helper delivered the keystrokes but can't
    confirm Claude actually came up (see the shell-startup race in the knowledge entry).
+   Always include the codex/grok line: the reopen can't tell the worker, so the caveat
+   must be inline, not left to the top-of-section note.
 
    **b) Outside herdr — manual block** (display this — do **not** execute the `cd`):
    ```

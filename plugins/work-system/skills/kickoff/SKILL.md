@@ -13,7 +13,7 @@ user_invocable: true
 
 ## Critical: never persist a `cd` into the worktree
 
-This skill runs **in the user's main-repo session**. Its job is to *create* the worktree, not to enter it. The user opens the worktree in a separate terminal/Claude session (see step 12).
+This skill runs **in the user's main-repo session**. Its job is to *create* the worktree, not to enter it. The user opens the worktree in a separate terminal/Claude session (see step 13).
 
 Because the Bash tool persists working directory between calls, a bare `cd .claude/worktrees/<task>` would silently trap the entire session inside the worktree — every subsequent `git status`, relative path, or check would target the worktree instead of the main repo. This has caused real user-visible bugs.
 
@@ -29,9 +29,12 @@ The same rule applies to any project-specific setup the user's `CLAUDE.md` may a
 
 ### Arguments: `<task> [agent-selector]`
 
-The **task name** is the single argument token that does **not** start with `-`
-(a task-file basename). An optional trailing **agent selector** picks the worker
-CLI×model — a `--…` token is never the task name:
+The **task name** is the argument token that does **not** start with `-` — with
+one exception: `--agent` **consumes the immediately-following token as its value**
+(the `cli[:model]`), so that token is *not* a task-name candidate. So in
+`/kickoff --agent claude:sonnet add-dark-mode`, `claude:sonnet` is the agent value
+and `add-dark-mode` is the task. Every other selector is valueless. An optional
+**agent selector** picks the worker CLI×model — a `--…` token is never the task name:
 
 | selector | worker |
 |----------|--------|
@@ -120,9 +123,18 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
       `--grok`, or `--agent <cli[:model]>`): `SELECTOR` is that flag (for
       `--agent`, the `cli[:model]` value, e.g. `claude:sonnet`). One-off — no
       default offer.
-    - **No flag:** read the repo default: `SELECTOR="$(bash "$REG" default get)"`.
-      - **Non-empty** → use it directly (the common path: no picker).
-      - **Empty** (no project default set) → fall through to the **picker** below.
+    - **No flag:** read the repo default: `SELECTOR="$(bash "$REG" default get)"`
+      (the helper validates the committed value; a stale/unknown name prints
+      empty, so it can't route the launch).
+      - **Non-empty** → use it directly (the common path: no picker). **If that
+        default is a non-claude worker** (`SELECTOR` starts `codex:`/`grok:`),
+        first **announce** it — e.g. "Launching **codex:gpt-5.6-sol** (project
+        default) — this sends the task to a third-party model; pass `--pick` to
+        choose another." This is a visibility line, **not** a prompt: a committed
+        default from a cloned repo shouldn't silently route your code off-Claude,
+        but it also shouldn't block. Claude defaults launch with no such line.
+      - **Empty** (no project default set, or the committed value was invalid) →
+        fall through to the **picker** below.
     - **`--pick`, or no flag with no default set → the picker.** Run
       `bash "$REG" list` and present the rows with **AskUserQuestion**: one option
       per entry, label = the `NAME` (`cli:model`), description = the model plus its

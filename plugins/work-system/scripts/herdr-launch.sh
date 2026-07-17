@@ -79,7 +79,7 @@ mode="${1:-}"
 case "$mode" in
   launch|resume) shift ;;
   *)
-    echo "usage: ${0##*/} {launch|resume} <label> <worktree> <workspace-id> [session-name]" >&2
+    echo "usage: ${0##*/} {launch <label> <worktree> <workspace-id> [agent-selector] [session-name] | resume <label> <worktree> <workspace-id>}" >&2
     exit 1
     ;;
 esac

@@ -210,6 +210,15 @@ e.run("default", "set", "claude:opus")
 check("default overwrite", e.run("default", "get").stdout.strip() == "claude:opus")
 # bogus name rejected
 check("bogus default rejected", e.run("default", "set", "bogus:model").returncode == 2)
+# `default get` VALIDATES the stored value: a committed default that no longer
+# maps to a real entry (stale/removed/attacker-supplied from a cloned repo) is
+# treated as "no default" -> empty -> caller shows the picker, never routes on it.
+e.project_state.write_text("default=grok:composer\n")   # a removed name
+check("stale committed default -> empty", e.run("default", "get").stdout.strip() == "")
+e.project_state.write_text("default=--grok\n")           # a flag, not a name
+check("flag as committed default -> empty", e.run("default", "get").stdout.strip() == "")
+e.project_state.write_text("default=claude:opus\n")      # valid again
+check("valid committed default -> returned", e.run("default", "get").stdout.strip() == "claude:opus")
 # no project location (not a git repo, no override) -> clear error, exit 2
 r = e.run("default", "set", "claude:opus", project_state=False)
 check("no project location -> exit 2", r.returncode == 2)

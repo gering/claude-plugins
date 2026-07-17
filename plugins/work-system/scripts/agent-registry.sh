@@ -64,13 +64,16 @@ BOOTSTRAP_PROMPT='Read TASK.md in this worktree and continue the task. Commit on
 # ---------- registry ----------
 # `flag|cli|model|supports`. flag `-` = no shorthand (name/--agent only). The
 # FIRST entry of each CLI is that CLI's default model (for a bare `--agent codex`).
-# `supports` is per-agent capability metadata consumed by the picker (annotate
-# non-claude limits) and the /close + /continue degradation paths:
+# `supports` is per-agent capability metadata: which lifecycle hooks each agent
+# honors —
 #   continue   -> `/continue`-reopen + `claude -c` session resume work
 #   close-exit -> /close may inject `/exit` for a clean self-teardown
 #   statusline -> the `[ws]` statusline segment tracks its session
 # codex/grok get commit,pr only — they drive git + a PR but have none of the
-# claude-session lifecycle hooks.
+# claude-session lifecycle hooks. RESERVED / not yet consumed: the skills
+# currently hardcode the claude-vs-codex/grok distinction in prose; this field is
+# the seed for the manager/worker-orchestration design to read per-agent
+# capabilities from one place. Keep it in sync when that lands.
 REGISTRY='--fable|claude|fable|continue,close-exit,statusline,commit,pr
 --opus|claude|opus|continue,close-exit,statusline,commit,pr
 -|claude|sonnet|continue,close-exit,statusline,commit,pr
@@ -155,14 +158,16 @@ row_for_selector() {
 # which a subshell can't carry anyway — there is a single grok entry today).
 grok_model_list() {
   local raw rc=0
-  # coreutils `timeout` is `gtimeout` on stock macOS — try both before falling
-  # back to a bare (unbounded) call, mirroring the swarm adapter's with_timeout.
+  # coreutils `timeout` is `gtimeout` on stock macOS — try both. If NEITHER is on
+  # PATH we refuse to run a bare, unbounded `grok models`: a stalled call would
+  # hang the picker with no way to fall back to Claude. Return inconclusive (rc=1)
+  # instead, so entry_status trusts auth (availability assumed) — never blocks.
   if command -v timeout >/dev/null 2>&1; then
     raw="$(timeout 10 grok models 2>/dev/null)" || rc=$?
   elif command -v gtimeout >/dev/null 2>&1; then
     raw="$(gtimeout 10 grok models 2>/dev/null)" || rc=$?
   else
-    raw="$(grok models 2>/dev/null)" || rc=$?
+    return 1
   fi
   # Lines look like "  * grok-4.5 (default)" — take the id after the bullet.
   printf '%s\n' "$raw" | awk '/^[[:space:]]*\*/ {print $2}'
@@ -330,10 +335,19 @@ validate_name() {
 
 subcmd_default() {
   # default get         → the repo's default agent name, or empty if none set
+  #                       (or if the stored name no longer maps to a real entry)
   # default set <name>  → persist it in the project state file
   local op="${1:-get}"; shift || true
   case "$op" in
-    get) _kv_get "$PROJECT_STATE" default ;;
+    get)
+      # VALIDATE the stored value against the live registry before handing it to
+      # no-flag /kickoff. The project file is committed and travels with a clone,
+      # so a stale/removed/garbage (or attacker-supplied) name must NOT route the
+      # launch: an unknown name is treated as "no default" → the caller shows the
+      # picker, rather than failing every kickoff on a bogus committed value.
+      local v; v="$(_kv_get "$PROJECT_STATE" default)"
+      if [ -n "$v" ] && row_for_name "$v" >/dev/null 2>&1; then printf '%s\n' "$v"; fi
+      ;;
     set)
       local name="${1:-}"
       [ -n "$name" ] || { echo "default set: missing <name>" >&2; exit 2; }
