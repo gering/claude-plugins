@@ -217,6 +217,12 @@ user_invocable: true
     - Run `/close` to clean up the task worktree  (task/* branch detected)
     ```
 
+17. **Sync task-tab glyphs** (best-effort, silent):
+    - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/refresh-task-glyphs.sh"`
+    - Inside herdr with the work-system plugin installed, this flips the task
+      tab's sidebar glyph to `✓` (merged, ready to `/close`); otherwise it is a
+      silent no-op. Ignore its output — never block or report on it.
+
 ## Edge Cases
 
 - Branch protection blocks merge → stop, surface exact reason from the GitHub error, never bypass with `--admin`

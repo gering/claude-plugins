@@ -101,7 +101,9 @@ The same rule applies to any project-specific setup the user's `CLAUDE.md` may a
 
     Derive a short, sidebar-friendly label from the task name — drop filler words
     (`automate`, `in`, …) so it reads punchy (e.g. `automate-close-in-herdr` →
-    `close-herdr`), hard-cap ~32 chars. This `LABEL` names the herdr agent, the
+    `close-herdr`), hard-cap ~32 chars. Pass it PLAIN — the launch helper
+    prefixes the task's state glyph (`○ ● ◇ ✓`, e.g. `● close-herdr`) itself,
+    mirroring the `[ws …]` statusline. This `LABEL` names the herdr agent, the
     tab, and the Claude session; the `task/<task-name>` branch is unchanged, so
     `/continue` still resolves the task inside the worktree. The worktree path is
     absolute (`<main-repo>/.claude/worktrees/<task-name>`, with `<main-repo>` from

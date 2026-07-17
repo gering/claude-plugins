@@ -84,7 +84,15 @@ user_invocable: true
 
    Print the chosen line as its own highlighted block directly below the summary. Pick exactly one — do not print multiple "Next" lines.
 
-7. **All commands** (reference, always shown):
+7. **Sync herdr tab glyphs** (best-effort, silent):
+   - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-tab-glyph.sh" refresh --cached "$PWD"`
+   - Inside herdr this re-stamps every open task tab's state glyph
+     (`○ ● ◇ ◆ ✓`) to match the surveyed states; outside herdr (or without a
+     backlog) it is a silent no-op. `--cached`: this is a read-only survey, so
+     read the PR cache instead of a blocking `gh` call (a background refresh
+     keeps it current). Ignore its output — never block or report on it.
+
+8. **All commands** (reference, always shown):
    ```
    Commands:
    • /define         — Create a new task

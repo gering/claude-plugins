@@ -82,6 +82,15 @@ user_invocable: true
    - If open issues from last review: "Run `/fix` to work through them"
    - If CI failing: list the failures and suggest fixing before re-triggering
 
+9. **Sync task-tab glyphs** (best-effort, silent):
+   - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/refresh-task-glyphs.sh" --cached`
+   - Inside herdr with the work-system plugin installed, this re-stamps the
+     task tabs' sidebar state glyphs (`○ ● ◇ ◆ ✓`) from the surveyed state;
+     otherwise it is a silent no-op. `--cached`: `/check` is a pure read (and
+     re-run during CI polling), so read the PR cache instead of a blocking `gh`
+     call. Ignore its output. (This tab-rename is the one deliberate exception
+     to "read-only" — it mutates no repo or PR state.)
+
 ## Notes
 
 - This skill is **read-only** — it never commits, pushes, or triggers a review

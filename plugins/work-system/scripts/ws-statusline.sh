@@ -2,12 +2,24 @@
 # Emit the [ws ...] work-system status block for a given workspace dir.
 #
 # Usage: ws-statusline.sh <workspace-dir>
-# Output: ANSI-coloured string like "[ws ○2 ●1 ◇1 ✓1]" — no trailing newline.
+# Output: ANSI-coloured string like "[ws ○2 ●1 ◇1 ◆1 ✓1]" — no trailing newline.
 #         Single-width glyphs (only non-zero columns shown):
 #           ○ not-started · ● active (has a worktree) · ◇ in review (open PR) ·
+#           ◆ approved (open PR, review APPROVED — ready to /merge) ·
 #           ✓ merged (ready to /close).
 #         Empty when DIR is not a git repo, has no tasks/ backlog, an empty
 #         backlog, or the <DIR>/.claude/.ws-statusline-off sentinel is present.
+#
+# Second mode (used by herdr-tab-glyph.sh, NOT by the status line):
+#   ws-statusline.sh states [--cached] <workspace-dir>
+# prints one "<task>\t<state>\t<glyph>" line per backlog task (state ∈
+# not-started|active|review|approved|merged). Without --cached it refreshes the
+# PR cache SYNCHRONOUSLY first — for callers reacting to a PR state change
+# (/open, /merge, /cycle) that need the post-change state. With --cached it only
+# reads the cache and kicks off the same non-blocking background refresh the
+# render path uses — for pure-survey callers (/status, /list, /check, /close)
+# that must not block on the network. Same tasks, precedence, and glyphs as the
+# rendered segment: one file, so the two surfaces cannot drift.
 #
 # Self-contained by design: the installer copies THIS file to
 # ~/.claude/ws-statusline.sh with no siblings, so it must not source other
@@ -15,13 +27,19 @@
 
 # Parsed by /work-system:statusline install — bump in lockstep with plugin.json.
 # Format must stay `readonly WS_STATUSLINE_VERSION="X.Y.Z"`.
-readonly WS_STATUSLINE_VERSION="1.0.0"
+readonly WS_STATUSLINE_VERSION="1.2.0"
+
+MODE=render
+[ "${1:-}" = "states" ] && { MODE=states; shift; }
+CACHED=0
+[ "${1:-}" = "--cached" ] && { CACHED=1; shift; }
 
 DIR="${1:-}"
 [ -z "$DIR" ] && exit 0
 
-# Honour per-project disable sentinel.
-[ -f "${DIR}/.claude/.ws-statusline-off" ] && exit 0
+# Honour per-project disable sentinel (render only — it silences the status
+# LINE; states feeds the herdr tab glyphs, a different surface).
+[ "$MODE" = render ] && [ -f "${DIR}/.claude/.ws-statusline-off" ] && exit 0
 
 # Only render inside a git repo (tasks/ lives in the main worktree).
 git -C "$DIR" rev-parse --git-dir >/dev/null 2>&1 || exit 0
@@ -55,6 +73,43 @@ refresh_needed() {
   [ -z "$(find "$CACHE" -mmin -1 2>/dev/null)" ]
 }
 
+# Timeouts, per path — the two callers have OPPOSITE needs, so they must not
+# share one value:
+FETCH_TO_SYNC=8    # inline on a skill's critical path: cut a hung network fast
+                   #   (a healthy `gh pr list` is ~0.5–2s; the glyph is cosmetic)
+FETCH_TO_ASYNC=20  # detached background refresh: a hang is harmless here, so be
+                   #   generous — killing a slow-but-successful call would leave
+                   #   the cache stale for a full TTL instead of populating it.
+
+# Run "$2..." with a $1-second bound. `timeout` isn't on stock macOS, so fall
+# back to perl's alarm (perl ships with macOS; the alarm timer survives exec).
+# Only a host with NEITHER tool runs unbounded — accepted residual (it matters
+# most on the sync path, which sits inline on a skill's critical path).
+run_bounded() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$secs" "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
+  else
+    "$@"
+  fi
+}
+
+# One gh invocation shared by both refresh paths; $1 = timeout in seconds (the
+# caller picks FETCH_TO_SYNC or FETCH_TO_ASYNC). Prints
+# "headRef\tstate\treviewDecision" rows; non-zero when gh fails/times out.
+# reviewDecision (APPROVED / CHANGES_REQUESTED / REVIEW_REQUIRED / "")
+# distinguishes ◆ approved from ◇ in-review among OPEN PRs.
+fetch_prs() {
+  # --limit 500 is a bounded cache: a repo with more matching PRs than this
+  # could drop a task's branch from the window, but backlog tasks have recent
+  # PRs and 500 is far above the old 100 cliff — acceptable for a glance segment.
+  (cd "$DIR" && run_bounded "$1" gh pr list --state all --limit 500 \
+     --json state,headRefName,reviewDecision \
+     --jq '.[] | "\(.headRefName)\t\(.state)\t\(.reviewDecision)"' 2>/dev/null)
+}
+
 maybe_refresh_prs() {
   [ -n "$CACHE" ] || return 0
   command -v gh >/dev/null 2>&1 || return 0
@@ -66,19 +121,12 @@ maybe_refresh_prs() {
   fi
   # mkdir is atomic: whoever wins runs the single refresh; everyone else skips.
   mkdir "$lock" 2>/dev/null || return 0
-  # Bound the refresh so a hung gh can't hold the lock until the 5-min stale
-  # sweep. `timeout` isn't on stock macOS — use it only when present.
-  local gh_to=""
-  command -v timeout >/dev/null 2>&1 && gh_to="timeout 20"
   # Detach with stdout/stderr closed so the host statusline's command
-  # substitution does not wait on this child holding the pipe open.
+  # substitution does not wait on this child holding the pipe open. Nothing
+  # waits on this child, so it gets the GENEROUS bound: a slow API should still
+  # populate the cache rather than be killed into a full-TTL backoff.
   (
-    # --limit 500 is a bounded cache: a repo with more matching PRs than this
-    # could drop a task's branch from the window, but backlog tasks have recent
-    # PRs and 500 is far above the old 100 cliff — acceptable for a glance segment.
-    if out="$(cd "$DIR" && $gh_to gh pr list --state all --limit 500 \
-                --json state,headRefName \
-                --jq '.[] | "\(.headRefName)\t\(.state)"' 2>/dev/null)"; then
+    if out="$(fetch_prs "$FETCH_TO_ASYNC")"; then
       printf '%s\n' "$out" > "$CACHE.tmp.$$" && mv "$CACHE.tmp.$$" "$CACHE"
     else
       # gh failed (offline / not authed): reset the mtime so we back off for a
@@ -89,56 +137,113 @@ maybe_refresh_prs() {
   ) >/dev/null 2>&1 &
 }
 
-# State of the PR whose head branch == $1, from the cache. A branch reused across
-# PRs has several rows (`gh --state all`) in no guaranteed order, so pick the most
-# authoritative state (MERGED > OPEN > CLOSED > other) instead of the first row —
-# a first-match `exit` could surface a stale CLOSED over a newer OPEN/MERGED.
+# states mode refreshes the cache INLINE (no TTL, no lock): its callers fire
+# right after a PR changed state, so the async path would hand them the
+# pre-change state. A failed fetch keeps the previous cache; racing an in-flight
+# async refresh is benign (both writes are atomic tmp+mv of valid data). The
+# caller is blocked on this, so it takes the SHORT bound.
+sync_refresh_prs() {
+  [ -n "$CACHE" ] || return 0
+  command -v gh >/dev/null 2>&1 || return 0
+  local out
+  if out="$(fetch_prs "$FETCH_TO_SYNC")"; then
+    printf '%s\n' "$out" > "$CACHE.tmp.$$" && mv "$CACHE.tmp.$$" "$CACHE"
+  fi
+}
+
+# State of the PR whose head branch == $1, from the cache, as "<state>\t<rd>"
+# (rd = reviewDecision, possibly empty). A branch reused across PRs has several
+# rows (`gh --state all`) in no guaranteed order, so pick the most authoritative
+# state (MERGED > OPEN > CLOSED > other) instead of the first row — a first-match
+# `exit` could surface a stale CLOSED over a newer OPEN/MERGED. An old two-column
+# cache yields an empty rd (field $3 absent) → treated as ◇, never ◆.
 pr_state_of() {
   [ -n "$CACHE" ] && [ -f "$CACHE" ] || return 0
   awk -F'\t' -v b="$1" '
     $1==b {
       p = ($2=="MERGED")?3 : ($2=="OPEN")?2 : ($2=="CLOSED")?1 : 0
-      if (p > best) { best=p; st=$2 }
+      if (p > best) { best=p; st=$2; rd=$3 }
     }
-    END { if (st != "") print st }
+    END { if (st != "") print st "\t" rd }
   ' "$CACHE" 2>/dev/null
 }
 
-maybe_refresh_prs
+# Refresh policy: render always non-blocking; states syncs by default (callers
+# reacting to a state change need it fresh) but reads cache-only + non-blocking
+# background refresh under --cached (pure-survey callers must not block).
+if [ "$MODE" = states ]; then
+  if [ "$CACHED" = 1 ]; then maybe_refresh_prs; else sync_refresh_prs; fi
+else
+  maybe_refresh_prs
+fi
 
-# ---- count tasks by state ---------------------------------------------------
-# Non-recursive tasks/*.md, excluding index/readme; tasks/archive/ is a subdir
-# and so is naturally excluded by -maxdepth 1.
+# ---- task state (single decision for BOTH modes) ----------------------------
 
 # Does branch $1 currently have a linked worktree?
 has_worktree() { printf '%s\n' "$WORKTREE_BRANCHES" | grep -qxF "$1"; }
 
-TOTAL=0; NS=0; ACT=0; PR=0; DONE=0
+# State of the task named $1: PR state wins (merged > open); an OPEN PR that is
+# review-APPROVED is `approved` (ready to /merge), otherwise `review`. A PR
+# closed WITHOUT merging means the task is not done and falls back to the local
+# signals — a linked worktree → active, otherwise back in the backlog. Branch is
+# the /kickoff convention; adopt-renamed branches are an accepted blind spot.
+task_state() {  # echoes not-started | active | review | approved | merged
+  local branch="task/$1" pr st rd
+  pr="$(pr_state_of "$branch")"
+  st="${pr%%$'\t'*}"        # everything before the first TAB
+  rd="${pr#*$'\t'}"; [ "$rd" = "$pr" ] && rd=""   # after it, or "" if no TAB
+  if [ "$st" = "MERGED" ]; then echo merged                    # ✓ ready to /close
+  elif [ "$st" = "OPEN" ]; then
+    if [ "$rd" = "APPROVED" ]; then echo approved              # ◆ ready to /merge
+    else echo review; fi                                       # ◇ in review
+  elif has_worktree "$branch"; then echo active                # ● has a worktree
+  else echo not-started                                        # ○ backlog
+  fi
+}
+
+# The state→glyph mapping — THE single source for the status line AND the
+# herdr tab glyphs (herdr-tab-glyph.sh consumes it via states mode).
+glyph_of() {
+  case "$1" in
+    merged)   printf '✓' ;;
+    approved) printf '◆' ;;
+    review)   printf '◇' ;;
+    active)   printf '●' ;;
+    *)        printf '○' ;;
+  esac
+}
+
+# ---- walk the backlog -------------------------------------------------------
+# Non-recursive tasks/*.md, excluding index/readme; tasks/archive/ is a subdir
+# and so is naturally excluded by -maxdepth 1.
+
+TOTAL=0; NS=0; ACT=0; PR=0; APP=0; DONE=0
 # -print0 + `read -d ''` so a task filename with an embedded newline can't split
 # into two iterations; process substitution (not a pipe) keeps the counters in
 # THIS shell.
 while IFS= read -r -d '' f; do
   TOTAL=$((TOTAL + 1))
   name="$(basename "$f" .md)"
-  branch="task/$name"          # /kickoff convention; adopt-renamed branches are
-                               # an accepted blind spot for this glance segment.
-  state="$(pr_state_of "$branch")"
-  if [ "$state" = "MERGED" ]; then
-    DONE=$((DONE + 1))                          # ✓ merged, ready to /close
-  elif [ "$state" = "OPEN" ]; then
-    PR=$((PR + 1))                              # ◇ in review
-  elif [ "$state" = "CLOSED" ]; then
-    # PR closed WITHOUT merging → the task is not done; fall back to its local
-    # state (still has a worktree → active, otherwise back in the backlog).
-    if has_worktree "$branch"; then ACT=$((ACT + 1)); else NS=$((NS + 1)); fi
-  elif has_worktree "$branch"; then
-    ACT=$((ACT + 1))                            # ● active (has a worktree)
-  else
-    NS=$((NS + 1))                              # ○ not started
+  state="$(task_state "$name")"
+  if [ "$MODE" = states ]; then
+    # A name embedding a tab/newline would forge or split rows in the TSV this
+    # mode emits (the consumer could stamp another task's state from the forged
+    # row) — skip such names entirely; render mode still counts them above.
+    case "$name" in (*$'\t'*|*$'\n'*) continue ;; esac
+    printf '%s\t%s\t%s\n' "$name" "$state" "$(glyph_of "$state")"
+    continue
   fi
+  case "$state" in
+    merged)   DONE=$((DONE + 1)) ;;
+    approved) APP=$((APP + 1)) ;;
+    review)   PR=$((PR + 1)) ;;
+    active)   ACT=$((ACT + 1)) ;;
+    *)        NS=$((NS + 1)) ;;
+  esac
 done < <(find "$MAIN/tasks" -maxdepth 1 -type f -name '*.md' \
     ! -name '_index.md' ! -name 'README.md' -print0 2>/dev/null)
 
+[ "$MODE" = states ] && exit 0
 [ "$TOTAL" -eq 0 ] && exit 0
 
 # ---- render -----------------------------------------------------------------
@@ -149,6 +254,7 @@ LABEL='\033[38;5;170m'    # ws label — purple
 C_NS='\033[38;5;245m'     # ○ not started — grey (passive backlog)
 C_AC='\033[38;5;39m'      # ● active — blue (in progress)
 C_RV='\033[38;5;179m'     # ◇ in review — amber (waiting on a PR)
+C_AP='\033[38;5;43m'      # ◆ approved — cyan-green (approved, ready to /merge)
 C_MG='\033[38;5;40m'      # ✓ merged — green (ready to /close)
 RESET='\033[0m'
 
@@ -157,9 +263,10 @@ add_col() {   # count color glyph
   [ "$1" -gt 0 ] || return 0
   SEG="${SEG:+$SEG }${2}${3}${1}${RESET}"
 }
-add_col "$NS"   "$C_NS" "○"
-add_col "$ACT"  "$C_AC" "●"
-add_col "$PR"   "$C_RV" "◇"
-add_col "$DONE" "$C_MG" "✓"
+add_col "$NS"   "$C_NS" "$(glyph_of not-started)"
+add_col "$ACT"  "$C_AC" "$(glyph_of active)"
+add_col "$PR"   "$C_RV" "$(glyph_of review)"
+add_col "$APP"  "$C_AP" "$(glyph_of approved)"
+add_col "$DONE" "$C_MG" "$(glyph_of merged)"
 
 printf '%b[ws %b%b]%b' "$LABEL" "$SEG" "$LABEL" "$RESET"

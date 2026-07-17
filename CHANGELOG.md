@@ -52,6 +52,9 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.8.0 — 2026-07-16
+- Mirror task states onto herdr tab names as a leading state glyph (`○ ● ◇ ◆ ✓`: not-started / active / in-review / approved / merged), matching the `[ws …]` statusline. The mapping + precedence stay in `ws-statusline.sh` (new `states` mode, single source of truth); the new `herdr-tab-glyph.sh` stamps the glyph at launch (`/kickoff`, `/continue`) and re-stamps it idempotently on `/status`, `/list`, and `/close` (and via pr-flow's PR-lifecycle skills). `◆` approved is derived from the PR's `reviewDecision`. Survey surfaces (`/status`, `/list`, `/check`, `/close`) read the PR cache without blocking; state-changing skills (`/open`, `/merge`, `/cycle`) do a bounded synchronous refresh.
+
 ### 1.7.0 — 2026-07-15
 - Add `/statusline` skill: a `[ws ○… ●… ◇… ✓…]` task-backlog segment for Claude Code's status line. Counts `tasks/*.md` by state (not-started / active / in-review / merged) with muted single-width glyphs; PR state comes from a short-TTL `.git/` cache refreshed by a detached background `gh` call, so rendering never blocks on the network. Own marker segment coexists with the knowledge-system `[cks …]` block.
 
@@ -119,6 +122,9 @@ entries are grouped per plugin, newest first.
 - Add `/work-adopt` skill; store worktrees under `.claude/worktrees/`.
 
 ## pr-flow
+
+### 1.3.0 — 2026-07-16
+- `/open`, `/merge`, `/cycle`, and `/check` refresh the work-system herdr tab glyphs after PR state changes (soft-coupled via `scripts/refresh-task-glyphs.sh` — silent no-op when work-system or herdr is absent). `/check` uses `--cached` (read-only survey, no blocking `gh` call); the state-changing skills refresh synchronously.
 
 ### 1.2.3 — 2026-07-13
 - Align the `/cycle` review table with the swarm findings-table layout.
