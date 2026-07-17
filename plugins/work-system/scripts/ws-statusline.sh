@@ -73,32 +73,39 @@ refresh_needed() {
   [ -z "$(find "$CACHE" -mmin -1 2>/dev/null)" ]
 }
 
-# Run "$@" with an 8s bound. `timeout` isn't on stock macOS, so fall back to
-# perl's alarm (perl ships with macOS; the alarm timer survives exec). Only a
-# host with NEITHER tool runs unbounded — states mode sits inline on a skill's
-# critical path (the async render path detaches, where a hang is harmless), so
-# an unconditional bound matters more there; accepted residual on such hosts.
-# 8s comfortably covers a healthy `gh pr list` (~0.5–2s) while keeping a hung
-# network from stalling the invoking skill for long — the glyph is cosmetic.
+# Timeouts, per path — the two callers have OPPOSITE needs, so they must not
+# share one value:
+FETCH_TO_SYNC=8    # inline on a skill's critical path: cut a hung network fast
+                   #   (a healthy `gh pr list` is ~0.5–2s; the glyph is cosmetic)
+FETCH_TO_ASYNC=20  # detached background refresh: a hang is harmless here, so be
+                   #   generous — killing a slow-but-successful call would leave
+                   #   the cache stale for a full TTL instead of populating it.
+
+# Run "$2..." with a $1-second bound. `timeout` isn't on stock macOS, so fall
+# back to perl's alarm (perl ships with macOS; the alarm timer survives exec).
+# Only a host with NEITHER tool runs unbounded — accepted residual (it matters
+# most on the sync path, which sits inline on a skill's critical path).
 run_bounded() {
+  local secs="$1"; shift
   if command -v timeout >/dev/null 2>&1; then
-    timeout 8 "$@"
+    timeout "$secs" "$@"
   elif command -v perl >/dev/null 2>&1; then
-    perl -e 'alarm shift; exec @ARGV' 8 "$@"
+    perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
   else
     "$@"
   fi
 }
 
-# One gh invocation shared by both refresh paths (async render / sync states).
-# Prints "headRef\tstate\treviewDecision" rows; non-zero when gh fails/times
-# out. reviewDecision (APPROVED / CHANGES_REQUESTED / REVIEW_REQUIRED / "")
+# One gh invocation shared by both refresh paths; $1 = timeout in seconds (the
+# caller picks FETCH_TO_SYNC or FETCH_TO_ASYNC). Prints
+# "headRef\tstate\treviewDecision" rows; non-zero when gh fails/times out.
+# reviewDecision (APPROVED / CHANGES_REQUESTED / REVIEW_REQUIRED / "")
 # distinguishes ◆ approved from ◇ in-review among OPEN PRs.
 fetch_prs() {
   # --limit 500 is a bounded cache: a repo with more matching PRs than this
   # could drop a task's branch from the window, but backlog tasks have recent
   # PRs and 500 is far above the old 100 cliff — acceptable for a glance segment.
-  (cd "$DIR" && run_bounded gh pr list --state all --limit 500 \
+  (cd "$DIR" && run_bounded "$1" gh pr list --state all --limit 500 \
      --json state,headRefName,reviewDecision \
      --jq '.[] | "\(.headRefName)\t\(.state)\t\(.reviewDecision)"' 2>/dev/null)
 }
@@ -115,9 +122,11 @@ maybe_refresh_prs() {
   # mkdir is atomic: whoever wins runs the single refresh; everyone else skips.
   mkdir "$lock" 2>/dev/null || return 0
   # Detach with stdout/stderr closed so the host statusline's command
-  # substitution does not wait on this child holding the pipe open.
+  # substitution does not wait on this child holding the pipe open. Nothing
+  # waits on this child, so it gets the GENEROUS bound: a slow API should still
+  # populate the cache rather than be killed into a full-TTL backoff.
   (
-    if out="$(fetch_prs)"; then
+    if out="$(fetch_prs "$FETCH_TO_ASYNC")"; then
       printf '%s\n' "$out" > "$CACHE.tmp.$$" && mv "$CACHE.tmp.$$" "$CACHE"
     else
       # gh failed (offline / not authed): reset the mtime so we back off for a
@@ -131,12 +140,13 @@ maybe_refresh_prs() {
 # states mode refreshes the cache INLINE (no TTL, no lock): its callers fire
 # right after a PR changed state, so the async path would hand them the
 # pre-change state. A failed fetch keeps the previous cache; racing an in-flight
-# async refresh is benign (both writes are atomic tmp+mv of valid data).
+# async refresh is benign (both writes are atomic tmp+mv of valid data). The
+# caller is blocked on this, so it takes the SHORT bound.
 sync_refresh_prs() {
   [ -n "$CACHE" ] || return 0
   command -v gh >/dev/null 2>&1 || return 0
   local out
-  if out="$(fetch_prs)"; then
+  if out="$(fetch_prs "$FETCH_TO_SYNC")"; then
     printf '%s\n' "$out" > "$CACHE.tmp.$$" && mv "$CACHE.tmp.$$" "$CACHE"
   fi
 }

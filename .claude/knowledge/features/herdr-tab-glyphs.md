@@ -36,14 +36,22 @@ see [statusline-integration](statusline-integration.md)). `states` mode has
 - **Default (sync):** refresh the PR cache *inline* before reading — for
   triggers that fire right after a PR changed state (`/open` → `◇`, `/merge` →
   `✓`, `/cycle` → possibly `◆`). The async TTL path would serve the pre-change
-  state and the glyph would flip one survey late. The inline `gh` call is
-  bounded (`run_bounded`: `timeout`, else a `perl -e 'alarm'` fallback, 8s).
+  state and the glyph would flip one survey late.
 - **`--cached`:** read the cache only + kick off the same non-blocking
   background refresh the render path uses — for pure-survey callers (`/status`,
   `/list`, `/check`, `/close`) whose state didn't just change and that must not
   block. `/check` especially: it re-runs during CI polling. The flag threads
   `herdr-tab-glyph.sh refresh --cached` → `ws-statusline.sh states --cached`,
   and through the pr-flow shim `refresh-task-glyphs.sh --cached`.
+
+**The two `gh` bounds must not be one value** (`run_bounded <secs> …`:
+`timeout`, else a `perl -e 'alarm'` fallback that survives `exec`; unbounded
+only on a host with neither — accepted). The sync path takes **8s**: a caller is
+blocked on it, so cut a hung network fast; the glyph is cosmetic. The detached
+background refresh takes **20s**: nothing waits on it, and killing a slow but
+*successful* API call would leave the cache stale for a whole TTL instead of
+populating it. Collapsing both onto the short bound is a real regression — it
+was shipped and caught in review.
 
 ## Renamer rules (herdr-tab-glyph.sh)
 

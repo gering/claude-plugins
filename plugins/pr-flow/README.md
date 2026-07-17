@@ -88,7 +88,7 @@ If a clear pattern emerges (e.g. 18 of 20 last PRs were squashed), `/merge` sugg
 
 ### work-system tab-glyph sync (soft-coupled)
 
-**What it does.** `/open`, `/merge`, `/cycle`, and `/check` end by running `scripts/refresh-task-glyphs.sh`, which — when the work-system plugin is installed and you're inside a herdr session — re-stamps the task tabs' sidebar state glyphs (`○ ● ◇ ✓`). Opening a PR flips the task's tab to `◇`, merging it to `✓`, live in the sidebar.
+**What it does.** `/open`, `/merge`, `/cycle`, and `/check` end by running `scripts/refresh-task-glyphs.sh`, which — when the work-system plugin is installed and you're inside a herdr session — re-stamps the task tabs' sidebar state glyphs (`○` not-started, `●` active, `◇` in review, `◆` approved, `✓` merged). Opening a PR flips the task's tab to `◇`, an approval to `◆`, merging to `✓`, live in the sidebar. `/check` passes `--cached` (a read-only survey never blocks on `gh`); the state-changing skills refresh synchronously.
 
 **Why it matters.** PR state changes happen in pr-flow, but the tab names belong to work-system. The shim only *locates* work-system's `herdr-tab-glyph.sh` and is a silent no-op when it (or herdr) is absent — pr-flow stays independently installable, per the marketplace's soft-coupling rule.
 

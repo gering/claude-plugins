@@ -115,8 +115,10 @@ Strip the flags first; whatever is left over is the commit message.
       task tabs' sidebar state glyphs (`○ ● ◇ ◆ ✓`); otherwise it is a silent
       no-op. No `--cached` — `/cycle` pushes and re-triggers review, so it needs
       a fresh `gh` read (e.g. an approval since flips `◇` → `◆`). Ignore its
-      output — never block or report on it. In loop mode run it once per
-      invocation (not per round).
+      output — never block or report on it.
+    - **Loop mode does not run this step here** (its rounds re-run steps 3–10
+      only, so a per-round glyph sync would be wasted work): the Wrap-up runs it
+      once at the end instead — see "Loop mode (`--loop`)" → Wrap-up.
 
 ## Loop mode (`--loop`)
 
@@ -172,7 +174,11 @@ The review wait is a background Bash poll, so the user can interject at any time
      Then `git push --force-with-lease`. This collapses only the loop's fix commits — the original feature commits are untouched. `HEAD~<FIX_COMMITS>` stays correct even if `/rebase` ran mid-loop, because a rebase replays our commits without changing how many sit on top of the base.
    - On no: leave history as-is.
    - If `FIX_COMMITS < 2`: skip the offer silently (nothing to squash).
-3. Hand control back. Suggest `/merge` if the loop converged clean, or manual follow-up / `/fix` if disagreements remain.
+3. **Sync task-tab glyphs** — run step 11 above, once, now (the loop's rounds
+   skip it). The loop pushed and re-triggered reviews, so the PR state may have
+   moved (e.g. an approval flips the tab `◇` → `◆`). Every termination reason
+   lands here, including "stopped by you", so the glyph is never left stale.
+4. Hand control back. Suggest `/merge` if the loop converged clean, or manual follow-up / `/fix` if disagreements remain.
 
 ## Edge Cases
 
