@@ -158,16 +158,27 @@ row_for_selector() {
 # which a subshell can't carry anyway — there is a single grok entry today).
 grok_model_list() {
   local raw rc=0
-  # coreutils `timeout` is `gtimeout` on stock macOS — try both. If NEITHER is on
-  # PATH we refuse to run a bare, unbounded `grok models`: a stalled call would
-  # hang the picker with no way to fall back to Claude. Return inconclusive (rc=1)
-  # instead, so entry_status trusts auth (availability assumed) — never blocks.
+  # Always run BOUNDED so the probe both fires (can catch a dropped model) and
+  # can't hang the picker. coreutils `timeout` is `gtimeout` on stock macOS — use
+  # either when present; otherwise self-bound with a background killer (no reliance
+  # on an external timeout binary, so the model check still runs everywhere).
   if command -v timeout >/dev/null 2>&1; then
     raw="$(timeout 10 grok models 2>/dev/null)" || rc=$?
   elif command -v gtimeout >/dev/null 2>&1; then
     raw="$(gtimeout 10 grok models 2>/dev/null)" || rc=$?
   else
-    return 1
+    local tmp; tmp="$(mktemp)"
+    grok models >"$tmp" 2>/dev/null &
+    local pid=$!
+    # Killer with fd1/fd2 -> /dev/null: this runs inside a command substitution,
+    # and a background job that still holds the captured pipe would make
+    # $(grok_model_list) block until its `sleep` ends (defeating the bound). grok's
+    # own stdout goes to $tmp, so only the killer needs its fds detached.
+    ( sleep 10; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+    local killer=$!
+    if wait "$pid" 2>/dev/null; then rc=0; else rc=$?; fi   # non-zero if the killer fired
+    kill "$killer" 2>/dev/null || true                       # stop the timer once grok returned
+    raw="$(cat "$tmp")"; rm -f "$tmp"
   fi
   # Lines look like "  * grok-4.5 (default)" — take the id after the bullet.
   printf '%s\n' "$raw" | awk '/^[[:space:]]*\*/ {print $2}'
@@ -197,6 +208,12 @@ entry_status() {
           # `grok models` was unreachable/timed out — inconclusive, not a drop.
           # Trust auth so a network hiccup doesn't wrongly block launch.
           avail=yes; note="grok models unreachable — availability assumed"
+        elif [ -z "$_list" ]; then
+          # Fetch succeeded but the parser found no ids — grok reformatted its
+          # `models` output (dropped the `*` bullet / moved the id). That's format
+          # drift, NOT "the model is gone", so treat it as inconclusive too rather
+          # than silently marking every grok entry unavailable.
+          avail=yes; note="grok models unparseable — availability assumed"
         elif printf '%s\n' "$_list" | grep -qxF "$model"; then avail=yes
         else note="model not offered by this grok CLI (see: grok models)"; fi
       fi

@@ -196,6 +196,15 @@ check("unreachable note is soft", "unreachable" in by["grok:grok-4.5"]["note"])
 check("resolve --grok available when fetch fails", e.run("resolve", "--grok").returncode == 0)
 e.close()
 
+# grok `models` SUCCEEDS (exit 0) but the parser extracts nothing (a reformatted
+# listing that dropped the `*` bullet) -> inconclusive, NOT "model gone": trust
+# auth so a format-drift release doesn't silently disable the whole grok backend.
+e = Env(grok_models=(), grok_models_ok=True)
+by = {r["name"]: r for r in json.loads(e.run("list", "--json").stdout)}
+check("grok models empty-but-ok -> assumed available", by["grok:grok-4.5"]["available"] is True)
+check("unparseable note is soft", "unparseable" in by["grok:grok-4.5"]["note"])
+e.close()
+
 # --- project default (the only persisted state) ---------------------------- #
 e = Env()
 # nothing set -> empty (no-flag /kickoff then shows the picker)

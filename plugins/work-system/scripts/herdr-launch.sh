@@ -166,8 +166,16 @@ case "$mode" in
       registry="${0%/*}/agent-registry.sh"
       [ -f "$registry" ] || { echo "agent-registry.sh not found next to herdr-launch.sh" >&2; exit 1; }
       rc=0
-      resolve_out="$(bash "$registry" resolve "$selector" --session "$session" 2>/dev/null)" || rc=$?
-      [ "$rc" = 2 ] && { echo "unknown agent selector: $selector" >&2; exit 2; }
+      # Keep resolve's stderr (it distinguishes its exit-2 causes: unknown
+      # selector vs a rejected --session vs missing selector) instead of masking
+      # them all as "unknown selector".
+      resolve_err="$(mktemp)"
+      resolve_out="$(bash "$registry" resolve "$selector" --session "$session" 2>"$resolve_err")" || rc=$?
+      if [ "$rc" = 2 ]; then
+        echo "agent selection failed for '$selector': $(tr '\n' ' ' < "$resolve_err")" >&2
+        rm -f "$resolve_err"; exit 2
+      fi
+      rm -f "$resolve_err"
       while IFS= read -r line; do
         case "$line" in
           argv=*) worker_argv+=("${line#argv=}") ;;

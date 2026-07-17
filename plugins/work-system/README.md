@@ -175,10 +175,13 @@ routing can plug in).
 so a launched worker gets a bootstrap prompt (read `TASK.md`, commit, open a PR)
 instead of `/continue`. Everything git/PR-derived (`/status`, `/list`, the
 `[ws]` statusline, `/close`'s tab teardown) works for any worker; only
-claude-session concepts differ — `/continue`'s reopen resumes a claude worker
-with `claude -c`, while a codex/grok task resumes with `codex resume --last` /
-`grok -c`. Since both CLIs read `AGENTS.md`, dropping a short `AGENTS.md` note
-into the worktree is an optional way to give them standing task guidance.
+claude-session concepts differ. `/continue`'s reopen **always sends `claude -c`**
+— the work-system doesn't persist which worker a task used (per-task agent memory
+is a later idea), so it can't dispatch per CLI. That resumes a claude worker; for
+a codex/grok task it's a *new* Claude session, so you resume the real worker
+yourself in the tab (`codex resume --last` / `grok -c`) — `/continue` surfaces
+this caveat inline. Since both CLIs read `AGENTS.md`, dropping a short `AGENTS.md`
+note into the worktree is an optional way to give them standing task guidance.
 
 ## herdr integration
 
