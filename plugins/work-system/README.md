@@ -100,16 +100,16 @@ Branches follow the pattern `task/<task-name>`:
 > /kickoff
 ```
 
-Creates a worktree, copies the task file, and opens a worker session in it. By
-default `/kickoff` shows a **picker** of the available worker agents; a flag
-skips it:
+Creates a worktree, copies the task file, and opens a worker session in it. With
+no flag `/kickoff` launches your **default** agent; a flag picks another:
 
 ```
+> /kickoff add-dark-mode             # the default agent (project > global > claude:opus)
 > /kickoff add-dark-mode --opus      # claude on opus
 > /kickoff add-dark-mode --sol       # codex on gpt-5.6-sol
 > /kickoff add-dark-mode --grok      # grok-4.5
-> /kickoff add-dark-mode --auto      # first available, by a configurable ranking
 > /kickoff add-dark-mode --last      # the agent you used last
+> /kickoff add-dark-mode --pick      # interactive picker
 ```
 
 See [Worker agent selection](#worker-agent-selection) below for the full set.
@@ -149,26 +149,34 @@ count in its summary.
 
 ## Worker agent selection
 
-`/kickoff` doesn't hardcode Claude as the worktree worker. At kickoff time you
-pick from the **known, available agents** — each a CLI × model, with
-availability probed by a script (`scripts/agent-registry.sh`, the single source
-of truth). With no flag you get an interactive picker; a flag skips it:
+`/kickoff` doesn't hardcode Claude as the worktree worker. Each agent is a
+CLI × model, with availability probed by a script (`scripts/agent-registry.sh`,
+the single source of truth). With no flag it launches your **default**; a flag
+picks another:
 
 | flag | worker |
 |------|--------|
-| *(none)* | interactive picker (unavailable agents are marked, not hidden) |
-| `--auto` | first available agent in a configurable ranking (deterministic, not an LLM pick) |
-| `--default` | your configured default |
+| *(none)* | the default agent (project → global → shipped `claude:opus`) |
+| `--pick` | interactive picker (unavailable agents are marked, not hidden) |
 | `--last` | the agent you used last |
 | `--fable` / `--opus` | claude on fable / opus |
 | `--codex` / `--sol` | codex on gpt-5.6-terra / gpt-5.6-sol |
 | `--grok` | grok-4.5 |
 | `--agent <cli[:model]>` | any registry entry, e.g. `--agent claude:sonnet` or `--agent codex` |
 
-State and ranking live in `~/.claude/work-system-agent` (default/last) and are
-overridable via `WORK_SYSTEM_AGENT_RANK[_FILE]`. The shipped `--auto` ranking
-prefers `claude:fable → claude:opus → codex:sol → …`; it is the hook where
-future task-aware routing can plug in.
+**The default resolves in three tiers:** a **project** default committed in the
+repo's `.claude/work-system-agent` overrides a **global** per-user default in
+`~/.claude/work-system-agent`, which overrides the shipped fallback
+`claude:opus`. Set them with:
+
+```
+agent-registry.sh default set <name>            # global (per-user)
+agent-registry.sh default set <name> --project  # committed for this repo
+```
+
+`--last` is updated automatically after each kickoff. Everything is
+registry-driven — no ranking or LLM call; the default is a simple, explicit
+choice (the hook where future task-aware routing can plug in).
 
 **Non-Claude workers degrade honestly.** codex/grok have no work-system skills,
 so a launched worker gets a bootstrap prompt (read `TASK.md`, commit, open a PR)

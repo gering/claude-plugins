@@ -35,9 +35,8 @@ CLI×model — a `--…` token is never the task name:
 
 | selector | worker |
 |----------|--------|
-| *(none)* | interactive picker (step 12) |
-| `--auto` | first available agent in the ranking (deterministic, not an LLM pick) |
-| `--default` | the configured default |
+| *(none)* | the **default** agent: project default → global default → shipped fallback (`claude:opus`) |
+| `--pick` | interactive picker over the available agents |
 | `--last` | the last-used agent |
 | `--fable` / `--opus` | claude on fable / opus |
 | `--codex` / `--sol` | codex on gpt-5.6-terra / gpt-5.6-sol |
@@ -46,7 +45,9 @@ CLI×model — a `--…` token is never the task name:
 
 This table mirrors `agent-registry.sh` for reader convenience only — **never
 hardcode it in a decision**. Step 12 resolves the selector through the script,
-which is the single source of truth for aliases, models, and availability.
+which is the single source of truth for aliases, models, availability, and the
+default. The default is set with `agent-registry.sh default set <name>`
+(`--global` per-user, or `--project` committed in the repo's `.claude/`).
 
 1. **Check current location** (shared helper — robust against paths with spaces and symlinks):
    - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" linked` → `main` or `linked`.
@@ -109,19 +110,20 @@ which is the single source of truth for aliases, models, and availability.
     - Run: `pwd` and compare to the `<main-repo>` path captured by the helper in step 1.
     - If they differ, **stop and report an error**: "Session CWD drifted into the worktree during kickoff — investigate which step ran a persistent `cd`." Do not silently continue; a contaminated session will mislead every subsequent command.
 
-12. **Select the worker agent** — turn the argument selector (or the picker) into
-    a concrete `SELECTOR`, which step 13 passes straight to the launch helper.
+12. **Select the worker agent** — turn the argument selector into a concrete
+    `SELECTOR`, which step 13 passes straight to the launch helper.
     `REG="${CLAUDE_PLUGIN_ROOT}/scripts/agent-registry.sh"`.
 
+    - **No flag → the default.** `SELECTOR="$(bash "$REG" default get)"` — the
+      helper resolves project default → global default → shipped fallback
+      (`claude:opus`), so it always prints something. This is the common path: no
+      picker, just launch the configured default.
     - **A selector flag was given** (`--fable`, `--opus`, `--codex`, `--sol`,
       `--grok`, or `--agent <cli[:model]>`): `SELECTOR` is that flag
       (for `--agent`, `SELECTOR` is the `cli[:model]` value, e.g. `claude:sonnet`).
-    - **`--auto`**: `SELECTOR="$(bash "$REG" auto)"` — the first available agent in
-      the ranking. (Always resolves: claude is available in-session.)
-    - **`--last`** / **`--default`**: `SELECTOR="$(bash "$REG" last get)"` /
-      `default get`. If it prints nothing (never set), say so and fall through to
-      the picker.
-    - **No flag → interactive picker.** Run `bash "$REG" list` and present the rows
+    - **`--last`**: `SELECTOR="$(bash "$REG" last get)"`. If it prints nothing
+      (never used yet), say so and fall back to the default (`default get`).
+    - **`--pick` → interactive picker.** Run `bash "$REG" list` and present the rows
       with **AskUserQuestion**: one option per entry, label = the `NAME`
       (`cli:model`), description = the model plus its availability
       (append the `NOTE`, e.g. "unavailable — run: grok login", for any row with
@@ -129,10 +131,10 @@ which is the single source of truth for aliases, models, and availability.
       them), and order available ones first. The user's pick is `SELECTOR` (its
       `NAME`).
 
-    Do not resolve models or availability yourself — the helper owns that. Step 13
-    passes `SELECTOR` to `herdr-launch.sh`, which resolves + validates it (and
-    reports a clear error if it is unavailable), so an unavailable pick is handled
-    there, not here.
+    Do not resolve models, the default, or availability yourself — the helper owns
+    that. Step 13 passes `SELECTOR` to `herdr-launch.sh`, which resolves +
+    validates it (and reports a clear error if it is unavailable), so an
+    unavailable pick is handled there, not here.
 
 13. **Launch the worktree session** — automate it inside herdr, otherwise show
     the manual block.

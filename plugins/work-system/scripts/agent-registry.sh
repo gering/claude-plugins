@@ -19,13 +19,17 @@
 #                                 Emits key=value lines incl. one `argv=` line
 #                                 per exec word. Exit 3 if the entry's CLI is
 #                                 unavailable (still prints available=no + note).
-#   auto                          Print the first AVAILABLE entry name per the
-#                                 ranking (exit 1 if none available).
-#   default get | default set <name>
+#   default get [--project|--global]
+#                                 No level: the EFFECTIVE default that no-flag
+#                                 /kickoff uses — project default > global
+#                                 default > the shipped fallback (claude:opus).
+#                                 --project/--global: the raw value at one level.
+#   default set <name> [--project|--global]
+#                                 Persist the default. --global (the default
+#                                 target) = per-user; --project = committed in
+#                                 the repo's .claude/, overrides global here.
 #   last    get | last    set <name>
-#                                 Persisted selection state (see STATE below).
-#   rank                          Print the effective --auto ranking, one name
-#                                 per line.
+#                                 Per-user last-used agent (recency shortcut).
 #
 # Launch shape per CLI (resolve builds the argv; the launch helper just execs
 # the `argv=` words, so the argv-exec path — no shell-typing race — is kept):
@@ -39,19 +43,28 @@
 #   for non-claude workers instead of faking claude-only behavior.
 #
 # State & config (override for tests / relocation):
-#   WORK_SYSTEM_AGENT_STATE      selection state file (default/last)
-#                                default: ~/.claude/work-system-agent
-#   WORK_SYSTEM_AGENT_RANK       inline ranking (whitespace-separated names)
-#   WORK_SYSTEM_AGENT_RANK_FILE  ranking file, one name per line, # comments
-#                                default: ~/.claude/work-system-agent-rank
+#   WORK_SYSTEM_AGENT_STATE          global state file (default + last)
+#                                    default: ~/.claude/work-system-agent
+#   WORK_SYSTEM_AGENT_PROJECT_STATE  project state file (default only)
+#                                    default: <repo-root>/.claude/work-system-agent
+#   the shipped fallback default (no config anywhere) is claude:opus.
 #
 # Exit codes: 0 ok · 1 not-available / no-op · 2 usage / unknown selector ·
 #             3 resolved but the entry's CLI is unavailable
 set -euo pipefail
 
 HOME="${HOME:-$(cd ~ 2>/dev/null && pwd || echo /nonexistent)}"
+# Global (per-user) state: the `default` fallback + `last`-used agent.
 STATE_FILE="${WORK_SYSTEM_AGENT_STATE:-$HOME/.claude/work-system-agent}"
-RANK_FILE="${WORK_SYSTEM_AGENT_RANK_FILE:-$HOME/.claude/work-system-agent-rank}"
+# Project (per-repo) state: a committed `default` that overrides the global one.
+# Defaults to <repo-root>/.claude/work-system-agent; overridable for tests.
+PROJECT_STATE="${WORK_SYSTEM_AGENT_PROJECT_STATE:-}"
+if [ -z "$PROJECT_STATE" ]; then
+  _repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$_repo_root" ] && PROJECT_STATE="$_repo_root/.claude/work-system-agent"
+fi
+# Built-in fallback default when neither project nor global config sets one.
+SHIPPED_DEFAULT="claude:opus"
 GROK_AUTH_FILE="${GROK_AUTH_FILE:-$HOME/.grok/auth.json}"
 
 # The bootstrap prompt for CLIs without work-system skills (codex, grok). One
@@ -74,11 +87,6 @@ REGISTRY='--fable|claude|fable|continue,close-exit,statusline,commit,pr
 --codex|codex|gpt-5.6-terra|commit,pr
 --sol|codex|gpt-5.6-sol|commit,pr
 --grok|grok|grok-4.5|commit,pr'
-
-# Shipped default --auto ranking (first available wins). Deterministic, not an
-# LLM judgment; override via WORK_SYSTEM_AGENT_RANK[_FILE]. This list is also the
-# hook where future task-aware routing plugs in.
-DEFAULT_RANK='claude:fable claude:opus codex:gpt-5.6-sol codex:gpt-5.6-terra grok:grok-4.5'
 
 usage() {
   # Usage = header comment from line 2 up to (not including) the registry
@@ -289,70 +297,82 @@ print()
   } | { command -v column >/dev/null 2>&1 && column -t -s $'\t' || cat; }
 }
 
-effective_rank() {
-  # Print the ranking, one name per line: env override > file > shipped default.
-  # Split on whitespace only — a name is `cli:model`, so the colon is part of the
-  # name, never a separator.
-  if [ -n "${WORK_SYSTEM_AGENT_RANK:-}" ]; then
-    printf '%s\n' $WORK_SYSTEM_AGENT_RANK
-  elif [ -f "$RANK_FILE" ]; then
-    grep -vE '^\s*(#|$)' "$RANK_FILE" | awk '{print $1}'
-  else
-    printf '%s\n' $DEFAULT_RANK
-  fi
+# Read/write one `key=value` line in a state file, preserving other keys.
+_kv_get() {
+  local file="$1" key="$2"
+  [ -n "$file" ] && [ -f "$file" ] || return 0
+  sed -n "s/^$key=//p" "$file" | tail -1
+}
+_kv_set() {
+  local file="$1" key="$2" value="$3" tmp
+  mkdir -p "$(dirname "$file")"
+  tmp="$(mktemp)"
+  [ -f "$file" ] && grep -v "^$key=" "$file" >"$tmp" 2>/dev/null || true
+  printf '%s=%s\n' "$key" "$value" >>"$tmp"
+  mv "$tmp" "$file"
 }
 
-subcmd_rank() { effective_rank; }
-
-subcmd_auto() {
-  local name flag cli model supports record avail note
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    record="$(row_for_name "$name")" || continue   # skip unknown names in a custom rank
-    IFS='|' read -r flag cli model supports <<<"$record"
-    IFS=$'\t' read -r avail note < <(entry_status "$cli" "$model")
-    if [ "$avail" = yes ]; then
-      printf '%s\n' "$name"
-      return 0
-    fi
-  done < <(effective_rank)
-  echo "no available agent in the ranking" >&2
-  exit 1
+validate_name() {
+  # A stored default/last must map to a real entry, so state can't rot.
+  row_for_name "$1" >/dev/null || {
+    echo "unknown agent name '$1' (see \`list\`)" >&2; exit 2; }
 }
 
-state_get() {
-  # $1 = key (default|last). Prints the stored value or nothing.
-  local key="$1"
-  [ -f "$STATE_FILE" ] || return 0
-  sed -n "s/^$key=//p" "$STATE_FILE" | tail -1
+effective_default() {
+  # No-flag /kickoff resolves this: project default > global default > shipped.
+  local v
+  v="$(_kv_get "$PROJECT_STATE" default)"; [ -n "$v" ] && { printf '%s\n' "$v"; return 0; }
+  v="$(_kv_get "$STATE_FILE" default)";    [ -n "$v" ] && { printf '%s\n' "$v"; return 0; }
+  printf '%s\n' "$SHIPPED_DEFAULT"
 }
 
-state_set() {
-  # $1 = key, $2 = value. Rewrites the one key, preserving the other.
-  local key="$1" value="$2" other other_val
-  case "$key" in default) other=last ;; last) other=default ;; esac
-  other_val="$(state_get "$other")"
-  mkdir -p "$(dirname "$STATE_FILE")"
-  {
-    printf '%s=%s\n' "$key" "$value"
-    [ -n "$other_val" ] && printf '%s=%s\n' "$other" "$other_val"
-  } >"$STATE_FILE"
-}
-
-subcmd_state() {
-  local key="$1"; shift   # default | last
-  local op="${1:-get}"
+subcmd_default() {
+  # default get [--project|--global]  → effective, or the raw value at one level
+  # default set <name> [--project|--global]  → write (global unless --project)
+  local op="${1:-get}"; shift || true
+  local level="" name=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project) level=project; shift ;;
+      --global)  level=global;  shift ;;
+      -*) echo "default: unknown flag $1" >&2; exit 2 ;;
+      *)  name="$1"; shift ;;
+    esac
+  done
   case "$op" in
-    get) state_get "$key" ;;
-    set)
-      local name="${2:-}"
-      [ -n "$name" ] || { echo "$key set: missing <name>" >&2; exit 2; }
-      # Validate against a real entry so state can't rot to a bogus name.
-      row_for_name "$name" >/dev/null || {
-        echo "$key set: unknown agent name '$name' (see \`list\`)" >&2; exit 2; }
-      state_set "$key" "$name"
+    get)
+      case "$level" in
+        project) _kv_get "$PROJECT_STATE" default ;;
+        global)  _kv_get "$STATE_FILE" default ;;
+        "")      effective_default ;;
+      esac
       ;;
-    *) echo "$key: expected get|set" >&2; exit 2 ;;
+    set)
+      [ -n "$name" ] || { echo "default set: missing <name>" >&2; exit 2; }
+      validate_name "$name"
+      if [ "$level" = project ]; then
+        [ -n "$PROJECT_STATE" ] || { echo "default set --project: not inside a git repo (no project config location)" >&2; exit 2; }
+        _kv_set "$PROJECT_STATE" default "$name"
+      else
+        _kv_set "$STATE_FILE" default "$name"
+      fi
+      ;;
+    *) echo "default: expected get|set" >&2; exit 2 ;;
+  esac
+}
+
+subcmd_last() {
+  # last is per-user (recency), so it only ever lives in the global state file.
+  local op="${1:-get}"; shift || true
+  case "$op" in
+    get) _kv_get "$STATE_FILE" last ;;
+    set)
+      local name="${1:-}"
+      [ -n "$name" ] || { echo "last set: missing <name>" >&2; exit 2; }
+      validate_name "$name"
+      _kv_set "$STATE_FILE" last "$name"
+      ;;
+    *) echo "last: expected get|set" >&2; exit 2 ;;
   esac
 }
 
@@ -362,10 +382,8 @@ main() {
   case "$cmd" in
     list)     subcmd_list "$@" ;;
     resolve)  subcmd_resolve "$@" ;;
-    auto)     subcmd_auto "$@" ;;
-    default)  subcmd_state default "$@" ;;
-    last)     subcmd_state last "$@" ;;
-    rank)     subcmd_rank "$@" ;;
+    default)  subcmd_default "$@" ;;
+    last)     subcmd_last "$@" ;;
     -h|--help) usage ;;
     "")       usage ;;
     *)        echo "Unknown subcommand: $cmd" >&2; usage ;;

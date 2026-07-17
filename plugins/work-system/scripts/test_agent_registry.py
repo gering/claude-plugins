@@ -4,9 +4,9 @@ or via scripts/check-structure.py's "plugin tests" check.
 
 Guards the registry's contract: alias/name/cli selector resolution, the per-CLI
 launch argv shape (claude `/continue` vs codex/grok bootstrap prompt), the
-availability probe (codex login status + grok auth file), the exit-code map
-(2 unknown selector, 3 resolved-but-unavailable), the --auto ranking (skips
-unavailable, exit 1 when none), and default/last state persistence.
+availability probe (codex login status + grok auth file + grok model-list), the
+exit-code map (2 unknown selector, 3 resolved-but-unavailable), and the
+two-level default resolution (project > global > shipped) plus last state.
 
 Availability is made deterministic with fake `codex`/`grok`/`claude` stubs on a
 prepended PATH, so the test does not depend on what is really installed/authed.
@@ -32,7 +32,7 @@ def check(name, cond):
 class Env:
     """A throwaway HOME + fake-bin sandbox controlling CLI availability."""
 
-    def __init__(self, codex_authed=True, grok_authed=True, rank=None,
+    def __init__(self, codex_authed=True, grok_authed=True,
                  grok_models=("grok-4.5",)):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
@@ -68,15 +68,15 @@ class Env:
         self.grok_auth = root / "grok_auth.json"
         if grok_authed:
             self.grok_auth.write_text("{}\n")
-        self.state = self.home / ".claude" / "work-system-agent"
+        self.state = self.home / ".claude" / "work-system-agent"          # global
+        self.project_state = root / "repo" / ".claude" / "work-system-agent"
 
         self.env = dict(os.environ)
         self.env["PATH"] = f"{bindir}:{self.env['PATH']}"
         self.env["HOME"] = str(self.home)
         self.env["GROK_AUTH_FILE"] = str(self.grok_auth)
         self.env["WORK_SYSTEM_AGENT_STATE"] = str(self.state)
-        if rank is not None:
-            self.env["WORK_SYSTEM_AGENT_RANK"] = rank
+        self.env["WORK_SYSTEM_AGENT_PROJECT_STATE"] = str(self.project_state)
 
     def run(self, *args):
         return subprocess.run(
@@ -180,43 +180,33 @@ check("unlisted-model note mentions the model list",
 check("resolve --grok unavailable -> exit 3", e.run("resolve", "--grok").returncode == 3)
 e.close()
 
-# --- auto ranking ---------------------------------------------------------- #
-# codex+grok down: --auto must fall through to the first available claude entry.
-e = Env(codex_authed=False, grok_authed=False,
-        rank="codex:gpt-5.6-sol grok:grok-4.5 claude:opus claude:fable")
-a = e.run("auto")
-check("auto skips unavailable to claude:opus", a.stdout.strip() == "claude:opus")
-check("auto exit 0", a.returncode == 0)
-e.close()
-
-# no available agent in the ranking -> exit 1
-e = Env(codex_authed=False, grok_authed=False, rank="codex:gpt-5.6-sol grok:grok-4.5")
-a = e.run("auto")
-check("auto none available exit 1", a.returncode == 1)
-e.close()
-
-# default rank, all available -> first (claude:fable)
+# --- two-level default resolution (project > global > shipped) ------------- #
 e = Env()
-check("auto default rank -> claude:fable", e.run("auto").stdout.strip() == "claude:fable")
-check("rank first line is claude:fable",
-      e.run("rank").stdout.splitlines()[0] == "claude:fable")
+# no config anywhere -> the shipped fallback (claude:opus)
+check("no config -> shipped opus", e.run("default", "get").stdout.strip() == "claude:opus")
+# global default overrides the shipped fallback
+e.run("default", "set", "claude:sonnet")
+check("global default wins over shipped", e.run("default", "get").stdout.strip() == "claude:sonnet")
+# project default overrides the global one
+e.run("default", "set", "codex:gpt-5.6-sol", "--project")
+check("project default wins over global", e.run("default", "get").stdout.strip() == "codex:gpt-5.6-sol")
+check("raw --global unchanged", e.run("default", "get", "--global").stdout.strip() == "claude:sonnet")
+check("raw --project", e.run("default", "get", "--project").stdout.strip() == "codex:gpt-5.6-sol")
+# last is per-user and independent of the default
+e.run("last", "set", "grok:grok-4.5")
+check("last persisted", e.run("last", "get").stdout.strip() == "grok:grok-4.5")
+check("last write preserves global default",
+      e.run("default", "get", "--global").stdout.strip() == "claude:sonnet")
+# bogus name rejected at both levels
+check("bogus global default rejected", e.run("default", "set", "bogus:model").returncode == 2)
+check("bogus project default rejected", e.run("default", "set", "bogus:model", "--project").returncode == 2)
+check("bogus last rejected", e.run("last", "set", "bogus:model").returncode == 2)
 e.close()
 
-# --- default/last state persistence ---------------------------------------- #
+# --- removed subcommands (auto / rank are gone) ---------------------------- #
 e = Env()
-check("default get empty initially", e.run("default", "get").stdout.strip() == "")
-e.run("default", "set", "claude:opus")
-e.run("last", "set", "codex:gpt-5.6-sol")
-check("default persisted", e.run("default", "get").stdout.strip() == "claude:opus")
-check("last persisted", e.run("last", "get").stdout.strip() == "codex:gpt-5.6-sol")
-# setting one preserves the other
-e.run("default", "set", "grok:grok-4.5")
-check("last survives default rewrite",
-      e.run("last", "get").stdout.strip() == "codex:gpt-5.6-sol")
-check("default updated", e.run("default", "get").stdout.strip() == "grok:grok-4.5")
-# bogus name rejected
-b = e.run("default", "set", "bogus:model")
-check("bogus default rejected exit 2", b.returncode == 2)
+check("auto removed -> exit 2", e.run("auto").returncode == 2)
+check("rank removed -> exit 2", e.run("rank").returncode == 2)
 e.close()
 
 
