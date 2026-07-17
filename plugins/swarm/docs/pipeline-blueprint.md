@@ -263,7 +263,8 @@ credential mid-review) converged on these non-negotiable mitigations:
 5. **Don't fully trust consensus.** Consensus (≥2 backends) currently skips the
    verifier, but agreement comes from LLM merge-clustering + correlated model
    bias, not independent proof. P2: still run a light verify on consensus
-   findings, or require cross-family agreement (not composer+grok).
+   findings, or require cross-family agreement (two voices from one vendor
+   are one vote).
 6. **Prefer deterministic transport, and distinguish error from empty.** The
    Haiku "thin transport" wrapper can silently drop/reshape findings while
    staying schema-valid; where a registered workflow can shell out, pass adapter
@@ -289,10 +290,5 @@ credential mid-review) converged on these non-negotiable mitigations:
   for the timing balance line.
 - **Model labels** in the balance line (`Opus-4.8`/`GPT-5.5`/`grok-4.5`),
   read from each backend's review output.
-- **Optional composer lens-gate**: `grok-composer-2.5-fast` can't enforce
-  `--json-schema`/`--effort`, but a strict-JSON prompt makes it emit valid JSON
-  and reason on demand (tested 2/2). It's ~2× faster than grok-4.5 but its
-  ~20s CLI cost undercuts a Haiku gate; keep it optional, with a defensive
-  parser + fallback-to-all-lenses.
 - **Balance / footer / loop-round box:** render deterministically from the
   synthesis data (see task file P4/P5).

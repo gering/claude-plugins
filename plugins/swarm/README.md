@@ -14,7 +14,7 @@ Complementary to [pr-flow](../pr-flow/): pr-flow drives the GitHub-PR
 
 **Phase 5 of 6** — the pipeline can now **act** (P3/P4 lens presets still to
 come). `/swarm:review` fans a diff
-across four voices (Claude lenses + `codex` + `grok-4.5` + `composer`),
+across three voices (Claude lenses + `codex` + `grok-4.5`),
 merges by mechanism, verifies solo findings, presents one ranked report, and —
 with `--fix` / `--loop` — applies the findings you agreed with.
 
@@ -44,22 +44,22 @@ presets).
 ## The pipeline (`/swarm:review`)
 
 ```
-Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok-4.5 ∥ composer)
+Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok-4.5)
           → Merge (file, mechanism) → Verify solos → Ranked synthesis
 ```
 
 1. **Scope + gate** — a cheap agent classifies the diff and picks which Claude
    lenses are worth running (security is never gated out when code/args/files
    flow to an external process).
-2. **Fan-out** — four voices in parallel: one Claude finder per gated lens plus
-   `codex`, `grok-4.5` and `composer` as full reviews through the adapter.
+2. **Fan-out** — three voices in parallel: one Claude finder per gated lens plus
+   `codex` and `grok-4.5` as full reviews through the adapter.
 3. **Merge** — an LLM step clusters findings by `(file, mechanism)`, not
    `(file, line)` (external CLIs number against the inlined diff).
 4. **Verify** — solo clusters go through an adversarial 3-state verifier
    (`CONFIRMED`/`PLAUSIBLE`/`REFUTED`; only `REFUTED` is dropped).
 
-**Consensus counts model *families*, not backends.** `grok-4.5` and
-`composer` are both grok, so their agreement is one vote — a `CONSENSUS` tag
+**Consensus counts model *families*, not voices.** Several Claude lenses
+flagging the same thing is one vote, not a cross-check — a `CONSENSUS` tag
 requires ≥2 of *claude / openai / grok*. Everything else is a solo and earns
 its place through the verifier.
 
@@ -94,7 +94,7 @@ Backends:
 |---------|------|-----------|
 | `claude` | probe-only | reviews run in-session via the Agent tool |
 | `codex` | external reviewer | `codex exec --output-schema` (model `gpt-5.6-terra`, effort `xhigh`) in a read-only sandbox; auth via `codex login status` |
-| `grok` | external reviewer | headless `-p` with inline `--json-schema` (model `grok-4.5`); findings extracted from the response envelope. `--model grok-composer-2.5-fast` takes a separate defensive-parse path (a ~2×-faster second grok voice, no schema flag). |
+| `grok` | external reviewer | headless `-p` with inline `--json-schema` (model `grok-4.5`, the only supported grok model); findings extracted from the response envelope. Readiness is model-aware: auth **and** `grok-4.5` present in `grok models`, since the CLI drops/renames models between releases. The model check falls back to auth alone — with a warning, never silently — if the probe can't produce a clean answer (no coreutils `timeout`, non-zero exit, or an unparseable list). |
 
 Unavailable backends drop from the ensemble — `claude` alone still works.
 `/swarm:review` reports a backend that *errored* mid-run distinctly from one

@@ -1,17 +1,17 @@
 ---
 name: review
 description: |
-  Local mixture-of-agents review: Claude lenses plus codex and grok (grok-4.5 +
-  composer), one ranked report. --fix/--loop applies agreed findings; --pr reviews
-  a GitHub PR diff and posts the result.
+  Local mixture-of-agents review: Claude lenses plus codex and grok, one ranked
+  report. --fix/--loop applies agreed findings; --pr reviews and posts on a
+  GitHub PR.
   Trigger: "swarm review", "review my changes", "review this PR".
 user_invocable: true
 ---
 
 # Swarm Review
 
-> Fan one code review across Claude lenses + codex + grok-4.5 + composer,
-> merge by mechanism, verify solos, and present one ranked report.
+> Fan one code review across Claude lenses + codex + grok-4.5, merge by
+> mechanism, verify solos, and present one ranked report.
 
 ## Arguments
 
@@ -48,9 +48,8 @@ branch delta).
   `--fix`/`--loop` — composes with both (`--max --loop` = max-depth fix loop).
   Set `max: true` in the workflow args (step 2). It bumps: codex →
   `gpt-5.6-sol` at `xhigh` (codex has no `max` tier), Claude finder lenses +
-  the adversarial verifier → `xhigh`. gate/merge, the grok voice (`high` is
-  grok's ceiling — it runs there on both profiles) and the composer voice (no
-  effort control) are unchanged.
+  the adversarial verifier → `xhigh`. gate/merge and the grok voice (`high` is
+  grok's ceiling — it runs there on both profiles) are unchanged.
 - Anything left after removing the flags → the scope argument for step 1.
 
 Without either flag the review is **read-only**: present the report and offer to
@@ -254,9 +253,8 @@ echo "LIVE_JSON=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json | t
 - `SWARM_WARN=…` → surface that line: the scope narrowed to uncommitted changes
   because no default-branch ancestor was found. Then continue.
 - From `LIVE_JSON` build `externalVoices`: include `"codex"` iff codex is
-  `available && ready`; include `"grok"` and `"composer"` iff grok is
-  `available && ready` (both share the grok CLI + auth). If none are live, the
-  review runs with the Claude lenses alone — say so.
+  `available && ready`; include `"grok"` iff grok is `available && ready`. If
+  none are live, the review runs with the Claude lenses alone — say so.
 - **Oversize** — if `PROMPT_BYTES` > 122880 the diff exceeds the adapter's 120 KiB
   (122880-byte) per-call cap, so the external CLIs cannot run: set `externalVoices` to `[]`
   (Claude-lens-only review), tell the user the external backends were skipped,
@@ -283,8 +281,8 @@ Workflow({
 Fill `<DIFF>`/`<PROMPT>`/`<FINDING_NONCE>` from the echoed values. Add `max: true` to `args` when
 `--max` was given (step 1 stripped it) — the deepest-effort profile. Add
 `claude: false` to `args`
-for an **external-only control run** (codex + grok-4.5 + composer, no Claude
-finder lenses — merge/verify still run in-session); default is the full ensemble.
+for an **external-only control run** (codex + grok-4.5, no Claude finder
+lenses — merge/verify still run in-session); default is the full ensemble.
 The workflow runs in the background for several minutes — **tell the user they
 can watch live progress with `/workflows`** while it runs. It returns
 `{ findings, refuted, backendErrors, balance, gate }`.
@@ -316,11 +314,10 @@ here in German. Do not translate finding content.)
 - **Ort** — `` `file:line` `` in backticks.
 - **Befund** — one short clause, **≤ ~40 chars** (hard budget); no emoji here.
 - **Quelle** — who raised it + ensemble confidence, folded into one cell: the
-  concrete models (`claude→opus`, `codex→gpt`, `grok→grok`, `composer→composer`,
-  dot-joined, e.g. `opus·grok`) then a confidence glyph — **`✓` = CONFIRMED ·
-  `~` = PLAUSIBLE** (e.g. `opus·grok ✓`, `gpt ~`). Never the backend names / single
-  letters. grok+composer = one family (no cross-family consensus). A single-source
-  review (no ensemble) omits this column.
+  concrete models (`claude→opus`, `codex→gpt`, `grok→grok`, dot-joined, e.g.
+  `opus·grok`) then a confidence glyph — **`✓` = CONFIRMED · `~` = PLAUSIBLE**
+  (e.g. `opus·grok ✓`, `gpt ~`). Never the backend names / single letters. A
+  single-source review (no ensemble) omits this column.
 - **V** — YOUR main-session Verdict, icon only, the action gate: ✅ agree ·
   🟨 partial · ❌ disagree. Distinct from the `✓`/`~` confidence in Quelle.
 - **Notiz** — the *why*, **≤ ~55 chars** (hard budget — let the renderer wrap it
@@ -589,9 +586,9 @@ post. Do **not** re-implement the sanitize/gate/post logic inline.
 
 ## Notes
 
-- **Consensus = cross-family agreement** (≥2 of claude / openai / grok). Two
-  grok voices (grok-4.5 + composer) agreeing count as one family, so they
-  cannot alone mint a CONSENSUS — solos go through the adversarial verifier.
+- **Consensus = cross-family agreement** (≥2 of claude / openai / grok). Voices
+  from one vendor count once — Claude's lens voices agreeing with each other is
+  one family, not a quorum — so solos go through the adversarial verifier.
 - **Security floor** (inherited from the adapter, plus this pipeline): the diff
   is fenced as data, external CLIs run sandboxed + tool-less (grok) with a
   secret scrub at the adapter boundary, and a final **output gate** re-scrubs
