@@ -221,9 +221,14 @@ both surfaces speak one visual language (e.g. `● close-herdr`, `◇ ks-label`,
 - `○` not-started · `●` active (worktree) · `◇` in review (PR open) ·
   `◆` approved (PR review APPROVED — ready to `/merge`) · `✓` merged.
 
+A session sitting in the **main repo root** — the hub you kick tasks off from —
+gets `◉` instead (e.g. `◉ Manager`), so the sidebar reads as one hub plus its
+task satellites. `◉` marks the *location*, not an identity: every tab at the
+main root carries it. It is stateless — the state glyphs belong to tasks.
+
 The mapping and its precedence live in `scripts/ws-statusline.sh` (a `states`
 mode next to the render mode — one file, so sidebar and statusline can never
-disagree); `scripts/herdr-tab-glyph.sh` applies it to herdr agent names.
+disagree); `scripts/herdr-tab-glyph.sh` applies it to the herdr tab label.
 
 The glyph is stamped when `/kickoff` or `/continue` opens the tab, and
 re-stamped — idempotently, only when it changed — whenever you survey or move
@@ -233,8 +238,13 @@ same refresh, so `●` flips to `◇` when the PR opens, to `◆` when it is app
 and to `✓` when it merges. Survey surfaces (`/status`, `/list`, `/check`,
 `/close`) read the PR cache and never block; the state-changing skills (`/open`,
 `/merge`, `/cycle`) do a bounded synchronous `gh` refresh so the new state shows
-at once. Agents outside task worktrees are never renamed; outside herdr
-everything is a silent no-op.
+at once. The same refreshes stamp `◉` on the main-root tabs — no separate
+trigger. Only tabs sitting *exactly* at a task worktree or the main root are
+renamed (one cd into a subdir and yours is left alone); a tab is renamed only
+when its label actually changes, your chosen label is kept and merely prefixed,
+and outside herdr everything is a silent no-op. The glyph lives in the **tab
+label** and nowhere else — the herdr agent name and the `claude -n` session name
+keep the plain label, since those are stable identities.
 
 ## Adopting Existing Branches
 

@@ -27,7 +27,9 @@
 #   herdr-launch.sh resume <label> <worktree-abs-path> <workspace-id>
 #     label         short, sidebar-friendly agent/tab name (e.g. close-herdr).
 #                   Pass it PLAIN — this helper prefixes the task's state glyph
-#                   (○ ● ◇ ✓, via herdr-tab-glyph.sh) itself, best-effort.
+#                   (○ ● ◇ ◆ ✓, via herdr-tab-glyph.sh) itself, best-effort,
+#                   onto the TAB LABEL only; the agent and session names keep
+#                   the plain label (see the stamping block below).
 #     worktree      absolute path to the worktree (becomes the new pane's cwd)
 #     workspace-id  herdr workspace to open the tab in (e.g. $HERDR_WORKSPACE_ID)
 #     session-name  (launch only) `claude -n` name; defaults to <label>
@@ -86,15 +88,21 @@ command -v python3 >/dev/null 2>&1 || { echo "python3 not on PATH" >&2; exit 1; 
 }
 [ -d "$worktree" ] || { echo "worktree dir not found: $worktree" >&2; exit 1; }
 
-# Stamp the task's CURRENT state glyph onto the sidebar label (○ ● ◇ ✓ — the
+# Stamp the task's CURRENT state glyph onto the sidebar label (○ ● ◇ ◆ ✓ — the
 # same mapping the [ws …] statusline renders; ws-statusline.sh is the single
 # source, applied via herdr-tab-glyph.sh). Best-effort: any failure keeps the
-# plain label. The Claude session name (launch mode) was already defaulted from
-# the PLAIN label above — glyphs would clutter /resume.
+# plain label.
+#
+# ONLY the TAB LABEL carries a glyph — `$label` stays plain for everything else.
+# The tab label is what the sidebar renders and what `herdr-tab-glyph.sh refresh`
+# keeps current as the task's state moves. The herdr *agent* name (`agent start
+# <name>`) and the Claude session name are stable identities: a glyph there would
+# freeze at its launch-time value (nothing refreshes them) and clutter /resume.
+tab_label="$label"
 glyph_helper="${0%/*}/herdr-tab-glyph.sh"
 if [ -f "$glyph_helper" ]; then
   stamped="$(bash "$glyph_helper" prefix "$label" "$worktree" 2>/dev/null || true)"
-  [ -n "$stamped" ] && label="$stamped"
+  [ -n "$stamped" ] && tab_label="$stamped"
 fi
 
 # JSON extractors. null / missing / malformed all yield empty, and a stray
@@ -138,7 +146,7 @@ case "$mode" in
     # Relocate the agent into its own background tab (agent start splits the
     # caller's tab). If the move fails, Claude is still running — report it in
     # place rather than claiming a tab that does not exist.
-    if move_json="$(herdr pane move "$pane" --new-tab --label "$label" --no-focus 2>/dev/null)"; then
+    if move_json="$(herdr pane move "$pane" --new-tab --label "$tab_label" --no-focus 2>/dev/null)"; then
       tab="$(printf '%s' "$move_json" | python3 -c "$extract_moved_tab" 2>/dev/null || true)"
       printf 'pane=%s\ntab=%s\nmoved=yes\n' "$pane" "$tab"
     else
@@ -197,7 +205,7 @@ case "$mode" in
     # empty pane id (with a present tab id) stays empty and trips the guard below,
     # rather than the tab id being mis-read as the pane id.
     create_json="$(herdr tab create --workspace "$workspace" \
-      --cwd "$worktree" --label "$label" 2>/dev/null || true)"
+      --cwd "$worktree" --label "$tab_label" 2>/dev/null || true)"
     pane_tab="$(printf '%s' "$create_json" | python3 -c "$extract_root_pane_tab" 2>/dev/null || true)"
     pane="${pane_tab%%|*}"
     tab="${pane_tab#*|}"

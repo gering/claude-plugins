@@ -52,6 +52,11 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.8.1 — 2026-07-17
+- Mark the main-repo session in the herdr sidebar: a tab sitting exactly at the main repo root is now prefixed with `◉` — the Manager hub among the `○ ● ◇ ◆ ✓` task satellites. Stateless and non-exclusive (it marks the location, so every tab at the root gets it), stamped by the existing `refresh` sweep — no new trigger. The chosen tab label is preserved (prefix only) and `◉` joins the idempotency strip, so hub↔task moves swap glyphs cleanly.
+- Fix: state-glyph refreshes never reached the sidebar. herdr keeps two names per tab — the tab label (what the sidebar renders) and the agent registry's own name — and 1.8.0's `refresh` rewrote the latter, so a tab kept its launch-time glyph forever (a task sat at `●` while its PR was in review). `refresh` now rewrites the tab label, joining `herdr agent list` (carries `cwd`) with `herdr tab list` (carries `label`).
+- The glyph now lives in the tab label only: `/kickoff` passes the plain label to `herdr agent start` and `claude -n`, so the agent and session names stay stable identities instead of freezing a launch-time glyph. Existing tabs correct themselves on the next refresh; agent names stamped by 1.8.0 are left as-is (rename them yourself if the leftover glyph bothers you).
+
 ### 1.8.0 — 2026-07-16
 - Mirror task states onto herdr tab names as a leading state glyph (`○ ● ◇ ◆ ✓`: not-started / active / in-review / approved / merged), matching the `[ws …]` statusline. The mapping + precedence stay in `ws-statusline.sh` (new `states` mode, single source of truth); the new `herdr-tab-glyph.sh` stamps the glyph at launch (`/kickoff`, `/continue`) and re-stamps it idempotently on `/status`, `/list`, and `/close` (and via pr-flow's PR-lifecycle skills). `◆` approved is derived from the PR's `reviewDecision`. Survey surfaces (`/status`, `/list`, `/check`, `/close`) read the PR cache without blocking; state-changing skills (`/open`, `/merge`, `/cycle`) do a bounded synchronous refresh.
 

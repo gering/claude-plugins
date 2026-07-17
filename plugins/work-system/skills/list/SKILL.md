@@ -87,8 +87,10 @@ user_invocable: true
 7. **Sync herdr tab glyphs** (best-effort, silent):
    - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-tab-glyph.sh" refresh --cached "$PWD"`
    - Inside herdr this re-stamps every open task tab's state glyph
-     (`○ ● ◇ ◆ ✓`) to match the surveyed states; outside herdr (or without a
-     backlog) it is a silent no-op. `--cached`: this is a read-only survey, so
+     (`○ ● ◇ ◆ ✓`, plus the main-repo tab's `◉` hub mark) to match the surveyed
+     states; outside herdr it is a silent no-op (the main-repo `◉` is stateless,
+     so an empty backlog still stamps it — only per-task glyphs have nothing to
+     do). `--cached`: this is a read-only survey, so
      read the PR cache instead of a blocking `gh` call (a background refresh
      keeps it current). Ignore its output — never block or report on it.
 

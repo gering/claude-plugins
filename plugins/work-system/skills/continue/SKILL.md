@@ -72,7 +72,8 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
    **a) Inside herdr — reopen the tab and resume via the shared helper:**
    ```sh
    LABEL="<short sidebar label from the task name, e.g. close-herdr>"   # same convention as
-   # /kickoff — pass it PLAIN; the helper prefixes the task's state glyph (○ ● ◇ ✓) itself.
+   # /kickoff — pass it PLAIN; the helper prefixes the task's state glyph (○ ● ◇ ◆ ✓)
+   # onto the tab LABEL itself (agent + session names stay plain).
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-launch.sh" resume "$LABEL" "$WORKTREE" "$HERDR_WORKSPACE_ID"
    ```
    The helper reuses an already-open tab at the worktree (focuses it), or (if none)

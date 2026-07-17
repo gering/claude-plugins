@@ -8,10 +8,13 @@ prime: false
 
 # herdr Tab State Glyphs
 
-work-system prefixes each task tab's herdr agent name with the task's state
+work-system prefixes each task tab's herdr **tab label** with the task's state
 glyph (`○` not-started · `●` active · `◇` in review · `◆` approved · `✓`
 merged), so the sidebar mirrors the `[ws …]` statusline (e.g. `● close-herdr`,
-`◇ ks-label`, `◆ ready-pr`). `◆` (open PR whose `reviewDecision == APPROVED`,
+`◇ ks-label`, `◆ ready-pr`). A tab at the **main repo root** gets `◉` — the
+Manager hub among the task satellites (`○` was rejected: it already means
+not-started). `◉` is stateless and non-exclusive: it marks the *location*, so
+every tab at the main root carries it. `◆` (open PR whose `reviewDecision == APPROVED`,
 ready to `/merge`) is the one state needing a second `gh` field beyond
 `state`: the PR cache carries `headRef\tstate\treviewDecision`, and an old
 two-column cache row degrades safely to `◇` (empty field 3 is never `APPROVED`).
@@ -25,7 +28,7 @@ surfaces source — is **blocked by the renderer's self-containment contract**:
 in the same file*: `ws-statusline.sh states <dir>` prints
 `<task>\t<state>\t<glyph>` per backlog task from the very `task_state()` /
 `glyph_of()` functions the render path aggregates. One file — the surfaces
-cannot drift. `herdr-tab-glyph.sh` only *applies* the result to agent names.
+cannot drift. `herdr-tab-glyph.sh` only *applies* the result to the tab label.
 
 ## Sync vs cache-only PR refresh
 
@@ -55,20 +58,55 @@ was shipped and caught in review.
 
 ## Renamer rules (herdr-tab-glyph.sh)
 
-- **Trigger points:** stamped at launch (`herdr-launch.sh prefix`, both modes —
-  the Claude *session name* stays plain; glyphs would clutter `/resume`);
-  re-stamped by `refresh` on `/status`, `/list`, `/close` (remaining tabs, main-repo
-  path — `$PWD` may be the just-removed worktree) and pr-flow's `/open`,
-  `/merge`, `/cycle`, `/check`.
-- **Matching:** exact realpath equality `agent.cwd == <main>/.claude/worktrees/<task>`
-  (same philosophy as `herdr-teardown.sh`): an unrelated agent cd'd into a
-  worktree subdir is never renamed; agents outside task worktrees are never
-  touched. Rename targets the `pane_id`; `herdr agent list` exposes `cwd`,
-  `name`, `pane_id` per agent (verified live 2026-07-16).
+- **The glyph lives in the TAB LABEL — one namespace, and it is not the obvious
+  one.** herdr has two independent names per tab: `tab rename <tab_id> <label>`
+  and `agent rename <pane_id> <name>` (the agent registry's own field, which
+  other tooling owns elsewhere). **The sidebar renders the label.** 1.8.0 shipped
+  `refresh` writing the *agent name* — invisible, so every re-stamp silently did
+  nothing and only the launch-time label survived (a task tab sat at `●` while
+  its PR was long in review). Fixed in 1.8.1: `refresh` writes the label, and
+  `herdr-launch.sh` passes the glyph *only* to `--label`, keeping the agent and
+  `claude -n` session names plain — those are stable identities, and nothing
+  refreshes them, so a glyph there would freeze at its launch value.
+- **Trigger points:** stamped at launch (`herdr-launch.sh` → `prefix`, both
+  modes); re-stamped by `refresh` on `/status`, `/list`, `/close` (remaining tabs,
+  main-repo path — `$PWD` may be the just-removed worktree) and pr-flow's
+  `/open`, `/merge`, `/cycle`, `/check`.
+- **Matching:** exact realpath equality against `<main>/.claude/worktrees/<task>`
+  (→ state glyph) or the main repo root itself (→ `◉`) — same philosophy as
+  `herdr-teardown.sh`: an agent cd'd into a *subdir* of either is never renamed,
+  and anything outside the repo never is. `◉` needs no new trigger — the same
+  `refresh` sweep stamps both. The match needs **both** herdr lists joined on
+  `tab_id`: only agents carry `cwd` (the match key), only tabs carry `label`
+  (what we stamp). One tab is stamped once (first matching agent wins — a
+  mixed-cwd multi-pane tab would otherwise flip-flop each refresh). The join is
+  the tab list passed **by file path** (not an argv element): the JSON can be
+  hundreds of KB and would blow ARG_MAX/E2BIG, a failure `|| true` would mask as
+  `checked=0`. **Caveat (accepted):** only *agent-backed* tabs are reachable —
+  `cwd` has no other source than `herdr agent list`, so a main-root tab that is a
+  bare shell (no agent) can't be matched and won't get `◉`. In practice a Manager
+  tab is a Claude session, so it is agent-backed; a plain terminal at the root is
+  not a Manager session.
+- **`◉` is stateless — never gated on the backlog.** The main-root mark is a
+  location mark, so `refresh` does NOT early-return on an empty `states` (no
+  tasks): it stamps `◉` on main-root tabs regardless, and only the per-task
+  `glyph_lookup` finds nothing to do. Coupling `◉` to a non-empty backlog was a
+  latent bug (the early-return predated `◉` and it inherited the gate) that also
+  contradicted the README/CHANGELOG "every main-root tab carries it" promise.
 - **Idempotency:** leading glyphs are stripped before re-prefixing via
   byte-exact `case "○ "*` patterns — a bracket expression (`[○●◇✓]`) would
-  match per *byte* for multibyte chars under C locale. Renames are only issued
-  when the name actually changes. Everything is best-effort exit-0.
+  match per *byte* for multibyte chars under C locale. The strip set includes
+  `◉`, so a tab moving between the hub and a worktree swaps glyphs cleanly.
+  Renames are only issued when the name actually changes. Everything is
+  best-effort exit-0.
+- **The extractor's TSV must never have an empty middle field.** The consumer
+  reads it with `IFS=$'\t' read -r …`, and tab is IFS *whitespace* — bash
+  collapses a run of tabs into ONE delimiter, so an empty field silently
+  shifts every later field left. Adding the `kind` column bit exactly here: a
+  main-root row emitted an empty `task`, and the agent's *name* slid into it
+  (`◉ Manager` → `◉ claude-plugins`). Hence the `key` column carries the task
+  name **or** the repo dir name — never nothing. A non-whitespace delimiter
+  (`\x1f`) would also work; non-empty fields were the smaller change.
 
 ## pr-flow coupling stays soft
 
