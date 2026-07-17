@@ -2,7 +2,10 @@
 # herdr-tab-glyph.sh — mirror work-system task states onto herdr tab/agent
 # names as a leading state glyph (○ not-started · ● active · ◇ in review ·
 # ◆ approved · ✓ merged), so the herdr sidebar speaks the same visual language
-# as the [ws …] status-line segment.
+# as the [ws …] status-line segment. A session sitting in the MAIN repo root
+# instead gets ◉ — the "Manager" hub among the task satellites. ◉ marks the
+# location, not an identity: if several tabs sit at the main root, they ALL
+# carry it.
 #
 # The state→glyph mapping and its precedence live in ws-statusline.sh
 # (`states` mode) — the ONE source both surfaces read; this script only
@@ -22,11 +25,14 @@
 #   refresh [--cached] [<dir>]
 #       Re-stamp the glyph on every herdr agent whose cwd IS a task worktree
 #       of the repo containing <dir> (default: $PWD) — exact realpath match on
-#       <main>/.claude/worktrees/<task>, across ALL workspaces of this herdr
-#       server, so one refresh fixes every open task tab of the repo. Agents
-#       outside task worktrees are never touched; a rename is only issued when
-#       the name actually changes. Prints `checked=N updated=M` when herdr was
-#       reachable; silent no-op otherwise. Always exits 0.
+#       <main>/.claude/worktrees/<task> — or IS the main repo root itself (→ ◉),
+#       across ALL workspaces of this herdr server, so one refresh fixes every
+#       open tab of the repo. Both matches are exact: an agent merely cd'd into
+#       a subdir of either is never touched, nor is anything outside the repo.
+#       A rename is only issued when the name actually changes. Prints
+#       `checked=N updated=M` when herdr was reachable; silent no-op otherwise
+#       — including for a repo with an empty backlog, where the ◉ stamp is
+#       skipped too (no workers, no manager). Always exits 0.
 #       --cached forwards to `ws-statusline.sh states --cached` (read the PR
 #       cache + non-blocking background refresh, never a synchronous gh call) —
 #       for pure-survey callers (/status, /list, /check, /close). Without it the
@@ -42,7 +48,7 @@ strip_glyph() {
   local l="$1"
   while :; do
     case "$l" in
-      "○ "*|"● "*|"◇ "*|"◆ "*|"✓ "*) l="${l#* }" ;;
+      "○ "*|"● "*|"◇ "*|"◆ "*|"✓ "*|"◉ "*) l="${l#* }" ;;
       *) break ;;
     esac
   done
@@ -64,10 +70,16 @@ task_glyph() {
   bash "$ws" states "$2" 2>/dev/null | glyph_lookup "$1"
 }
 
-# Emit "pane_id\ttask\tcurrent_name" for every agent whose realpath(cwd) is
-# EXACTLY <main>/.claude/worktrees/<task> (argv[1] = main repo path). Exact
-# match mirrors herdr-teardown.sh's cwd philosophy: an unrelated agent merely
-# cd'd into a worktree subdir is never renamed. Malformed JSON emits nothing.
+# Emit "pane_id\tkind\tkey\tcurrent_name" for every agent whose realpath(cwd)
+# is EXACTLY <main>/.claude/worktrees/<task> (kind=task, key=<task>) or EXACTLY
+# the main repo root (kind=main, key=the repo dir name) — argv[1] = main repo
+# path. Exact match mirrors herdr-teardown.sh's cwd philosophy: an unrelated
+# agent merely cd'd into a subdir of either is never renamed. `key` doubles as
+# the name fallback for an unnamed agent. Malformed JSON emits nothing.
+# NO FIELD BUT THE LAST MAY EVER BE EMPTY: the consumer reads with IFS=<tab>,
+# and tab is IFS *whitespace* — bash collapses a run of them into one
+# delimiter, so an empty middle field would silently shift every later field
+# left (kind=main once put the name into `key` this way).
 # The agent fields are UNTRUSTED (any tool in the session can set a name): a
 # tab/newline embedded in a field would forge extra TSV records and aim a
 # rename at an arbitrary pane — so the pane id must match herdr shape, a task
@@ -76,11 +88,12 @@ task_glyph() {
 # pattern forbids a LEADING dash (first char excludes `-`) so a value like
 # `-x`/`--foo` can never reach `herdr agent rename` as an option flag; herdr
 # ids are `wN:pM` and never start with a dash, so nothing legitimate is lost.
-extract_task_agents='import sys, json, os, re
+extract_glyph_agents='import sys, json, os, re
 main = sys.argv[1] if len(sys.argv) > 1 else ""
 if not main.strip():
     sys.exit(0)
-wtdir = os.path.join(os.path.realpath(main), ".claude", "worktrees")
+root = os.path.realpath(main)
+wtdir = os.path.join(root, ".claude", "worktrees")
 try:
     agents = json.load(sys.stdin)["result"]["agents"]
 except Exception:
@@ -91,13 +104,16 @@ for a in agents:
     if not cwd or not re.fullmatch(r"[A-Za-z0-9:_.][A-Za-z0-9:_.-]*", pane):
         continue
     cwd = os.path.realpath(cwd)
-    if os.path.dirname(cwd) != wtdir:
+    if cwd == root:
+        kind, key = "main", os.path.basename(root)
+    elif os.path.dirname(cwd) == wtdir:
+        kind, key = "task", os.path.basename(cwd)
+    else:
         continue
-    task = os.path.basename(cwd)
-    if re.search(r"[\t\r\n]", task):
+    if not key or re.search(r"[\t\r\n]", key):
         continue
     name = re.sub(r"[\t\r\n]", " ", a.get("name") or "")
-    print("\t".join([pane, task, name]))'
+    print("\t".join([pane, kind, key, name]))'
 
 cmd_prefix() {
   local label="${1:-}" worktree="${2:-}" base name glyph
@@ -143,19 +159,23 @@ cmd_refresh() {
   list="$(herdr agent list 2>/dev/null || true)"
   [ -n "$list" ] || return 0
   agents="$(printf '%s' "$list" \
-    | python3 -c "$extract_task_agents" "$main" 2>/dev/null || true)"
+    | python3 -c "$extract_glyph_agents" "$main" 2>/dev/null || true)"
   if [ -z "$agents" ]; then
     echo "checked=0 updated=0"
     return 0
   fi
-  local checked=0 updated=0 pane task name glyph base new
-  while IFS=$'\t' read -r pane task name; do
-    [ -n "$pane" ] && [ -n "$task" ] || continue
-    glyph="$(printf '%s\n' "$states" | glyph_lookup "$task")"
-    [ -n "$glyph" ] || continue    # worktree without a backlog task — leave alone
+  local checked=0 updated=0 pane kind key name glyph base new
+  while IFS=$'\t' read -r pane kind key name; do
+    [ -n "$pane" ] && [ -n "$key" ] || continue
+    if [ "$kind" = "main" ]; then
+      glyph="◉"                    # the Manager hub — no state, just the place
+    else
+      glyph="$(printf '%s\n' "$states" | glyph_lookup "$key")"
+      [ -n "$glyph" ] || continue  # worktree without a backlog task — leave alone
+    fi
     checked=$((checked + 1))
     base="$(strip_glyph "$name")"
-    [ -n "$base" ] || base="$task" # unnamed agent → fall back to the task name
+    [ -n "$base" ] || base="$key"  # unnamed agent → task name / repo dir name
     new="$glyph $base"
     [ "$new" = "$name" ] && continue   # already correct — no rename churn
     # No `--` guard here: `herdr agent rename` treats `--` as the target itself

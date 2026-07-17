@@ -52,6 +52,9 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.8.1 — 2026-07-17
+- Mark the main-repo session in the herdr sidebar: a tab sitting exactly at the main repo root is now prefixed with `◉` — the Manager hub among the `○ ● ◇ ◆ ✓` task satellites. Stateless and non-exclusive (it marks the location, so every tab at the root gets it), stamped by the existing `refresh` sweep — no new trigger. The chosen tab name is preserved (prefix only) and `◉` joins the idempotency strip, so hub↔task moves swap glyphs cleanly.
+
 ### 1.8.0 — 2026-07-16
 - Mirror task states onto herdr tab names as a leading state glyph (`○ ● ◇ ◆ ✓`: not-started / active / in-review / approved / merged), matching the `[ws …]` statusline. The mapping + precedence stay in `ws-statusline.sh` (new `states` mode, single source of truth); the new `herdr-tab-glyph.sh` stamps the glyph at launch (`/kickoff`, `/continue`) and re-stamps it idempotently on `/status`, `/list`, and `/close` (and via pr-flow's PR-lifecycle skills). `◆` approved is derived from the PR's `reviewDecision`. Survey surfaces (`/status`, `/list`, `/check`, `/close`) read the PR cache without blocking; state-changing skills (`/open`, `/merge`, `/cycle`) do a bounded synchronous refresh.
 

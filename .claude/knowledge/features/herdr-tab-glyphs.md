@@ -11,7 +11,10 @@ prime: false
 work-system prefixes each task tab's herdr agent name with the task's state
 glyph (`○` not-started · `●` active · `◇` in review · `◆` approved · `✓`
 merged), so the sidebar mirrors the `[ws …]` statusline (e.g. `● close-herdr`,
-`◇ ks-label`, `◆ ready-pr`). `◆` (open PR whose `reviewDecision == APPROVED`,
+`◇ ks-label`, `◆ ready-pr`). A tab at the **main repo root** gets `◉` — the
+Manager hub among the task satellites (`○` was rejected: it already means
+not-started). `◉` is stateless and non-exclusive: it marks the *location*, so
+every tab at the main root carries it. `◆` (open PR whose `reviewDecision == APPROVED`,
 ready to `/merge`) is the one state needing a second `gh` field beyond
 `state`: the PR cache carries `headRef\tstate\treviewDecision`, and an old
 two-column cache row degrades safely to `◇` (empty field 3 is never `APPROVED`).
@@ -60,15 +63,26 @@ was shipped and caught in review.
   re-stamped by `refresh` on `/status`, `/list`, `/close` (remaining tabs, main-repo
   path — `$PWD` may be the just-removed worktree) and pr-flow's `/open`,
   `/merge`, `/cycle`, `/check`.
-- **Matching:** exact realpath equality `agent.cwd == <main>/.claude/worktrees/<task>`
-  (same philosophy as `herdr-teardown.sh`): an unrelated agent cd'd into a
-  worktree subdir is never renamed; agents outside task worktrees are never
-  touched. Rename targets the `pane_id`; `herdr agent list` exposes `cwd`,
-  `name`, `pane_id` per agent (verified live 2026-07-16).
+- **Matching:** exact realpath equality against `<main>/.claude/worktrees/<task>`
+  (→ state glyph) or the main repo root itself (→ `◉`) — same philosophy as
+  `herdr-teardown.sh`: an agent cd'd into a *subdir* of either is never renamed,
+  and anything outside the repo never is. `◉` needs no new trigger — the same
+  `refresh` sweep stamps both. Rename targets the `pane_id`; `herdr agent list`
+  exposes `cwd`, `name`, `pane_id` per agent (verified live 2026-07-16).
 - **Idempotency:** leading glyphs are stripped before re-prefixing via
   byte-exact `case "○ "*` patterns — a bracket expression (`[○●◇✓]`) would
-  match per *byte* for multibyte chars under C locale. Renames are only issued
-  when the name actually changes. Everything is best-effort exit-0.
+  match per *byte* for multibyte chars under C locale. The strip set includes
+  `◉`, so a tab moving between the hub and a worktree swaps glyphs cleanly.
+  Renames are only issued when the name actually changes. Everything is
+  best-effort exit-0.
+- **The extractor's TSV must never have an empty middle field.** The consumer
+  reads it with `IFS=$'\t' read -r …`, and tab is IFS *whitespace* — bash
+  collapses a run of tabs into ONE delimiter, so an empty field silently
+  shifts every later field left. Adding the `kind` column bit exactly here: a
+  main-root row emitted an empty `task`, and the agent's *name* slid into it
+  (`◉ Manager` → `◉ claude-plugins`). Hence the `key` column carries the task
+  name **or** the repo dir name — never nothing. A non-whitespace delimiter
+  (`\x1f`) would also work; non-empty fields were the smaller change.
 
 ## pr-flow coupling stays soft
 
