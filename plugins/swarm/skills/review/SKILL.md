@@ -631,8 +631,10 @@ post. Do **not** re-implement the sanitize/gate/post logic inline.
   one family, not a quorum — so solos go through the adversarial verifier.
   **Design clusters are applicability-verified even with consensus**: agreement
   attests agreement, not repo-grounded applicability (external voices only see
-  the diff and cannot check whether a claimed reuse target exists). Only defect
-  consensus is auto-accepted.
+  the diff and cannot check whether a claimed reuse target exists). Only
+  **tagged topical-defect** consensus is auto-accepted; all-untagged consensus and
+  methodological-lens consensus not tagged by a repo-reading Claude voice still go
+  through the verifier (their "consensus" isn't repo-grounded either).
 - **Security floor** (inherited from the adapter, plus this pipeline): the diff
   is fenced as data, external CLIs run sandboxed + tool-less (grok) with a
   secret scrub at the adapter boundary, and a final **output gate** re-scrubs
