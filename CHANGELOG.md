@@ -190,7 +190,7 @@ entries are grouped per plugin, newest first.
 
 ## swarm
 
-### 0.5.0 — 2026-07-16
+### 0.5.0 — 2026-07-17
 - Grow the review lens set from 5 to 11 (all default-on): methodological `removed-behavior` + `cross-file-trace` (factual, normal verify) and design-quality `reuse` / `simplification` / `efficiency` / `altitude` (suggestion-shaped, `kind: "design"`).
 - Organize the lenses into 4 clusters (`LENS_CLUSTERS` — single source of truth): breakage / threat / design / consistency. Claude fan-out runs one finder per cluster by default (≤4 agents); `--max` splits to one finder per lens (≤11). The gate still prunes per-lens.
 - Verify design findings with a kind-aware applicability prompt (reuse target real? simpler form behavior-identical?) through the same 3-state verifier — consensus design clusters included (agreement isn't applicability); report them in their own `Design` table so they never dilute the defect ranking (`balance.design` counts them).

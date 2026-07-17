@@ -513,14 +513,15 @@ const VERDICT_SCHEMA = {
     reclassifyToDefect: { type: 'boolean' },
   },
 }
-// A methodological consensus is repo-GROUNDED only if the Claude voice that can
-// read repo files actually TAGGED that methodological lens — mere family presence
-// is not enough. Plurality lens resolution can label a cluster `cross-file-trace`
-// off two externals while the lone Claude member tagged `[correctness]`; that
-// Claude voice never checked the cross-file claim, so `families.includes('claude')`
-// would wrongly wave it through. Check the member's (backend, lens) pair instead.
+// A methodological consensus is repo-GROUNDED only if a Claude voice that can read
+// repo files actually TAGGED the SAME lens that won plurality (c.lens) — not just
+// any methodological tag. Plurality can set c.lens to `cross-file-trace` off two
+// externals while the lone Claude member tagged a DIFFERENT methodological lens
+// (`removed-behavior`) on an unrelated deletion in the same file; that Claude voice
+// never checked the cross-file claim, so grounding on "any Claude methodological
+// tag" would wave it through. Require the exact (family=claude, lens=c.lens) pair.
 const claudeCheckedLens = (c) =>
-  (c.member_indices || []).some((i) => pool[i] && pool[i].family === 'claude' && METHODOLOGICAL_LENSES.includes(pool[i].lens))
+  (c.member_indices || []).some((i) => pool[i] && pool[i].family === 'claude' && pool[i].lens === c.lens)
 // A merged cluster can mix a design-tagged member with a defect-tagged one; the
 // kind vote then resolves to 'defect', but the design PROPOSAL folded into the
 // cluster still needs its applicability checked. Verify whenever ANY member is
@@ -540,21 +541,29 @@ const needsVerify = (c) =>
   hasDesignMember(c) ||
   c.untaggedOnly === true ||
   (METHODOLOGICAL_LENSES.includes(c.lens) && !claudeCheckedLens(c))
-// The applicability rubric asks the verifier to check whether a named reuse
-// target exists, and the proposal (c.recommendation) is attacker-controllable
-// free text folded into the fence. Only c.file is repoSafePath-guarded, so a
-// proposal naming an out-of-repo target (`/Users/x/.aws/credentials`, `~/…`,
-// `../../secret`) could lure the verifier into READING it and reflecting its
-// existence/contents in the evidence (which scrubFinding only pattern-scrubs).
-// Neutralize obvious out-of-repo path tokens before fencing; repo-relative
-// targets (no leading '/', '~', '..', or drive letter) are preserved so genuine
-// reuse checks still work. Deterministic — a prompt reminder alone can't contain
-// a read target the verifier was explicitly asked to look up.
-const redactProposalPaths = (s) => String(s == null ? '' : s).split(/(\s+)/).map((tok) => {
-  const bare = tok.replace(/^[('"`[<]+|[)'"`\]>.,;:!?]+$/g, '')
-  if (!bare) return tok
-  const unsafe = bare.startsWith('/') || bare.startsWith('~') || bare.includes('..') || /^[A-Za-z]:[\\/]/.test(bare)
-  return unsafe ? tok.replace(bare, '[out-of-repo path redacted]') : tok
+// The applicability rubric asks the verifier whether a named reuse target exists,
+// and EVERY finding field folded into the fence is attacker-controllable free
+// text. Only c.file is repoSafePath-guarded, so a field naming an out-of-repo
+// target (`/Users/x/.aws/credentials`, `~/…`, `../secret`, `file:///etc/passwd`,
+// `$HOME/…`) could lure the verifier into READING it and reflecting its
+// existence/contents in the evidence (scrubFinding only pattern-scrubs secrets).
+// Neutralize any token that CONTAINS an out-of-repo path/URI indicator anywhere
+// (not just at its start — `path=/Users/x` glues one after `=`): a leading or
+// post-delimiter `/`|`~`, a `..` traversal, a Windows drive/UNC, a `$VAR` prefix,
+// or a `scheme://` URI. Repo-relative targets (plain `dir/file`, no leading `/`,
+// no `~`/`..`/scheme/drive) are preserved so genuine reuse checks still work.
+// Deterministic — a prompt reminder alone can't contain a target the verifier was
+// explicitly asked to look up.
+const redactOutOfRepoPaths = (s) => String(s == null ? '' : s).split(/(\s+)/).map((tok) => {
+  if (!tok.trim()) return tok
+  const unsafe =
+    /(^|[=:('"`[<])[~/]/.test(tok) ||      // absolute/home path, incl. embedded after = : ( ' " ` [ <
+    /\.\./.test(tok) ||                     // parent traversal anywhere
+    /[A-Za-z]:[\\/]/.test(tok) ||           // Windows drive (C:\ or C:/)
+    /\\\\/.test(tok) ||                     // UNC \\server\share
+    /\$[A-Za-z_]/.test(tok) ||              // env-var prefix ($HOME…)
+    /[a-z][a-z0-9+.-]*:\/\//i.test(tok)     // scheme:// URI (file://, http://…)
+  return unsafe ? '[out-of-repo path redacted]' : tok
 }).join('')
 const verifyClusters = clusters.filter(needsVerify)
 const verified = await parallel(verifyClusters.map((c) => () => {
@@ -576,8 +585,12 @@ const verified = await parallel(verifyClusters.map((c) => () => {
   // otherwise be unverifiable and survive as PLAUSIBLE by default). Include it
   // for all-untagged clusters too: an untagged external design suggestion names
   // its target only in the recommendation, so without it the verifier can't check.
-  const fence = fenceFindings('FINDING', `File: ${c.file} (line ${c.line})\nMechanism: ${c.mechanism}\nClaim: ${c.summary}\nFailure: ${c.failure_scenario}` +
-    (design || c.untaggedOnly ? `\nProposal: ${redactProposalPaths(c.recommendation)}` : ''))
+  // Redact out-of-repo paths from EVERY attacker-controlled field in the fence,
+  // not just the proposal — mechanism/summary/failure_scenario can name a read
+  // target too (`duplicates the loader at /Users/x/.aws/credentials`). c.file is
+  // handled separately by repoSafePath (below). Same deterministic-guard rationale.
+  const fence = fenceFindings('FINDING', `File: ${c.file} (line ${c.line})\nMechanism: ${redactOutOfRepoPaths(c.mechanism)}\nClaim: ${redactOutOfRepoPaths(c.summary)}\nFailure: ${redactOutOfRepoPaths(c.failure_scenario)}` +
+    (design || c.untaggedOnly ? `\nProposal: ${redactOutOfRepoPaths(c.recommendation)}` : ''))
   const safe = repoSafePath(c.file)
   return agent(
     (design
@@ -597,17 +610,27 @@ const verified = await parallel(verifyClusters.map((c) => () => {
     { label: `verify:${(c.file || '').split('/').pop()}`, phase: 'Verify', schema: VERDICT_SCHEMA, effort: MAX ? 'xhigh' : 'medium' }
   ).then((v) => {
     const reclassified = design && v?.reclassifyToDefect === true
+    // Reclassified → carry a real DEFECT lens for accurate survivingPerLens / PR
+    // attribution: the lens of a non-design (defect-tagged) member if the cluster
+    // was mixed, else the generic 'correctness' (a pure design cluster the verifier
+    // judged an actual bug has no defect member to name). Not the design lens it
+    // was mis-filed under. (pr-post buckets by `kind` alone, so this is attribution,
+    // not table placement.)
+    const defectMember = reclassified
+      ? (c.member_indices || []).map((i) => pool[i]).find((m) => m && m.kind === 'defect' && !LENS_CLUSTERS.design.includes(m.lens) && m.lens !== 'unspecified')
+      : null
     return {
       ...c,
-      verifier: v?.verdict || 'PLAUSIBLE',
+      // A reclassified mis-filed bug MUST survive: the prompt asks for PLAUSIBLE,
+      // but the schema permits REFUTED+reclassifyToDefect, and a REFUTED verdict
+      // would be dropped by the `kept` filter — discarding the very defect the
+      // exception exists to surface. Force PLAUSIBLE when reclassifying.
+      verifier: reclassified ? 'PLAUSIBLE' : (v?.verdict || 'PLAUSIBLE'),
       evidence: v?.evidence || '',
-      // Promote a mis-filed bug out of the Design section so it ranks + renders
-      // as the defect it is. Also STRIP its design lens: pr-post buckets a row by
-      // lens when the (optional) `kind` field is dropped in the step-5 handoff, so
-      // a lingering 'reuse'/'simplification' lens would re-promote it straight back
-      // into the Design section. It is a defect now — give it the generic lens.
+      // Promote a mis-filed bug out of the Design section so it ranks + renders as
+      // the defect it is, with a real defect lens (above).
       kind: reclassified ? 'defect' : c.kind,
-      lens: reclassified ? 'correctness' : c.lens,
+      lens: reclassified ? (defectMember ? defectMember.lens : 'correctness') : c.lens,
       // A design applicability pass alone must not mint a CONSENSUS defect: no
       // family agreed on a defect framing and no adversarial defect verify ran, so
       // drop a reclassified finding to solo lest conRank rank it above real solos.

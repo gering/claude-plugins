@@ -24,7 +24,6 @@ HERE = Path(__file__).parent
 PLUGIN = HERE.parent
 WORKFLOW = PLUGIN / "workflows" / "swarm-review.js"
 SKILL = PLUGIN / "skills" / "review" / "SKILL.md"
-PR_POST = HERE / "pr-post.py"
 
 FAILS = []
 
