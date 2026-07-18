@@ -512,10 +512,13 @@ Each round:
    `terminate=cap` the last round's fixes were applied but not re-reviewed** (cap
    fires before step 4) — say so in the close-out summary; the cap is a safety
    stop, not a clean bill of health for the final edits. **On
-   `terminate=design-only`** the round's defect count hit zero but design
-   suggestions may remain (they were applied in this round's fix step, not
-   re-reviewed) — say so: the loop converged on defects, the design tail is
-   advisory.
+   `terminate=design-only`** the round's defect count hit zero, but its design
+   fixes were **applied and NOT re-reviewed** (design-only fires before step 4,
+   like cap) — and a simplification/refactor *can* introduce a real defect that
+   this round therefore never catches. Say so explicitly and recommend one more
+   `/swarm:review` over the result to confirm the final design edits are clean;
+   the loop converged on the defects it had, the design tail is advisory, not
+   a guarantee the last edits are bug-free.
 4. **Re-review** — re-run steps 1–3 (Prepare diff → Workflow → Present) on the
    **new** working tree. Two guards before spending another (possibly `--max`)
    ensemble pass:

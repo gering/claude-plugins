@@ -167,7 +167,13 @@ the diff out of the script, above). Claude applies edits between rounds.
   defect/design-blind tally ran the loop to the cap on them. The loop now
   converges once no *defect* finding remains — design is advisory and never holds
   it open; `--pending` is defect-scoped for the same reason. Omitting `--defects`
-  disables the reason (legacy callers see the original four).
+  disables the reason (legacy callers see the original four). **Accepted residual
+  (the branch's own self-review flagged it):** like `cap`, design-only fires
+  BEFORE the round's re-review, so this round's design fixes are applied but not
+  re-reviewed — a simplification could introduce a defect the loop never catches.
+  Forcing a re-review would re-open the very churn design-only closes (design
+  findings diverge), so the close-out instead flags the residual and recommends a
+  fresh `/swarm:review` over the result.
 - Loop mechanics mirror pr-flow `/cycle` run locally (no push / no `@claude`
   poll); the `Status` column (🔧/⏭️/🔁) and stable `#` across rounds come from
   the report table contract this entry defines above (P2 reserved them).

@@ -42,7 +42,8 @@ REASONS = {
     "0-findings": "0 findings — converged clean",
     "nothing-agreed": "nothing agreed — only disagreements (❌) left open",
     "no-change": "no files changed — fixed point reached",
-    "design-only": "no defect findings remain — design suggestions are advisory",
+    "design-only": "no defect findings remain — design tail is advisory; its fixes "
+                   "were applied but NOT re-reviewed (re-run to confirm they're clean)",
     "cap": "cap reached",
 }
 
@@ -63,7 +64,12 @@ def cmd_step(a: argparse.Namespace) -> int:
     advisory, and each applied simplification can spawn a fresh one, so once no
     defect-kind finding remains the loop has converged on the part that matters —
     the design tail doesn't hold it open. Omitting `--defects` disables this
-    reason (legacy behavior: only the other four fire).
+    reason (legacy behavior: only the other four fire). Like `cap`, it fires
+    BEFORE the round's re-review, so this round's design fixes were applied but
+    NOT re-reviewed — a simplification could have introduced a defect this round
+    never catches. Forcing a re-review instead would re-open the churn this reason
+    exists to close (design findings diverge), so the caller must flag the residual
+    and recommend a fresh review over the result (see the SKILL close-out).
 
     Any DEFECT finding still awaiting a user decision (`--pending` > 0) keeps the
     loop alive: it suppresses ALL FOUR convergence reasons (0-findings,
