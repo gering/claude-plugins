@@ -306,8 +306,12 @@ findings table holds only `kind: "defect"` rows; when `kind: "design"` findings
 exist, render them after it as a second table under a short `**Design**`
 heading, with the SAME columns and budgets as the defect table **in the current
 round** (seven normally; eight including `Status` in `--loop` re-review rounds —
-design rows carry 🔧/⏭️/🔁/🆕 like any other). Severity there reads as
-importance, not breakage. Numbering is ONE shared sequence across both tables —
+design rows carry 🔧/⏭️/🔁/🆕 like any other). **Prefix each design row's `Befund`
+with its `[lens]`** (`[reuse]`/`[simplification]`/`[efficiency]`/`[altitude]`) —
+the design table has no lens column, so this is where the lens attribution shows,
+mirroring the PR-comment path exactly (both surfaces read the same); skip the
+prefix only if the finding text already opens with that tag. Severity there reads
+as importance, not breakage. Numbering is ONE shared sequence across both tables —
 render each finding's workflow-assigned `num` verbatim in round 0 (across
 `--loop` rounds the `#` column follows the cross-round identity rule below, not
 the workflow's re-assigned per-round `num`); no design findings → no
