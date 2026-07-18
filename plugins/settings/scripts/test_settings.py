@@ -148,7 +148,55 @@ def test_toml_roundtrip():
     reparsed = tomllib.loads(settings.dump_toml(data))
     assert reparsed == data, reparsed
     assert settings.dump_toml({}) == ""
-    print("ok: toml dump round-trips through tomllib")
+
+    # control chars in a string value must escape so the file reparses (#1)
+    tricky = {"paths": {"tasks_dir": "a\nb\tc\\d\"e"}}
+    assert tomllib.loads(settings.dump_toml(tricky)) == tricky
+    # non-bare table names / keys must be quoted, not emitted raw (#7)
+    special = {"related_projects": {"web api": {"path": "/x"}, "a.b": {"path": "/y"}}}
+    assert tomllib.loads(settings.dump_toml(special)) == special
+    print("ok: toml dump round-trips (control chars + non-bare keys)")
+
+
+def test_config_filename_sandbox():
+    # x-config-file must be a plain basename — traversal / absolute / ~ rejected (#3)
+    for bad in ["../escape.toml", "/tmp/x.toml", "a/b.toml", "~/x.toml", "..", "."]:
+        try:
+            settings.config_filename({"x-plugin": "demo", "x-config-file": bad})
+            assert False, f"expected rejection for {bad!r}"
+        except settings.SettingsError:
+            pass
+    assert settings.config_filename({"x-config-file": ".demo.toml"}) == ".demo.toml"
+    print("ok: config filename sandbox")
+
+
+def test_set_guards(project: Path):
+    cfg_path = project / ".demo.toml"
+    if cfg_path.exists():
+        cfg_path.unlink()
+    # #5: setting a section (object node) is rejected, nothing written
+    assert run(["set", "demo.paths", "foo"]) == 1
+    assert not cfg_path.exists()
+    # #8: descending past a scalar leaf is rejected
+    assert run(["set", "demo.paths.tasks_dir.extra", "x"]) == 1
+    assert not cfg_path.exists()
+    # #4: an array with wrong element types is refused before writing
+    assert run(["set", "demo.branches.backup_prefixes", "[1,2,3]"]) == 1
+    assert not cfg_path.exists()
+    # valid array still works
+    assert run(["set", "demo.branches.backup_prefixes", '["x/","y/"]']) == 0
+    import tomllib
+
+    with cfg_path.open("rb") as fh:
+        assert tomllib.load(fh)["branches"]["backup_prefixes"] == ["x/", "y/"]
+    # #6 guard: a mistyped dynamic related_projects field can't silently corrupt
+    assert run(["set", "demo.related_projects.frontend.tags", '["web"]']) == 1
+    # string-shorthand related_projects entry still works (path warns, not errors)
+    assert run(["set", "demo.related_projects.backend", "/tmp"]) == 0
+    with cfg_path.open("rb") as fh:
+        assert tomllib.load(fh)["related_projects"]["backend"] == "/tmp"
+    cfg_path.unlink()  # leave a clean slate for the next test
+    print("ok: set guards (#4 #5 #6 #8)")
 
 
 def test_coercion():
@@ -216,7 +264,9 @@ def main() -> int:
         test_validation(project)
         test_related_projects(project)
         test_toml_roundtrip()
+        test_config_filename_sandbox()
         test_coercion()
+        test_set_guards(project)
         test_cli_set_get_unset(project)
         test_cli_list_show_validate()
     print("\nall settings tests passed")

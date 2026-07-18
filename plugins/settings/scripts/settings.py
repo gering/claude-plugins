@@ -113,6 +113,21 @@ def config_filename(schema: dict) -> str:
     name = schema.get("x-config-file")
     if not name:
         raise SettingsError(f"schema {schema.get('x-plugin')} lacks x-config-file")
+    # x-config-file comes from a (plugin-authored) schema but is joined onto the
+    # project root for read/write/unlink — a plain filename only, never a path
+    # that could traverse out (`../…`), be absolute, or expand `~`. Reject
+    # anything but a single basename so a malformed/hostile schema cannot touch
+    # files outside the project root.
+    if (
+        name in (".", "..")
+        or name != os.path.basename(name)
+        or os.path.isabs(name)
+        or name.startswith("~")
+    ):
+        raise SettingsError(
+            f"schema {schema.get('x-plugin')}: x-config-file must be a plain "
+            f"filename, got {name!r}"
+        )
     return name
 
 
@@ -305,6 +320,48 @@ def normalize_related_projects(value: dict) -> dict:
 # --------------------------------------------------------------------------- #
 
 
+_TOML_SHORT_ESCAPES = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\n": "\\n",
+    "\r": "\\r",
+    "\t": "\\t",
+    "\b": "\\b",
+    "\f": "\\f",
+}
+
+
+def _toml_basic_string(s: str) -> str:
+    """A TOML basic string with control chars escaped, so it always round-trips.
+
+    Plain `"…"` quoting that left a raw newline/tab inside produced a file tomllib
+    then refused to parse. Escape the short forms and \\uXXXX everything else in
+    the C0 range (+ DEL), which TOML basic strings forbid unescaped.
+    """
+    out = []
+    for ch in s:
+        if ch in _TOML_SHORT_ESCAPES:
+            out.append(_TOML_SHORT_ESCAPES[ch])
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+            out.append(f"\\u{ord(ch):04X}")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
+
+def _is_bare_key(k: str) -> bool:
+    """TOML bare-key charset: ASCII letters, digits, `_`, `-`."""
+    return bool(k) and all(
+        ("a" <= c <= "z") or ("A" <= c <= "Z") or ("0" <= c <= "9") or c in "_-"
+        for c in k
+    )
+
+
+def _toml_key(k: str) -> str:
+    """A key/table-name segment: bare where legal, else a quoted string."""
+    return k if _is_bare_key(k) else _toml_basic_string(k)
+
+
 def _toml_scalar(value: object) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -313,8 +370,7 @@ def _toml_scalar(value: object) -> str:
     if isinstance(value, float):
         return repr(value)
     if isinstance(value, str):
-        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-        return f'"{escaped}"'
+        return _toml_basic_string(value)
     if isinstance(value, list):
         return "[" + ", ".join(_toml_scalar(v) for v in value) + "]"
     raise SettingsError(f"cannot serialize value of type {type(value).__name__}")
@@ -338,15 +394,15 @@ def dump_toml(data: dict) -> str:
         if scalars or not tables:
             if lines:
                 lines.append("")
-            lines.append(f"[{section}]")
+            lines.append(f"[{_toml_key(section)}]")
             for key, value in scalars.items():
-                lines.append(f"{key} = {_toml_scalar(value)}")
+                lines.append(f"{_toml_key(key)} = {_toml_scalar(value)}")
         for name, sub in tables.items():
             if lines:
                 lines.append("")
-            lines.append(f"[{section}.{name}]")
+            lines.append(f"[{_toml_key(section)}.{_toml_key(name)}]")
             for key, value in sub.items():
-                lines.append(f"{key} = {_toml_scalar(value)}")
+                lines.append(f"{_toml_key(key)} = {_toml_scalar(value)}")
     return "\n".join(lines) + "\n" if lines else ""
 
 
@@ -381,24 +437,29 @@ def dig(data: dict, keys: list[str]):
     return cur
 
 
-_DYNAMIC = object()  # a valid key under a dynamic-map section (e.g. related_projects)
+def resolve_set_target(schema: dict, keys: list[str]) -> tuple[str, object]:
+    """Classify a dotted set-path against the schema. Returns (kind, detail):
 
-
-def leaf_schema(schema: dict, keys: list[str]):
-    """Walk the schema `properties` tree to the spec for a dotted key.
-
-    Returns the leaf spec dict, `_DYNAMIC` for a key under a dynamic-map section
-    (valid but schemaless — no type/enum), or None for a genuinely unknown key.
+    - ("leaf", spec)        settable scalar/array leaf → coerce + enum-check
+    - ("section", node)     path stops at an object/section → reject (#5)
+    - ("scalar-prefix", i)  key[i] descends past a scalar leaf → reject (#8)
+    - ("dynamic", None)     under a dynamic-map (related_projects) → free-form
+    - ("unknown", None)     key not in schema → written with a warning
     """
     node = schema
-    for key in keys:
+    for i, key in enumerate(keys):
         if node.get("x-semantic") == "related-projects":
-            return _DYNAMIC  # entries are free-form project names
-        props = node.get("properties")
-        if not isinstance(props, dict) or key not in props:
-            return None
-        node = props[key]
-    return node
+            return ("dynamic", None)  # entries are free-form project names
+        if node.get("type") == "object" or "properties" in node:
+            props = node.get("properties")
+            if not isinstance(props, dict) or key not in props:
+                return ("unknown", None)
+            node = props[key]
+        else:
+            return ("scalar-prefix", i)  # node is a scalar leaf, but keys remain
+    if node.get("type") == "object" or "properties" in node:
+        return ("section", node)
+    return ("leaf", node)
 
 
 def coerce_value(raw: str, spec: dict | None) -> object:
@@ -517,8 +578,18 @@ def cmd_set(args, schemas, project_root):
     if not rest:
         raise SettingsError("set path must include a section and key, e.g. work-system.paths.tasks_dir")
     schema = _pick_schema(schemas, plugin)
-    spec = leaf_schema(schema, rest)
-    if spec is _DYNAMIC:
+    kind, detail = resolve_set_target(schema, rest)
+    if kind == "section":
+        raise SettingsError(
+            f"{args.path} is a section, not a value — specify a section and key, "
+            f"e.g. {args.path}.<key>"
+        )
+    if kind == "scalar-prefix":
+        prefix = ".".join([plugin] + rest[: detail + 1])
+        raise SettingsError(f"{prefix} is a value, not a section — cannot set a key beneath it")
+
+    spec = detail if kind == "leaf" else None
+    if kind == "dynamic":
         value = args.value  # free-form entry (e.g. a related_projects path) — no coercion
     else:
         value = coerce_value(args.value, spec)
@@ -535,8 +606,20 @@ def cmd_set(args, schemas, project_root):
             cur[key] = nxt
         cur = nxt
     cur[rest[-1]] = value
+
+    # Gate the write on schema validity: a coerced array with wrong element types
+    # (#4) or a dynamic related_projects entry given a mistyped field (#6) must
+    # not silently write an invalid config. Only errors block; warnings (unknown
+    # key, non-existent related-project path) are tolerated as before.
+    errors = [msg for lvl, msg in validate(schema, user, project_root) if lvl == "error"]
+    if errors:
+        raise SettingsError(
+            f"{args.path}: refusing to write an invalid config — "
+            + "; ".join(errors)
+        )
+
     path = write_user_config(schema, project_root, user)
-    if spec is None:
+    if kind == "unknown":
         print(f"set {args.path} = {json.dumps(value)}  (warning: not in schema)  -> {path}")
     else:
         print(f"set {args.path} = {json.dumps(value)}  -> {path}")
