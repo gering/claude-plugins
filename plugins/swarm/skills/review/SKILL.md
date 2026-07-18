@@ -310,8 +310,11 @@ design rows carry 🔧/⏭️/🔁/🆕 like any other). **Prefix each design ro
 with its `[lens]`** (`[reuse]`/`[simplification]`/`[efficiency]`/`[altitude]`) —
 the design table has no lens column, so this is where the lens attribution shows,
 mirroring the PR-comment path exactly (both surfaces read the same); skip the
-prefix only if the finding text already opens with that tag. Severity there reads
-as importance, not breakage. Numbering is ONE shared sequence across both tables —
+prefix only if the finding text already opens with **any known design-lens tag**
+(not just the row's own lens) — same rule as the PR path's guard, so a merged row
+whose text opens with a different member's tag (`[simplification]` on a `reuse`
+row) reads the same on both surfaces. Severity there reads as importance, not
+breakage. Numbering is ONE shared sequence across both tables —
 render each finding's workflow-assigned `num` verbatim in round 0 (across
 `--loop` rounds the `#` column follows the cross-round identity rule below, not
 the workflow's re-assigned per-round `num`); no design findings → no

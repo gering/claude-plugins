@@ -71,7 +71,13 @@ expect("design-only omitted = disabled", ["step", *step(round=1, cap=10, finding
        out="continue")
 expect("pending blocks design-only", ["step", *step(round=1, cap=10, findings=5, agreed=3, changed=2, defects=0, pending=1)],
        out="continue")
-expect("cap wins over design-only at last round", ["step", *step(round=9, cap=10, findings=5, agreed=3, changed=2, defects=2)],
+# design-only slots BEFORE cap in the fixed order: at the last allowed round with
+# NO defects left, the loop converges clean (design-only), not on the safety stop.
+expect("design-only wins over cap at last round", ["step", *step(round=9, cap=10, findings=5, agreed=3, changed=2, defects=0)],
+       out="terminate=design-only")
+# with defects remaining at the last round nothing converged, so cap fires — this
+# is the true "cap" case when --defects is passed (design-only never eligible).
+expect("cap fires with defects remaining", ["step", *step(round=9, cap=10, findings=5, agreed=3, changed=2, defects=2)],
        out="terminate=cap")
 expect("design-only box renders", ["box", "3 2 1", "--reason", "design-only"], code=0)
 

@@ -203,8 +203,13 @@ def _safe_pr_num(pr_num):
 # self-tag the finder may already have baked into the summary, so we don't add a
 # second prefix. It can never move a row between the defect/design tables.
 DESIGN_LENS_TAGS = ("reuse", "simplification", "efficiency", "altitude")
+# Match a leading "[lens]" tag the SAME way the workflow's own parser does
+# (/^\s*\[([\w-]+)\]/) — no trailing-whitespace requirement. Requiring a space
+# after "]" would miss a valid but unspaced self-tag ("[reuse]ExtractHelper" or a
+# bare "[reuse]"), which the workflow accepts as tagged, and re-prefix it to
+# "[reuse] [reuse]…" — the exact double-prefix this guard exists to prevent.
 _DESIGN_PREFIX_RE = re.compile(
-    r"\s*\[(" + "|".join(DESIGN_LENS_TAGS) + r")\]\s", re.IGNORECASE
+    r"\s*\[(" + "|".join(DESIGN_LENS_TAGS) + r")\]", re.IGNORECASE
 )
 
 

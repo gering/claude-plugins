@@ -174,6 +174,12 @@ check("self-tag kept, row lens not re-added", "&#91;Simplification&#93; flatten 
 # a non-lens bracket prefix is NOT mistaken for a self-tag — the lens is still added
 todo = pr_post.render_body({"rows": [{"num": "1", "befund": "[TODO] drop this", "kind": "design", "lens": "reuse"}]})
 check("non-lens bracket still gets lens", "&#91;reuse&#93; &#91;TODO&#93; drop this" in todo)
+# an unspaced self-tag ("[reuse]text", bare "[reuse]") is still recognized — the
+# workflow parser accepts it, so the guard must too (else it double-prefixes)
+unspaced = pr_post.render_body({"rows": [{"num": "1", "befund": "[reuse]ExtractHelper", "kind": "design", "lens": "reuse"}]})
+check("unspaced self-tag not doubled", "&#91;reuse&#93;ExtractHelper" in unspaced and unspaced.count("&#91;reuse&#93;") == 1)
+bare = pr_post.render_body({"rows": [{"num": "1", "befund": "[reuse]", "kind": "design", "lens": "reuse"}]})
+check("bare self-tag not doubled", bare.count("&#91;reuse&#93;") == 1)
 
 # --- build subcommand round-trip via subprocess ---------------------------- #
 with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
