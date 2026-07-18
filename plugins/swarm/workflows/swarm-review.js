@@ -374,34 +374,25 @@ for (const v of voices) {
     // set, not the finder's own subset: off-lens bleed is real (a design finder
     // may spot a genuine [security] bug while reading), and coercing a validly
     // tagged foreign lens would flip `kind` and route the finding through the
-    // wrong verifier + report section.
+    // wrong verifier + report section. An unknown/missing prefix falls back to
+    // the finder's lens ONLY for a single-lens unit (--max — the assignment is
+    // unambiguous); a multi-lens cluster finding falls back to 'unspecified'
+    // (kind defect, the safe bucket) — guessing lenses[0] could stamp a design
+    // kind on an untagged off-lens defect from the design cluster.
     //
-    // When the prefix is unknown/missing, the exact lens can't be recovered — but
-    // the KIND often can, and that's what routes a finding (design table +
-    // applicability verify vs defect ranking + P1b's --loop defect tally). A
-    // Claude finder reviews through ONE cluster whose lenses are single-KIND
-    // (breakage/threat/consistency = all defect, design = all design), so an
-    // untagged finding from it inherits that kind reliably (`kindTrusted`) — a
-    // dropped [reuse] prefix must not sink a design suggestion into the defect
-    // table. Externals carry the full 11-lens set (or none), so their unit is
-    // kind-MIXED → never inferred: an untagged external stays 'unspecified'/defect
-    // (the safe bucket) and keeps NOT voting on cluster kind (the load-bearing
-    // invariant). The lens itself stays 'unspecified' unless it was a --max
-    // single-lens unit — we recover the kind, not a specific lens we can't know.
+    // 0.5.1 briefly inferred the KIND from a homogeneous design unit here (a
+    // dropped [reuse] prefix would otherwise mis-file a design suggestion to the
+    // defect table). Reverted: a design finder is invited to report defects too,
+    // so an untagged finding from it may be a real off-lens BUG — inferring
+    // 'design' routes that bug to applicability verify (wrong rubric → can drop a
+    // real defect) and out of the --loop defect tally. Dropping a bug is worse
+    // than mis-filing a suggestion, so untagged stays 'defect' (the safe bucket).
     const m = /^\s*\[([\w-]+)\]/.exec(f.summary || '')
     let lens = m ? m[1].toLowerCase() : ''
-    let kind, kindTrusted
-    if (CANDIDATE_LENSES.includes(lens)) {
-      kind = lensKind(lens); kindTrusted = true
-    } else if (Array.isArray(v.lenses) && v.lenses.length === 1) {
-      lens = v.lenses[0]; kind = lensKind(lens); kindTrusted = true   // --max: unambiguous lens
-    } else {
-      lens = 'unspecified'
-      const unitKinds = new Set((Array.isArray(v.lenses) ? v.lenses : []).map(lensKind))
-      kindTrusted = unitKinds.size === 1                              // homogeneous Claude unit only
-      kind = kindTrusted ? [...unitKinds][0] : 'defect'
+    if (!CANDIDATE_LENSES.includes(lens)) {
+      lens = Array.isArray(v.lenses) && v.lenses.length === 1 ? v.lenses[0] : 'unspecified'
     }
-    pool.push({ ...f, backend: v.backend, family: FAMILY[v.backend] || v.backend, lens, kind, kindTrusted })
+    pool.push({ ...f, backend: v.backend, family: FAMILY[v.backend] || v.backend, lens, kind: lensKind(lens) })
   }
 }
 log(`Fan-out: ${pool.length} raw findings from ${voices.length} voices` +
@@ -450,25 +441,19 @@ if (pool.length > 0) {
     const backends = Array.from(new Set(members.map((i) => pool[i].backend))).sort()
     const families = Array.from(new Set(members.map((i) => pool[i].family))).sort()
     // Cluster kind from the MEMBERS (not the merge agent's free-text `lens`):
-    // design only when every KIND-TRUSTED member is design — 'defect' is the
-    // single structural fallback (a design suggestion merged with a real defect
-    // must not drop out of the defect ranking). A member is kind-trusted when its
-    // kind is provenance-known: explicitly tagged, OR inferred from a homogeneous
-    // Claude unit (see the pool loop). Kind-UNtrusted members (untagged externals,
-    // whose 11-lens unit is kind-mixed) do NOT vote — one untagged external must
-    // not drag a properly tagged design cluster into the defect ranking, nor a
-    // homogeneous Claude design finding out of it.
-    //
-    // `untaggedOnly` is separate and stays LENS-tagged-based: an ALL-untagged
-    // cluster (no member carries a lens tag) is flagged so it is never
-    // auto-accepted (see needsVerify) — two diff-scoped externals can agree on an
-    // unverifiable suggestion without ever tagging it. An inferred-design finding
-    // still carries no lens tag, so this gate is untouched: the consensus /
-    // auto-accept invariant is unchanged — only the design/defect routing is
-    // corrected.
-    const voters = members.filter((i) => pool[i].kindTrusted)
-    const kind = voters.length > 0 && voters.every((i) => pool[i].kind === 'design') ? 'design' : 'defect'
-    const untaggedOnly = members.every((i) => pool[i].lens === 'unspecified')
+    // design only when every TAGGED member is design — 'defect' is the single
+    // structural fallback (a design suggestion merged with a real defect must
+    // not drop out of the defect ranking). 'unspecified' members (untagged
+    // externals, or an untagged Claude finding — 0.5.1's kind-inference was
+    // reverted, see the pool loop) do NOT vote: their kind is only the safe
+    // default, and one untagged voice must not drag a properly tagged design
+    // cluster into the defect ranking. An ALL-untagged cluster is kind 'defect'
+    // but flagged — its "consensus" is backed by no tagged lens, so it must never
+    // be auto-accepted (see needsVerify below): two diff-scoped externals can
+    // agree on an unverifiable suggestion without ever tagging it.
+    const known = members.filter((i) => pool[i].lens !== 'unspecified')
+    const kind = known.length > 0 && known.every((i) => pool[i].kind === 'design') ? 'design' : 'defect'
+    const untaggedOnly = known.length === 0
     // The merge agent's `lens` is free text (schema caps length, not values):
     // accept it ONLY when it is a known lens AND some cluster member actually
     // carries it — a globally-valid lens no member tagged (merge says `security`

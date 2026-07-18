@@ -46,19 +46,19 @@ truth** (the per-cluster externals follow-up consumes it):
   trades isolation for fewer agents).
 - **`kind` is derived from the lens name** (`design` vs `defect`) — no
   finding-schema change, so the 3-place schema mirror is untouched. A merged
-  cluster's kind comes from its KIND-TRUSTED members (design only when every
-  trusted member is design — a design suggestion merged with a real defect must
-  not leave the defect ranking). **Kind-trusted = provenance-known:** explicitly
-  tagged, OR (0.5.1) inferred from a homogeneous Claude finder unit — a Claude
-  finder reviews through ONE kind-single cluster, so an untagged finding from it
-  still has a reliable kind (a dropped `[reuse]` prefix must not sink a design
-  suggestion into the defect table + the `--loop` defect tally). Externals carry
-  the full 11-lens (kind-mixed) set, so they're never inferred — an untagged
-  external stays `unspecified`/defect and does NOT vote. `untaggedOnly` stays
-  lens-tag-based, so an **all-untagged cluster is never auto-accepted** — its
-  "consensus" is backed by no lens, verified like a solo (the `--max` dogfooding
-  round found exactly this hole); the 0.5.1 kind-inference corrects routing only,
-  never auto-accept.
+  cluster's kind comes from its TAGGED members (design only when every tagged
+  member is design — a design suggestion merged with a real defect must not
+  leave the defect ranking); untagged (`unspecified`) members don't vote, and
+  an **all-untagged cluster is never auto-accepted** — its "consensus" is
+  backed by no lens, so it is verified like a solo (the `--max` dogfooding
+  round found exactly this hole). **Untagged findings stay `kind: "defect"`**
+  (the safe bucket), NOT inferred as design from cluster homogeneity: 0.5.1
+  tried that inference (to keep a dropped-`[reuse]` design suggestion out of the
+  defect table) and reverted it — a design finder is invited to report defects
+  too, so an untagged finding may be a real off-lens BUG, and inferring `design`
+  routes that bug to applicability verify (wrong rubric → can drop a real defect)
+  and out of the `--loop` defect tally. Dropping a bug outweighs mis-filing a
+  suggestion (the branch's own external-only self-review caught this).
 - **Verify path decision: kind-aware prompt, not bypass.** Design findings are
   suggestion-shaped, but each has a falsifiable applicability core (reuse
   target exists? simpler form behavior-identical? claimed waste real?) — the
