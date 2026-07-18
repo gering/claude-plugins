@@ -163,6 +163,18 @@ check("explicit defect keeps a design lens in defects", "&#91;" not in expl and 
 evil = pr_post.render_body({"rows": [{"num": "1", "befund": "z", "kind": "design", "lens": "x|@y"}]})
 check("evil lens sanitized", "&#91;x&#124;&#64;y&#93; z" in evil and "@y" not in evil)
 
+# idempotency guard: a befund that already carries its own "[lens] " self-tag is
+# NOT prefixed again (would post "[reuse] [reuse] …"). Guard is case-insensitive
+# and covers a self-tag that differs from the row's resolved lens (merge picked a
+# different design lens as representative).
+dup = pr_post.render_body({"rows": [{"num": "1", "befund": "[reuse] use the helper", "kind": "design", "lens": "reuse"}]})
+check("no double [reuse] prefix", "&#91;reuse&#93; use the helper" in dup and dup.count("&#91;reuse&#93;") == 1)
+dup2 = pr_post.render_body({"rows": [{"num": "1", "befund": "[Simplification] flatten it", "kind": "design", "lens": "reuse"}]})
+check("self-tag kept, row lens not re-added", "&#91;Simplification&#93; flatten it" in dup2 and "&#91;reuse&#93;" not in dup2)
+# a non-lens bracket prefix is NOT mistaken for a self-tag — the lens is still added
+todo = pr_post.render_body({"rows": [{"num": "1", "befund": "[TODO] drop this", "kind": "design", "lens": "reuse"}]})
+check("non-lens bracket still gets lens", "&#91;reuse&#93; &#91;TODO&#93; drop this" in todo)
+
 # --- build subcommand round-trip via subprocess ---------------------------- #
 with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
     json.dump(DATA, f)

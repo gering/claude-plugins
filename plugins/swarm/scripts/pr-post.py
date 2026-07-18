@@ -196,6 +196,18 @@ def _safe_pr_num(pr_num):
     return sanitize_prose(pr_num)
 
 
+# Design-cluster lens names, mirrored from swarm-review.js LENS_CLUSTERS.design
+# (kept in sync by test_lens_sync.py). NOT a kind fallback (the retired
+# DESIGN_LENSES was — bucketing keys on `kind` ALONE, see _row_kind): this runs
+# only INSIDE the already-decided design branch, purely to recognize a "[lens] "
+# self-tag the finder may already have baked into the summary, so we don't add a
+# second prefix. It can never move a row between the defect/design tables.
+DESIGN_LENS_TAGS = ("reuse", "simplification", "efficiency", "altitude")
+_DESIGN_PREFIX_RE = re.compile(
+    r"\s*\[(" + "|".join(DESIGN_LENS_TAGS) + r")\]\s", re.IGNORECASE
+)
+
+
 def _row_kind(r: dict) -> str:
     """Row kind. 'design' ONLY when explicitly tagged `kind: "design"`; anything
     else — including a missing/junk kind — is a defect, the safe bucket. The lens
@@ -258,10 +270,21 @@ def render_body(data: dict) -> str:
             # sanitizing: the brackets come out entity-encoded like any other
             # cell content and render back as literal [lens] — an untrusted
             # lens value gets the full sanitizer, same as the finding text.
+            # Idempotency guard: the workflow doesn't strip a finder's own
+            # "[lens] " self-tag from the summary, and a merge can leave the
+            # representative summary tagged with a DIFFERENT design lens than the
+            # cluster's resolved `lens`. Prefixing unconditionally would post
+            # "[reuse] [reuse] …" (or "[reuse] [simplification] …"). If the cell
+            # already opens with a known design-lens tag, keep it and don't add a
+            # second one.
             befund = r.get("befund")
             if _row_kind(r) == "design":
-                lens = str(r.get("lens") or "").strip() or "design"
-                befund = f"[{lens}] {'' if befund is None else befund}".rstrip()
+                body = "" if befund is None else str(befund)
+                if _DESIGN_PREFIX_RE.match(body):
+                    befund = body                       # already self-tagged — leave it
+                else:
+                    lens = str(r.get("lens") or "").strip() or "design"
+                    befund = f"[{lens}] {body}".rstrip()
             cells = [
                 sanitize_prose(r.get("num", "")),
                 sanitize_prose(r.get("sev", "")),
