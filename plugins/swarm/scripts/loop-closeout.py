@@ -16,17 +16,22 @@ them from each round's presentation) and passes them in. No state file, so
 there is no working-directory footgun.
 
 Usage:
-  loop-closeout.py step --round R --cap N --findings F --agreed A --changed C [--pending P]
-      -> prints `continue` or `terminate=<reason>` (one of the 4 reasons).
-      --pending P = agreed findings still awaiting a user decision (default 0);
+  loop-closeout.py step --round R --cap N --findings F --agreed A --changed C [--defects D] [--pending P]
+      -> prints `continue` or `terminate=<reason>` (one of the 5 reasons).
+      --defects D = defect-kind findings this round (design suggestions excluded);
+      when given, the loop converges via `design-only` once no defects remain, so
+      subjective design churn (each applied simplification spawning a fresh one)
+      can't run the loop to the cap. Omit to disable that reason (legacy callers).
+      --pending P = *defect* findings still awaiting a user decision (default 0);
       P > 0 keeps the loop alive past every convergence reason except the cap.
+      Design needs-decision does NOT count here — design never holds the loop open.
       On bad input it writes to stderr and exits non-zero with NO stdout token —
       the caller must treat a non-zero exit as abort, not as `continue`.
 
   loop-closeout.py box "15 7 4 4 5 4 3 1 1 0" --reason cap
       -> prints the close-out box + the termination reason line.
 
-Reasons: 0-findings | nothing-agreed | no-change | cap
+Reasons: 0-findings | nothing-agreed | no-change | design-only | cap
 """
 import argparse
 import sys
@@ -37,6 +42,7 @@ REASONS = {
     "0-findings": "0 findings — converged clean",
     "nothing-agreed": "nothing agreed — only disagreements (❌) left open",
     "no-change": "no files changed — fixed point reached",
+    "design-only": "no defect findings remain — design suggestions are advisory",
     "cap": "cap reached",
 }
 
@@ -48,31 +54,45 @@ def cmd_step(a: argparse.Namespace) -> int:
       1. review returned zero findings          -> 0-findings   (clean)
       2. nothing was agreed (no ✅/🟨 this round) -> nothing-agreed
       3. no files changed AND nothing is pending  -> no-change   (fixed point)
-      4. this was the last allowed round          -> cap
+      4. no DEFECT findings remain (design only)   -> design-only (advisory tail)
+      5. this was the last allowed round          -> cap
     Otherwise: continue.
 
-    Any agreed finding still awaiting a user decision (`--pending` > 0) keeps the
-    loop alive: it suppresses ALL THREE convergence reasons (0-findings,
-    nothing-agreed, no-change), because none of them is a true fixed point while a
-    choice is still owed. Only `cap` — the safety stop — can still fire with a
-    decision pending. Inputs are range-checked so a mis-parsed flag (e.g.
-    `--cap 0`) fails loudly instead of silently collapsing the loop.
+    `design-only` (only when `--defects` is given) is what stops the loop from
+    running to the cap on subjective design churn: design suggestions are
+    advisory, and each applied simplification can spawn a fresh one, so once no
+    defect-kind finding remains the loop has converged on the part that matters —
+    the design tail doesn't hold it open. Omitting `--defects` disables this
+    reason (legacy behavior: only the other four fire).
+
+    Any DEFECT finding still awaiting a user decision (`--pending` > 0) keeps the
+    loop alive: it suppresses ALL FOUR convergence reasons (0-findings,
+    nothing-agreed, no-change, design-only), because none of them is a true fixed
+    point while a defect choice is still owed. Only `cap` — the safety stop — can
+    still fire with a decision pending. A *design* needs-decision is NOT passed as
+    pending (design never holds the loop). Inputs are range-checked so a mis-parsed
+    flag (e.g. `--cap 0`) fails loudly instead of silently collapsing the loop.
     """
-    for name, val, lo in (
+    checks = [
         ("--cap", a.cap, 1), ("--round", a.round, 0), ("--findings", a.findings, 0),
         ("--agreed", a.agreed, 0), ("--changed", a.changed, 0), ("--pending", a.pending, 0),
-    ):
+    ]
+    if a.defects is not None:
+        checks.append(("--defects", a.defects, 0))
+    for name, val, lo in checks:
         if val < lo:
             print(f"loop-closeout: {name} must be >= {lo} (got {val})", file=sys.stderr)
             return 2
 
-    converged = a.pending <= 0  # a pending decision is never a fixed point
+    converged = a.pending <= 0  # a pending defect decision is never a fixed point
     if converged and a.findings <= 0:
         print("terminate=0-findings")
     elif converged and a.agreed <= 0:
         print("terminate=nothing-agreed")
     elif converged and a.changed <= 0:
         print("terminate=no-change")
+    elif converged and a.defects is not None and a.defects <= 0:
+        print("terminate=design-only")
     elif a.round + 1 >= a.cap:
         print("terminate=cap")
     else:
@@ -133,8 +153,11 @@ def main() -> int:
     s.add_argument("--findings", type=int, required=True, help="findings this round")
     s.add_argument("--agreed", type=int, required=True, help="✅+🟨 findings this round")
     s.add_argument("--changed", type=int, required=True, help="files changed this round")
+    s.add_argument("--defects", type=int, default=None,
+                   help="defect-kind findings this round (design excluded); enables the "
+                        "design-only reason. Omit to disable it (legacy).")
     s.add_argument("--pending", type=int, default=0,
-                   help="agreed findings still awaiting a user decision (default 0)")
+                   help="DEFECT findings still awaiting a user decision (default 0)")
     s.set_defaults(func=cmd_step)
 
     b = sub.add_parser("box", help="render the OPEN-findings close-out box")
