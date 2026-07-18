@@ -1,9 +1,9 @@
 ---
 title: "Swarm Review Pipeline (/swarm:review)"
 createdAt: 2026-07-08
-updatedAt: 2026-07-17
+updatedAt: 2026-07-18
 createdFrom: "PR #24"
-updatedFrom: "PR #35"
+updatedFrom: "harden-swarm-design-lens-integration"
 pluginVersion: 1.8.2
 prime: false
 reindexedAt: 2026-07-12
@@ -39,6 +39,11 @@ truth** (the per-cluster externals follow-up consumes it):
   one broad pass → default = per-cluster → `--max` = per-lens. The **gate
   stays per-lens** (a fully-pruned cluster spawns no agent); design lenses are
   first-class in the gate prompt, skipped only when the diff can't pay off.
+  **Accepted tradeoff of the cluster default:** per-lens failure isolation is
+  gone — one crashed cluster finder drops that whole cluster's Claude coverage
+  for the round (a visible `backendError`, never silent); `--max` restores
+  per-lens isolation. Documented, not retried per-lens (minimal — the default
+  trades isolation for fewer agents).
 - **`kind` is derived from the lens name** (`design` vs `defect`) — no
   finding-schema change, so the 3-place schema mirror is untouched. A merged
   cluster's kind comes from its TAGGED members (design only when every tagged
@@ -46,7 +51,14 @@ truth** (the per-cluster externals follow-up consumes it):
   leave the defect ranking); untagged (`unspecified`) members don't vote, and
   an **all-untagged cluster is never auto-accepted** — its "consensus" is
   backed by no lens, so it is verified like a solo (the `--max` dogfooding
-  round found exactly this hole).
+  round found exactly this hole). **Untagged findings stay `kind: "defect"`**
+  (the safe bucket), NOT inferred as design from cluster homogeneity: 0.5.1
+  tried that inference (to keep a dropped-`[reuse]` design suggestion out of the
+  defect table) and reverted it — a design finder is invited to report defects
+  too, so an untagged finding may be a real off-lens BUG, and inferring `design`
+  routes that bug to applicability verify (wrong rubric → can drop a real defect)
+  and out of the `--loop` defect tally. Dropping a bug outweighs mis-filing a
+  suggestion (the branch's own external-only self-review caught this).
 - **Verify path decision: kind-aware prompt, not bypass.** Design findings are
   suggestion-shaped, but each has a falsifiable applicability core (reuse
   target exists? simpler form behavior-identical? claimed waste real?) — the
@@ -60,7 +72,10 @@ truth** (the per-cluster externals follow-up consumes it):
 - **Report keeps kinds apart**: defects table first, then a same-format
   `Design` table (shared numbering — the workflow sorts defects first);
   `balance.design` counts the subset. Lens prefixes are parsed with `[\w-]`
-  (hyphenated names like `removed-behavior` — plain `\w` misses them).
+  (hyphenated names like `removed-behavior` — plain `\w` misses them). The Design
+  table has no lens column; instead each design row's finding cell is prefixed
+  `[lens]` (0.5.1) — the SAME in the in-session table and the PR comment, so lens
+  attribution reads identically on both surfaces.
 - Effort: design lenses run at the **same effort** as defect lenses (`xhigh`
   under `--max` — user call: depth applies to design thinking too).
 
@@ -133,16 +148,32 @@ the diff out of the script, above). Claude applies edits between rounds.
   ❌-disagree is never touched and stays visible in the report.
 - **Re-confirm claim-vs-code before every edit** — a stale finding (comment rot,
   already-fixed, line drift) is reported as skipped, never fabricated into an edit.
+  **Kind-aware (0.5.1):** a `kind:"design"` finding has no line-local defect to
+  re-find, so re-confirm the *suggestion still applies* (reuse target / duplication
+  / simpler form / waste still present), not "defect still present" — else an
+  agreed design fix is silently dropped as skipped-stale.
 - **Deterministic bits live in `scripts/loop-closeout.py`, not skill prose**
   (per the project's prose-drift memory — stateful skill logic drifts as
-  prose): `step` = the 4-part termination decision in **fixed order** (0-findings
-  / nothing-agreed / no-change / cap, default 10), `box` = the OPEN-findings
+  prose): `step` = the termination decision in **fixed order** (0-findings /
+  nothing-agreed / no-change / **design-only** / cap, default 10), `box` = the OPEN-findings
   close-out visualization that **shows a legitimate rise** (a fix surfaced new
   findings) instead of hiding it. Stateless — Claude passes the per-round counts
   in; no state file, so no cwd footgun. The determinism is **the arithmetic, not
-  the inputs**: `F/A/C/pending/OPEN[]` are Claude's in-session tallies, so a
+  the inputs**: `F/A/C/D/pending/OPEN[]` are Claude's in-session tallies, so a
   miscount still feeds a wrong reason in (garbage-in) — the script can't make a
   judged count reproducible, only the branch logic over it.
+  **`design-only` (0.5.1, via `--defects D`):** design suggestions are subjective
+  and self-spawning (each applied simplification surfaces a fresh one), so a
+  defect/design-blind tally ran the loop to the cap on them. The loop now
+  converges once no *defect* finding remains — design is advisory and never holds
+  it open; `--pending` is defect-scoped for the same reason. Omitting `--defects`
+  disables the reason (legacy callers see the original four). **Accepted residual
+  (the branch's own self-review flagged it):** like `cap`, design-only fires
+  BEFORE the round's re-review, so this round's design fixes are applied but not
+  re-reviewed — a simplification could introduce a defect the loop never catches.
+  Forcing a re-review would re-open the very churn design-only closes (design
+  findings diverge), so the close-out instead flags the residual and recommends a
+  fresh `/swarm:review` over the result.
 - Loop mechanics mirror pr-flow `/cycle` run locally (no push / no `@claude`
   poll); the `Status` column (🔧/⏭️/🔁) and stable `#` across rounds come from
   the report table contract this entry defines above (P2 reserved them).
@@ -211,7 +242,15 @@ filled* — `gh pr diff <n>` (bare `--pr` resolves the current branch's PR via
   0.5.0 moved one more rule from prose to code the same way: rows carry optional
   `kind`/`lens`, and the script orders defect rows before design rows and
   prefixes design finding cells with `[lens]` — the caller passes findings
-  through verbatim, never hand-orders or hand-prefixes.
+  through verbatim, never hand-orders or hand-prefixes. 0.5.1 added an
+  **idempotency guard**: the finder's summary may already carry its own
+  `[lens]` self-tag (the workflow doesn't strip it, and a merge can leave a
+  *different* design lens as the representative), so prefixing unconditionally
+  posted `[reuse] [reuse] …` / `[reuse] [simplification] …`. If the cell already
+  opens with a known design-lens tag (`DESIGN_LENS_TAGS`, sync-checked by
+  `test_lens_sync.py`) it's kept as-is. Note it is **not** a kind fallback (the
+  retired `DESIGN_LENSES` was): it runs only inside the already-`kind`-decided
+  design branch and never moves a row between tables.
 
 ## Future idea (P3+): per-cluster external prompts
 

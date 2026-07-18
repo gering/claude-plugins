@@ -193,6 +193,13 @@ entries are grouped per plugin, newest first.
 
 ## swarm
 
+### 0.5.1 — 2026-07-18
+- Make `--fix` re-confirm design-aware: a `kind: "design"` finding has no line-local defect to re-find, so an agreed (✅) design fix was silently reported skipped-stale and never applied. Step 1 now branches on kind — for design findings it re-confirms the suggestion still applies (reuse target / duplication / simpler form / waste still present), only skipping when that target is genuinely gone.
+- Make `--loop` converge on design churn: the tally made no defect/design distinction, so once only design suggestions remained (each applied simplification spawning a fresh one) it ran to the cap. `loop-closeout.py step` gains `--defects D` and a new `design-only` reason (fixed order: after no-change, before cap); `--pending` is now defect-scoped (design never holds the loop open). Omitting `--defects` disables the reason (legacy callers unaffected).
+- Guard `pr-post.py` against a design-row `[lens]` double-prefix (`[reuse] [reuse] …`): if the finding cell already opens with a known design-lens self-tag (spaced or not, matching the workflow tag parser), keep it and don't add a second (`DESIGN_LENS_TAGS`, sync-checked by `test_lens_sync.py`; not a kind fallback). Untagged findings deliberately stay `kind: "defect"` (the safe bucket): a design finder may report a real off-lens bug, and inferring `design` from cluster homogeneity would route that bug to applicability verify (wrong rubric) and out of the `--loop` defect tally — dropping a bug is worse than mis-filing a suggestion.
+- Show the lens in the in-session Design table too: design rows now carry a `[lens]` `Befund` prefix, matching the PR-comment path (both surfaces read identically).
+- Accept the cluster-default's loss of per-lens failure isolation as a documented tradeoff (one crashed cluster finder drops that cluster's Claude coverage as a visible `backendError`; `--max` restores per-lens isolation).
+
 ### 0.5.0 — 2026-07-17
 - Grow the review lens set from 5 to 11 (all default-on): methodological `removed-behavior` + `cross-file-trace` (factual, normal verify) and design-quality `reuse` / `simplification` / `efficiency` / `altitude` (suggestion-shaped, `kind: "design"`).
 - Organize the lenses into 4 clusters (`LENS_CLUSTERS` — single source of truth): breakage / threat / design / consistency. Claude fan-out runs one finder per cluster by default (≤4 agents); `--max` splits to one finder per lens (≤11). The gate still prunes per-lens.

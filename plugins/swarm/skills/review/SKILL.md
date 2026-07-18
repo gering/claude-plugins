@@ -306,8 +306,15 @@ findings table holds only `kind: "defect"` rows; when `kind: "design"` findings
 exist, render them after it as a second table under a short `**Design**`
 heading, with the SAME columns and budgets as the defect table **in the current
 round** (seven normally; eight including `Status` in `--loop` re-review rounds —
-design rows carry 🔧/⏭️/🔁/🆕 like any other). Severity there reads as
-importance, not breakage. Numbering is ONE shared sequence across both tables —
+design rows carry 🔧/⏭️/🔁/🆕 like any other). **Prefix each design row's `Befund`
+with its `[lens]`** (`[reuse]`/`[simplification]`/`[efficiency]`/`[altitude]`) —
+the design table has no lens column, so this is where the lens attribution shows,
+mirroring the PR-comment path exactly (both surfaces read the same); skip the
+prefix only if the finding text already opens with **any known design-lens tag**
+(not just the row's own lens) — same rule as the PR path's guard, so a merged row
+whose text opens with a different member's tag (`[simplification]` on a `reuse`
+row) reads the same on both surfaces. Severity there reads as importance, not
+breakage. Numbering is ONE shared sequence across both tables —
 render each finding's workflow-assigned `num` verbatim in round 0 (across
 `--loop` rounds the `#` column follows the cross-round identity rule below, not
 the workflow's re-assigned per-round `num`); no design findings → no
@@ -416,9 +423,21 @@ Work the ✅/🟨 findings, most severe first. For each:
    would leak. Report such a finding as ⏭️ skipped-unsafe-path and move on; never
    open the path to "check."
 1. **Re-confirm claim-vs-code** — re-read the cited `file:line` (already confirmed
-   repo-safe in step 0) and confirm the defect is still there. If it's gone
-   (already fixed, comment rot, line drift, refactored away) → **skip it, report
-   as skipped-stale; never fabricate an edit** to justify a stale finding. **Anchor every edit on surrounding
+   repo-safe in step 0). What you re-confirm is **kind-specific**:
+   - **`kind:"defect"`** → confirm the **defect is still there**. If it's gone
+     (already fixed, comment rot, line drift, refactored away) → skip it, report
+     as skipped-stale.
+   - **`kind:"design"`** (`[reuse]`/`[simplification]`/`[efficiency]`/`[altitude]`)
+     → a suggestion has no line-local defect to re-find, so confirm the
+     **suggestion still applies**: the reuse target still exists / the duplication
+     is still present / the simpler form is still available and behavior-identical /
+     the claimed waste is still real. Only when that target is genuinely gone (e.g.
+     the duplicated block was already removed) is it skipped-stale — do **not**
+     report an agreed design fix as stale just because there's no defect to see at
+     the line.
+
+   Either way: **skip stale findings, report as skipped-stale; never fabricate an
+   edit** to justify one. **Anchor every edit on surrounding
    content, not the report's raw line number** — an earlier fix in the same file
    this pass shifts later line numbers; the `Edit` tool matches strings, so
    re-reading the anchor text before each edit is what keeps a same-file batch
@@ -456,7 +475,11 @@ fire while a decision is still pending.
 
 Each round:
 1. You already hold this round's report (round 0 = step 3; later rounds = the
-   re-review below). Let `F` = findings, `A` = ✅+🟨 count.
+   re-review below). Let `F` = findings, `A` = ✅+🟨 count, and `D` = the
+   **defect-kind** findings (`kind:"defect"`) — design suggestions excluded. `D`
+   is what drives convergence: design findings are advisory (each applied
+   simplification can spawn a fresh one), so the loop stops once no defect remains
+   rather than churning to the cap on subjective design targets.
 2. **Fix** — snapshot the tree, run the `--fix` procedure above, then derive `C`
    (files this round's fixes changed) **deterministically from git, not by hand**:
    ```sh
@@ -471,21 +494,31 @@ Each round:
    += fixes applied`. Append this round's OPEN count to `OPEN[]`.
 3. **Termination decision** — **deterministic arithmetic over judged inputs**:
    the script's branch logic is fixed. `C` is now git-derived (step 2), but
-   `F`/`A`/`P` and `OPEN[]` are still your in-session tallies, so a miscount there
-   feeds a wrong reason in (garbage-in). Count them carefully — especially `P`. Pass
-   `--pending <P>` = agreed findings still awaiting a user decision, so a round
-   that changed no files but has an open decision does **not** false-terminate as
-   `no-change`:
+   `F`/`A`/`D`/`P` and `OPEN[]` are still your in-session tallies, so a miscount
+   there feeds a wrong reason in (garbage-in). Count them carefully — especially
+   `P`. Pass `--defects <D>` (defect-kind findings this round) so the loop
+   converges via `design-only` once no defect remains, and `--pending <P>` =
+   **defect** findings still awaiting a user decision, so a round that changed no
+   files but has an open defect decision does **not** false-terminate as
+   `no-change`. A **design** needs-decision is NOT counted in `P` — design never
+   holds the loop open:
    ```sh
    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/loop-closeout.py" step \
-     --round <ROUND> --cap <CAP> --findings <F> --agreed <A> --changed <C> --pending <P>
+     --round <ROUND> --cap <CAP> --findings <F> --agreed <A> --changed <C> --defects <D> --pending <P>
    ```
    Read stdout: `continue` → step 4; `terminate=<reason>` → Close-out. **A
    non-zero exit (with no stdout token) means bad input — abort and surface the
    stderr message; never treat a missing token as `continue`.** **On
    `terminate=cap` the last round's fixes were applied but not re-reviewed** (cap
    fires before step 4) — say so in the close-out summary; the cap is a safety
-   stop, not a clean bill of health for the final edits.
+   stop, not a clean bill of health for the final edits. **On
+   `terminate=design-only`** the round's defect count hit zero, but its design
+   fixes were **applied and NOT re-reviewed** (design-only fires before step 4,
+   like cap) — and a simplification/refactor *can* introduce a real defect that
+   this round therefore never catches. Say so explicitly and recommend one more
+   `/swarm:review` over the result to confirm the final design edits are clean;
+   the loop converged on the defects it had, the design tail is advisory, not
+   a guarantee the last edits are bug-free.
 4. **Re-review** — re-run steps 1–3 (Prepare diff → Workflow → Present) on the
    **new** working tree. Two guards before spending another (possibly `--max`)
    ensemble pass:
@@ -647,7 +680,8 @@ post. Do **not** re-implement the sanitize/gate/post logic inline.
   against the code first (stale findings are skipped, not fabricated), 🟨 applies
   the session's own variant, and a finding with more than one good fix asks the
   user which path. `--loop[=N]` re-reviews after each fix round until it
-  converges (0 findings · nothing agreed · no files changed · cap, default 10).
+  converges (0 findings · nothing agreed · no files changed · no defects left
+  (design tail is advisory) · cap, default 10).
   The deterministic loop bits (termination decision, close-out box) live in
   `scripts/loop-closeout.py`, not this prose.
 - **Reviewing a PR** (`--pr [<number>]`): the *same* pipeline runs against the

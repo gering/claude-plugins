@@ -92,6 +92,18 @@ check(
     methodological == set(clusters.get("breakage", [])) - TOPICAL_BREAKAGE,
 )
 
+# pr-post.py DESIGN_LENS_TAGS mirror: the publish path prefixes design rows with
+# "[lens] " and guards against doubling an already-present tag; that guard keys
+# on this hand-mirrored tuple, so a design lens added to the cluster but not here
+# would slip past the guard and could re-post as "[reuse] [reuse] …".
+PR_POST = PLUGIN / "scripts" / "pr-post.py"
+pp = PR_POST.read_text(encoding="utf-8")
+dm = re.search(r"DESIGN_LENS_TAGS = \(([^)]*)\)", pp)
+check("pr-post: DESIGN_LENS_TAGS found", dm)
+pr_design = set(re.findall(r"'([a-z][a-z-]*)'|\"([a-z][a-z-]*)\"", dm.group(1) if dm else ""))
+pr_design = {a or b for a, b in pr_design}
+check("pr-post DESIGN_LENS_TAGS == design cluster", pr_design == set(clusters.get("design", [])))
+
 if FAILS:
     print("lens-sync tests FAILED:", file=sys.stderr)
     for f in FAILS:

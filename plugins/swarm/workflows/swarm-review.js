@@ -379,6 +379,14 @@ for (const v of voices) {
     // unambiguous); a multi-lens cluster finding falls back to 'unspecified'
     // (kind defect, the safe bucket) — guessing lenses[0] could stamp a design
     // kind on an untagged off-lens defect from the design cluster.
+    //
+    // 0.5.1 briefly inferred the KIND from a homogeneous design unit here (a
+    // dropped [reuse] prefix would otherwise mis-file a design suggestion to the
+    // defect table). Reverted: a design finder is invited to report defects too,
+    // so an untagged finding from it may be a real off-lens BUG — inferring
+    // 'design' routes that bug to applicability verify (wrong rubric → can drop a
+    // real defect) and out of the --loop defect tally. Dropping a bug is worse
+    // than mis-filing a suggestion, so untagged stays 'defect' (the safe bucket).
     const m = /^\s*\[([\w-]+)\]/.exec(f.summary || '')
     let lens = m ? m[1].toLowerCase() : ''
     if (!CANDIDATE_LENSES.includes(lens)) {
@@ -436,11 +444,12 @@ if (pool.length > 0) {
     // design only when every TAGGED member is design — 'defect' is the single
     // structural fallback (a design suggestion merged with a real defect must
     // not drop out of the defect ranking). 'unspecified' members (untagged
-    // externals) do NOT vote: their kind is only the safe default, and one
-    // untagged voice must not drag a properly tagged design cluster into the
-    // defect ranking. An ALL-untagged cluster is kind 'defect' but flagged —
-    // its "consensus" is backed by no tagged lens, so it must never be
-    // auto-accepted (see needsVerify below): two diff-scoped externals can
+    // externals, or an untagged Claude finding — 0.5.1's kind-inference was
+    // reverted, see the pool loop) do NOT vote: their kind is only the safe
+    // default, and one untagged voice must not drag a properly tagged design
+    // cluster into the defect ranking. An ALL-untagged cluster is kind 'defect'
+    // but flagged — its "consensus" is backed by no tagged lens, so it must never
+    // be auto-accepted (see needsVerify below): two diff-scoped externals can
     // agree on an unverifiable suggestion without ever tagging it.
     const known = members.filter((i) => pool[i].lens !== 'unspecified')
     const kind = known.length > 0 && known.every((i) => pool[i].kind === 'design') ? 'design' : 'defect'

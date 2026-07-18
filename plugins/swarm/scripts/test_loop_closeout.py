@@ -57,9 +57,34 @@ expect("cap fires despite pending", ["step", *step(round=9, cap=10, findings=5, 
 expect("pending defaults to 0", ["step", *step(round=1, cap=10, findings=5, agreed=2, changed=0)],
        out="terminate=no-change")
 
+# --- design-only: no defect findings remain -> converge on the advisory tail
+#     (only when --defects is given; it slots in AFTER no-change, BEFORE cap) ---
+expect("design-only fires", ["step", *step(round=1, cap=10, findings=5, agreed=3, changed=2, defects=0)],
+       out="terminate=design-only")
+expect("defects>0 continues", ["step", *step(round=1, cap=10, findings=5, agreed=3, changed=2, defects=2)],
+       out="continue")
+expect("no-change wins over design-only", ["step", *step(round=1, cap=10, findings=5, agreed=3, changed=0, defects=0)],
+       out="terminate=no-change")
+expect("0-findings wins over design-only", ["step", *step(round=1, cap=10, findings=0, agreed=0, changed=2, defects=0)],
+       out="terminate=0-findings")
+expect("design-only omitted = disabled", ["step", *step(round=1, cap=10, findings=5, agreed=3, changed=2)],
+       out="continue")
+expect("pending blocks design-only", ["step", *step(round=1, cap=10, findings=5, agreed=3, changed=2, defects=0, pending=1)],
+       out="continue")
+# design-only slots BEFORE cap in the fixed order: at the last allowed round with
+# NO defects left, the loop converges clean (design-only), not on the safety stop.
+expect("design-only wins over cap at last round", ["step", *step(round=9, cap=10, findings=5, agreed=3, changed=2, defects=0)],
+       out="terminate=design-only")
+# with defects remaining at the last round nothing converged, so cap fires — this
+# is the true "cap" case when --defects is passed (design-only never eligible).
+expect("cap fires with defects remaining", ["step", *step(round=9, cap=10, findings=5, agreed=3, changed=2, defects=2)],
+       out="terminate=cap")
+expect("design-only box renders", ["box", "3 2 1", "--reason", "design-only"], code=0)
+
 # --- input range checks: bad values fail loudly (exit 2), no stdout token ---
 expect("cap<1 rejected", ["step", *step(round=0, cap=0, findings=3, agreed=2, changed=1)], out="", code=2)
 expect("negative changed rejected", ["step", *step(round=0, cap=10, findings=3, agreed=2, changed=-1)], out="", code=2)
+expect("negative defects rejected", ["step", *step(round=0, cap=10, findings=3, agreed=2, changed=1, defects=-1)], out="", code=2)
 
 # --- box renders, and rejects malformed / negative counts ---
 rc, so, se = run(["box", "15 7 4 4 5 4 3 1 1 0", "--reason", "cap"])
