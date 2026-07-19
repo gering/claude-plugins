@@ -65,17 +65,22 @@ A file mailbox carries judgment/intent signals that have no git artifact.
   the recognized **inbox/outbox pattern**, and **AMQ** (`avivsinai/agent-message-queue`,
   Go single binary) is startlingly close (Maildir delivery, `.agent-mail` store,
   swarm/agent-teams mode, federation, presence, wake). `spike-agent-mail-substrate`
-  **decided (2026-07-19): adopt AMQ as *transport only*** behind a soft-coupled adapter
-  (like swarm's codex/grok; degrades to a thin in-house Maildir flow if absent). **`amq
-  swarm` is NOT adopted as a task-state authority** — its `claim/block/complete` is
-  *self-reported*, the opposite of our hook/TUI-scrape status grounded in git/PR artifacts;
-  AMQ owns transport, herdr-derived lanes own state. Either way the mechanics are fixed:
-  **Maildir** (atomic `rename()`,
+  **decided (2026-07-19): adopt AMQ core messaging as the transport** behind a soft-coupled
+  adapter (like swarm's codex/grok). **AMQ is a prerequisite, not reimplemented** — absent ⇒
+  a `brew install` hint + degrade to the git/PR floor + manual relay (no thin-Maildir
+  fallback; that floor already exists, and a missing mailbox ≈ today's fire-and-forget, so no
+  regression). We use AMQ's own envelope + store (AMQ-native). **`amq swarm` is NOT used at
+  all**: despite the name it is a *bridge to Claude Code's native "Agent Teams"* (shared task
+  list at `~/.claude/tasks/{team}/`), a competing orchestration substrate (no worktrees, no
+  PR/CI grounding, grok can't join without the bridge). We call only `send`/inbox-outbox/
+  `who`/`receipts`/`dlq`/`wake`. AMQ owns transport; herdr-derived lanes own state. The
+  mechanics are fixed: **Maildir** (atomic `rename()`,
   no locking, `tmp/new/cur`, one file per message — supersedes the earlier append-JSONL +
-  byte-offset idea; unread = files in `new/`, read = moved to `cur/`) and a
-  **CloudEvents-aligned envelope** (`id, source(=from), type(reverse-DNS), time, subject/
-  ext(=to), data(=body)`). Align concepts with **A2A** (its Task lifecycle maps to our
-  lane states) for a future HTTP bridge — don't adopt its transport now.
+  byte-offset idea; unread = files in `new/`, read = moved to `cur/`) and **AMQ's own JSON
+  envelope** (`{schema, id, from, to[], thread, subject, created, priority, kind}`; our 5
+  semantic types map onto `kind`+`subject`+body). **CloudEvents / A2A** stay *conceptual*
+  alignment (A2A's Task lifecycle maps to our lane states) for a future HTTP bridge — not the
+  on-disk format now that we're AMQ-native.
 - **Message types:** `ready-to-close`, `blocked-on-decision`, `coordination-request`,
   `needs-human`, `broadcast-request`.
 - **Topology — outbox + inbox, NOT inbox-only.** Each participant writes **only its
