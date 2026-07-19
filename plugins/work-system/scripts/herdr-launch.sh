@@ -147,6 +147,50 @@ try:
     print(pane + "|" + tab)
 except Exception:
     print("|")'
+#   error diagnostics: herdr emits {"error":{"code":…,"message":…}} on stderr for
+#   every failed call above. Extract it defensively — any exception (not JSON, no
+#   "error" key, …) yields nothing, never a traceback on the user's terminal.
+extract_herdr_error='import sys, json
+try:
+    err = json.load(sys.stdin)["error"]
+    print((err.get("code") or "") + "|" + (err.get("message") or ""))
+except Exception:
+    pass'
+
+# herdr_diag <raw-stderr> <workspace-id> — turn a captured herdr stderr blob into
+# one-or-two diagnostic lines: herdr's error.code/message when the blob parses as
+# the JSON error schema, else the raw text relayed verbatim (trimmed). Prints
+# nothing for an empty blob. Appends a one-line actionable hint when the error
+# names an invalid placement target (the "stale $HERDR_WORKSPACE_ID after a herdr
+# restart/handoff" case this repo has hit in practice) — never more than one hint
+# line, so the diagnostic doesn't nag.
+herdr_diag() {
+  raw="$1"
+  ws="$2"
+  [ -n "$raw" ] || return 0
+  parsed="$(printf '%s' "$raw" | python3 -c "$extract_herdr_error" 2>/dev/null || true)"
+  if [ -n "$parsed" ]; then
+    code="${parsed%%|*}"
+    msg="${parsed#*|}"
+    line="herdr error"
+    [ -n "$code" ] && line="$line code=$code"
+    [ -n "$msg" ] && line="$line: $msg"
+  else
+    code=""
+    msg="$raw"
+    line="herdr error: $(printf '%s' "$raw" | tr '\n' ' ' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  fi
+  case "$code" in
+    agent_placement_not_found) stale=1 ;;
+    *) case "$msg" in
+         *"$ws"*"not found"*|*"$ws"*placement*) stale=1 ;;
+         *) stale=0 ;;
+       esac ;;
+  esac
+  [ "$stale" = 1 ] && line="$line
+HERDR_WORKSPACE_ID=$ws is not a valid workspace on this herdr server (likely a stale id after a herdr restart/handoff) — relaunch from a live session or start the worker manually."
+  printf '%s\n' "$line"
+}
 
 case "$mode" in
   launch)
@@ -193,21 +237,39 @@ EOF_RESOLVE
       [ ${#worker_argv[@]} -gt 0 ] || { echo "agent-registry resolved no argv for $selector" >&2; exit 1; }
     fi
 
-    # Spawn the worker as argv and read back the pane id.
+    # Spawn the worker as argv and read back the pane id. stderr is captured (not
+    # discarded) so a failure can surface herdr's actual error.code/message instead
+    # of only the generic "no pane id" guard below.
+    start_err="$(mktemp)"
     start_json="$(herdr agent start "$label" --workspace "$workspace" \
-      --cwd "$worktree" --no-focus -- "${worker_argv[@]}" 2>/dev/null || true)"
+      --cwd "$worktree" --no-focus -- "${worker_argv[@]}" 2>"$start_err" || true)"
     pane="$(printf '%s' "$start_json" | python3 -c "$extract_agent_pane" 2>/dev/null || true)"
 
     # Empty pane id → the agent did not start (broken socket / bad response).
-    [ -n "$pane" ] || { echo "herdr agent start did not return a pane id" >&2; exit 1; }
+    # Print herdr's own error first when captured — the generic message stays as
+    # the last-resort fallback for a truly pane-less/malformed response.
+    if [ -z "$pane" ]; then
+      diag="$(herdr_diag "$(cat "$start_err")" "$workspace")"
+      rm -f "$start_err"
+      [ -n "$diag" ] && printf '%s\n' "$diag" >&2
+      echo "herdr agent start did not return a pane id" >&2
+      exit 1
+    fi
+    rm -f "$start_err"
 
     # caller's tab). If the move fails, the worker is still running — report it in
     # place rather than claiming a tab that does not exist. `agent=` tells the
     # caller which CLI×model was launched; the tab uses the glyph-stamped label.
-    if move_json="$(herdr pane move "$pane" --new-tab --label "$tab_label" --no-focus 2>/dev/null)"; then
+    move_err="$(mktemp)"
+    if move_json="$(herdr pane move "$pane" --new-tab --label "$tab_label" --no-focus 2>"$move_err")"; then
       tab="$(printf '%s' "$move_json" | python3 -c "$extract_moved_tab" 2>/dev/null || true)"
+      rm -f "$move_err"
       printf 'pane=%s\ntab=%s\nmoved=yes\nagent=%s\n' "$pane" "$tab" "$agent_name"
     else
+      diag="$(herdr_diag "$(cat "$move_err")" "$workspace")"
+      rm -f "$move_err"
+      [ -n "$diag" ] && printf '%s\n' "$diag" >&2
+      echo "herdr pane move --new-tab failed for pane $pane (worker still running; no dedicated tab)" >&2
       printf 'pane=%s\ntab=\nmoved=no\nagent=%s\n' "$pane" "$agent_name"
     fi
     ;;
@@ -262,8 +324,9 @@ EOF_RESOLVE
     # (shell) pane id and tab id in one python3 pass. Split on the FIRST `|`, so an
     # empty pane id (with a present tab id) stays empty and trips the guard below,
     # rather than the tab id being mis-read as the pane id.
+    create_err="$(mktemp)"
     create_json="$(herdr tab create --workspace "$workspace" \
-      --cwd "$worktree" --label "$tab_label" 2>/dev/null || true)"
+      --cwd "$worktree" --label "$tab_label" 2>"$create_err" || true)"
     pane_tab="$(printf '%s' "$create_json" | python3 -c "$extract_root_pane_tab" 2>/dev/null || true)"
     pane="${pane_tab%%|*}"
     tab="${pane_tab#*|}"
@@ -272,12 +335,18 @@ EOF_RESOLVE
     # socket / bad JSON / pane-less result). Cannot run claude -c without a pane. If a
     # tab id WAS parsed (a pane-less/partial result from schema drift), the tab is real
     # and would be orphaned — close it before bailing so a drifted response can't leak a
-    # blank tab on every resume; then the caller shows the manual block.
+    # blank tab on every resume; then the caller shows the manual block. herdr's own
+    # error is printed first when captured — the generic message stays as the
+    # last-resort fallback.
     if [ -z "$pane" ]; then
       [ -n "$tab" ] && herdr tab close "$tab" >/dev/null 2>&1 || true
+      diag="$(herdr_diag "$(cat "$create_err")" "$workspace")"
+      rm -f "$create_err"
+      [ -n "$diag" ] && printf '%s\n' "$diag" >&2
       echo "herdr tab create did not return a pane id" >&2
       exit 1
     fi
+    rm -f "$create_err"
 
     # Run `claude -c` INSIDE the shell pane — the /exit hardening (a later /exit
     # returns to the shell, keeping the tab alive). Prefix an explicit `cd <worktree>`
@@ -290,10 +359,13 @@ EOF_RESOLVE
     # the user must run it by hand. (Catches a failed send, not `claude -c` erroring
     # later on a cwd with no prior session — the caller's wording stays tentative.)
     resumed=yes
-    if ! herdr pane run "$pane" "cd $(printf '%q' "$worktree") && claude -c" >/dev/null 2>&1; then
+    run_err="$(mktemp)"
+    if ! herdr pane run "$pane" "cd $(printf '%q' "$worktree") && claude -c" >/dev/null 2>"$run_err"; then
       resumed=no
-      echo "herdr pane run could not start 'claude -c' in $pane (tab is open; run it by hand)" >&2
+      diag="$(herdr_diag "$(cat "$run_err")" "$workspace")"
+      echo "herdr pane run could not start 'claude -c' in $pane (tab is open; run it by hand)${diag:+ — $diag}" >&2
     fi
+    rm -f "$run_err"
 
     # Focus the reopened tab — unlike kickoff's background launch, the user is
     # switching to it now. Report whether the focus took, so the caller doesn't

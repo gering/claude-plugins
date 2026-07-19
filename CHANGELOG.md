@@ -52,6 +52,9 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.9.1 — 2026-07-19
+- `herdr-launch.sh` no longer swallows herdr's own error on a launch/resume failure (`2>/dev/null`). Every herdr call that can fail now captures stderr, parses herdr's `{"error":{"code","message"}}` JSON defensively (raw text as fallback, never a traceback), and prints it before the existing generic diagnostic. When the error names an invalid workspace placement (`agent_placement_not_found` or the message otherwise naming the target), a one-line actionable hint is appended pointing at a stale `HERDR_WORKSPACE_ID`. Diagnostics only — stdout key=value lines, exit codes, and `moved`/`reused`/`resumed`/`focused` semantics are unchanged.
+
 ### 1.9.0 — 2026-07-17
 - `/kickoff` no longer hardcodes Claude as the worktree worker. With no flag it launches the repo's **default** agent — a single committed per-project setting (`.claude/work-system-agent`); if none is set, `/kickoff` shows a picker and offers to save your choice as that default. No global default and no shipped fallback. Override per run with a flag: `--fable`/`--opus`, `--codex`/`--sol`, `--grok`, `--agent <cli[:model]>`, or `--pick` (force the picker). New `scripts/agent-registry.sh` is the single source of truth (registry-driven aliases, the project `default get`/`set`, and an availability probe — CLI install + auth, plus model-level for grok via `grok models` so a model the CLI no longer offers reads as unavailable instead of failing at launch); `herdr-launch.sh` execs the resolved worker argv instead of a hardcoded `claude`. Non-Claude workers degrade honestly: they get a bootstrap prompt (read `TASK.md`, drive to a PR) instead of `/continue`, `/close` teardown stays CLI-agnostic, and `/continue`'s reopen documents the per-CLI resume command. Covered by `test_agent_registry.py`.
 

@@ -1,10 +1,10 @@
 ---
 title: "herdr /kickoff + /continue-reopen Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-07-18
+updatedAt: 2026-07-19
 createdFrom: "PR #17"
-updatedFrom: "session: 2026-07-18 (kickoff agent selection)"
-pluginVersion: 1.9.0
+updatedFrom: "session: 2026-07-19 (surface herdr launch errors)"
+pluginVersion: 1.9.1
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -53,6 +53,22 @@ truth; this entry captures the durable design and one non-obvious gotcha.
   unrelated, workspace), and both `herdr` and `python3` are on `PATH`. `--no-focus`
   keeps the kickoff session in front; any failure (empty `$pane`) degrades to the
   unchanged manual block — never block kickoff on herdr.
+- **Failure diagnostics surface herdr's own error (1.9.1).** Every herdr call on a
+  failure path (`agent start`, `pane move --new-tab`, resume's `tab create`, resume's
+  `pane run "claude -c"`) now captures stderr instead of `2>/dev/null` and runs it
+  through a shared `herdr_diag` helper: parse herdr's `{"error":{"code","message"}}`
+  JSON defensively (any exception falls back to the raw stderr text, never a
+  traceback), print it, then the existing generic message stays as the last-resort
+  line. This was diagnosability-only (no fallback/self-heal logic — actively rejected,
+  see below) after a real incident where the launch failed with only "herdr agent
+  start did not return a pane id" while herdr's stderr — discarded by the old
+  `2>/dev/null` — had named the exact cause. When the parsed `code` is
+  `agent_placement_not_found` (or the message otherwise names the workspace target),
+  `herdr_diag` appends one hint line pointing at a stale `$HERDR_WORKSPACE_ID` — the
+  env var is frozen at Claude-spawn time (see the `resume`/`reused` discussion below)
+  and never refreshed, so a herdr server restart / `update --handoff` that reassigns
+  workspace ids strands it. Stdout contract (`pane=`/`tab=`/`moved=`/… key=value
+  lines, exit codes) is untouched — only stderr got richer.
 
 ## `resume` mode: reopen a task tab a `/exit` closed
 
