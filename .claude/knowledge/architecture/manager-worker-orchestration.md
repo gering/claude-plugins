@@ -10,10 +10,10 @@ prime: false
 
 Design decisions for evolving work-system from fire-and-forget kickoffs into a
 coordinated Manager/Worker model. This is the **decision record**; the
-implementation is spawned across tasks `add-lane-registry`, `add-lane-mailbox`,
-`add-manager-watch-loop`, `extend-worker-autonomy`, `add-merge-sequencer`,
-`add-roadmap-skill`, `add-mailbox-statusline`, and `add-agent-broadcast` (follow-up).
-Full working notes: the design task's `DESIGN-NOTES.md`.
+implementation is spawned across tasks `add-lane-registry`, `spike-agent-mail-substrate`,
+`add-lane-mailbox`, `add-manager-watch-loop`, `extend-worker-autonomy`,
+`add-merge-sequencer`, `add-roadmap-skill`, `add-mailbox-statusline`, and
+`add-agent-broadcast` (follow-up). Full working notes: the design task's `DESIGN-NOTES.md`.
 
 ## The model
 - **Manager** = the Claude Code session at the main repo root (herdr `◉` tab). A
@@ -55,25 +55,31 @@ worker's *implementation* of hitting agent-agnostic milestones — soft-coupling
 
 ## Worker↔Manager mailbox (the coordination substrate)
 A file mailbox carries judgment/intent signals that have no git artifact.
-- **Central `~/.agent_messaging/` — NOT per-worktree** (decided 2026-07-19). Participant
-  id = **encoded absolute path**; a hook derives its dir from `cwd`:
-  `~/.agent_messaging/lanes/<enc(cwd)>/{outbox,inbox}.jsonl`. Central over `<root>/.mailbox/`
-  because (a) it is the rendezvous for **broadcast / cross-Manager** (below), (b)
-  never-commit is automatic (outside every repo — no per-repo gitignore), (c) no
-  cross-worktree-boundary writes. Tool-agnostic name, JSONL append-only; survives `/close`
-  removing the worktree.
-- **Envelope:** `{id, ts, from, to, type, body}`. `from`+`to` required. Types:
-  `ready-to-close`, `blocked-on-decision`, `coordination-request`, `needs-human`,
-  `broadcast-request`.
+- **Central `~/.agent-mail/` — NOT per-worktree** (decided 2026-07-19; the community
+  "agent mail" name). Participant id = **encoded absolute path**; a hook derives its dir
+  from `cwd`: `~/.agent-mail/lanes/<enc(cwd)>/{outbox,inbox}/`. Central over
+  `<root>/.mailbox/` because (a) it is the rendezvous for **broadcast / cross-Manager**
+  (below), (b) never-commit is automatic (outside every repo — no per-repo gitignore),
+  (c) no cross-worktree-boundary writes. Survives `/close` removing the worktree.
+- **Prior art & substrate (researched 2026-07-19; spike-first decided).** Our design is
+  the recognized **inbox/outbox pattern**, and **AMQ** (`avivsinai/agent-message-queue`,
+  Go single binary) is startlingly close (Maildir delivery, `.agent-mail` store,
+  swarm/agent-teams mode, federation, presence, wake). `spike-agent-mail-substrate`
+  decides **adopt AMQ behind a soft-coupled adapter** (like swarm's codex/grok) vs.
+  **build thin**. Either way the mechanics are fixed: **Maildir** (atomic `rename()`,
+  no locking, `tmp/new/cur`, one file per message — supersedes the earlier append-JSONL +
+  byte-offset idea; unread = files in `new/`, read = moved to `cur/`) and a
+  **CloudEvents-aligned envelope** (`id, source(=from), type(reverse-DNS), time, subject/
+  ext(=to), data(=body)`). Align concepts with **A2A** (its Task lifecycle maps to our
+  lane states) for a future HTTP bridge — don't adopt its transport now.
+- **Message types:** `ready-to-close`, `blocked-on-decision`, `coordination-request`,
+  `needs-human`, `broadcast-request`.
 - **Topology — outbox + inbox, NOT inbox-only.** Each participant writes **only its
   own outbox**; the Manager is the **only** writer of any inbox. Buys: single writer
-  per file (no clobber), no cross-participant writes by a worker, and the
-  **single-sequencer invariant** — worker→worker messages are *addressable* but
-  **route through the Manager** (it drains outboxes, delivers to inboxes, may
-  reorder/veto/batch). Workers never write another lane's inbox.
-- **Drain by offset, never mid-file delete.** Reader (Manager for outboxes, worker
-  for its inbox) tracks a last-read byte offset in a sidecar; files stay append-only,
-  archived/truncated only once fully consumed. Preserves single-writer.
+  per mailbox (Maildir already makes concurrent delivery lockless), no cross-participant
+  writes by a worker, and the **single-sequencer invariant** — worker→worker messages are
+  *addressable* but **route through the Manager** (it drains outboxes, delivers to
+  inboxes, may reorder/veto/batch). Workers never write another lane's inbox.
 - **`ready-to-close` is worker-authoritative + a handoff report.** Only the worker knows
   if a *second* PR is open or a post-merge TODO remains — a single PR's `✓ merged` is a
   soft "near-done" hint, NOT a close trigger. The message carries the worker's fresh
@@ -84,7 +90,7 @@ A file mailbox carries judgment/intent signals that have no git artifact.
 
 ## Broadcast + cross-Manager (follow-up phase; central location adopted now)
 The central store unlocks system-wide coordination across the *multiple Managers* a
-machine runs (one per project). `~/.agent_messaging/broadcast/global.jsonl` is the one
+machine runs (one per project). `~/.agent-mail/broadcast/global.jsonl` is the one
 multi-writer append log every Manager reads (offset-tracked); `managers/<enc>.json`
 presence files make Managers discoverable. Use: system-wide notices, or capability
 queries ("who has Cloudflare access?") answered point-to-point into the asker's inbox.
@@ -95,11 +101,12 @@ ship as a dedicated follow-up (`add-agent-broadcast`), not the Wave-1 core.
 
 ## Push without polling — Claude Code hooks first
 Files are pull; hooks make delivery push-like at turn boundaries, all gated by a
-cheap `stat` (append-only ⇒ compare byte offset, read only the new tail):
-- **Stop hook** (turn end): inbox grew → `decision:block` + `additionalContext`
-  injects the message so the worker continues. Respect `stop_hook_active` (exit 0 when
-  true) + block only on a real offset advance → no loop / 8-block cap. Injected text is
-  context; the worker still applies its own autonomy gates.
+cheap check (Maildir ⇒ unread = files in `inbox/new/`, a `readdir`):
+- **Stop hook** (turn end): new files in `inbox/new/` → `decision:block` +
+  `additionalContext` injects them so the worker continues, then moves them to `cur/`.
+  Respect `stop_hook_active` (exit 0 when true) + block only when genuinely new → no
+  loop / 8-block cap. Injected text is context; the worker still applies its own
+  autonomy gates.
 - **SessionStart(`resume`)**: pull what arrived while closed. **UserPromptSubmit**:
   belt-and-suspenders prepend.
 - **Notification hook** (`permission_prompt`/`idle_prompt`) auto-emits
