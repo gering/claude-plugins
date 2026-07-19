@@ -108,6 +108,22 @@ decides/posts; **Managers peer-to-peer** (they are the coordinators). Aligns wit
 `plugin-settings-system`'s `[related_projects]` peering registry. Broadcast + registry
 ship as a dedicated follow-up (`add-agent-broadcast`), not the Wave-1 core.
 
+## Why not Claude Code Agent Teams (the native alternative)
+CC's experimental **Agent Teams** (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`; lead spawns
+teammate processes, shared task list at `~/.claude/tasks/{team}/`, mailbox at
+`~/.claude/teams/{team}/inboxes/`) solves a *different* problem: short-lived, **Claude-only**,
+single-working-tree fan-out inside one session. Four blockers rule it out as our base: (1)
+teammates ARE Claude processes → no codex/grok (our hard requirement); reaches externals only
+via the AMQ bridge we use natively. (2) **No worktree isolation** → can't do N parallel
+independent PRs. (3) Task status is **self-reported** (documented "teammate forgets
+`completed`" bug) vs. our git/PR-artifact grounding. (4) No PR/review/merge/deploy lifecycle —
+our four pillars. Also session-scoped/ephemeral (team config dies with the lead) vs. our
+persistent worktree-lanes. **Complementary, not competing** — and both converge on the same
+Maildir envelope (AMQ mirrors AT's `kind/priority/thread/receipts`), so a lane could later be
+bridged to an AT team. Worth stealing now: AT's `TeammateIdle` hook validates our
+Notification-hook auto-emit (T4); its dependency-aware auto-unblock informs the merge
+sequencer (T5) / roadmap waves (T6).
+
 ## Push without polling — Claude Code hooks first
 Files are pull; hooks make delivery push-like at turn boundaries, all gated by a
 cheap check (Maildir ⇒ unread = files in `inbox/new/`, a `readdir`):
