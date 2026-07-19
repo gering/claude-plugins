@@ -12,8 +12,8 @@ Design decisions for evolving work-system from fire-and-forget kickoffs into a
 coordinated Manager/Worker model. This is the **decision record**; the
 implementation is spawned across tasks `add-lane-registry`, `add-lane-mailbox`,
 `add-manager-watch-loop`, `extend-worker-autonomy`, `add-merge-sequencer`,
-`add-roadmap-skill`, `add-mailbox-statusline`. Full working notes: the design
-task's `DESIGN-NOTES.md`.
+`add-roadmap-skill`, `add-mailbox-statusline`, and `add-agent-broadcast` (follow-up).
+Full working notes: the design task's `DESIGN-NOTES.md`.
 
 ## The model
 - **Manager** = the Claude Code session at the main repo root (herdr `◉` tab). A
@@ -55,24 +55,43 @@ worker's *implementation* of hitting agent-agnostic milestones — soft-coupling
 
 ## Worker↔Manager mailbox (the coordination substrate)
 A file mailbox carries judgment/intent signals that have no git artifact.
-- **`<root>/.mailbox/`** per participant (worker's worktree / Manager's main root),
-  **tool-agnostic name** (no herdr/claude). `outbox.jsonl` + `inbox.jsonl`, **JSONL
-  append-only**, **gitignored** (lane-local, never committed).
+- **Central `~/.agent_messaging/` — NOT per-worktree** (decided 2026-07-19). Participant
+  id = **encoded absolute path**; a hook derives its dir from `cwd`:
+  `~/.agent_messaging/lanes/<enc(cwd)>/{outbox,inbox}.jsonl`. Central over `<root>/.mailbox/`
+  because (a) it is the rendezvous for **broadcast / cross-Manager** (below), (b)
+  never-commit is automatic (outside every repo — no per-repo gitignore), (c) no
+  cross-worktree-boundary writes. Tool-agnostic name, JSONL append-only; survives `/close`
+  removing the worktree.
 - **Envelope:** `{id, ts, from, to, type, body}`. `from`+`to` required. Types:
-  `ready-to-close`, `blocked-on-decision`, `coordination-request`, `needs-human`.
+  `ready-to-close`, `blocked-on-decision`, `coordination-request`, `needs-human`,
+  `broadcast-request`.
 - **Topology — outbox + inbox, NOT inbox-only.** Each participant writes **only its
   own outbox**; the Manager is the **only** writer of any inbox. Buys: single writer
-  per file (no clobber), no cross-worktree writes by a worker, and the
+  per file (no clobber), no cross-participant writes by a worker, and the
   **single-sequencer invariant** — worker→worker messages are *addressable* but
   **route through the Manager** (it drains outboxes, delivers to inboxes, may
   reorder/veto/batch). Workers never write another lane's inbox.
 - **Drain by offset, never mid-file delete.** Reader (Manager for outboxes, worker
   for its inbox) tracks a last-read byte offset in a sidecar; files stay append-only,
   archived/truncated only once fully consumed. Preserves single-writer.
-- **`ready-to-close` is worker-authoritative.** Only the worker knows if a *second*
-  PR is open or a post-merge TODO remains — a single PR's `✓ merged` is a soft
-  "near-done" hint, NOT a close trigger. The worker emits `ready-to-close`; the
-  Manager/human then runs `/close`.
+- **`ready-to-close` is worker-authoritative + a handoff report.** Only the worker knows
+  if a *second* PR is open or a post-merge TODO remains — a single PR's `✓ merged` is a
+  soft "near-done" hint, NOT a close trigger. The message carries the worker's fresh
+  context as `{summary, follow_ups[], deploy?, updates[], learnings[]}`: `follow_ups` →
+  Manager `/define`; `deploy` runs **from main after merge** (Manager-at-main model);
+  `updates` = dependency/config recommendations (e.g. a plugin bump); `learnings` →
+  Manager `/curate`. The Manager acts on these, then it/human runs `/close`.
+
+## Broadcast + cross-Manager (follow-up phase; central location adopted now)
+The central store unlocks system-wide coordination across the *multiple Managers* a
+machine runs (one per project). `~/.agent_messaging/broadcast/global.jsonl` is the one
+multi-writer append log every Manager reads (offset-tracked); `managers/<enc>.json`
+presence files make Managers discoverable. Use: system-wide notices, or capability
+queries ("who has Cloudflare access?") answered point-to-point into the asker's inbox.
+**Single-sequencer up a level:** a worker emits `broadcast-request` and its **Manager**
+decides/posts; **Managers peer-to-peer** (they are the coordinators). Aligns with
+`plugin-settings-system`'s `[related_projects]` peering registry. Broadcast + registry
+ship as a dedicated follow-up (`add-agent-broadcast`), not the Wave-1 core.
 
 ## Push without polling — Claude Code hooks first
 Files are pull; hooks make delivery push-like at turn boundaries, all gated by a
