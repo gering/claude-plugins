@@ -65,8 +65,12 @@ A file mailbox carries judgment/intent signals that have no git artifact.
   the recognized **inbox/outbox pattern**, and **AMQ** (`avivsinai/agent-message-queue`,
   Go single binary) is startlingly close (Maildir delivery, `.agent-mail` store,
   swarm/agent-teams mode, federation, presence, wake). `spike-agent-mail-substrate`
-  decides **adopt AMQ behind a soft-coupled adapter** (like swarm's codex/grok) vs.
-  **build thin**. Either way the mechanics are fixed: **Maildir** (atomic `rename()`,
+  **decided (2026-07-19): adopt AMQ as *transport only*** behind a soft-coupled adapter
+  (like swarm's codex/grok; degrades to a thin in-house Maildir flow if absent). **`amq
+  swarm` is NOT adopted as a task-state authority** — its `claim/block/complete` is
+  *self-reported*, the opposite of our hook/TUI-scrape status grounded in git/PR artifacts;
+  AMQ owns transport, herdr-derived lanes own state. Either way the mechanics are fixed:
+  **Maildir** (atomic `rename()`,
   no locking, `tmp/new/cur`, one file per message — supersedes the earlier append-JSONL +
   byte-offset idea; unread = files in `new/`, read = moved to `cur/`) and a
   **CloudEvents-aligned envelope** (`id, source(=from), type(reverse-DNS), time, subject/
