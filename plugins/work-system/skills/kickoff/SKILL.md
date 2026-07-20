@@ -194,9 +194,9 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     - **exit 0 with `moved=no`** → the worker started but the tab move failed, so it
       is running as a split in *this* session's tab — tell the user it's here, not in
       a new tab. The helper's stderr for this call carries herdr's own error
-      (code/message, and a stale-workspace hint when applicable) ahead of its own
-      generic line — **relay that stderr text to the user**, not just "the move
-      failed."
+      (code/message) ahead of its own generic line — **relay that stderr text to the
+      user**, not just "the move failed." (This call never sends `--workspace`, so
+      unlike the failure below there is no stale-workspace hint to expect here.)
     - **After a successful launch (either `moved=` value), if `OFFER_DEFAULT=yes`**
       (the picker path, user chose to save): `bash "$REG" default set "<agent>"`
       (the `agent=` value) to write the repo's committed default. Mention it, and

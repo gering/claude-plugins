@@ -108,7 +108,7 @@ command -v python3 >/dev/null 2>&1 || { echo "python3 not on PATH" >&2; exit 1; 
 # between their `mktemp` and that `rm -f` would otherwise leak the file — matching
 # the existing convention in herdr-tab-glyph.sh. `${var:-}` tolerates a variable
 # that isn't assigned yet (or on a code path that never used it) under `set -u`.
-trap 'rm -f "${start_err:-}" "${move_err:-}" "${create_err:-}" "${run_err:-}"' EXIT
+trap 'rm -f "${start_err:-}" "${move_err:-}" "${create_err:-}" "${run_err:-}" "${close_err:-}"' EXIT
 
 # Stamp the task's CURRENT state glyph onto the sidebar label (○ ● ◇ ◆ ✓ — the
 # same mapping the [ws …] statusline renders; ws-statusline.sh is the single
@@ -164,24 +164,46 @@ try:
 except Exception:
     pass'
 
+# stale_ws_check <workspace-id> — read a message on stdin, print 1 if $ws names
+# the failing placement target, else 0. Bounded-token match (not a bare
+# substring — ws=w1 must not match a message naming w12) with the "not
+# found"/"placement" keyword required in the SAME clause as the token (split on
+# ;/./,), not merely present anywhere else in the message — a fixed character
+# window is not enough: "workspace w1 is healthy; agent placement is
+# unavailable" puts the keyword within any reasonable window of a short
+# sentence's token even though the two halves are unrelated clauses.
+# Case-insensitive ("Not Found" from herdr must still match). python3's
+# re.escape covers every ERE metacharacter — a hand-rolled sed/grep escape
+# class is exactly the kind of thing that quietly misses one (`+ ? ( ) { } |`
+# are the ones a naive `. [ \ * ^ $` class leaves live).
+stale_ws_check='import sys, re
+ws = sys.argv[1] if len(sys.argv) > 1 else ""
+msg = sys.stdin.read()
+if not ws:
+    print(0); sys.exit(0)
+tok_re = re.compile(r"(?<![A-Za-z0-9_:.-])" + re.escape(ws) + r"(?![A-Za-z0-9_:.-])")
+kw_re = re.compile(r"not\s*found|placement", re.IGNORECASE)
+hit = any(tok_re.search(clause) and kw_re.search(clause) for clause in re.split(r"[;.,]", msg))
+print(1 if hit else 0)'
+
 # herdr_diag <raw-stderr> <workspace-id> <ws-relevant 0|1> — turn a captured herdr
 # stderr blob into one-or-two diagnostic lines: herdr's error.code/message when
 # the blob parses as the JSON error schema, else the raw text relayed verbatim
 # (trimmed). Prints nothing for an empty blob. Control/escape bytes are stripped
-# before ANY of this text reaches the terminal — herdr's stderr is untrusted
-# output from a possibly-compromised/buggy server, and an embedded ANSI/OSC
-# sequence must never be interpreted by the user's terminal.
+# TWICE — once from the raw blob, once from the code/message pulled out of it —
+# because a JSON ``-style escape is still plain printable text before
+# python3's json.load decodes it into a real ESC byte; stripping only the raw
+# blob lets a compromised herdr's escaped control sequence survive decoding and
+# reach the terminal, defeating the whole point of the filter.
 # <ws-relevant> gates the stale-$HERDR_WORKSPACE_ID hint: pass 1 only for calls
 # that actually send `--workspace $ws` (agent start, tab create) — for calls that
 # don't (pane move, pane run) an agent_placement_not_found can't be a workspace-id
-# problem, so the hint would misattribute the cause. When relevant, the message
-# fallback additionally requires $ws to appear as a bounded token next to
-# "not found"/"placement" — not merely as a loose substring, which could
-# false-positive on an unrelated id that happens to contain $ws (e.g. ws=w1
-# inside a message naming w12). Never more than one hint line, so the
-# diagnostic doesn't nag.
+# problem, so the hint would misattribute the cause. $ws itself is sanitized
+# before it's ever interpolated into the printed hint (it comes from
+# $HERDR_WORKSPACE_ID, an environment value this script doesn't control).
+# Never more than one hint line, so the diagnostic doesn't nag.
 herdr_diag() {
-  local raw ws ws_relevant clean parsed code msg line stale ws_ok esc_ws
+  local raw ws ws_relevant clean parsed code msg line stale ws_hit ws_clean
   raw="$1"
   ws="$2"
   ws_relevant="${3:-1}"
@@ -189,8 +211,8 @@ herdr_diag() {
   clean="$(printf '%s' "$raw" | tr -dc '[:print:]\t\n')"
   parsed="$(printf '%s' "$clean" | python3 -c "$extract_herdr_error" 2>/dev/null || true)"
   if [ -n "$parsed" ]; then
-    code="${parsed%%|*}"
-    msg="${parsed#*|}"
+    code="$(printf '%s' "${parsed%%|*}" | tr -dc '[:print:]\t\n')"
+    msg="$(printf '%s' "${parsed#*|}" | tr -dc '[:print:]\t\n')"
     line="herdr error"
     [ -n "$code" ] && line="$line code=$code"
     [ -n "$msg" ] && line="$line: $msg"
@@ -205,20 +227,15 @@ herdr_diag() {
       agent_placement_not_found) stale=1 ;;
     esac
     if [ "$stale" != 1 ] && [ -n "$ws" ]; then
-      ws_ok=0
-      esc_ws="$(printf '%s' "$ws" | sed 's/[.[\*^$]/\\&/g')"
-      if printf '%s' "$msg" | grep -qE "(^|[^[:alnum:]_:.-])${esc_ws}([^[:alnum:]_:.-]|$)" 2>/dev/null; then
-        ws_ok=1
-      fi
-      if [ "$ws_ok" = 1 ]; then
-        case "$msg" in
-          *"not found"*|*placement*) stale=1 ;;
-        esac
-      fi
+      ws_hit="$(printf '%s' "$msg" | python3 -c "$stale_ws_check" "$ws" 2>/dev/null || echo 0)"
+      [ "$ws_hit" = 1 ] && stale=1
     fi
   fi
-  [ "$stale" = 1 ] && line="$line
-HERDR_WORKSPACE_ID=$ws is not a valid workspace on this herdr server (likely a stale id after a herdr restart/handoff) — relaunch from a live session or start the worker manually."
+  if [ "$stale" = 1 ]; then
+    ws_clean="$(printf '%s' "$ws" | tr -dc '[:print:]\t\n')"
+    line="$line
+HERDR_WORKSPACE_ID=$ws_clean is not a valid workspace on this herdr server (likely a stale id after a herdr restart/handoff) — relaunch from a live session or start the worker manually."
+  fi
   printf '%s\n' "$line"
 }
 
@@ -369,7 +386,14 @@ EOF_RESOLVE
     # error is printed first when captured — the generic message stays as the
     # last-resort fallback.
     if [ -z "$pane" ]; then
-      [ -n "$tab" ] && herdr tab close "$tab" >/dev/null 2>&1 || true
+      if [ -n "$tab" ]; then
+        close_err="$(mktemp)"
+        if ! herdr tab close "$tab" >/dev/null 2>"$close_err"; then
+          close_diag="$(herdr_diag "$(cat "$close_err")" "$workspace" 0)"
+          [ -n "$close_diag" ] && printf 'herdr tab close cleanup for orphaned tab %s also failed: %s\n' "$tab" "$close_diag" >&2
+        fi
+        rm -f "$close_err"
+      fi
       diag="$(herdr_diag "$(cat "$create_err")" "$workspace" 1)"
       rm -f "$create_err"
       [ -n "$diag" ] && printf '%s\n' "$diag" >&2

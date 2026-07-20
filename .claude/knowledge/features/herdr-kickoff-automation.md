@@ -85,6 +85,32 @@ truth; this entry captures the durable design and one non-obvious gotcha.
   would have silently dropped this entire improvement at exactly the layer the
   original incident was observed at: the model narrating only the generic
   guard message, never the captured herdr error).
+  **A second swarm-review round on that first-round fix found it was still
+  wrong in four ways** — sanitization/anchoring code is exactly the kind of
+  code whose own fix deserves an adversarial pass, not just the original
+  feature: (1) control bytes were stripped only from the RAW stderr blob, but a
+  JSON ``-style escape is still plain printable text at that point — only
+  after `python3`'s `json.load` decodes it does it become a real ESC byte, so
+  `code`/`message` need their own strip pass post-decode; (2) the "workspace id
+  as a bounded token" fix from round one checked token-presence and keyword-
+  presence as independent ANDs, so `"workspace w1 is healthy; agent placement
+  is unavailable"` still false-triggered — a fixed character window wasn't
+  enough either (a short sentence puts the keyword in range regardless), so the
+  check now splits the message on `;`/`.`/`,` and requires both in the SAME
+  clause; (3) the ERE-escaping of `$ws` before embedding it in a `grep -E`
+  pattern only escaped `. [ \ * ^ $`, leaving `+ ? ( ) { } |` live — a
+  workspace id containing one of those could match unrelated text as a regex,
+  not a literal; (2) and (3) together made the bash sed/grep chain fragile
+  enough that it was replaced with a single `python3 re`-based check
+  (`re.escape` + per-clause matching, case-insensitive) instead of iterating
+  the bash version further; (4) `$HERDR_WORKSPACE_ID` itself (interpolated into
+  the hint line) was never sanitized — only herdr's own stderr was. All four
+  fixed, plus: the orphaned-tab `herdr tab close` cleanup call's own stderr was
+  being discarded (`2>&1 >/dev/null || true`) even though the CHANGELOG claimed
+  every failing call surfaces stderr — now captured too. `test_herdr_launch.py`
+  (new, mirrors `test_agent_registry.py`'s stub-the-CLI-on-PATH pattern) locks
+  in all of this — every case above, plus the stdout contract, as regression
+  coverage the first round shipped without.
 
 ## `resume` mode: reopen a task tab a `/exit` closed
 
