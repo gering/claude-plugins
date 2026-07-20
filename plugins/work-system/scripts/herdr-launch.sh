@@ -103,6 +103,13 @@ command -v python3 >/dev/null 2>&1 || { echo "python3 not on PATH" >&2; exit 1; 
 }
 [ -d "$worktree" ] || { echo "worktree dir not found: $worktree" >&2; exit 1; }
 
+# The four herdr-call stderr-capture tempfiles below are each cleaned up with an
+# explicit `rm -f` on their own success/failure branches, but a SIGINT/SIGTERM
+# between their `mktemp` and that `rm -f` would otherwise leak the file — matching
+# the existing convention in herdr-tab-glyph.sh. `${var:-}` tolerates a variable
+# that isn't assigned yet (or on a code path that never used it) under `set -u`.
+trap 'rm -f "${start_err:-}" "${move_err:-}" "${create_err:-}" "${run_err:-}"' EXIT
+
 # Stamp the task's CURRENT state glyph onto the sidebar label (○ ● ◇ ◆ ✓ — the
 # same mapping the [ws …] statusline renders; ws-statusline.sh is the single
 # source, applied via herdr-tab-glyph.sh). Best-effort: any failure keeps the
@@ -157,18 +164,30 @@ try:
 except Exception:
     pass'
 
-# herdr_diag <raw-stderr> <workspace-id> — turn a captured herdr stderr blob into
-# one-or-two diagnostic lines: herdr's error.code/message when the blob parses as
-# the JSON error schema, else the raw text relayed verbatim (trimmed). Prints
-# nothing for an empty blob. Appends a one-line actionable hint when the error
-# names an invalid placement target (the "stale $HERDR_WORKSPACE_ID after a herdr
-# restart/handoff" case this repo has hit in practice) — never more than one hint
-# line, so the diagnostic doesn't nag.
+# herdr_diag <raw-stderr> <workspace-id> <ws-relevant 0|1> — turn a captured herdr
+# stderr blob into one-or-two diagnostic lines: herdr's error.code/message when
+# the blob parses as the JSON error schema, else the raw text relayed verbatim
+# (trimmed). Prints nothing for an empty blob. Control/escape bytes are stripped
+# before ANY of this text reaches the terminal — herdr's stderr is untrusted
+# output from a possibly-compromised/buggy server, and an embedded ANSI/OSC
+# sequence must never be interpreted by the user's terminal.
+# <ws-relevant> gates the stale-$HERDR_WORKSPACE_ID hint: pass 1 only for calls
+# that actually send `--workspace $ws` (agent start, tab create) — for calls that
+# don't (pane move, pane run) an agent_placement_not_found can't be a workspace-id
+# problem, so the hint would misattribute the cause. When relevant, the message
+# fallback additionally requires $ws to appear as a bounded token next to
+# "not found"/"placement" — not merely as a loose substring, which could
+# false-positive on an unrelated id that happens to contain $ws (e.g. ws=w1
+# inside a message naming w12). Never more than one hint line, so the
+# diagnostic doesn't nag.
 herdr_diag() {
+  local raw ws ws_relevant clean parsed code msg line stale ws_ok esc_ws
   raw="$1"
   ws="$2"
+  ws_relevant="${3:-1}"
   [ -n "$raw" ] || return 0
-  parsed="$(printf '%s' "$raw" | python3 -c "$extract_herdr_error" 2>/dev/null || true)"
+  clean="$(printf '%s' "$raw" | tr -dc '[:print:]\t\n')"
+  parsed="$(printf '%s' "$clean" | python3 -c "$extract_herdr_error" 2>/dev/null || true)"
   if [ -n "$parsed" ]; then
     code="${parsed%%|*}"
     msg="${parsed#*|}"
@@ -177,16 +196,27 @@ herdr_diag() {
     [ -n "$msg" ] && line="$line: $msg"
   else
     code=""
-    msg="$raw"
-    line="herdr error: $(printf '%s' "$raw" | tr '\n' ' ' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    msg="$clean"
+    line="herdr error: $(printf '%s' "$clean" | tr '\n' ' ' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
   fi
-  case "$code" in
-    agent_placement_not_found) stale=1 ;;
-    *) case "$msg" in
-         *"$ws"*"not found"*|*"$ws"*placement*) stale=1 ;;
-         *) stale=0 ;;
-       esac ;;
-  esac
+  stale=0
+  if [ "$ws_relevant" = 1 ]; then
+    case "$code" in
+      agent_placement_not_found) stale=1 ;;
+    esac
+    if [ "$stale" != 1 ] && [ -n "$ws" ]; then
+      ws_ok=0
+      esc_ws="$(printf '%s' "$ws" | sed 's/[.[\*^$]/\\&/g')"
+      if printf '%s' "$msg" | grep -qE "(^|[^[:alnum:]_:.-])${esc_ws}([^[:alnum:]_:.-]|$)" 2>/dev/null; then
+        ws_ok=1
+      fi
+      if [ "$ws_ok" = 1 ]; then
+        case "$msg" in
+          *"not found"*|*placement*) stale=1 ;;
+        esac
+      fi
+    fi
+  fi
   [ "$stale" = 1 ] && line="$line
 HERDR_WORKSPACE_ID=$ws is not a valid workspace on this herdr server (likely a stale id after a herdr restart/handoff) — relaunch from a live session or start the worker manually."
   printf '%s\n' "$line"
@@ -249,7 +279,7 @@ EOF_RESOLVE
     # Print herdr's own error first when captured — the generic message stays as
     # the last-resort fallback for a truly pane-less/malformed response.
     if [ -z "$pane" ]; then
-      diag="$(herdr_diag "$(cat "$start_err")" "$workspace")"
+      diag="$(herdr_diag "$(cat "$start_err")" "$workspace" 1)"
       rm -f "$start_err"
       [ -n "$diag" ] && printf '%s\n' "$diag" >&2
       echo "herdr agent start did not return a pane id" >&2
@@ -266,7 +296,7 @@ EOF_RESOLVE
       rm -f "$move_err"
       printf 'pane=%s\ntab=%s\nmoved=yes\nagent=%s\n' "$pane" "$tab" "$agent_name"
     else
-      diag="$(herdr_diag "$(cat "$move_err")" "$workspace")"
+      diag="$(herdr_diag "$(cat "$move_err")" "$workspace" 0)"
       rm -f "$move_err"
       [ -n "$diag" ] && printf '%s\n' "$diag" >&2
       echo "herdr pane move --new-tab failed for pane $pane (worker still running; no dedicated tab)" >&2
@@ -340,7 +370,7 @@ EOF_RESOLVE
     # last-resort fallback.
     if [ -z "$pane" ]; then
       [ -n "$tab" ] && herdr tab close "$tab" >/dev/null 2>&1 || true
-      diag="$(herdr_diag "$(cat "$create_err")" "$workspace")"
+      diag="$(herdr_diag "$(cat "$create_err")" "$workspace" 1)"
       rm -f "$create_err"
       [ -n "$diag" ] && printf '%s\n' "$diag" >&2
       echo "herdr tab create did not return a pane id" >&2
@@ -362,8 +392,9 @@ EOF_RESOLVE
     run_err="$(mktemp)"
     if ! herdr pane run "$pane" "cd $(printf '%q' "$worktree") && claude -c" >/dev/null 2>"$run_err"; then
       resumed=no
-      diag="$(herdr_diag "$(cat "$run_err")" "$workspace")"
-      echo "herdr pane run could not start 'claude -c' in $pane (tab is open; run it by hand)${diag:+ — $diag}" >&2
+      diag="$(herdr_diag "$(cat "$run_err")" "$workspace" 0)"
+      [ -n "$diag" ] && printf '%s\n' "$diag" >&2
+      echo "herdr pane run could not start 'claude -c' in $pane (tab is open; run it by hand)" >&2
     fi
     rm -f "$run_err"
 

@@ -69,6 +69,22 @@ truth; this entry captures the durable design and one non-obvious gotcha.
   and never refreshed, so a herdr server restart / `update --handoff` that reassigns
   workspace ids strands it. Stdout contract (`pane=`/`tab=`/`moved=`/… key=value
   lines, exit codes) is untouched — only stderr got richer.
+  A swarm review of this change (external-only: codex + grok) caught three
+  refinements before merge, all applied: (1) the stale-workspace hint is scoped by
+  a `ws_relevant` flag on `herdr_diag` — only `agent start`/`tab create` actually
+  send `--workspace`, so `pane move`/`pane run` never get an
+  `agent_placement_not_found` misattributed to the workspace id; (2) the message
+  fallback (no parseable `code`) requires the workspace id to appear as a
+  bounded token, not a loose substring (`ws=w1` no longer false-positives on a
+  message naming `w12`); (3) `herdr_diag` strips control/escape bytes from
+  herdr's stderr before it reaches the terminal — herdr's stderr is untrusted
+  server output, so an embedded ANSI/OSC sequence must never be interpreted by
+  the user's terminal. **The diagnostic is only as useful as the skill layer
+  that relays it** — kickoff/continue SKILL.md's failure branches now explicitly
+  instruct relaying the helper's stderr to the user (they didn't before, which
+  would have silently dropped this entire improvement at exactly the layer the
+  original incident was observed at: the model narrating only the generic
+  guard message, never the captured herdr error).
 
 ## `resume` mode: reopen a task tab a `/exit` closed
 

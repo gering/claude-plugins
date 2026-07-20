@@ -193,7 +193,10 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
       (`tab=<id>`) with worker `agent=<cli:model>`. Report success (template below).
     - **exit 0 with `moved=no`** → the worker started but the tab move failed, so it
       is running as a split in *this* session's tab — tell the user it's here, not in
-      a new tab.
+      a new tab. The helper's stderr for this call carries herdr's own error
+      (code/message, and a stale-workspace hint when applicable) ahead of its own
+      generic line — **relay that stderr text to the user**, not just "the move
+      failed."
     - **After a successful launch (either `moved=` value), if `OFFER_DEFAULT=yes`**
       (the picker path, user chose to save): `bash "$REG" default set "<agent>"`
       (the `agent=` value) to write the repo's committed default. Mention it, and
@@ -204,7 +207,10 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
       `note=<hint>`). Report it verbatim (e.g. "codex not ready — run: codex login")
       and re-offer the picker or another selector. Nothing was spawned.
     - **other non-zero exit** → the helper could not automate (herdr/python3 missing,
-      broken socket, or no pane id). Show the manual block (b).
+      broken socket, or no pane id). **Relay the helper's stderr to the user first**
+      — on a broken-socket/no-pane-id failure it carries herdr's own error
+      (code/message, and a stale-workspace hint when applicable), the actual reason
+      this happened, not just the generic guard text. Then show the manual block (b).
 
     Success report (fill `Tab` from the helper's `tab=` line, `Agent` from `agent=`):
     ```
