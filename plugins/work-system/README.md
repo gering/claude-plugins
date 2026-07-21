@@ -117,11 +117,13 @@ See [Worker agent selection](#worker-agent-selection) below for the full set.
 ### 3. Continue in the worktree
 
 Open a new Claude session in the worktree — `-n` names the session, and the
-`/continue` initial prompt loads the task context in one step:
+`/work-system:continue` initial prompt loads the task context in one step (use
+the plugin-qualified form: a Claude Code built-in `/continue` shadows the bare
+skill name):
 
 ```
 cd .claude/worktrees/add-dark-mode
-claude -n "add-dark-mode" "/continue"
+claude -n "add-dark-mode" "/work-system:continue"
 ```
 
 Loads the task context, checks dependencies, and shows current progress.
@@ -203,10 +205,11 @@ worktree as its cwd, and starts the task there for you:
   `skills/kickoff/SKILL.md` step 13 for the exact rule), so the sidebar shows one
   clear entry per task instead of a wall of identical agents. The same short label
   names the herdr agent (and, for a claude worker, the `-n` session); the
-  underlying `task/<name>` branch is unchanged, so `/continue` still resolves the task.
+  underlying `task/<name>` branch is unchanged, so the resume flow still resolves
+  the task.
 - The chosen worker is launched directly as argv (`herdr agent start … --
   <resolved worker command>`), so the real CLI process is what herdr's agent-state
-  detection sees. A claude worker gets `claude --model <m> -n "<label>" "/continue"`
+  detection sees. A claude worker gets `claude --model <m> -n "<label>" "/work-system:continue"`
   and loads the task context automatically; a codex/grok worker gets a bootstrap
   prompt (read `TASK.md`, drive the task to a PR) since they have no work-system skills.
 - The new tab opens in the background (`--no-focus`), so your kickoff session
@@ -240,12 +243,14 @@ marker file (under `$HOME/.cache`), so it never fires on an ordinary session exi
 All of this lives in the tested `scripts/herdr-teardown.sh`; see
 `skills/close/SKILL.md` step 12 for the flow.
 
-### `/continue <task>` reopens a closed task tab
+### `/work-system:continue <task>` reopens a closed task tab
 
 A kickoff tab runs Claude as its **root pane**, so a bare `/exit` (even just to
 restart Claude Code) ends that pane and herdr closes the whole tab — the worktree
 and the resumable session survive, but you lose your place. Run
-`/continue <task>` **from the main session** to get it back: it reopens a herdr tab
+`/work-system:continue <task>` **from the main session** to get it back (use the
+plugin-qualified form — a Claude Code built-in `/continue` shadows the bare skill
+name): it reopens a herdr tab
 at the task's worktree and resumes the existing session with `claude -c` (the
 most-recent session for that cwd — since each worktree hosts exactly one task, the
 cwd identifies it unambiguously), then focuses the tab.

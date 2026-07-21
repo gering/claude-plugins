@@ -36,8 +36,18 @@ def shquote(s):
 
 
 def herdr_stub(cases):
-    """Build a fake `herdr` script from {"<argv1> <argv2>": (stdout, stderr, exit)}."""
-    lines = ["#!/usr/bin/env bash", 'case "$1 $2" in']
+    """Build a fake `herdr` script from {"<argv1> <argv2>": (stdout, stderr, exit)}.
+
+    When $HERDR_ARGV_LOG is set, every call appends a `=== <subcmd>` header line
+    followed by each received arg on its own line — so a test can assert the exact
+    argv herdr-launch.sh execs (e.g. the worker argv after `agent start … --`)."""
+    lines = [
+        "#!/usr/bin/env bash",
+        'if [ -n "${HERDR_ARGV_LOG:-}" ]; then',
+        '  { printf \'=== %s\\n\' "$1 $2"; printf \'%s\\n\' "$@"; } >> "$HERDR_ARGV_LOG"',
+        "fi",
+        'case "$1 $2" in',
+    ]
     for key, (out, err, rc) in cases.items():
         lines.append(f'  "{key}")')
         if out:
@@ -55,7 +65,7 @@ class Env:
     """A throwaway PATH with a fake `herdr` stub, plus a worktree dir for
     herdr-launch.sh to target."""
 
-    def __init__(self, cases):
+    def __init__(self, cases, log_argv=False):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
         self.worktree = root / "wt"
@@ -67,6 +77,15 @@ class Env:
         herdr.chmod(0o755)
         self.env = dict(os.environ)
         self.env["PATH"] = f"{bindir}:{self.env['PATH']}"
+        self.argv_log = root / "argv.log" if log_argv else None
+        if self.argv_log is not None:
+            self.env["HERDR_ARGV_LOG"] = str(self.argv_log)
+
+    def logged_argv(self):
+        """Lines the herdr stub recorded (headers + one arg per line); [] if none."""
+        if self.argv_log is None or not self.argv_log.exists():
+            return []
+        return self.argv_log.read_text().splitlines()
 
     def run(self, *args):
         return subprocess.run(
@@ -161,6 +180,28 @@ check("tab-close cleanup: close diag surfaced",
       "tab_not_found" in r.stderr and "also failed" in r.stderr)
 check("tab-close cleanup: create diag also surfaced",
       "herdr tab create did not return a pane id" in r.stderr)
+e.close()
+
+# --- legacy no-selector launch: worker argv is the plugin-qualified skill --- #
+# Guards the shadowing fix: an empty selector takes the legacy path, whose worker
+# argv MUST be `claude -n <session> /work-system:continue` — the qualified form as
+# ONE argv token (a bare `/continue` would be shadowed by a CC built-in/alias).
+e = Env({
+    "agent start": (jsonlib.dumps({"result": {"agent": {"pane_id": "w1:p5"}}}), "", 0),
+    "pane move": (jsonlib.dumps(
+        {"result": {"move_result": {"created_tab": {"tab_id": "w1:t9"}}}}), "", 0),
+}, log_argv=True)
+r = e.run("launch", "t", str(e.worktree), "w1", "", "sess1")  # "" selector = legacy path
+argv = e.logged_argv()
+check("legacy: exit 0", r.returncode == 0)
+check("legacy: agent=claude on stdout", "agent=claude\n" in r.stdout)
+check("legacy: worker argv carries the qualified skill as one token",
+      "/work-system:continue" in argv)
+check("legacy: bare /continue is NOT emitted", "/continue" not in argv)
+if "/work-system:continue" in argv:
+    i = argv.index("/work-system:continue")
+    check("legacy: `-n <session>` precedes the skill token",
+          argv[i - 2:i] == ["-n", "sess1"])
 e.close()
 
 # --- success path: stdout contract untouched by any of the above ----------- #

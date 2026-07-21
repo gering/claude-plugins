@@ -26,8 +26,9 @@
 #
 # Launch shape per CLI (resolve builds the argv; the launch helper just execs
 # the `argv=` words, so the argv-exec path — no shell-typing race — is kept):
-#   claude  -> claude --model <model> [-n <session>] /continue
-#              (the work-system /continue skill resumes TASK.md deterministically)
+#   claude  -> claude --model <model> [-n <session>] /work-system:continue
+#              (plugin-qualified so a CC built-in /continue can't shadow the skill;
+#              the work-system continue skill resumes TASK.md deterministically)
 #   codex   -> codex -m <model> <bootstrap-prompt>
 #   grok    -> grok  -m <model> <bootstrap-prompt>
 #   The bootstrap prompt (codex/grok have no work-system skills) tells the agent
@@ -265,7 +266,9 @@ emit_argv() {
     claude)
       printf 'argv=%s\n' claude --model "$model"
       [ -n "$session" ] && printf 'argv=%s\n' -n "$session"
-      printf 'argv=%s\n' /continue
+      # Plugin-qualified: a CC built-in/alias `/continue` shadows the skill, so
+      # the bare form would run CC's own resume, not the work-system flow.
+      printf 'argv=%s\n' /work-system:continue
       ;;
     codex)
       printf 'argv=%s\n' codex -m "$model" "$BOOTSTRAP_PROMPT"
