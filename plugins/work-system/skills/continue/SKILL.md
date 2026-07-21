@@ -115,9 +115,15 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
      append: "couldn't confirm the tab focus — switch to it manually (pane `<pane>`)."
    - **exit 0, `reused=no resumed=no`** → the tab opened but `claude -c` could not be
      sent; tell the user the tab is up at the worktree and to run `claude -c` in it by
-     hand.
+     hand. The helper's stderr for this call carries herdr's own error (code/message)
+     — **relay that stderr text**, not just "run it by hand." (This call never sends
+     `--workspace`, so unlike the failure below there is no stale-workspace hint to
+     expect here.)
    - **non-zero exit** → the helper could not automate (herdr/python3 missing, broken
-     socket, or no pane id). Show the manual block (b).
+     socket, or no pane id). **Relay the helper's stderr to the user first** — on a
+     broken-socket/no-pane-id failure it carries herdr's own error (code/message, and
+     a stale-workspace hint when applicable), the actual reason this happened, not
+     just the generic guard text. Then show the manual block (b).
 
    Success report for the `reused=no resumed=yes` case (fill `Tab` from the `tab=`
    line; drop the line if `tab=` is empty):

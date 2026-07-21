@@ -1,10 +1,10 @@
 ---
 title: "herdr /kickoff + /continue-reopen Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-07-18
+updatedAt: 2026-07-19
 createdFrom: "PR #17"
-updatedFrom: "session: 2026-07-18 (kickoff agent selection)"
-pluginVersion: 1.9.0
+updatedFrom: "session: 2026-07-19 (surface herdr launch errors)"
+pluginVersion: 1.9.1
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -53,6 +53,64 @@ truth; this entry captures the durable design and one non-obvious gotcha.
   unrelated, workspace), and both `herdr` and `python3` are on `PATH`. `--no-focus`
   keeps the kickoff session in front; any failure (empty `$pane`) degrades to the
   unchanged manual block — never block kickoff on herdr.
+- **Failure diagnostics surface herdr's own error (1.9.1).** Every herdr call on a
+  failure path (`agent start`, `pane move --new-tab`, resume's `tab create`, resume's
+  `pane run "claude -c"`) now captures stderr instead of `2>/dev/null` and runs it
+  through a shared `herdr_diag` helper: parse herdr's `{"error":{"code","message"}}`
+  JSON defensively (any exception falls back to the raw stderr text, never a
+  traceback), print it, then the existing generic message stays as the last-resort
+  line. This was diagnosability-only (no fallback/self-heal logic — actively rejected,
+  see below) after a real incident where the launch failed with only "herdr agent
+  start did not return a pane id" while herdr's stderr — discarded by the old
+  `2>/dev/null` — had named the exact cause. When the parsed `code` is
+  `agent_placement_not_found` (or the message otherwise names the workspace target),
+  `herdr_diag` appends one hint line pointing at a stale `$HERDR_WORKSPACE_ID` — the
+  env var is frozen at Claude-spawn time (see the `resume`/`reused` discussion below)
+  and never refreshed, so a herdr server restart / `update --handoff` that reassigns
+  workspace ids strands it. Stdout contract (`pane=`/`tab=`/`moved=`/… key=value
+  lines, exit codes) is untouched — only stderr got richer.
+  A swarm review of this change (external-only: codex + grok) caught three
+  refinements before merge, all applied: (1) the stale-workspace hint is scoped by
+  a `ws_relevant` flag on `herdr_diag` — only `agent start`/`tab create` actually
+  send `--workspace`, so `pane move`/`pane run` never get an
+  `agent_placement_not_found` misattributed to the workspace id; (2) the message
+  fallback (no parseable `code`) requires the workspace id to appear as a
+  bounded token, not a loose substring (`ws=w1` no longer false-positives on a
+  message naming `w12`); (3) `herdr_diag` strips control/escape bytes from
+  herdr's stderr before it reaches the terminal — herdr's stderr is untrusted
+  server output, so an embedded ANSI/OSC sequence must never be interpreted by
+  the user's terminal. **The diagnostic is only as useful as the skill layer
+  that relays it** — kickoff/continue SKILL.md's failure branches now explicitly
+  instruct relaying the helper's stderr to the user (they didn't before, which
+  would have silently dropped this entire improvement at exactly the layer the
+  original incident was observed at: the model narrating only the generic
+  guard message, never the captured herdr error).
+  **A second swarm-review round on that first-round fix found it was still
+  wrong in four ways** — sanitization/anchoring code is exactly the kind of
+  code whose own fix deserves an adversarial pass, not just the original
+  feature: (1) control bytes were stripped only from the RAW stderr blob, but a
+  JSON ``-style escape is still plain printable text at that point — only
+  after `python3`'s `json.load` decodes it does it become a real ESC byte, so
+  `code`/`message` need their own strip pass post-decode; (2) the "workspace id
+  as a bounded token" fix from round one checked token-presence and keyword-
+  presence as independent ANDs, so `"workspace w1 is healthy; agent placement
+  is unavailable"` still false-triggered — a fixed character window wasn't
+  enough either (a short sentence puts the keyword in range regardless), so the
+  check now splits the message on `;`/`.`/`,` and requires both in the SAME
+  clause; (3) the ERE-escaping of `$ws` before embedding it in a `grep -E`
+  pattern only escaped `. [ \ * ^ $`, leaving `+ ? ( ) { } |` live — a
+  workspace id containing one of those could match unrelated text as a regex,
+  not a literal; (2) and (3) together made the bash sed/grep chain fragile
+  enough that it was replaced with a single `python3 re`-based check
+  (`re.escape` + per-clause matching, case-insensitive) instead of iterating
+  the bash version further; (4) `$HERDR_WORKSPACE_ID` itself (interpolated into
+  the hint line) was never sanitized — only herdr's own stderr was. All four
+  fixed, plus: the orphaned-tab `herdr tab close` cleanup call's own stderr was
+  being discarded (`2>&1 >/dev/null || true`) even though the CHANGELOG claimed
+  every failing call surfaces stderr — now captured too. `test_herdr_launch.py`
+  (new, mirrors `test_agent_registry.py`'s stub-the-CLI-on-PATH pattern) locks
+  in all of this — every case above, plus the stdout contract, as regression
+  coverage the first round shipped without.
 
 ## `resume` mode: reopen a task tab a `/exit` closed
 
