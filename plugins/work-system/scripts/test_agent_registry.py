@@ -3,7 +3,7 @@
 or via scripts/check-structure.py's "plugin tests" check.
 
 Guards the registry's contract: alias/name/cli selector resolution, the per-CLI
-launch argv shape (claude `/continue` vs codex/grok bootstrap prompt), the
+launch argv shape (claude `/work-system:continue` vs codex/grok bootstrap prompt), the
 availability probe (codex login status + grok auth file + grok model-list), the
 exit-code map (2 unknown selector, 3 resolved-but-unavailable), and the
 project-default state (set/get, bogus rejection, no-git-repo error).
@@ -114,13 +114,13 @@ r = kv(e.run("resolve", "--fable", "--session", "close-herdr").stdout)
 check("--fable -> claude:fable", r.get("name") == "claude:fable")
 check("--fable cli", r.get("cli") == "claude")
 check("claude argv shape",
-      r["argv"] == ["claude", "--model", "fable", "-n", "close-herdr", "/continue"])
+      r["argv"] == ["claude", "--model", "fable", "-n", "close-herdr", "/work-system:continue"])
 check("claude supports lifecycle", "continue" in r.get("supports", ""))
 
 r = kv(e.run("resolve", "--opus").stdout)
 check("--opus -> claude:opus", r.get("name") == "claude:opus")
 check("claude argv without session omits -n",
-      r["argv"] == ["claude", "--model", "opus", "/continue"])
+      r["argv"] == ["claude", "--model", "opus", "/work-system:continue"])
 
 r = kv(e.run("resolve", "--sol").stdout)
 check("--sol -> codex:gpt-5.6-sol", r.get("name") == "codex:gpt-5.6-sol")

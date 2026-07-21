@@ -12,7 +12,7 @@
 #                         can eat the leading keystrokes of a typed command.
 #                         The worker argv is resolved from an agent SELECTOR via
 #                         agent-registry.sh (claude/codex/grok × model); with no
-#                         selector it stays the legacy `claude … /continue`. The
+#                         selector it stays the legacy `claude … /work-system:continue`. The
 #                         registry owns every per-CLI launch detail, so this script
 #                         is CLI-agnostic — it just execs the resolved argv.
 #
@@ -252,7 +252,8 @@ case "$mode" in
     agent_name="claude"
     note=""
     if [ -z "$selector" ]; then
-      worker_argv=(claude -n "$session" "/continue")
+      # Plugin-qualified: a CC built-in/alias `/continue` shadows the skill.
+      worker_argv=(claude -n "$session" "/work-system:continue")
     else
       registry="${0%/*}/agent-registry.sh"
       [ -f "$registry" ] || { echo "agent-registry.sh not found next to herdr-launch.sh" >&2; exit 1; }

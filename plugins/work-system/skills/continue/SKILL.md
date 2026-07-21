@@ -2,7 +2,7 @@
 name: continue
 description: |
   Resumes a task, or reopens its herdr tab from the main session with
-  `/continue <task>`.
+  `/work-system:continue <task>`.
   Trigger: "continue", "resume the task", "reopen <task>", "pick up where I left off".
 user_invocable: true
 ---
@@ -46,7 +46,7 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
         the current task." Never refuse to resume the task you're in.
 - `main` **with** a `<task>` argument → **Reopen mode** (step 1 normalizes the name).
 - `main` **without** an argument → nothing to resume in-session here; tell the user to
-  name a task (`/continue <task>`) or use `/kickoff` / `/list`, and stop.
+  name a task (`/work-system:continue <task>`) or use `/kickoff` / `/list`, and stop.
 
 ### Reopen mode (main session + `<task>` arg)
 

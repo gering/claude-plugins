@@ -1,10 +1,10 @@
 ---
 title: "herdr /kickoff + /continue-reopen Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-07-19
+updatedAt: 2026-07-21
 createdFrom: "PR #17"
-updatedFrom: "session: 2026-07-19 (surface herdr launch errors)"
-pluginVersion: 1.9.1
+updatedFrom: "session: 2026-07-21 (fully-qualify kickoff's /continue)"
+pluginVersion: 1.9.2
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -31,7 +31,8 @@ truth; this entry captures the durable design and one non-obvious gotcha.
   `herdr agent start "<label>" … -- <worker argv>`, which execs the worker binary
   directly. As of work-system 1.9.0 the worker argv is **resolved from the chosen
   agent** by `agent-registry.sh` (`emit_argv`), not hardcoded: a claude worker is
-  `claude --model <m> -n "<label>" "/continue"`, while codex/grok get their own
+  `claude --model <m> -n "<label>" "/work-system:continue"` (plugin-qualified — see
+  the shadowing gotcha below), while codex/grok get their own
   `-m` form — `codex -m <model> "<bootstrap prompt>"` /
   `grok -m <model> "<bootstrap prompt>"` (see [[kickoff-agent-selection]]).
   herdr-launch stays CLI-agnostic — it just execs the resolved `argv=` words. The
@@ -212,6 +213,29 @@ always prints the manual-close line as its backstop — so a reopened task may n
 by-hand tab close where a kickoff tab would auto-close. This is the same
 agent-detection question flagged as unverified for the deferred race-free-prevention
 option above; both wait on live herdr verification.
+
+## Gotcha: launch the worker with `/work-system:continue`, never bare `/continue`
+
+The claude worker's initial prompt is the **plugin-qualified** `/work-system:continue`,
+not the bare `/continue` (work-system 1.9.2 fix). Bare `/continue` is not a safe way to
+reach a plugin skill: a Claude Code built-in/alias `/continue` can shadow it, and — per
+CC's own docs — plugin skills live under a `plugin-name:skill-name` namespace and are
+only *guaranteed* reachable via that qualified form; the bare name resolves to a skill
+only when nothing at a higher precedence claims it. In a fresh worktree session
+(`claude -n <name>`, no prior conversation) a shadowed bare `/continue` either runs CC's
+own resume (nothing to resume → worker sits idle, TASK.md never loaded) or errors as an
+unknown command — either way the work-system resume flow never runs, breaking the core
+kickoff→worker handoff. The exact mechanism (a built-in vs namespace-only resolution)
+is CC-version-dependent and was reported intermittently; the fix is orthogonal to which
+it is, because `/work-system:continue` is the one documented, unshadowable invocation.
+**Do not "simplify" it back to the bare form.**
+
+Sites carrying the qualified form (all machine-generated invocations): `agent-registry.sh`
+`emit_argv` (the primary selector path), `herdr-launch.sh`'s legacy no-selector fallback,
+and kickoff's outside-herdr manual block; `test_agent_registry.py` asserts the argv ends
+in `/work-system:continue`. **Deployment caveat:** `agent-registry.sh` / `herdr-launch.sh`
+run from the *plugin cache*, not the repo, so a launch only picks up this fix after a
+`/plugin` marketplace update + reload refreshes the cache.
 
 ## Gotcha: input into a fresh pane races shell startup
 

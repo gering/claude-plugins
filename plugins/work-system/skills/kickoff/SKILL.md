@@ -55,7 +55,8 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
 
 1. **Check current location** (shared helper — robust against paths with spaces and symlinks):
    - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" linked` → `main` or `linked`.
-     If `linked`, this is already a worktree — stop and suggest `/continue` instead.
+     If `linked`, this is already a worktree — stop and suggest `/work-system:continue`
+     instead (plugin-qualified — a CC built-in `/continue` shadows the bare skill).
    - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path` → `<main-repo>` — capture
      it for the CWD-drift check in step 11.
 
@@ -252,8 +253,10 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
          <the argv= words, each shell-quoted — e.g. codex -m gpt-5.6-sol 'Read TASK.md …'>
     ```
     For a **claude** worker the command is `claude --model <m> -n "<task-name>"
-    "/continue"` — `-n` names the session (shown in `/resume`), `/continue` runs the
-    resume flow (load TASK.md, commits, progress). For **codex/grok** it is
+    "/work-system:continue"` — `-n` names the session (shown in `/resume`),
+    `/work-system:continue` runs the resume flow (load TASK.md, commits, progress).
+    Use the plugin-qualified form: a CC built-in/alias `/continue` shadows the skill,
+    so the bare word would run CC's own resume instead. For **codex/grok** it is
     `codex -m <model> '<bootstrap prompt>'` (they have no work-system skills, so the
     prompt tells them to read TASK.md and drive to a PR). Do **not** execute the `cd`
     yourself — it is for the user's new terminal. If `resolve` exits non-zero

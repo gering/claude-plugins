@@ -130,11 +130,13 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
        session — this session stays in the main repo) and run:
 
          cd .claude/worktrees/<task-name>
-         claude -n "<task-name>" "/continue"
+         claude -n "<task-name>" "/work-system:continue"
     ```
     `-n "<task-name>"` names the session (shown in `/resume` and the terminal title);
-    the `/continue` initial prompt runs the resume flow (load TASK.md, recent commits,
-    progress) deterministically — both in one launch. Do **not** execute the `cd` yourself
+    the `/work-system:continue` initial prompt runs the resume flow (load TASK.md, recent
+    commits, progress) deterministically — both in one launch. Use the plugin-qualified
+    form: a Claude Code built-in `/continue` shadows the bare skill name. Do **not** execute
+    the `cd` yourself
     — it is for the user's new terminal.
 
 ## Remember
