@@ -142,13 +142,22 @@ class TestSandboxE2E(unittest.TestCase):
 
     def test_sandboxed_cat_env_blocked(self):
         marker = "SANDBOX_E2E_MARKER_9f3a2c1b"
+        ok_marker = "SANDBOX_E2E_READABLE_5d1c7e0a"
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
             env_file = repo / ".env"
             env_file.write_text(f"SECRET={marker}\n")
+            ok_file = repo / "readable.txt"
+            ok_file.write_text(f"OK={ok_marker}\n")
 
-            # Source agents.sh helpers, then run sandboxed cat on the .env.
+            # Source agents.sh helpers, then run TWO sandboxed cats:
+            #  1. POSITIVE CONTROL — a non-denied file MUST come through (under
+            #     set -e), proving the jail actually ran and allows normal reads.
+            #     Without it, "wrapper broke before cat" and "jail denied the
+            #     read" are indistinguishable (both leave the marker absent).
+            #  2. The denied .env — `|| true` only here, because the DENIED read
+            #     is expected to fail; the assertion is marker absence.
             # Use a dummy backend name so both ~/.codex and ~/.grok stay denied
             # (irrelevant here); the repo .env must be denied by the new rule.
             harness = f'''
@@ -156,6 +165,7 @@ set -euo pipefail
 eval "$(sed -n '1,/^main() {{/p' "{AGENTS}" | sed '$d')"
 # Force re-init for this backend in this process.
 _sandbox_ready="<none>"
+sandboxed codex cat "{ok_file}"
 sandboxed codex cat "{env_file}" || true
 '''
             r = subprocess.run(
@@ -166,6 +176,14 @@ sandboxed codex cat "{env_file}" || true
                 timeout=30,
             )
             combined = r.stdout + r.stderr
+            self.assertEqual(
+                r.returncode, 0,
+                f"sandbox harness failed before the denied read (rc={r.returncode}):\n{combined!r}",
+            )
+            self.assertIn(
+                ok_marker, r.stdout,
+                f"positive control missing — jail blocked (or never ran) a non-denied read:\n{combined!r}",
+            )
             self.assertNotIn(
                 marker, combined,
                 f"secret marker leaked through sandboxed cat:\n{combined!r}",
@@ -173,7 +191,8 @@ sandboxed codex cat "{env_file}" || true
 
 
 if __name__ == "__main__":
-    # Prefer unittest discovery style used by sibling tests.
+    # unittest (deliberately diverging from the siblings' plain check()/FAILS
+    # style): skipUnless cleanly gates the host-dependent sandbox-exec e2e.
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     sys.exit(0 if result.wasSuccessful() else 1)

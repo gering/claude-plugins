@@ -21,7 +21,7 @@ This is a **Claude Code plugin marketplace** (monorepo) containing plugins that 
 - **knowledge-system** (v1.9.x) — Knowledge management with three layers: Rules, Knowledge, Memory. Skills: `/init`, `/query`, `/curate`, `/reindex`, `/backfill-knowledge`, `/migrate`, `/statusline`
 - **work-system** (v1.8.x) — Task and worktree workflow. Skills: `/define`, `/kickoff`, `/adopt`, `/continue`, `/status`, `/close`, `/list`, `/statusline`
 - **pr-flow** (v1.3.x) — PR review feedback loop. Skills: `/open`, `/cycle`, `/check`, `/fix`, `/rebase`, `/merge`
-- **swarm** (v0.5.x) — Local mixture-of-agents code review (external `codex`/`grok` CLIs — grok-4.5 — plus Claude lenses: 11 in 4 clusters). P2: `/swarm:review` pipeline (scope→fan-out→merge→verify); P5: `--fix`/`--loop` apply the findings you agreed with. Skills: `/swarm:review`, `/swarm:agents`
+- **swarm** (v0.6.x) — Local mixture-of-agents code review (external `codex`/`grok` CLIs — grok-4.5 — plus Claude lenses: 11 in 4 clusters). Externals get file-read + web research under an OS secret-jail. P2: `/swarm:review` pipeline (scope→fan-out→merge→verify); P5: `--fix`/`--loop` apply the findings you agreed with. Skills: `/swarm:review`, `/swarm:agents`
 - **settings** (v0.1.x) — Per-plugin TOML config resolved over schema defaults; each plugin owns its `schema/settings.schema.json`. Skill: `/settings` (list/show/get/set/validate). Phase 1: config surface only.
 
 ## Plugin Anatomy

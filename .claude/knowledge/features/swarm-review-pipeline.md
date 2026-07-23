@@ -1,10 +1,10 @@
 ---
 title: "Swarm Review Pipeline (/swarm:review)"
 createdAt: 2026-07-08
-updatedAt: 2026-07-18
+updatedAt: 2026-07-23
 createdFrom: "PR #24"
-updatedFrom: "harden-swarm-design-lens-integration"
-pluginVersion: 1.8.2
+updatedFrom: "open-swarm-external-exploration"
+pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
 ---

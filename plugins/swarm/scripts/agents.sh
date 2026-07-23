@@ -131,7 +131,10 @@ require_valid_timeout() {
 _sandbox_deny_paths() {
   # $1 = the calling backend (its OWN credential dir stays readable — it needs
   # it to authenticate; the OTHER backends' cred dirs are denied so an injected
-  # read can't steal a sibling's token). A denylist is a backstop, not a full
+  # read can't steal a sibling's token. ACCEPTED RESIDUAL: with web on, an
+  # injected read of that own dir could exfiltrate the backend's OWN API token —
+  # unjailable without breaking its auth; bounded to that one token and named
+  # in [[swarm-backend-adapter]] § residual risk). A denylist is a backstop, not a full
   # allowlist: the node/bun-based CLIs load runtime from all over $HOME, so
   # deny-$HOME breaks them (documented in the blueprint). scrub_secrets + env
   # filtering + the prompt egress guard back it up.
@@ -146,22 +149,20 @@ _sandbox_deny_paths() {
   if [[ "$own" != "grok" ]]; then printf '%s\n' "$HOME/.grok"; fi
   # Repo-local secrets: .env*, data/, common key files at repo root. Best-effort
   # (skip if not in a git work tree); only emit paths that exist so the profile
-  # stays clean. nullglob so a missing .env* never emits a literal ".env*".
+  # stays clean. The `[[ -e ]]` guard also filters an unmatched pattern's
+  # literal fallback (`[[ -e ]]` does not glob its operand), so no nullglob
+  # juggling is needed — test_sandbox_deny.py pins the no-literal-glob behavior.
   # ROOT-LEVEL ONLY (not recursive): a nested apps/api/.env is not auto-denied —
   # deliberate (bwrap can't regex, a recursive glob bloats the profile on large
   # trees). HOME cred stores are covered at full depth; nested repo secrets go
   # via SWARM_DENY_PATHS. (documented in [[swarm-backend-adapter]] § Posture)
   local repo
-  repo="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  repo="$(_repo_root)"
   if [[ -n "$repo" ]]; then
-    local _old_nullglob=0
-    shopt -q nullglob && _old_nullglob=1
-    shopt -s nullglob
     local p
     for p in "$repo"/.env* "$repo"/data "$repo"/*.pem "$repo"/id_* "$repo"/*.key; do
       if [[ -e "$p" ]]; then printf '%s\n' "$p"; fi
     done
-    if ((_old_nullglob == 0)); then shopt -u nullglob; fi
   fi
   local extra="${SWARM_DENY_PATHS:-}"
   # if-form, not `[[ … ]] && …`: the latter returns 1 when extra is empty, and
@@ -174,6 +175,17 @@ _sandbox_deny_paths() {
 # git work tree (callers fall back to the ambient cwd).
 _repo_root() {
   git rev-parse --show-toplevel 2>/dev/null || true
+}
+
+_jail_available() {
+  # $1 = backend. Builds the jail (memoized) and reports whether an OS sandbox
+  # wrapper exists. run_codex/run_grok consult this to FAIL CLOSED: the read+web
+  # posture is only safe under the OS secret-jail (the hard boundary), so on a
+  # host without sandbox-exec/bwrap the externals degrade to the 0.5.x
+  # tool-less/no-web flags instead of running read+web bare — 0.5.x was safe
+  # there precisely because the flags, not the jail, closed the channel.
+  _init_sandbox "$1"
+  (( ${#SANDBOX_CMD[@]} > 0 ))
 }
 
 SANDBOX_CMD=()
@@ -621,6 +633,16 @@ run_codex() {
     echo "warning: codex could not resolve repo root (git rev-parse) — running without -C" >&2
   fi
 
+  # FAIL CLOSED without the OS jail: web + FS-read with no read-deny boundary
+  # would let an injected read reach ~/.aws etc. and exfiltrate via web_search.
+  # Degrade to no-web (codex's own read-only sandbox still applies to its FS
+  # access) and say so — audibly, mirroring the degrade pattern above.
+  local web_args=(-c tools.web_search=true)
+  if ! _jail_available codex; then
+    echo "warning: no sandbox-exec/bwrap — codex web search DISABLED (fail closed; read+web needs the OS secret-jail)" >&2
+    web_args=()
+  fi
+
   # The schema-validated JSON lands in $TMP_OUT; codex's stdout copy of the
   # final message is discarded (its transcript goes to stderr = debug info).
   # stdin must be closed: with an inherited open non-TTY stdin, codex waits
@@ -634,7 +656,7 @@ run_codex() {
   sandboxed codex codex exec -s read-only \
       ${repo_args[@]+"${repo_args[@]}"} \
       --skip-git-repo-check \
-      -c tools.web_search=true \
+      ${web_args[@]+"${web_args[@]}"} \
       -c model_reasoning_effort="$effort" \
       ${model_args[@]+"${model_args[@]}"} \
       --output-schema "$schema" \
@@ -693,7 +715,8 @@ run_grok() {
   # --cwd pins the project root. The OS secret-jail (sandboxed) blocks
   # credential paths; the prompt egress guard (SKILL.md HDR, outside the diff
   # fence) is the model-cooperation web policy; scrub_secrets is the output
-  # backstop. Do NOT re-add --disable-web-search or --tools "".
+  # backstop. Do NOT re-add --disable-web-search or --tools "" unconditionally —
+  # they are reserved for the no-jail fail-closed degrade below.
   local cwd_args=()
   local repo
   repo="$(_repo_root)"
@@ -703,9 +726,19 @@ run_grok() {
     echo "warning: grok could not resolve repo root (git rev-parse) — running without --cwd" >&2
   fi
 
+  # FAIL CLOSED without the OS jail: grok's file+web tools with no read-deny
+  # boundary would re-open the exfil channel 0.5.x closed by flags. Degrade to
+  # the 0.5.x posture (tool-less, no web) and say so — the review still runs on
+  # the inlined diff, just without exploration.
+  local tool_args=(--tools "$GROK_TOOLS")
+  if ! _jail_available grok; then
+    echo "warning: no sandbox-exec/bwrap — grok degraded to tool-less/no-web (fail closed; read+web needs the OS secret-jail)" >&2
+    tool_args=(--tools "" --disable-web-search)
+  fi
+
   local raw rc=0
   raw="$(sandboxed grok grok -m "$grok_model" --effort "$effort" \
-      --tools "$GROK_TOOLS" \
+      ${tool_args[@]+"${tool_args[@]}"} \
       ${cwd_args[@]+"${cwd_args[@]}"} \
       --json-schema "$(cat "$schema")" \
       --single="$prompt" </dev/null 2>/dev/null)" || rc=$?
