@@ -31,6 +31,12 @@
       "source": "./plugins/swarm",
       "description": "Local mixture-of-agents code review for Claude Code. Fans a diff across Claude lenses plus the codex and grok CLIs (grok-4.5), merges by mechanism with cross-family consensus, verifies solo findings and all design suggestions, and presents one ranked report. Optional --fix / --loop applies the findings you agreed with; --pr reviews a GitHub PR diff and posts the result. Skills: /swarm:review, /swarm:agents.",
       "version": "0.5.1"
+    },
+    {
+      "name": "settings",
+      "source": "./plugins/settings",
+      "description": "Plugin settings system for Claude Code marketplaces. Per-plugin TOML config resolved over schema defaults: list, show, get, set, validate. Each plugin owns its config file, defaults, and validation schema.",
+      "version": "0.1.0"
     }
   ]
 }

@@ -244,3 +244,8 @@ entries are grouped per plugin, newest first.
 
 ### 0.1.0 — 2026-07-03
 - Initial swarm plugin: local mixture-of-agents review adapter (P1).
+
+## settings
+
+### 0.1.0 — 2026-07-16
+- Initial settings plugin (phase 1: config surface). Per-plugin TOML config resolved over schema defaults, with `list` / `show [--overrides]` / `get` / `set` / `unset` / `validate` / `defaults` via `scripts/settings.py` (Python 3.11+ stdlib) and the `/settings` skill. Each plugin owns a `schema/settings.schema.json` (types, enums, defaults, config filename); work-system, knowledge-system, and pr-flow ship schemas whose defaults match current behavior. Includes a `[related_projects]` sibling-project address book (path-existence warnings, not errors). Consumer wiring lands in a follow-up.

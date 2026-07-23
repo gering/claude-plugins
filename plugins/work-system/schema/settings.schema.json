@@ -1,0 +1,90 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "work-system settings",
+  "x-plugin": "work-system",
+  "x-config-file": ".work-system.toml",
+  "type": "object",
+  "properties": {
+    "paths": {
+      "type": "object",
+      "description": "Where work-system stores tasks, worktrees, and Claude config.",
+      "properties": {
+        "tasks_dir": {
+          "type": "string",
+          "default": "tasks",
+          "description": "Directory holding task markdown files, relative to the repo root."
+        },
+        "worktrees_dir": {
+          "type": "string",
+          "default": ".claude/worktrees",
+          "description": "Directory that holds task worktrees. Default matches current behavior; the neutral `.worktrees` target is opt-in via [compat].prefer_neutral_worktrees."
+        },
+        "claude_settings_file": {
+          "type": "string",
+          "default": ".claude/settings.json",
+          "description": "Claude Code settings file copied into new worktrees when auto_copy_claude_settings is on."
+        }
+      }
+    },
+    "branches": {
+      "type": "object",
+      "description": "Branch naming conventions.",
+      "properties": {
+        "task_prefix": {
+          "type": "string",
+          "default": "task/",
+          "description": "Prefix for task branches created by /kickoff (e.g. task/<name>)."
+        },
+        "backup_prefixes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["backup/", "archive/", "old/"],
+          "description": "Branch prefixes treated as non-task backups when resolving task names."
+        }
+      }
+    },
+    "behavior": {
+      "type": "object",
+      "description": "Operational toggles.",
+      "properties": {
+        "copy_task_to_worktree": {
+          "type": "boolean",
+          "default": true,
+          "description": "Copy the task file into the worktree on /kickoff instead of symlinking."
+        },
+        "task_filename": {
+          "type": "string",
+          "default": "TASK.md",
+          "description": "Filename the task file takes inside a worktree."
+        },
+        "auto_copy_claude_settings": {
+          "type": "boolean",
+          "default": true,
+          "description": "Copy claude_settings_file into new worktrees on /kickoff."
+        }
+      }
+    },
+    "compat": {
+      "type": "object",
+      "description": "Migration toggles between Claude-specific and neutral conventions. Storage only in this phase; no plugin consumes them yet.",
+      "properties": {
+        "prefer_neutral_worktrees": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, prefer a neutral `.worktrees` dir over `.claude/worktrees`. Off by default to match current behavior."
+        },
+        "allow_legacy_claude_worktrees": {
+          "type": "boolean",
+          "default": true,
+          "description": "Keep recognizing an existing `.claude/worktrees` dir during a migration."
+        }
+      }
+    },
+    "related_projects": {
+      "type": "object",
+      "x-semantic": "related-projects",
+      "default": {},
+      "description": "Address book of sibling projects this repo coordinates with. Each entry is `name = \"/abs/path\"`, or a table `name = { path = \"/abs/path\", role = \"backend\", tags = [\"api\"] }`. A missing path is a warning, not an error (machines differ). Storage/resolve only — no behavior yet."
+    }
+  }
+}
