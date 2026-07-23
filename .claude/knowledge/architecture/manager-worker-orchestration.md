@@ -1,0 +1,210 @@
+---
+title: "Manager/Worker Orchestration (design)"
+createdAt: 2026-07-18
+createdFrom: "session: design-manager-worker-orchestration 2026-07-18"
+pluginVersion: 1.8.1
+prime: false
+---
+
+# Manager/Worker Orchestration (design)
+
+Design decisions for evolving work-system from fire-and-forget kickoffs into a
+coordinated Manager/Worker model. This is the **decision record**; the
+implementation is spawned across tasks `add-lane-registry`, `spike-agent-mail-substrate`
+(decided 2026-07-19 — see the mailbox section; no open task file),
+`add-lane-mailbox`, `add-manager-watch-loop`, `extend-worker-autonomy`,
+`add-merge-sequencer`, `add-roadmap-skill`, `add-mailbox-statusline`, and
+`add-agent-broadcast` (follow-up). Full working notes: the design task's `DESIGN-NOTES.md`.
+
+## The model
+- **Manager** = the Claude Code session at the main repo root (herdr `◉` tab). A
+  *coordinator*, not a merge robot — the human stays merge authority unless
+  explicitly delegated at kickoff.
+- **Worker** = one {claude|codex|grok} session per worktree, driving its task to a
+  reviewed, mergeable PR.
+- **Lane** = `(worktree_path, task, branch)`. **Identity = worktree_path** — the one
+  key stable across agent types and restarts. herdr pane/tab, `agent_status`,
+  session UUID, PR state are live-attached attributes, **never identity**. Only the
+  task file persists; everything else is derived live (no lane registry file, no
+  stashed ids).
+
+## Gate verdict (herdr substrate, verified live 2026-07-16, herdr 0.7.0)
+- An `agent start`-launched tab **does** expose a pollable `agent_status` ∈
+  `idle|working|blocked|done|unknown`. `blocked` (worker on an input/permission
+  prompt) is the primary "needs the Manager" signal. Poll via `agent list`/`agent
+  get`; **bounded** block-wait via `agent wait --status … --timeout` (no busy loop).
+- Status is produced by **installed hook integrations** merged with a TUI-scrape
+  rule engine (`agent explain`), NOT self-reported by the agent.
+- `agent read --source recent` returns clean text incl. Claude's `※ recap:` line +
+  statusline. This entry **records the resolution** of the previously-UNVERIFIED
+  agent-status flag in [herdr-kickoff-automation](../features/herdr-kickoff-automation.md) /
+  [herdr-close-automation](../features/herdr-close-automation.md) and **supersedes** their
+  `idle|working|done` enum with `idle|working|blocked|done|unknown`. Those two entries still
+  carry the old enum (refresh pending) — this ADR is the current source until then.
+
+## Cross-agent constraint (workers may be claude, codex, OR grok)
+The Manager is always Claude Code. Workers are tiered by herdr integration:
+- **claude, codex** — installed hook (`herdr-agent-state.sh`) → authoritative status
+  **+ session UUID**; `agent read` carries branch+`PR#` (claude also `※ recap:`).
+- **grok** — **no installable integration, no session UUID**, TUI-scrape-only status
+  (coarse; `blocked` unlikely), minimal `agent read`.
+→ The orchestration **contract is expressed in git/PR terms**, the ONE channel
+uniform across all three (every agent produces commits/branches/PRs). `agent_status`
+is a coarse liveness layer; `agent read` is best-effort detail, parsed *per agent
+type*, never format-required. Agent-specific skills (`/open`, `/rebase`) are each
+worker's *implementation* of hitting agent-agnostic milestones — soft-coupling
+([skill-composition](skill-composition.md)) applied across agent types.
+
+## Worker↔Manager mailbox (the coordination substrate)
+A file mailbox carries judgment/intent signals that have no git artifact.
+- **Central `~/.agent-mail/` — NOT per-worktree** (decided 2026-07-19; the community
+  "agent mail" name). Participant id = **encoded canonical worktree root** (`git rev-parse
+  --show-toplevel`, per [cwd-safety](../../rules/cwd-safety.md) — never raw `cwd`, which
+  differs for a subdirectory launch and would split a lane's mail across two dirs); a hook
+  derives its dir: `~/.agent-mail/lanes/<enc(root)>/{outbox,inbox}/`. Central over
+  `<root>/.mailbox/` because (a) it is the rendezvous for **broadcast / cross-Manager**
+  (below), (b) never-commit is automatic (outside every repo — no per-repo gitignore),
+  (c) no cross-worktree-boundary writes. Survives `/close` removing the worktree.
+  **Lifecycle:** `/close` **drains the lane's mailbox to the Manager before teardown**, and
+  a reader **guards against stale mail** (envelope `id`/`ts` + a worktree-exists check) so a
+  new task at a *reused* path never reconsumes a prior occupant's undrained message (e.g. a
+  late `rebase` intent). Undrained-after-teardown mail is caught by the Manager dead-letter
+  sweep (`add-manager-watch-loop`).
+- **Prior art & substrate (researched 2026-07-19; spike-first decided).** Our design is
+  the recognized **inbox/outbox pattern**, and **AMQ** (`avivsinai/agent-message-queue`,
+  Go single binary) is startlingly close (Maildir delivery, `.agent-mail` store,
+  swarm/agent-teams mode, federation, presence, wake). `spike-agent-mail-substrate`
+  **decided (2026-07-19): adopt AMQ core messaging as the transport** behind a soft-coupled
+  adapter (like swarm's codex/grok). **AMQ is a prerequisite, not reimplemented** — absent ⇒
+  a `brew install` hint + degrade to the git/PR floor + manual relay (no thin-Maildir
+  fallback; that floor already exists, and a missing mailbox ≈ today's fire-and-forget, so no
+  regression). We use AMQ's own envelope + store (AMQ-native). **`amq swarm` is NOT used at
+  all**: despite the name it is a *bridge to Claude Code's native "Agent Teams"* (shared task
+  list at `~/.claude/tasks/{team}/`), a competing orchestration substrate (no worktrees, no
+  PR/CI grounding, grok can't join without the bridge). We call only `send`/inbox-outbox/
+  `who`/`receipts`/`dlq`/`wake`. AMQ owns transport; herdr-derived lanes own state. The
+  mechanics are fixed: **Maildir** (atomic `rename()`,
+  no locking, `tmp/new/cur`, one file per message — supersedes the earlier append-JSONL +
+  byte-offset idea; unread = files in `new/`, read = moved to `cur/`) and **AMQ's own JSON
+  envelope** (`{schema, id, from, to[], thread, subject, created, priority, kind}`; our 5
+  semantic types map onto `kind`+`subject`+body). **CloudEvents / A2A** stay *conceptual*
+  alignment (A2A's Task lifecycle maps to our lane states) for a future HTTP bridge — not the
+  on-disk format now that we're AMQ-native.
+- **Message types:** `ready-to-close`, `blocked-on-decision`, `coordination-request`,
+  `needs-human`, `broadcast-request`.
+- **Topology — outbox + inbox, NOT inbox-only.** Each participant writes **only its
+  own outbox**; the Manager is the **only** writer of any inbox. Buys: single writer
+  per mailbox (Maildir already makes concurrent delivery lockless), no cross-participant
+  writes by a worker, and the **single-sequencer invariant** — worker→worker messages are
+  *addressable* but **route through the Manager** (it drains outboxes, delivers to
+  inboxes, may reorder/veto/batch). Workers never write another lane's inbox. **Over AMQ**
+  this means a worker `amq send`s **only to the Manager handle** — never `--to <other-worker>`,
+  which delivers straight into a peer's Maildir and bypasses the sequencer; the Manager
+  re-sends to the target. `send` is the outbox-write + Manager-relay transport, not a
+  peer-delivery channel.
+- **`ready-to-close` is worker-authoritative + a handoff report.** Only the worker knows
+  if a *second* PR is open or a post-merge TODO remains — a single PR's `✓ merged` is a
+  soft "near-done" hint, NOT a close trigger. The message carries the worker's fresh
+  context as `{summary, follow_ups[], deploy?, updates[], learnings[]}`: `follow_ups` →
+  Manager `/define`; `deploy` runs **from main after merge** (Manager-at-main model);
+  `updates` = dependency/config recommendations (e.g. a plugin bump); `learnings` →
+  Manager `/curate`. The Manager acts on these, then it/human runs `/close`.
+
+## Broadcast + cross-Manager (follow-up phase; central location adopted now)
+The central store unlocks system-wide coordination across the *multiple Managers* a
+machine runs (one per project). Reuse **AMQ's native fan-out + presence/federation** here
+too — a shared broadcast handle every Manager subscribes to, discovery via AMQ
+`who`/presence — **not** a hand-rolled multi-writer `global.jsonl`, which would re-introduce
+the append + byte-offset model Maildir already superseded for lane mail (concurrent-append
+corruption, offset skew). Use: system-wide notices, or capability queries ("who has
+Cloudflare access?") answered point-to-point into the asker's inbox.
+**Single-sequencer up a level:** a worker emits `broadcast-request` and its **Manager**
+decides/posts; **Managers peer-to-peer** (they are the coordinators). Aligns with
+`plugin-settings-system`'s `[related_projects]` peering registry. Broadcast + registry
+ship as a dedicated follow-up (`add-agent-broadcast`), not the Wave-1 core.
+
+## Why not Claude Code Agent Teams (the native alternative)
+CC's experimental **Agent Teams** (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`; lead spawns
+teammate processes, shared task list at `~/.claude/tasks/{team}/`, mailbox at
+`~/.claude/teams/{team}/inboxes/`) solves a *different* problem: short-lived, **Claude-only**,
+single-working-tree fan-out inside one session. Four blockers rule it out as our base: (1)
+teammates ARE Claude processes → no codex/grok (our hard requirement); reaches externals only
+via the AMQ bridge we use natively. (2) **No worktree isolation** → can't do N parallel
+independent PRs. (3) Task status is **self-reported** (documented "teammate forgets
+`completed`" bug) vs. our git/PR-artifact grounding. (4) No PR/review/merge/deploy lifecycle —
+our four pillars. Also session-scoped/ephemeral (team config dies with the lead) vs. our
+persistent worktree-lanes. **Complementary, not competing** — and both converge on the same
+Maildir envelope (AMQ mirrors AT's `kind/priority/thread/receipts`), so a lane could later be
+bridged to an AT team. Worth stealing now: AT's `TeammateIdle` hook validates our
+Notification-hook auto-emit (T4); its dependency-aware auto-unblock informs the merge
+sequencer (T5) / roadmap waves (T6).
+
+## Push without polling — Claude Code hooks first
+Files are pull; hooks make delivery push-like at turn boundaries, all gated by a
+cheap check (Maildir ⇒ unread = files in `inbox/new/`, a `readdir`):
+- **Stop hook** (turn end): new files in `inbox/new/` → `decision:block` +
+  `additionalContext` injects them so the worker continues, then moves them to `cur/`.
+  Respect `stop_hook_active` (exit 0 when true) + block only when genuinely new → no
+  loop / 8-block cap. Injected text is context; the worker still applies its own
+  autonomy gates.
+- **SessionStart(`resume`)**: pull what arrived while closed. **UserPromptSubmit**:
+  belt-and-suspenders prepend.
+- **Notification hook** (`permission_prompt`/`idle_prompt`) auto-emits
+  `blocked-on-decision`/`needs-human` to the outbox — worker-stuck detection becomes
+  push, no Manager poll.
+- **Manager** drains all outboxes at its own Stop/UserPromptSubmit boundaries.
+- The **one gap**: a worker idle *at the prompt* (already Stopped). Only here does a
+  herdr **idle-wake ping** (`agent send` onto idle) earn its keep. Optional.
+Hooks are Claude-Code-specific → reinforces **claude-first**; codex/grok stay
+poll/Manager-inferred until they grow equivalents.
+
+## Worker autonomy arc (milestone-defined, agent-tiered)
+Default arc = git/PR **milestones**: `commits → push → PR open → review pass →
+ready-to-close`. claude self-drives via work-system/pr-flow/swarm; codex/grok drive
+to *PR open* with `gh`, and the **Manager fills the review gap** (`/swarm:review --pr
+N` — any agent's PR is a valid target). Kickoff **pre-authorizes** commit/push/PR/
+review/own-branch-rebase/agreed-fixes. **Stop-early gates** (→ `blocked`/escalate):
+failing CI, scope drift, any destructive/irreversible step, **merge to main** (never
+without explicit delegation), force-push beyond own-branch lease, any human decision.
+
+## Merge sequencing — deterministic decision helper
+`merge-sequencer.sh` (a *decision* helper, not an actor) over the lanes view outputs:
+mergeable-now (`◆` + CI green + no conflict) and, after a merge, rebase-due lanes
+(behind main ∧ file overlap). One PR at a time; the human authorizes each; the
+Manager sends rebase intents. The `marketplace.json`+`plugin.json` version-line
+collision is baked in. Encodes today's ROADMAP prose rule as a script (prose-drift).
+
+## Roadmap — a derived view, co-equal with the GH board
+Source of truth = task files + git/PR state. `ROADMAP.md` and the future GH board
+(see task `design-github-projects-task-source`) are **two derived views**, not
+competing sources — ROADMAP is the local/offline projection, the board the
+shared/online one; both read the same `states`/`task-status.sh` substrate. Inside
+ROADMAP.md, a marker-delimited **Manager-auto block** (per-lane state ○●◇◆✓, PR#,
+version) is regenerated from the lanes view; the **human-curated block** (waves,
+serialization policy, rationale) is never machine-touched (idempotent-scaffolding:
+absorb-unmarked, never overwrite user content). Owned by a new `/roadmap` skill;
+`/list` stays the ephemeral snapshot.
+
+## Safety envelope (cross-cutting)
+Fail-closed pane id (reuse `worktree-tab-state` tri-state — never inject into an
+unverified pane); no force-push beyond own-branch `--force-with-lease`, never
+shared/main; no merge-to-main without delegation; bounded herdr waits, survey refresh
+`--cached`; grok `always-approve` ⇒ Manager sends nothing destructive to a grok lane.
+
+**Trust model (accepted residuals, single-user local tool):** the envelope `from` is
+self-declared and single-writer is a cooperative protocol — a *same-account* process could
+forge a message, but every agent already runs under the user's account and consequential
+actions stay human-gated, so it grants no new privilege. The central `~/.agent-mail/` is
+home-dir readable across projects; accepted for a single-user machine (any home-read process
+already sees SSH/cloud creds), not hardened for a shared host.
+
+## Reused existing substrate (build ON, don't reinvent)
+- `ws-statusline.sh states [--cached] <workspace-dir>` → `task\tstate\tglyph` = a ready-made
+  lane registry with states; the state machine ○●◇◆✓ + `◉` and the tab↔worktree join
+  already exist in [herdr-tab-glyphs](../features/herdr-tab-glyphs.md).
+- The PR cache (`headRef\tstate\treviewDecision`) + sync/`--cached` refresh policy.
+
+Related: [skill-composition](skill-composition.md),
+[idempotent-scaffolding](idempotent-scaffolding.md),
+[herdr-kickoff-automation](../features/herdr-kickoff-automation.md),
+[herdr-tab-glyphs](../features/herdr-tab-glyphs.md).
