@@ -188,18 +188,22 @@ note into the worktree is an optional way to give them standing task guidance.
 ## herdr integration
 
 When you run the work system inside a **herdr** session (herdr is a terminal
-multiplexer for AI coding agents), `/kickoff` and `/close` automate the terminal
-juggling you'd otherwise do by hand — `/kickoff` opens the task's tab, `/close`
-tears it down. They activate when `HERDR_ENV=1`, a herdr workspace id is set, and
+multiplexer for AI coding agents), `/kickoff`, `/adopt`, and `/close` automate the
+terminal juggling you'd otherwise do by hand — `/kickoff` and `/adopt` open the
+task's tab, `/close` tears it down. They activate when `HERDR_ENV=1`, a herdr workspace id is set, and
 both `herdr` and `python3` are on `PATH`; if any prerequisite is missing or the
 socket is unreachable they fall back to the plain, herdr-free behaviour, so you're
 never left stranded. Outside herdr, every skill behaves exactly as documented above.
 
-### `/kickoff` opens a named tab
+### `/kickoff` and `/adopt` open a named tab
 
 Inside herdr, `/kickoff` doesn't just create the worktree and print manual
 instructions — it opens a new herdr **tab** in the *same* workspace, with the
-worktree as its cwd, and starts the task there for you:
+worktree as its cwd, and starts the task there for you. `/adopt` does exactly the
+same once it has created the worktree from an existing branch — same helper, same
+tab, same worker selection (`--opus`/`--sol`/`--grok`/`--pick`, or the repo default);
+its tab label comes from the *resolved* task name, so it's sensible even when `/adopt`
+keeps the original branch name rather than renaming it to `task/<name>`:
 
 - The tab is **named after the task** (shortened for a readable sidebar — see
   `skills/kickoff/SKILL.md` step 13 for the exact rule), so the sidebar shows one
@@ -306,7 +310,10 @@ keep the plain label, since those are stable identities.
 Already started work on a branch outside the work system? Use `/adopt` to bring it in:
 
 ```
-> /adopt feature/dark-mode
+> /adopt feature/dark-mode              # repo default worker
+> /adopt feature/dark-mode --opus       # claude on opus
+> /adopt feature/dark-mode --sol        # codex on gpt-5.6-sol
+> /adopt feature/dark-mode --pick       # force the interactive picker
 ```
 
 This will:
@@ -314,6 +321,9 @@ This will:
 2. Generate a task file from that context
 3. Optionally rename the branch to `task/<name>` for consistency
 4. Create a worktree and set everything up
+5. Inside a [herdr](#herdr-integration) session, open the task's tab and start the
+   chosen worker there (same auto-launch as `/kickoff`); outside herdr it prints the
+   manual launch command instead
 
 After adoption, the standard workflow applies (`/continue`, `/status`, `/close`).
 

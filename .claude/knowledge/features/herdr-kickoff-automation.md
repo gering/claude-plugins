@@ -1,10 +1,10 @@
 ---
 title: "herdr /kickoff + /continue-reopen Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-07-21
+updatedAt: 2026-07-23
 createdFrom: "PR #17"
-updatedFrom: "session: 2026-07-21 (fully-qualify kickoff's /continue)"
-pluginVersion: 1.9.2
+updatedFrom: "session: 2026-07-23 (adopt auto-launch reuses launch)"
+pluginVersion: 1.9.3
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -14,7 +14,8 @@ reindexedAt: 2026-07-12
 Inside a herdr session, `/kickoff` replaces its manual "open a terminal yourself"
 block with an automated tab launch. The launch lives in one shared, testable
 helper — `plugins/work-system/scripts/herdr-launch.sh` — with two subcommands:
-`launch` (called from `skills/kickoff/SKILL.md` step 13) and `resume` (called from
+`launch` (called from **both** `skills/kickoff/SKILL.md` step 13 and
+`skills/adopt/SKILL.md` step 13 — see the adopt note below) and `resume` (called from
 `skills/continue/SKILL.md`'s reopen path — the main session with a `<task>` arg, or
 a *different* task's name given from inside a worktree). The helper is the source of
 truth; this entry captures the durable design and one non-obvious gotcha.
@@ -23,10 +24,10 @@ truth; this entry captures the durable design and one non-obvious gotcha.
 
 - **Encapsulate the launch in a script, not skill prose.** The deterministic
   sequence (gate → `agent start` → robust pane-id parse → `pane move` → exit code)
-  lives in `herdr-launch.sh` so it can be `bash`-tested and reused (e.g. by a
-  future `/adopt` automation), per the project's helper-script convention and the
-  "prose skill logic drifts" memory. The skill only derives the label and branches
-  on the helper's `moved=yes|no` / exit code.
+  lives in `herdr-launch.sh` so it can be `bash`-tested and reused — realized in
+  work-system 1.9.3 by `/adopt` (see the adopt note below) — per the project's
+  helper-script convention and the "prose skill logic drifts" memory. The skill only
+  derives the label and branches on the helper's `moved=yes|no` / exit code.
 - **Spawn the worker as argv, never type it into a shell.** The launch is
   `herdr agent start "<label>" … -- <worker argv>`, which execs the worker binary
   directly. As of work-system 1.9.0 the worker argv is **resolved from the chosen
@@ -112,6 +113,29 @@ truth; this entry captures the durable design and one non-obvious gotcha.
   (new, mirrors `test_agent_registry.py`'s stub-the-CLI-on-PATH pattern) locks
   in all of this — every case above, plus the stdout contract, as regression
   coverage the first round shipped without.
+
+## `/adopt` auto-launch: reference kickoff's prose, don't duplicate it
+
+work-system 1.9.3 gave `/adopt` the same in-herdr tab launch as `/kickoff`: after it
+builds the worktree from an existing branch, `skills/adopt/SKILL.md` step 13 calls the
+identical `herdr-launch.sh launch "$LABEL" "$WORKTREE" "$HERDR_WORKSPACE_ID" "$SELECTOR"`
+(step 12 resolves the worker selector exactly as kickoff does — `/adopt` grew an
+optional `[agent-selector]` arg for it). Two durable decisions:
+
+- **One copy of the intricate branching.** The launch *helper* is already the single
+  source of truth for the mechanics, but the *skill prose* around it (the picker/announce
+  rules of step 12, and the exit-0-`moved`/exit-2/exit-3/non-zero result branching of
+  step 13) is stateful logic that drifts if copied — the "prose skill logic drifts"
+  memory. So adopt's steps **reference** `kickoff/SKILL.md` step 12/13 for that shared
+  logic and inline only the adopt-specific deltas, rather than a full paraphrase that
+  would silently diverge under later edits.
+- **Adopt-specific deltas that must stay inline.** (1) The `LABEL` derives from the
+  *resolved* task name (prefix-stripped), because `/adopt` may **keep the original
+  branch name** rather than rename to `task/<name>` — deriving from the branch would
+  give a nonsense label. (2) The success/manual templates show `<current-branch-name>`
+  (the adopted branch, possibly not `task/<name>`), not kickoff's assumed `task/<name>`.
+  (3) The worktree path is built from the `<main-repo>` captured in adopt step 1, never a
+  possibly-drifted CWD (adopt runs in the main-repo session — its whole cwd-safety spine).
 
 ## `resume` mode: reopen a task tab a `/exit` closed
 
