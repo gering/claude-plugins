@@ -84,17 +84,22 @@ requires ≥2 of *claude / openai / grok*. Everything else is a solo and earns
 its place through the verifier. Only **tagged topical-defect** consensus is
 auto-accepted; design, all-untagged, and Claude-unchecked methodological
 consensus still go through the verifier (agreement isn't repo-grounded
-applicability — diff-only externals can share a hallucination).
+applicability — externals can still share a hallucination).
 
-**Security is minimal by design.** Untrusted text is fenced with a per-run
+**Security is layered by design.** Untrusted text is fenced with a per-run
 random nonce at both hops — the diff going into the backends, and the finding
 text they send back into the merge/verify prompts (closing second-order
-injection). The external CLIs run sandboxed + tool-less (grok) with a secret
-scrub at the adapter boundary, and a final **output gate** re-scrubs every
-surviving finding before it reaches you. Findings are advisory by default; `--fix` / `--loop` act
-only on the ones you agreed with, and **only Claude** applies edits — the
-external agents stay review-only, never touching your code. The full threat
-model lives in `docs/pipeline-blueprint.md` § Security.
+injection). External CLIs run **read+web** (file-read to find out-of-diff bugs;
+web for external knowledge only) under an OS secret-jail that denies HOME secret
+stores and repo-root `.env*`/`data/`/key files (root-level; nested via
+`SWARM_DENY_PATHS`) — no write/shell tools. A prompt
+egress guard forbids putting repo content into web queries (model-cooperation-
+dependent; the jail is the hard boundary). A secret scrub at the adapter
+boundary plus a final **output gate** re-scrub findings before they reach you.
+Findings are advisory by default; `--fix` / `--loop` act only on the ones you
+agreed with, and **only Claude** applies edits — external agents stay
+review-only. The full threat model lives in `docs/pipeline-blueprint.md`
+§ Security.
 
 ## Architecture
 
@@ -116,8 +121,8 @@ Backends:
 | Backend | Role | Mechanics |
 |---------|------|-----------|
 | `claude` | probe-only | reviews run in-session via the Agent tool |
-| `codex` | external reviewer | `codex exec --output-schema` (model `gpt-5.6-terra`, effort `xhigh`) in a read-only sandbox; auth via `codex login status` |
-| `grok` | external reviewer | headless `-p` with inline `--json-schema` (model `grok-4.5`, the only supported grok model); findings extracted from the response envelope. Readiness is model-aware: auth **and** `grok-4.5` present in `grok models`, since the CLI drops/renames models between releases. The model check falls back to auth alone — with a warning, never silently — if the probe can't produce a clean answer (no coreutils `timeout`, non-zero exit, or an unparseable list). |
+| `codex` | external reviewer | `codex exec -s read-only -C <repo> -c tools.web_search=true --output-schema` (model `gpt-5.6-terra`); file-read + web under read-only; auth via `codex login status` |
+| `grok` | external reviewer | headless `--single=` with inline `--json-schema` (model `grok-4.5`, the only supported grok model); strict `--tools` allowlist (`read_file,list_dir,grep,web_search,web_fetch`) + `--cwd <repo>` — no write/shell. Readiness is model-aware: auth **and** `grok-4.5` present in `grok models`. |
 
 Unavailable backends drop from the ensemble — `claude` alone still works.
 `/swarm:review` reports a backend that *errored* mid-run distinctly from one

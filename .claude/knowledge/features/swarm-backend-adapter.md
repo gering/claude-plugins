@@ -1,10 +1,10 @@
 ---
 title: "Swarm Backend Adapter Layer"
 createdAt: 2026-07-03
-updatedAt: 2026-07-17
+updatedAt: 2026-07-20
 createdFrom: "PR #21"
-updatedFrom: "PR #37"
-pluginVersion: 1.8.2
+updatedFrom: "open-swarm-external-exploration"
+pluginVersion: 0.6.0
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -19,7 +19,54 @@ The script header documents the per-backend mechanics; this entry captures the
 *verified* CLI behavior the adapter is built on and the gotchas that cost a
 debugging round.
 
-## Verified CLI facts (codex 0.128 / grok 0.2.101, 2026-07)
+## Posture (swarm 0.6.0 — read + web, hardened egress)
+
+External voices are **no longer tool-less / inline-only**. Both may read
+project files and research online so they can find bugs that live outside the
+inlined diff (callers, config, types, library/CVE knowledge).
+
+| Voice | File-read | Web | Write/shell | Scope |
+|-------|-----------|-----|-------------|-------|
+| **codex** | yes (`-s read-only` already permits FS reads) | yes (`-c tools.web_search=true`; works under read-only, no sandbox loosen) | no (`-s read-only` only — never `workspace-write` / `danger-full-access`) | `-C <repo-root>` (working root; do **not** use `--add-dir`, which grants writable dirs) |
+| **grok** | yes (`read_file,list_dir,grep` in `--tools` allowlist) | yes (`web_search,web_fetch` in the same allowlist; drop `--disable-web-search`) | no (strict allowlist — never admit `write` / `search_replace` / `run_terminal_command` / …) | `--cwd <repo-root>` |
+
+**Security layers (do not soften or over-claim):**
+
+1. **OS secret-jail (hard boundary).** `_sandbox_deny_paths` / `sandboxed()` deny
+   HOME secret stores per-backend (a backend keeps its own cred dir; siblings'
+   stay denied) **plus** **repo-root** `.env*`, `data/`, `*.pem`, `id_*`, `*.key`
+   when they exist. The repo-local globs are **root-level only** (not recursive):
+   a nested `apps/api/.env` is NOT auto-denied — add it (or a parent) via
+   `SWARM_DENY_PATHS` (colon-separated absolute paths). Root-only is deliberate
+   (minimal, cross-platform: bwrap can't regex, and a recursive glob would bloat
+   the profile on large trees); HOME credential stores — the historical exfil
+   vector — are covered in full regardless of depth. Dropping the jail was
+   explicitly rejected.
+2. **Egress guard (prompt policy, model-cooperation-dependent).** A HIGH-
+   PRIORITY instruction in the external prompt header (OUTSIDE the untrusted-
+   diff fence) requires: web/research is for EXTERNAL general knowledge only
+   (API docs, standards, CVE/library semantics); NEVER put repository content —
+   diff hunks, source, config, file contents, project identifiers, or any
+   secret — into a search query or fetched URL; frame every query in the
+   abstract. This is **not** transport-level enforcement: we instruct the model
+   but cannot filter the queries a web-enabled CLI formulates internally. It is
+   strong against careless leakage and a real hurdle for injection, but **not**
+   a hard boundary like the removed `--disable-web-search`.
+3. **Residual risk (state honestly).** With web always on, the kept+extended
+   secret-jail is what bounds blast radius: even if an injection defeats the
+   prompt guard, HOME credential stores (full depth) and **repo-root**
+   `.env*`/`data/` stay unreadable at OS level, so what *can* be exfiltrated is
+   limited to non-secret project content — **except** nested repo secrets not
+   covered by the root-only globs (see layer 1: add them via `SWARM_DENY_PATHS`).
+   `scrub_secrets` (bash) + `scrubField` (JS) filter **OUTPUT only**, not a
+   query the model issues mid-run.
+4. **No write/shell/network-write tools.** Review is read-only for both voices.
+
+The 120-KiB inline-diff cap is **unchanged** in 0.6.0; file-read now makes a
+future reduction of inlining possible (have the agent read the file itself) —
+coordinate that separately, do not duplicate transport work here.
+
+## Verified CLI facts (codex 0.144.6 / grok 0.2.103, 2026-07)
 
 - **Uniform findings JSON** is achievable from both CLIs: `codex exec
   --output-schema <file>` and `grok --json-schema '<inline>'` both enforce a
@@ -133,10 +180,17 @@ debugging round.
     (`grok_model_fetch; local list="$_grok_models"`).
   This mirrors work-system's `agent-registry.sh`, which learned the same lesson
   at task-launch time.
-- **Headless tool execution**: both CLIs run read-only commands (e.g.
-  `git diff`) without extra approval flags — codex inside `-s read-only`
-  sandbox, grok headless `-p` auto-approves read-only tools. So lens prompts
-  may either inline the diff or instruct the agent to read it itself.
+- **Headless tool execution**: both CLIs run read-only tools without extra
+  approval flags — codex inside `-s read-only` (web_search is model-native and
+  does not need the sandbox loosened), grok with a strict `--tools` allowlist
+  auto-approves the listed tools. So lens prompts may either inline the diff or
+  instruct the agent to read project files itself (and research external
+  knowledge under the egress guard).
+- **grok `--tools` is a STRICT allowlist and gates web OFF too.** With only
+  `read_file,list_dir,grep`, web is unavailable. Web tool IDs (live 0.2.103):
+  `web_search`, `web_fetch`. Do not fall back to a broad denylist that could
+  admit a mutating tool — if web IDs cannot be verified, degrade to
+  read-only + warning, never silently open write/shell.
 
 ## Gotchas (found in E2E testing, fixed in the adapter)
 

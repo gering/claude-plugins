@@ -199,6 +199,12 @@ entries are grouped per plugin, newest first.
 
 ## swarm
 
+### 0.6.0 — 2026-07-20
+- **Posture change: external voices get file-read + always-on web research** (hardened egress). codex runs `-s read-only -C <repo> -c tools.web_search=true`; grok runs a strict `--tools` allowlist (`read_file,list_dir,grep,web_search,web_fetch`) + `--cwd <repo>` — no write/shell tools, no `--disable-web-search`. Enables out-of-diff bug finding and external knowledge (API docs, CVEs) without re-opening the secret-exfil hole.
+- **Keep + extend the OS secret-jail**: repo-**root** `.env*`, `data/`, `*.pem`, `id_*`, `*.key` join the HOME denylist (root-level only — nested secrets via `SWARM_DENY_PATHS`, which also takes per-repo extras). New `test_sandbox_deny.py` regression-checks the denylist (and e2e blocks a temp `.env` when `sandbox-exec` is present).
+- **Egress guard** in the external prompt header (outside the untrusted-diff fence): web is for external general knowledge only — never put repository content into a search query or fetched URL. Prompt-policy (model-cooperation-dependent), not transport-enforced; the secret-jail is the hard boundary. Residual risk documented in knowledge + SKILL posture block. `scrub_secrets` / output gate stay as output-only backstops.
+- Run-start notice once per review when external voices are live. Docs + knowledge rewritten off the old tool-less/inline-only claims.
+
 ### 0.5.1 — 2026-07-18
 - Make `--fix` re-confirm design-aware: a `kind: "design"` finding has no line-local defect to re-find, so an agreed (✅) design fix was silently reported skipped-stale and never applied. Step 1 now branches on kind — for design findings it re-confirms the suggestion still applies (reuse target / duplication / simpler form / waste still present), only skipping when that target is genuinely gone.
 - Make `--loop` converge on design churn: the tally made no defect/design distinction, so once only design suggestions remained (each applied simplification spawning a fresh one) it ran to the cap. `loop-closeout.py step` gains `--defects D` and a new `design-only` reason (fixed order: after no-change, before cap); `--pending` is now defect-scoped (design never holds the loop open). Omitting `--defects` disables the reason (legacy callers unaffected).
