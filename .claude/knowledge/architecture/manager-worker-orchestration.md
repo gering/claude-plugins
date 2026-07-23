@@ -10,7 +10,8 @@ prime: false
 
 Design decisions for evolving work-system from fire-and-forget kickoffs into a
 coordinated Manager/Worker model. This is the **decision record**; the
-implementation is spawned across tasks `add-lane-registry`, `spike-agent-mail-substrate`,
+implementation is spawned across tasks `add-lane-registry`, `spike-agent-mail-substrate`
+(decided 2026-07-19 — see the mailbox section; no open task file),
 `add-lane-mailbox`, `add-manager-watch-loop`, `extend-worker-autonomy`,
 `add-merge-sequencer`, `add-roadmap-skill`, `add-mailbox-statusline`, and
 `add-agent-broadcast` (follow-up). Full working notes: the design task's `DESIGN-NOTES.md`.
@@ -35,10 +36,11 @@ implementation is spawned across tasks `add-lane-registry`, `spike-agent-mail-su
 - Status is produced by **installed hook integrations** merged with a TUI-scrape
   rule engine (`agent explain`), NOT self-reported by the agent.
 - `agent read --source recent` returns clean text incl. Claude's `※ recap:` line +
-  statusline. This RESOLVES the previously-UNVERIFIED agent-status flag in
-  [herdr-kickoff-automation](../features/herdr-kickoff-automation.md) /
-  [herdr-close-automation](../features/herdr-close-automation.md) and adds `blocked`
-  to their documented `idle|working|done` set.
+  statusline. This entry **records the resolution** of the previously-UNVERIFIED
+  agent-status flag in [herdr-kickoff-automation](../features/herdr-kickoff-automation.md) /
+  [herdr-close-automation](../features/herdr-close-automation.md) and **supersedes** their
+  `idle|working|done` enum with `idle|working|blocked|done|unknown`. Those two entries still
+  carry the old enum (refresh pending) — this ADR is the current source until then.
 
 ## Cross-agent constraint (workers may be claude, codex, OR grok)
 The Manager is always Claude Code. Workers are tiered by herdr integration:
@@ -56,11 +58,18 @@ worker's *implementation* of hitting agent-agnostic milestones — soft-coupling
 ## Worker↔Manager mailbox (the coordination substrate)
 A file mailbox carries judgment/intent signals that have no git artifact.
 - **Central `~/.agent-mail/` — NOT per-worktree** (decided 2026-07-19; the community
-  "agent mail" name). Participant id = **encoded absolute path**; a hook derives its dir
-  from `cwd`: `~/.agent-mail/lanes/<enc(cwd)>/{outbox,inbox}/`. Central over
+  "agent mail" name). Participant id = **encoded canonical worktree root** (`git rev-parse
+  --show-toplevel`, per [cwd-safety](../../rules/cwd-safety.md) — never raw `cwd`, which
+  differs for a subdirectory launch and would split a lane's mail across two dirs); a hook
+  derives its dir: `~/.agent-mail/lanes/<enc(root)>/{outbox,inbox}/`. Central over
   `<root>/.mailbox/` because (a) it is the rendezvous for **broadcast / cross-Manager**
   (below), (b) never-commit is automatic (outside every repo — no per-repo gitignore),
   (c) no cross-worktree-boundary writes. Survives `/close` removing the worktree.
+  **Lifecycle:** `/close` **drains the lane's mailbox to the Manager before teardown**, and
+  a reader **guards against stale mail** (envelope `id`/`ts` + a worktree-exists check) so a
+  new task at a *reused* path never reconsumes a prior occupant's undrained message (e.g. a
+  late `rebase` intent). Undrained-after-teardown mail is caught by the Manager dead-letter
+  sweep (`add-manager-watch-loop`).
 - **Prior art & substrate (researched 2026-07-19; spike-first decided).** Our design is
   the recognized **inbox/outbox pattern**, and **AMQ** (`avivsinai/agent-message-queue`,
   Go single binary) is startlingly close (Maildir delivery, `.agent-mail` store,
@@ -88,7 +97,11 @@ A file mailbox carries judgment/intent signals that have no git artifact.
   per mailbox (Maildir already makes concurrent delivery lockless), no cross-participant
   writes by a worker, and the **single-sequencer invariant** — worker→worker messages are
   *addressable* but **route through the Manager** (it drains outboxes, delivers to
-  inboxes, may reorder/veto/batch). Workers never write another lane's inbox.
+  inboxes, may reorder/veto/batch). Workers never write another lane's inbox. **Over AMQ**
+  this means a worker `amq send`s **only to the Manager handle** — never `--to <other-worker>`,
+  which delivers straight into a peer's Maildir and bypasses the sequencer; the Manager
+  re-sends to the target. `send` is the outbox-write + Manager-relay transport, not a
+  peer-delivery channel.
 - **`ready-to-close` is worker-authoritative + a handoff report.** Only the worker knows
   if a *second* PR is open or a post-merge TODO remains — a single PR's `✓ merged` is a
   soft "near-done" hint, NOT a close trigger. The message carries the worker's fresh
@@ -99,10 +112,12 @@ A file mailbox carries judgment/intent signals that have no git artifact.
 
 ## Broadcast + cross-Manager (follow-up phase; central location adopted now)
 The central store unlocks system-wide coordination across the *multiple Managers* a
-machine runs (one per project). `~/.agent-mail/broadcast/global.jsonl` is the one
-multi-writer append log every Manager reads (offset-tracked); `managers/<enc>.json`
-presence files make Managers discoverable. Use: system-wide notices, or capability
-queries ("who has Cloudflare access?") answered point-to-point into the asker's inbox.
+machine runs (one per project). Reuse **AMQ's native fan-out + presence/federation** here
+too — a shared broadcast handle every Manager subscribes to, discovery via AMQ
+`who`/presence — **not** a hand-rolled multi-writer `global.jsonl`, which would re-introduce
+the append + byte-offset model Maildir already superseded for lane mail (concurrent-append
+corruption, offset skew). Use: system-wide notices, or capability queries ("who has
+Cloudflare access?") answered point-to-point into the asker's inbox.
 **Single-sequencer up a level:** a worker emits `broadcast-request` and its **Manager**
 decides/posts; **Managers peer-to-peer** (they are the coordinators). Aligns with
 `plugin-settings-system`'s `[related_projects]` peering registry. Broadcast + registry
@@ -176,8 +191,15 @@ unverified pane); no force-push beyond own-branch `--force-with-lease`, never
 shared/main; no merge-to-main without delegation; bounded herdr waits, survey refresh
 `--cached`; grok `always-approve` ⇒ Manager sends nothing destructive to a grok lane.
 
+**Trust model (accepted residuals, single-user local tool):** the envelope `from` is
+self-declared and single-writer is a cooperative protocol — a *same-account* process could
+forge a message, but every agent already runs under the user's account and consequential
+actions stay human-gated, so it grants no new privilege. The central `~/.agent-mail/` is
+home-dir readable across projects; accepted for a single-user machine (any home-read process
+already sees SSH/cloud creds), not hardened for a shared host.
+
 ## Reused existing substrate (build ON, don't reinvent)
-- `ws-statusline.sh states <main> [--cached]` → `task\tstate\tglyph` = a ready-made
+- `ws-statusline.sh states [--cached] <workspace-dir>` → `task\tstate\tglyph` = a ready-made
   lane registry with states; the state machine ○●◇◆✓ + `◉` and the tab↔worktree join
   already exist in [herdr-tab-glyphs](../features/herdr-tab-glyphs.md).
 - The PR cache (`headRef\tstate\treviewDecision`) + sync/`--cached` refresh policy.
