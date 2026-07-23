@@ -181,9 +181,27 @@ def resolve(schema: dict, user: dict) -> dict:
 # --------------------------------------------------------------------------- #
 
 
+def config_path(schema: dict, project_root: Path) -> Path:
+    """Resolve the override file path, rejecting a symlink at that name.
+
+    `config_filename()` vets the *name* (a schema-supplied path can't traverse
+    out), but the file on disk is a separate vector: a repo-controlled symlink at
+    the config name (`.work-system.toml -> ../../secret`) would make read leak an
+    outside file's contents (e.g. `~/.aws/credentials` is valid TOML) and write
+    follow the link out of the project root. A settings override is never
+    legitimately a symlink — refuse it for both read and write.
+    """
+    path = project_root / config_filename(schema)
+    if path.is_symlink():
+        raise SettingsError(
+            f"{path}: config file is a symlink — refusing to follow it"
+        )
+    return path
+
+
 def load_user_config(schema: dict, project_root: Path) -> dict:
     """Parse the plugin's override TOML, or {} when absent."""
-    path = project_root / config_filename(schema)
+    path = config_path(schema, project_root)
     if not path.exists():
         return {}
     try:
@@ -407,7 +425,7 @@ def dump_toml(data: dict) -> str:
 
 
 def write_user_config(schema: dict, project_root: Path, data: dict) -> Path:
-    path = project_root / config_filename(schema)
+    path = config_path(schema, project_root)  # rejects a symlink at the config name
     text = dump_toml(data)
     if text:
         path.write_text(text, encoding="utf-8")

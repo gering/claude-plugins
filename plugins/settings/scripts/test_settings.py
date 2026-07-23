@@ -199,6 +199,26 @@ def test_set_guards(project: Path):
     print("ok: set guards (#4 #5 #6 #8)")
 
 
+def test_symlink_config_refused(project: Path):
+    # A repo-controlled symlink at the config name must be refused for read AND
+    # write. Target is VALID TOML, so the refusal is the symlink guard, not a
+    # parse error — and a valid-TOML target (e.g. ~/.aws/credentials) is exactly
+    # the read-leak case.
+    cfg_path = project / ".demo.toml"
+    if cfg_path.exists() or cfg_path.is_symlink():
+        cfg_path.unlink()
+    target = project / "outside_target.toml"
+    original = '[paths]\ntasks_dir = "leaked"\n'
+    target.write_text(original, encoding="utf-8")
+    cfg_path.symlink_to(target)  # .demo.toml -> outside_target (a symlink)
+    assert run(["show", "demo", "--overrides"]) == 1  # read refused (no leak)
+    assert run(["set", "demo.paths.tasks_dir", "todo"]) == 1  # write refused
+    assert target.read_text() == original  # target untouched
+    cfg_path.unlink()  # remove the symlink, not the target
+    target.unlink()
+    print("ok: symlink config refused (read + write)")
+
+
 def test_coercion():
     assert settings.coerce_value("false", {"type": "boolean"}) is False
     assert settings.coerce_value("on", {"type": "boolean"}) is True
@@ -267,6 +287,7 @@ def main() -> int:
         test_config_filename_sandbox()
         test_coercion()
         test_set_guards(project)
+        test_symlink_config_refused(project)
         test_cli_set_get_unset(project)
         test_cli_list_show_validate()
     print("\nall settings tests passed")
