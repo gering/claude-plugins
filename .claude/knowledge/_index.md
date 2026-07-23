@@ -7,6 +7,7 @@
 - `architecture/idempotent-scaffolding.md` — Scaffolding into shared user files: absorb unmarked sections, lazy dirs, never overwrite user content
 - `architecture/worktree-task-file-copy.md` — Why `/kickoff` copies the task file into the worktree (not a symlink): no skill simplification, avoids accidental-commit repo poisoning + cross-platform fragility
 - `architecture/manager-worker-orchestration.md` — Design decisions for the coordinated Manager/Worker model: lane identity = worktree path, cross-agent (claude/codex/grok) git-as-uniform-bus, central `~/.agent-mail/` mailbox (Maildir/AMQ, outbox+inbox, hook-driven push), milestone worker autonomy, merge sequencer, roadmap-as-derived-view
+- `architecture/plugin-settings-system.md` — Per-plugin TOML config over schema defaults: ownership split (plugin owns schema+defaults, settings plugin owns resolve/validate/IO), defaults=current-behavior + `[compat]` migration, `[related_projects]` peer address book, consumer contract (read resolved via `settings.py get --json`), serializer/symlink/`set`-path hardening lessons
 
 ## Features
 - `features/backfill-and-origin-metadata.md` — `/backfill-knowledge` significance bar + origin-reconstruction cascade
