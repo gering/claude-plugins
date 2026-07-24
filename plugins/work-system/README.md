@@ -292,14 +292,16 @@ disagree); `scripts/herdr-tab-glyph.sh` applies it to the herdr tab label.
 
 The glyph is stamped when `/kickoff` or `/continue` opens the tab, and
 re-stamped — idempotently, only when it changed — whenever you survey or move
-task state: `/status`, `/list`, and `/close` refresh every open task tab of the
-repo, and the pr-flow skills (`/open`, `/merge`, `/cycle`, `/check`) trigger the
-same refresh, so `●` flips to `◇` when the PR opens, to `◆` when it is approved,
-and to `✓` when it merges. Survey surfaces (`/status`, `/list`, `/check`,
-`/close`) read the PR cache and never block; the state-changing skills (`/open`,
-`/merge`, `/cycle`) do a bounded synchronous `gh` refresh so the new state shows
-at once. The same refreshes stamp `◉` on the main-root tabs — no separate
-trigger. Only tabs sitting *exactly* at a task worktree or the main root are
+task state: `/status`, `/list`, `/close`, `/kickoff` (after launching the new
+tab), and `/define` (after writing the task file) refresh every open task tab
+of the repo, and the pr-flow skills (`/open`, `/merge`, `/cycle`, `/check`)
+trigger the same refresh, so `●` flips to `◇` when the PR opens, to `◆` when it
+is approved, and to `✓` when it merges. Survey surfaces (`/status`, `/list`,
+`/check`, `/close`, `/kickoff`, `/define`) read the PR cache and never block;
+the state-changing skills (`/open`, `/merge`, `/cycle`) do a bounded
+synchronous `gh` refresh so the new state shows at once. The same refreshes
+stamp `◉` on the main-root tabs — no separate trigger. Only tabs sitting
+*exactly* at a task worktree or the main root are
 renamed (one cd into a subdir and yours is left alone); a tab is renamed only
 when its label actually changes, your chosen label is kept and merely prefixed,
 and outside herdr everything is a silent no-op. The glyph lives in the **tab
