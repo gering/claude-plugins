@@ -14,9 +14,10 @@ user_invocable: true
 ## Arguments
 
 - `$ARGUMENTS` — `<branch> [agent-selector]`: optional branch name to adopt, plus an
-  optional worker-agent selector (same set as `/kickoff`: `--opus`, `--sol`, `--grok`,
-  `--codex`, `--agent <cli[:model]>`, `--pick`). The selector chooses the worker the
-  herdr auto-launch (step 13) starts; omit it to use the repo default.
+  optional worker-agent selector (same set as `/kickoff`: `--fable`, `--opus`, `--sol`,
+  `--grok`, `--codex`, `--agent <cli[:model]>`, `--pick`). The selector chooses the
+  worker the herdr auto-launch (step 13) starts; omit it to use the repo default. The
+  **branch is the token that does not start with `-`**; step 2 separates the two.
 
 ## Critical: never persist a `cd` into the worktree
 
@@ -38,9 +39,14 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
    - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path` → `<main-repo>` — capture
      it for the CWD-drift check in step 11.
 
-2. **Select branch**:
-   - If `$ARGUMENTS` provided, use as branch name
-   - Otherwise, list available branches:
+2. **Select branch** (separate it from any agent selector first):
+   - The **branch** is the `$ARGUMENTS` token that does **not** start with `-`. The
+     `--…` selector tokens (`--opus`, `--pick`, …) belong to step 12, never the branch;
+     `--agent` additionally **consumes the immediately-following token** as its value
+     (`cli[:model]`), so that token is not a branch candidate either. This mirrors
+     `/kickoff`'s arg rule — set the leftover selector tokens aside for step 12.
+   - If a branch token is present, use it as the branch name.
+   - Otherwise (no non-`-` token), list available branches:
      - Run: `git branch --list --no-merged | grep -v '^\*'`
      - Exclude the current branch and any `task/*` branches that already have worktrees
      - Show the list and ask the user which branch to adopt
@@ -124,7 +130,7 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     `SELECTOR` for the launch helper, and set `OFFER_DEFAULT` (`no`, flipped to `yes`
     only when the picker asks to save). With
     `REG="${CLAUDE_PLUGIN_ROOT}/scripts/agent-registry.sh"`: an explicit flag
-    (`--opus`/`--sol`/`--grok`/`--codex`/`--agent <cli[:model]>`) is used verbatim, no
+    (`--fable`/`--opus`/`--sol`/`--grok`/`--codex`/`--agent <cli[:model]>`) is used verbatim, no
     default offer; no flag reads the repo default (`SELECTOR="$(bash "$REG" default
     get)"` — announce it before launching when it's a non-claude worker, then launch;
     empty → the picker); `--pick`, or no flag with no default set, runs the picker
