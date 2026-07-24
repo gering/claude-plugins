@@ -213,8 +213,27 @@ _sandbox_deny_paths() {
 
 # Resolve the repo root for -C/--cwd scoping. Best-effort: empty when not in a
 # git work tree (callers fall back to the ambient cwd).
+_REPO_ROOT_DONE=""
+_REPO_ROOT_MEMO=""
 _repo_root() {
-  git rev-parse --show-toplevel 2>/dev/null || true
+  # Memoized per PROCESS: the adapter runs one backend per `run` invocation and
+  # never chdir's mid-run, so the toplevel is stable — resolve the git subprocess
+  # once instead of per caller (_scope_args, _sandbox_deny_paths, _read_web_safe).
+  if [[ -z "$_REPO_ROOT_DONE" ]]; then
+    _REPO_ROOT_DONE=1
+    _REPO_ROOT_MEMO="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  fi
+  printf '%s' "$_REPO_ROOT_MEMO"
+}
+
+_read_web_safe() {
+  # $1 = backend. read+web is safe ONLY when BOTH hold: a working OS jail (the
+  # hard boundary) AND a resolvable repo root. Without the root,
+  # _sandbox_deny_paths emits NO repo-local denies and _scope_args drops
+  # -C/--cwd — so the reviewed repo's own .env*/data/keys would be readable and,
+  # with web on, exfiltratable. The HOME denylist alone keeps _jail_available
+  # true, so that check is not enough on its own — hence the second condition.
+  _jail_available "$1" && [[ -n "$(_repo_root)" ]]
 }
 
 _scope_args() {
@@ -291,10 +310,13 @@ sys.stdout.write("(version 1)(allow default)(deny file-read* %s)" % " ".join(rul
     # name were masked. sandbox-exec realpaths in its profile builder; the bwrap
     # path must match, or Linux under-denies. Mask BOTH the link name and the
     # resolved target so neither is a bypass.
-    local args=(--dev-bind / /) p rp q
+    local args=(--dev-bind / /) p rp q targets
     while IFS= read -r p; do
       rp="$(readlink -f -- "$p" 2>/dev/null || printf '%s' "$p")"
-      for q in "$p" "$rp"; do
+      # Mask the link name, plus its resolved target when it differs (a symlink).
+      # Array (not unquoted $(…)) so a path with spaces stays one word.
+      targets=("$p"); [[ "$rp" != "$p" ]] && targets+=("$rp")
+      for q in "${targets[@]}"; do
         if [[ -d "$q" ]]; then args+=(--tmpfs "$q")
         elif [[ -e "$q" ]]; then args+=(--ro-bind /dev/null "$q")
         fi
@@ -635,13 +657,14 @@ print()
 }
 
 subcmd_jail() {
-  # Machine-readable jail availability. The /swarm:review skill reads this to
-  # brand its run-start notice and the externals' prompt capabilities honestly:
-  # jail=no means the fail-closed degrade will apply (grok tool-less/no-web,
-  # codex web hard-off) — the "audible warning" must reach the USER, and the
-  # transport layer discards adapter stderr, so this is the visible channel.
-  # Requires python3 on macOS (profile build) exactly like a run would.
-  if _jail_available codex; then echo "jail=yes"; else echo "jail=no"; fi
+  # Machine-readable "will read+web be granted?" — the SAME condition the run
+  # path gates on (_read_web_safe: working OS jail AND resolvable repo root), so
+  # the /swarm:review skill's CAP_RULES + run-start notice can't promise reads/
+  # web the adapter then strips. jail=no ⇒ the fail-closed degrade applies (grok
+  # tool-less/no-web, codex web hard-off); the transport discards adapter
+  # stderr, so this is the visible channel for that warning. Runs from the same
+  # cwd as the review, so its _repo_root matches the run's.
+  if _read_web_safe codex; then echo "jail=yes"; else echo "jail=no"; fi
 }
 
 subcmd_run() {
@@ -734,8 +757,8 @@ run_codex() {
   # codex always had in 0.5.x — the degrade is per-voice, not "tool-less", and
   # the docs describe it that way (do not over-claim).
   local web_args=(-c tools.web_search=true)
-  if ! _jail_available codex; then
-    echo "warning: no working OS sandbox (sandbox-exec/bwrap) — codex web search HARD-disabled (fail closed); FS reads stay inside codex's own read-only sandbox (0.5.x read surface)" >&2
+  if ! _read_web_safe codex; then
+    echo "warning: no working OS jail or unresolvable repo root — codex web search HARD-disabled (fail closed); FS reads stay inside codex's own read-only sandbox (0.5.x read surface)" >&2
     web_args=(-c tools.web_search=false)
   fi
 
@@ -821,8 +844,8 @@ run_grok() {
   # the 0.5.x posture (tool-less, no web) and say so — the review still runs on
   # the inlined diff, just without exploration.
   local tool_args=(--tools "$GROK_TOOLS")
-  if ! _jail_available grok; then
-    echo "warning: no sandbox-exec/bwrap — grok degraded to tool-less/no-web (fail closed; read+web needs the OS secret-jail)" >&2
+  if ! _read_web_safe grok; then
+    echo "warning: no working OS jail or unresolvable repo root — grok degraded to tool-less/no-web (fail closed; read+web needs the OS secret-jail AND a resolvable repo to scope+deny)" >&2
     tool_args=(--tools "" --disable-web-search)
   fi
 

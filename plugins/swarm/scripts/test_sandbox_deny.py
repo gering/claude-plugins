@@ -181,10 +181,34 @@ class TestSandboxDenyPaths(unittest.TestCase):
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
             # No .env*, no data/, no keys.
             paths = _bash_deny_paths("codex", cwd=repo)
+            # Unmatched globs must not survive as literals. The suffixes are the
+            # ACTUAL patterns the loop iterates (id_rsa*/…, *.pem, *.key) — not a
+            # bare id_*, which the code never emits (asserting `/id_*` would be
+            # vacuous — it can never match).
             for p in paths:
                 self.assertNotIn(".env*", p, f"literal glob leaked: {p!r}")
-                self.assertFalse(p.endswith("/*.pem"), f"literal glob leaked: {p!r}")
-                self.assertFalse(p.endswith("/id_*"), f"literal glob leaked: {p!r}")
+                for suffix in ("/*.pem", "/*.key", "/id_rsa*", "/id_ed25519*",
+                               "/id_ecdsa*", "/id_dsa*"):
+                    self.assertFalse(p.endswith(suffix), f"literal glob leaked: {p!r}")
+
+    def test_env_templates_stay_readable(self):
+        """Non-secret .env templates must NOT be denied (bwrap would serve them
+        empty, feeding false 'config is empty' findings)."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            (repo / ".env").write_text("SECRET=x\n")             # denied
+            for tmpl in (".env.example", ".env.sample", ".env.template",
+                         ".env.dist", ".env.defaults"):
+                (repo / tmpl).write_text("KEY=doc\n")            # NOT denied
+            paths = _bash_deny_paths("codex", cwd=repo)
+            denied_names = {os.path.basename(p) for p in paths}
+            self.assertIn(".env", denied_names,
+                          f"real .env must be denied; got {paths!r}")
+            for tmpl in (".env.example", ".env.sample", ".env.template",
+                         ".env.dist", ".env.defaults"):
+                self.assertNotIn(tmpl, denied_names,
+                                 f"template {tmpl} must stay readable; got {paths!r}")
 
 
 @unittest.skipUnless(

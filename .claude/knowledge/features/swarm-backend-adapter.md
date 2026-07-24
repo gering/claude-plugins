@@ -51,11 +51,14 @@ inlined diff (callers, config, types, library/CVE knowledge).
    blocked. The repo's own `.git/config` is **NOT** denied for the same fatal-git
    reason (it can't be redirected — git needs it); a repo-config-embedded token
    is an accepted residual (below). **Linked worktree:** the globs are emitted
-   for the reviewed root AND the main checkout's root (via `git rev-parse
-   --path-format=absolute --git-common-dir` — the absolute form; the bare flag is
-   cwd-relative and mis-resolves from a subdir) — untracked `.env`/`data/` never
-   propagate into a worktree, so the real secrets sit in the main checkout, a
-   readable sibling path without this. The globs are **root-level only** (not recursive):
+   for the reviewed root AND the main checkout's root — resolved with
+   `git -C "$repo" rev-parse --git-common-dir` (bare) then anchored via bash
+   `dirname` + `cd`/`pwd -P`. NOT `--path-format=absolute` (git ≥ 2.31): that
+   floor would silently fail-open on older git on the bwrap path, so the bare
+   flag + `-C "$repo"` (making any relative result relative to a root we control)
+   is used instead. Untracked `.env`/`data/` never propagate into a worktree, so
+   the real secrets sit in the main checkout, a readable sibling path without
+   this. The globs are **root-level only** (not recursive):
    a nested `apps/api/.env` is NOT auto-denied — add it (or a parent) via
    `SWARM_DENY_PATHS` (colon-separated absolute paths). Root-only is deliberate
    (minimal, cross-platform: bwrap can't regex, and a recursive glob would bloat
@@ -101,7 +104,17 @@ inlined diff (callers, config, types, library/CVE knowledge).
    active backend's **own cred dir** and the **repo's own `.git/config`** stay
    readable (both must, to authenticate / for git to run), so a defeated prompt
    guard could exfiltrate that backend's own API token or a repo-config-embedded
-   PAT — bounded to those.
+   PAT — bounded to those; (c) a **secret in the reviewed diff itself** (an
+   accidentally-added credential, or an untracked `.env` swept into the prompt)
+   is already *in* the model's context, so no file read is even needed — a
+   defeated egress guard could place it in a web query. Input is NOT
+   secret-scrubbed before the prompt (that would blind the review to exactly the
+   hardcoded-secret defects it should catch); the egress guard + `--disable-web`
+   fallback on a jail-less host are the mitigations. **All of these sharpen under
+   `--pr`**, where the diff is untrusted *contributor* input rather than the
+   operator's own tree — the egress guard is doing more load-bearing work there.
+   These are the accepted cost of the user's "web always on, jail-not-allowlist,
+   minimal" decision — documented so nobody quietly assumes a hard boundary.
 4. **No write/shell/network-write tools** — but this is a **CLI-level** barrier
    (grok `--tools` allowlist; codex `-s read-only`), NOT OS-enforced: the jail
    is a `(deny file-read*)` / `--dev-bind / /` **read**-deny only, so there is no

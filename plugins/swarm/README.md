@@ -114,6 +114,8 @@ external CLIs directly:
 agents.sh list [--json]       # probe all backends → status table / JSON
 agents.sh available <backend> # installed? prints version
 agents.sh ready <backend>     # authenticated? hint on stderr if not
+agents.sh jail                # jail=yes|no — will read+web be granted? (working
+                              # OS sandbox AND a resolvable repo root)
 agents.sh run <backend> [--prompt-file f] [--effort E] [--model M] [--schema f]
                               # lens prompt in → findings JSON out
 ```
