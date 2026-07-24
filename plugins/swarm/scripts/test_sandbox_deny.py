@@ -9,6 +9,10 @@ paths when they exist, and — when sandbox-exec is available — that a sandbox
 
 Run: python3 plugins/swarm/scripts/test_sandbox_deny.py
      (also discovered by scripts/check-structure.py's plugin tests check)
+
+The e2e class exercises the sandbox-exec (macOS) path only; the bwrap (Linux)
+enforcement path has no e2e here — extending coverage there belongs to the
+add-sandbox-regression-tests task (coordinate, don't fork).
 """
 from __future__ import annotations
 
@@ -105,6 +109,37 @@ class TestSandboxDenyPaths(unittest.TestCase):
             # HOME secrets still present even from a temp repo cwd
             home = os.path.expanduser("~")
             self.assertIn(f"{home}/.aws", paths)
+
+    def test_worktree_denies_main_checkout_secrets(self):
+        """From a linked worktree, the MAIN checkout's root secrets are denied too.
+
+        Untracked .env/data/ never propagate into a worktree, so in the standard
+        /kickoff layout the real secrets sit in the main checkout — a readable
+        sibling path unless _sandbox_deny_paths walks up via --git-common-dir.
+        """
+        env = {**os.environ,
+               "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        with tempfile.TemporaryDirectory() as td:
+            main = Path(td) / "main"
+            main.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=main, check=True)
+            (main / ".env").write_text("SECRET=main-checkout\n")
+            subprocess.run(
+                ["git", "-C", str(main), "commit", "--allow-empty", "-m", "x", "-q"],
+                check=True, env=env)
+            wt = Path(td) / "wt"
+            subprocess.run(
+                ["git", "-C", str(main), "worktree", "add", "-q", str(wt)],
+                check=True, env=env)
+
+            paths = _bash_deny_paths("codex", cwd=wt)
+            expected = main / ".env"
+            resolved = os.path.realpath(expected)
+            self.assertTrue(
+                resolved in paths or str(expected) in paths,
+                f"main-checkout .env missing from worktree denylist; got {paths!r}",
+            )
 
     def test_swarm_deny_paths_extra(self):
         with tempfile.TemporaryDirectory() as td:

@@ -8,6 +8,7 @@
 #   list [--json]         Probe all backends -> human table or JSON array
 #   available <backend>   Exit 0 if the CLI is installed; prints its version
 #   ready <backend>       Exit 0 if authenticated/usable; hint on stderr if not
+#   jail                  Print jail=yes|no (working OS sandbox wrapper?)
 #   run <backend> [opts]  Run a review prompt -> findings JSON on stdout
 #       --prompt-file <f>   Read the lens prompt from a file (default: stdin)
 #       --effort <level>    low|medium|high|xhigh|max (default: xhigh)
@@ -147,11 +148,11 @@ _sandbox_deny_paths() {
     "$HOME/.config/anthropic" "$HOME/.config/openai" "$HOME/.claude.json"
   if [[ "$own" != "codex" ]]; then printf '%s\n' "$HOME/.codex"; fi
   if [[ "$own" != "grok" ]]; then printf '%s\n' "$HOME/.grok"; fi
-  # Repo-local secrets: .env*, data/, common key files at repo root. Best-effort
-  # (skip if not in a git work tree); only emit paths that exist so the profile
-  # stays clean. The `[[ -e ]]` guard also filters an unmatched pattern's
-  # literal fallback (`[[ -e ]]` does not glob its operand), so no nullglob
-  # juggling is needed — test_sandbox_deny.py pins the no-literal-glob behavior.
+  # Repo-local secrets: .env*, data/, common key/cred files at repo root.
+  # Best-effort (skip if not in a git work tree); only emit paths that exist so
+  # the profile stays clean. The `[[ -e ]]` guard also filters an unmatched
+  # pattern's literal fallback (`[[ -e ]]` does not glob its operand), so no
+  # nullglob juggling is needed — test_sandbox_deny.py pins that behavior.
   # ROOT-LEVEL ONLY (not recursive): a nested apps/api/.env is not auto-denied —
   # deliberate (bwrap can't regex, a recursive glob bloats the profile on large
   # trees). HOME cred stores are covered at full depth; nested repo secrets go
@@ -159,9 +160,29 @@ _sandbox_deny_paths() {
   local repo
   repo="$(_repo_root)"
   if [[ -n "$repo" ]]; then
-    local p
-    for p in "$repo"/.env* "$repo"/data "$repo"/*.pem "$repo"/id_* "$repo"/*.key; do
-      if [[ -e "$p" ]]; then printf '%s\n' "$p"; fi
+    # When the reviewed root is a LINKED WORKTREE, also deny the MAIN checkout's
+    # root globs: untracked .env/data/ never propagate into a worktree, so in
+    # the standard /kickoff layout the real secrets sit in the main checkout —
+    # a plain readable sibling path without this (0.6.0 self-review, round 2).
+    local roots=("$repo") common main
+    common="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+    if [[ -n "$common" ]]; then
+      case "$common" in /*) ;; *) common="$repo/$common" ;; esac  # relative when cwd IS the main root
+      main="$(dirname "$common")"
+      if [[ "$main" != "$repo" && -d "$main" ]]; then roots+=("$main"); fi
+    fi
+    # Key globs are the SSH id names (id_rsa*/id_ed25519*/…), NOT a bare id_* —
+    # that would jail legit files (id_utils.py), and under bwrap a denied path
+    # reads as silently EMPTY (tmpfs / /dev/null bind), not EPERM, feeding the
+    # reviewers false "file is empty" evidence. .git/config can embed a token in
+    # a remote URL; .npmrc/.pypirc/credentials.json mirror the HOME store list.
+    local r p
+    for r in "${roots[@]}"; do
+      for p in "$r"/.env* "$r"/data "$r"/*.pem "$r"/id_rsa* "$r"/id_ed25519* \
+               "$r"/id_ecdsa* "$r"/id_dsa* "$r"/*.key "$r"/.npmrc "$r"/.pypirc \
+               "$r"/credentials.json "$r"/.git/config; do
+        if [[ -e "$p" ]]; then printf '%s\n' "$p"; fi
+      done
     done
   fi
   local extra="${SWARM_DENY_PATHS:-}"
@@ -236,6 +257,18 @@ sys.stdout.write("(version 1)(allow default)(deny file-read* %s)" % " ".join(rul
       fi
     done < <(_sandbox_deny_paths "$backend")
     SANDBOX_CMD=(bwrap "${args[@]}")
+  fi
+  # Probe that the wrapper actually WORKS, not merely exists on PATH: a
+  # container can ship a bwrap that cannot create namespaces, and a broken
+  # sandbox-exec would otherwise fail every review run with an opaque backend
+  # error instead of taking the callers' fail-closed degrade path. On probe
+  # failure treat the host as jail-less (audibly) — _jail_available then
+  # reports false and run_codex/run_grok degrade.
+  if ((${#SANDBOX_CMD[@]} > 0)); then
+    if ! "${SANDBOX_CMD[@]}" true >/dev/null 2>&1; then
+      echo "warning: ${SANDBOX_CMD[0]} is installed but not functional here — treating host as jail-less; externals fail closed" >&2
+      SANDBOX_CMD=()
+    fi
   fi
 }
 
@@ -546,6 +579,16 @@ print()
   esac
 }
 
+subcmd_jail() {
+  # Machine-readable jail availability. The /swarm:review skill reads this to
+  # brand its run-start notice and the externals' prompt capabilities honestly:
+  # jail=no means the fail-closed degrade will apply (grok tool-less/no-web,
+  # codex web hard-off) — the "audible warning" must reach the USER, and the
+  # transport layer discards adapter stderr, so this is the visible channel.
+  # Requires python3 on macOS (profile build) exactly like a run would.
+  if _jail_available codex; then echo "jail=yes"; else echo "jail=no"; fi
+}
+
 subcmd_run() {
   local backend="${1:-}"
   [[ -z "$backend" ]] && usage
@@ -635,12 +678,16 @@ run_codex() {
 
   # FAIL CLOSED without the OS jail: web + FS-read with no read-deny boundary
   # would let an injected read reach ~/.aws etc. and exfiltrate via web_search.
-  # Degrade to no-web (codex's own read-only sandbox still applies to its FS
-  # access) and say so — audibly, mirroring the degrade pattern above.
+  # Degrade closes the EGRESS half: web is HARD-disabled (=false, not merely
+  # omitted — an omitted flag would inherit a future codex default or a user
+  # config that turns web on). FS reads remain: -s read-only is codex's most
+  # restrictive sandbox tier (there is no no-read tier), the same read surface
+  # codex always had in 0.5.x — the degrade is per-voice, not "tool-less", and
+  # the docs describe it that way (do not over-claim).
   local web_args=(-c tools.web_search=true)
   if ! _jail_available codex; then
-    echo "warning: no sandbox-exec/bwrap — codex web search DISABLED (fail closed; read+web needs the OS secret-jail)" >&2
-    web_args=()
+    echo "warning: no working OS sandbox (sandbox-exec/bwrap) — codex web search HARD-disabled (fail closed); FS reads stay inside codex's own read-only sandbox (0.5.x read surface)" >&2
+    web_args=(-c tools.web_search=false)
   fi
 
   # The schema-validated JSON lands in $TMP_OUT; codex's stdout copy of the
@@ -785,6 +832,7 @@ main() {
     list)          subcmd_list "$@" ;;
     available)     subcmd_available "$@" ;;
     ready)         subcmd_ready "$@" ;;
+    jail)          subcmd_jail ;;
     run)           subcmd_run "$@" ;;
     -h|--help)     print_usage; exit 0 ;;
     "")            usage ;;

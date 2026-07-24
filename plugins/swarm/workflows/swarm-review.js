@@ -448,8 +448,9 @@ if (pool.length > 0) {
     // default, and one untagged voice must not drag a properly tagged design
     // cluster into the defect ranking. An ALL-untagged cluster is kind 'defect'
     // but flagged — its "consensus" is backed by no tagged lens, so it must never
-    // be auto-accepted (see needsVerify below): two diff-scoped externals can
-    // agree on an unverifiable suggestion without ever tagging it.
+    // be auto-accepted (see needsVerify below): two externals can agree on an
+    // unverifiable suggestion without ever tagging it (and since 0.6.0 they read
+    // the same repo files, so shared-input agreement is even cheaper to reach).
     const known = members.filter((i) => pool[i].lens !== 'unspecified')
     const kind = known.length > 0 && known.every((i) => pool[i].kind === 'design') ? 'design' : 'defect'
     const untaggedOnly = known.length === 0

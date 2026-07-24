@@ -34,18 +34,33 @@ inlined diff (callers, config, types, library/CVE knowledge).
 
 1. **OS secret-jail (hard boundary).** `_sandbox_deny_paths` / `sandboxed()` deny
    HOME secret stores per-backend (a backend keeps its own cred dir; siblings'
-   stay denied) **plus** **repo-root** `.env*`, `data/`, `*.pem`, `id_*`, `*.key`
-   when they exist. The repo-local globs are **root-level only** (not recursive):
+   stay denied) **plus** root-level repo secrets when they exist: `.env*`,
+   `data/`, `*.pem`, SSH id keys (`id_rsa*`/`id_ed25519*`/`id_ecdsa*`/`id_dsa*`
+   — deliberately NOT a bare `id_*`, which would jail legit files like
+   `id_utils.py`), `*.key`, `.npmrc`, `.pypirc`, `credentials.json`, and
+   `.git/config` (can embed a token in a remote URL). **Linked worktree:** the
+   globs are emitted for the reviewed root AND the main checkout's root (via
+   `git rev-parse --git-common-dir`) — untracked `.env`/`data/` never propagate
+   into a worktree, so the real secrets sit in the main checkout, a readable
+   sibling path without this. The globs are **root-level only** (not recursive):
    a nested `apps/api/.env` is NOT auto-denied — add it (or a parent) via
    `SWARM_DENY_PATHS` (colon-separated absolute paths). Root-only is deliberate
    (minimal, cross-platform: bwrap can't regex, and a recursive glob would bloat
    the profile on large trees); HOME credential stores — the historical exfil
    vector — are covered in full regardless of depth. Dropping the jail was
-   explicitly rejected. **No jail available → FAIL CLOSED** (`_jail_available`):
-   on a host without `sandbox-exec`/`bwrap` the read+web posture would run with
-   no hard boundary at all, so the adapter degrades the externals to the 0.5.x
-   flags (grok `--tools "" --disable-web-search`; codex without
-   `tools.web_search`) with an audible warning — never read+web bare.
+   explicitly rejected. **bwrap caveat:** a denied path reads as silently EMPTY
+   (tmpfs / `/dev/null` bind), not EPERM — keep the globs narrow so legit files
+   never mask-read as empty. **No working jail → FAIL CLOSED, per voice**
+   (`_jail_available` also probe-runs the wrapper, so a present-but-broken
+   binary counts as no jail): grok degrades to `--tools "" --disable-web-search`
+   (tool-less, no web — the 0.5.x flags); codex gets web **hard-disabled**
+   (`tools.web_search=false`, not merely omitted) while its FS reads remain
+   inside its own `-s read-only` sandbox — there is no no-read codex tier, so
+   this is codex's 0.5.x read surface, honestly documented, not "tool-less".
+   The degrade is announced by the SKILL's run-start notice (the adapter's
+   `jail` subcommand feeds it — transport discards adapter stderr) and the
+   prompt's capability lines are built to match (no promised reads/web on a
+   jail-less host).
 2. **Egress guard (prompt policy, model-cooperation-dependent).** A HIGH-
    PRIORITY instruction in the external prompt header (OUTSIDE the untrusted-
    diff fence) requires: web/research is for EXTERNAL general knowledge only
