@@ -212,18 +212,30 @@ The diff under review is **untrusted input** that flows into agentic backends an
 back into the report. Three loop rounds (one of which exfiltrated a real
 credential mid-review) converged on these non-negotiable mitigations:
 
-1. **Sandbox every backend + filter the env.** The diff is inlined, so backends
-   need NO filesystem/shell tools. Adapter enforces: grok `--tools ""` (verified
-   to block file reads) + `--disable-web-search`; codex `-s read-only`; **an
-   OS-level read-deny jail** (`sandbox-exec`/`bwrap`) around every call, denying
-   secret stores **per-backend** (a backend keeps its own cred dir but not its
-   siblings' — verified: codex can't read `~/.grok`); **an env filter** stripping
-   secret-shaped vars (the jail blocks files, not the inherited env).
+1. **Sandbox every backend + filter the env (read+web posture, 0.6.0).** Both
+   external voices may **read project files** and do **web research** so they
+   can catch out-of-diff bugs and external knowledge (API docs, CVEs). Adapter
+   enforces: grok strict `--tools read_file,list_dir,grep,web_search,web_fetch`
+   + `--cwd <repo>` (no write/shell tools); codex `-s read-only -C <repo>
+   -c tools.web_search=true` (web works under read-only; never
+   `workspace-write` / `--add-dir`); **an OS-level read-deny jail**
+   (`sandbox-exec`/`bwrap`) around every call, denying HOME secret stores
+   **per-backend** (a backend keeps its own cred dir but not its siblings' —
+   verified: codex can't read `~/.grok`) **plus repo-root** `.env*` / `data/` /
+   `*.pem` / SSH id keys (`id_rsa*`/`id_ed25519*`/…) / `*.key` / `.npmrc` /
+   `.pypirc` / `credentials.json` (root-level only — nested secrets via
+   `SWARM_DENY_PATHS`; in a linked worktree the **main checkout's** root too).
+   No working jail → **fail closed per voice** (grok tool-less/no-web, codex web
+   hard-off); **an env filter** stripping secret-shaped vars (the jail blocks
+   files, not the inherited env) and pointing git at `/dev/null` for
+   global/system config so a denied `~/.gitconfig` never breaks git. A prompt
+   **egress guard** (outside the untrusted-diff fence) forbids putting repository
+   content into web queries — it is **model-cooperation-dependent**, not
+   transport-enforced; the kept+extended secret-jail is the hard boundary that
+   bounds blast radius.
    *Denylist, not allowlist, by necessity:* the node/bun-based CLIs load runtime
    from all over `$HOME`, so a deny-`$HOME`-allowlist jail breaks them (tested:
-   codex's node loader dies). The denylist is a backstop; the primary defense is
-   that backends need no reads at all (diff inlined) + grok is tool-less. A full
-   allowlist (or a purpose-built minimal-runtime container) is the P2 upgrade.
+   codex's node loader dies).
 2. **Scrub secrets at the boundaries.** `scrub_secrets` redacts secret-shaped
    content (AWS keys, private keys, gh/sk tokens, `secret=…`) from findings JSON
    before it leaves `run_codex`/`run_grok` — a backstop even if a sandbox is

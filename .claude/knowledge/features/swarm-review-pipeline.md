@@ -1,10 +1,10 @@
 ---
 title: "Swarm Review Pipeline (/swarm:review)"
 createdAt: 2026-07-08
-updatedAt: 2026-07-18
+updatedAt: 2026-07-23
 createdFrom: "PR #24"
-updatedFrom: "harden-swarm-design-lens-integration"
-pluginVersion: 1.8.2
+updatedFrom: "open-swarm-external-exploration"
+pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -111,7 +111,8 @@ truth** (the per-cluster externals follow-up consumes it):
   agreeing with itself is one vote, not a cross-check" stays the load-bearing
   invariant the day a second same-vendor voice returns.
 - **Security is intentionally minimal** (user directive: no cannons-at-sparrows).
-  The P1 adapter floor stays (sandbox, tool-less grok, secret scrub, env filter,
+  The P1 adapter floor stays (secret-jail sandbox, jailed read+web externals
+  since 0.6.0 — see [[swarm-backend-adapter]], secret scrub, env filter,
   caps); P2 adds only three cheap things — **fencing** the diff as data
   (deterministic Bash, not an LLM step that could be steered into dropping it),
   an **output gate** (a final JS secret-scrub over *every* surviving finding,
@@ -142,8 +143,9 @@ because workflow JS has no Bash and can't edit files (same constraint that keeps
 the diff out of the script, above). Claude applies edits between rounds.
 
 - **Only Claude edits.** External agents stay review-only — never `codex apply`,
-  never hand them edit authority (also the security posture: they run jailed +
-  tool-less). Act only on ✅-agree + 🟨-partial findings; 🟨 = apply the
+  never hand them edit authority (also the security posture: they run jailed,
+  read-only — read+web tools but no write/shell). Act only on ✅-agree +
+  🟨-partial findings; 🟨 = apply the
   session's own variant, not the reviewer's `recommendation` verbatim;
   ❌-disagree is never touched and stays visible in the report.
 - **Re-confirm claim-vs-code before every edit** — a stale finding (comment rot,

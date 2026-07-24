@@ -8,33 +8,46 @@
 #   list [--json]         Probe all backends -> human table or JSON array
 #   available <backend>   Exit 0 if the CLI is installed; prints its version
 #   ready <backend>       Exit 0 if authenticated/usable; hint on stderr if not
+#   jail                  Print jail=yes|no (working OS sandbox wrapper?)
 #   run <backend> [opts]  Run a review prompt -> findings JSON on stdout
 #       --prompt-file <f>   Read the lens prompt from a file (default: stdin)
 #       --effort <level>    low|medium|high|xhigh|max (default: xhigh)
 #       --model <name>      Backend model override
 #       --schema <file>     JSON schema to enforce (default: bundled finding.schema.json)
 #
-# Backend notes (probed against codex 0.128 / grok 0.2.101, 2026-07):
+# Backend notes (probed against codex 0.144.6 / grok 0.2.103, 2026-07):
 #   claude — probe-only: reviews run in-session via the Agent tool, so
 #            `run claude` is a usage error. available/ready/list include it.
-#   codex  — `codex exec --output-schema` in a read-only sandbox; the pure
-#            schema JSON arrives via --output-last-message (stdout carries the
-#            agent transcript, which we discard). Auth: `codex login status`.
-#            Reasoning effort has no "max" tier -> max maps to xhigh.
-#   grok   — headless `-p` with inline --json-schema; the validated object is
-#            the `.structuredOutput` field of a response envelope. Needs an
+#   codex  — `codex exec --output-schema` under `-s read-only` with
+#            `-C <repo>` + `-c tools.web_search=true` (web works under read-only;
+#            no sandbox loosen). Pure schema JSON via --output-last-message.
+#            Auth: `codex login status`. Effort has no "max" tier -> max→xhigh.
+#   grok   — headless `--single=` with inline --json-schema; the validated
+#            object is `.structuredOutput` of a response envelope. Needs an
 #            explicit model (-m): grok-4.5 is the sole schema-capable model and
 #            accepts --effort (ladder is low|medium|high — no max tier, so the
 #            adapter maps xhigh/max down to high, mirroring codex's missing
-#            max). Readiness is model-aware: auth (non-empty ~/.grok/auth.json —
-#            there is no status command) AND grok-4.5 listed by `grok models`.
-#            The CLI rejects an unlisted -m id at launch ("unknown model id")
-#            and drops/renames models between releases (0.2.101 removed
-#            grok-composer-2.5-fast), so an auth-only check would advertise a
-#            model the CLI no longer offers. The probe degrades to auth-only —
-#            with a warning, never silently — when it cannot run: no coreutils
-#            timeout to bound it, or an empty/unparseable list. Its bound is
-#            SWARM_PROBE_TIMEOUT (10s), not SWARM_TIMEOUT (a review-length cap).
+#            max). Read+web via STRICT `--tools` allowlist
+#            (read_file,list_dir,grep,web_search,web_fetch) + `--cwd <repo>`;
+#            no write/shell tools. Readiness is model-aware: auth (non-empty
+#            ~/.grok/auth.json — there is no status command) AND grok-4.5 listed
+#            by `grok models`. The CLI rejects an unlisted -m id at launch
+#            ("unknown model id") and drops/renames models between releases
+#            (0.2.101 removed grok-composer-2.5-fast), so an auth-only check
+#            would advertise a model the CLI no longer offers. The probe
+#            degrades to auth-only — with a warning, never silently — when it
+#            cannot run: no coreutils timeout to bound it, or an empty/
+#            unparseable list. Its bound is SWARM_PROBE_TIMEOUT (10s), not
+#            SWARM_TIMEOUT (a review-length cap).
+#
+# Security floor (both external voices):
+#   - OS secret-jail (sandbox-exec/bwrap) denies HOME secret stores +
+#     repo-ROOT .env*/data/*.pem/id_rsa*|id_ed25519*|…/*.key/.npmrc/.pypirc/
+#     credentials.json (nested via SWARM_DENY_PATHS; main checkout too in a
+#     linked worktree). No working jail -> fail closed per voice.
+#   - Egress guard is a prompt policy (model-cooperation-dependent) — the
+#     jail is the hard boundary. scrub_secrets filters OUTPUT only.
+#   - No write/shell/network-write tools; review is read-only.
 #
 # Exit codes: 0 ok · 1 unavailable / not ready / run failed · 2 usage error
 
@@ -111,35 +124,143 @@ require_valid_timeout() {
     || { echo "Invalid SWARM_TIMEOUT='$ADAPTER_TIMEOUT' — must be a non-negative integer (seconds; 0 disables)" >&2; exit 2; }
 }
 
-# OS-level read-deny jail for external CLI calls (the root-cause fix for
-# "-s read-only still permits file reads"). The diff is untrusted, so an
-# injected payload could steer a backend to read local secrets. This denies
-# reads of common secret stores while leaving the CLI's own config + the repo
+# OS-level read-deny jail for external CLI calls. Both voices may now read
+# project files (out-of-diff bugs), so the jail is the HARD boundary that bounds
+# blast radius if an injection steers a read: common secret stores stay
+# unreadable while the CLI's own config + non-secret project files remain
 # readable (verified: ~/.aws blocked, ~/.codex readable). macOS: sandbox-exec;
 # Linux: bwrap; else passthrough (scrub_secrets + backend flags remain).
-# Extra deny paths via SWARM_DENY_PATHS (colon-separated).
+# Extra deny paths via SWARM_DENY_PATHS (colon-separated absolute paths).
 _sandbox_deny_paths() {
   # $1 = the calling backend (its OWN credential dir stays readable — it needs
   # it to authenticate; the OTHER backends' cred dirs are denied so an injected
-  # read can't steal a sibling's token). A denylist is a backstop, not the
-  # primary defense: grok runs tool-less, the diff is inlined so backends need
-  # no file reads at all, and scrub_secrets + env filtering back it up. A full
-  # allowlist jail is impractical here — the node/bun-based CLIs load runtime
-  # from all over $HOME, so deny-$HOME breaks them (documented in the blueprint).
+  # read can't steal a sibling's token. ACCEPTED RESIDUAL: with web on, an
+  # injected read of that own dir could exfiltrate the backend's OWN API token —
+  # unjailable without breaking its auth; bounded to that one token and named
+  # in [[swarm-backend-adapter]] § residual risk). A denylist is a backstop, not a full
+  # allowlist: the node/bun-based CLIs load runtime from all over $HOME, so
+  # deny-$HOME breaks them (documented in the blueprint). scrub_secrets + env
+  # filtering + the prompt egress guard back it up.
   local own="${1:-}"
   printf '%s\n' \
     "$HOME/.aws" "$HOME/.ssh" "$HOME/.gnupg" "$HOME/.netrc" \
     "$HOME/.config/gcloud" "$HOME/.kube" "$HOME/.docker" \
     "$HOME/.git-credentials" "$HOME/.npmrc" "$HOME/.pypirc" \
-    "$HOME/.config/gh" "$HOME/.cargo/credentials" "/etc/master.passwd" \
+    "$HOME/.config/gh" "$HOME/.cargo/credentials" "$HOME/.cargo/credentials.toml" \
+    "$HOME/.gitconfig" "$HOME/.config/git" "/etc/master.passwd" \
     "$HOME/.config/anthropic" "$HOME/.config/openai" "$HOME/.claude.json"
   if [[ "$own" != "codex" ]]; then printf '%s\n' "$HOME/.codex"; fi
   if [[ "$own" != "grok" ]]; then printf '%s\n' "$HOME/.grok"; fi
+  # Repo-local secrets: .env*, data/, common key/cred files at repo root.
+  # Best-effort (skip if not in a git work tree); only emit paths that exist so
+  # the profile stays clean. The `[[ -e ]]` guard also filters an unmatched
+  # pattern's literal fallback (`[[ -e ]]` does not glob its operand), so no
+  # nullglob juggling is needed — test_sandbox_deny.py pins that behavior.
+  # ROOT-LEVEL ONLY (not recursive): a nested apps/api/.env is not auto-denied —
+  # deliberate (bwrap can't regex, a recursive glob bloats the profile on large
+  # trees). HOME cred stores are covered at full depth; nested repo secrets go
+  # via SWARM_DENY_PATHS. (documented in [[swarm-backend-adapter]] § Posture)
+  local repo
+  repo="$(_repo_root)"
+  if [[ -n "$repo" ]]; then
+    # When the reviewed root is a LINKED WORKTREE, also deny the MAIN checkout's
+    # root globs: untracked .env/data/ never propagate into a worktree, so in
+    # the standard /kickoff layout the real secrets sit in the main checkout —
+    # a plain readable sibling path without this (0.6.0 self-review, round 2).
+    local roots=("$repo") common main
+    # --git-common-dir can print a path RELATIVE to CWD, so run it with -C "$repo"
+    # (→ relative to $repo, which we control) and anchor any relative result there.
+    # Bash-only resolution (cd+pwd -P), NOT `--path-format=absolute` (git >= 2.31)
+    # or a python realpath: this runs on the bwrap path too, which must not gain a
+    # git-version floor or a python3 dep. `cd … && pwd -P` canonicalizes symlinks.
+    common="$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null || true)"
+    if [[ -n "$common" ]]; then
+      [[ "$common" = /* ]] || common="$repo/$common"
+      main="$(cd "$(dirname -- "$common")" 2>/dev/null && pwd -P || true)"
+      if [[ -n "$main" && "$main" != "$repo" && -d "$main" ]]; then roots+=("$main"); fi
+    fi
+    # Key globs are the SSH id names (id_rsa*/id_ed25519*/…), NOT a bare id_* —
+    # that would jail legit files (id_utils.py), and under bwrap a denied path
+    # reads as silently EMPTY (tmpfs / /dev/null bind), not EPERM, feeding the
+    # reviewers false "file is empty" evidence. .npmrc/.pypirc/credentials.json
+    # mirror the HOME store list. NOTE: the repo's own .git/config is NOT denied
+    # — git treats an EPERM on it as fatal (sandbox-exec), which would break the
+    # externals' git-based exploration entirely; a repo-config-embedded token is
+    # an accepted residual ([[swarm-backend-adapter]] § residual risk).
+    local r p
+    for r in "${roots[@]}"; do
+      for p in "$r"/.env* "$r"/data "$r"/*.pem "$r"/id_rsa* "$r"/id_ed25519* \
+               "$r"/id_ecdsa* "$r"/id_dsa* "$r"/*.key "$r"/.npmrc "$r"/.pypirc \
+               "$r"/credentials.json; do
+        [[ -e "$p" ]] || continue
+        # Skip conventionally NON-secret .env templates: they are committed for
+        # docs, and jailing them makes bwrap serve them as empty (no EPERM) —
+        # feeding reviewers a false "config is empty" finding for a file that is
+        # legitimately readable. Real secrets never use these names.
+        case "${p##*/}" in
+          .env.example|.env.sample|.env.template|.env.dist|.env.defaults) continue ;;
+        esac
+        printf '%s\n' "$p"
+      done
+    done
+  fi
   local extra="${SWARM_DENY_PATHS:-}"
   # if-form, not `[[ … ]] && …`: the latter returns 1 when extra is empty, and
   # under set -e that aborts the `profile="$(…)"` assignment that calls this.
   if [[ -n "$extra" ]]; then printf '%s\n' "${extra//:/$'\n'}"; fi
   return 0
+}
+
+# Resolve the repo root for -C/--cwd scoping. Best-effort: empty when not in a
+# git work tree (callers fall back to the ambient cwd).
+_REPO_ROOT_DONE=""
+_REPO_ROOT_MEMO=""
+_repo_root() {
+  # Memoized per PROCESS: the adapter runs one backend per `run` invocation and
+  # never chdir's mid-run, so the toplevel is stable — resolve the git subprocess
+  # once instead of per caller (_scope_args, _sandbox_deny_paths, _read_web_safe).
+  if [[ -z "$_REPO_ROOT_DONE" ]]; then
+    _REPO_ROOT_DONE=1
+    _REPO_ROOT_MEMO="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  fi
+  printf '%s' "$_REPO_ROOT_MEMO"
+}
+
+_read_web_safe() {
+  # $1 = backend. read+web is safe ONLY when BOTH hold: a working OS jail (the
+  # hard boundary) AND a resolvable repo root. Without the root,
+  # _sandbox_deny_paths emits NO repo-local denies and _scope_args drops
+  # -C/--cwd — so the reviewed repo's own .env*/data/keys would be readable and,
+  # with web on, exfiltratable. The HOME denylist alone keeps _jail_available
+  # true, so that check is not enough on its own — hence the second condition.
+  _jail_available "$1" && [[ -n "$(_repo_root)" ]]
+}
+
+_scope_args() {
+  # Shared "scope the working root to the repo, or warn" block for run_codex
+  # (-C) and run_grok (--cwd) — one source of truth so the resolution + warning
+  # can't drift between the two. $1 = the backend's working-root flag, $2 = a
+  # label for the warning. Prints the two argv words ("<flag>\n<repo>") on
+  # success; on failure warns to stderr and prints nothing (caller runs
+  # unscoped, falling back to the ambient cwd).
+  local flag="$1" who="$2" repo
+  repo="$(_repo_root)"
+  if [[ -n "$repo" ]]; then
+    printf '%s\n%s\n' "$flag" "$repo"
+  else
+    echo "warning: $who could not resolve repo root (git rev-parse) — running without $flag" >&2
+  fi
+}
+
+_jail_available() {
+  # $1 = backend. Builds the jail (memoized) and reports whether an OS sandbox
+  # wrapper exists. run_codex/run_grok consult this to FAIL CLOSED: the read+web
+  # posture is only safe under the OS secret-jail (the hard boundary), so on a
+  # host without sandbox-exec/bwrap the externals degrade to the 0.5.x
+  # tool-less/no-web flags instead of running read+web bare — 0.5.x was safe
+  # there precisely because the flags, not the jail, closed the channel.
+  _init_sandbox "$1"
+  (( ${#SANDBOX_CMD[@]} > 0 ))
 }
 
 SANDBOX_CMD=()
@@ -183,13 +304,37 @@ sys.stdout.write("(version 1)(allow default)(deny file-read* %s)" % " ".join(rul
   elif command -v bwrap >/dev/null; then
     # --tmpfs masks a directory; a regular file (e.g. ~/.netrc) needs a bind of
     # an empty source instead — --tmpfs over a file dies with ENOTDIR.
-    local args=(--dev-bind / /) p
+    # REALPATH each path (readlink -f, resolving the final symlink component too):
+    # bwrap masks the exact path given, so a symlinked secret (~/.gitconfig →
+    # dotfiles/.gitconfig) would stay readable via its real path if only the link
+    # name were masked. sandbox-exec realpaths in its profile builder; the bwrap
+    # path must match, or Linux under-denies. Mask BOTH the link name and the
+    # resolved target so neither is a bypass.
+    local args=(--dev-bind / /) p rp q targets
     while IFS= read -r p; do
-      if [[ -d "$p" ]]; then args+=(--tmpfs "$p")
-      elif [[ -f "$p" ]]; then args+=(--ro-bind /dev/null "$p")
-      fi
+      rp="$(readlink -f -- "$p" 2>/dev/null || printf '%s' "$p")"
+      # Mask the link name, plus its resolved target when it differs (a symlink).
+      # Array (not unquoted $(…)) so a path with spaces stays one word.
+      targets=("$p"); [[ "$rp" != "$p" ]] && targets+=("$rp")
+      for q in "${targets[@]}"; do
+        if [[ -d "$q" ]]; then args+=(--tmpfs "$q")
+        elif [[ -e "$q" ]]; then args+=(--ro-bind /dev/null "$q")
+        fi
+      done
     done < <(_sandbox_deny_paths "$backend")
     SANDBOX_CMD=(bwrap "${args[@]}")
+  fi
+  # Probe that the wrapper actually WORKS, not merely exists on PATH: a
+  # container can ship a bwrap that cannot create namespaces, and a broken
+  # sandbox-exec would otherwise fail every review run with an opaque backend
+  # error instead of taking the callers' fail-closed degrade path. On probe
+  # failure treat the host as jail-less (audibly) — _jail_available then
+  # reports false and run_codex/run_grok degrade.
+  if ((${#SANDBOX_CMD[@]} > 0)); then
+    if ! "${SANDBOX_CMD[@]}" true >/dev/null 2>&1; then
+      echo "warning: ${SANDBOX_CMD[0]} is installed but not functional here — treating host as jail-less; externals fail closed" >&2
+      SANDBOX_CMD=()
+    fi
   fi
 }
 
@@ -222,8 +367,19 @@ sandboxed() {
   fi
   local env_args=() _e
   while IFS= read -r _e; do env_args+=("$_e"); done < <(_env_filter_args)
-  # order: timeout → env (strip secrets) → sandbox-exec (jail) → backend
-  with_timeout env ${env_args[@]+"${env_args[@]}"} ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"} "$@"
+  # GIT_CONFIG_GLOBAL/SYSTEM=/dev/null: the denylist now jails ~/.gitconfig /
+  # ~/.config/git (a PAT can live there via url.insteadOf / http.extraHeader),
+  # but git treats an EPERM on a config it reads as FATAL — so point git at
+  # /dev/null for global+system config and it never opens the denied paths,
+  # keeping the externals' git-based exploration working while the files stay
+  # unreadable to a direct read_file. (repo .git/config is left readable — git
+  # needs it; see _sandbox_deny_paths.)
+  # order: timeout → env (strip secrets, redirect git config) → sandbox-exec (jail) → backend.
+  # env options (-u …) MUST precede the NAME=VALUE assignments, or env treats the
+  # first `-u` after an assignment as the command.
+  with_timeout env ${env_args[@]+"${env_args[@]}"} \
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"} "$@"
 }
 
 scrub_secrets() {
@@ -500,6 +656,17 @@ print()
   esac
 }
 
+subcmd_jail() {
+  # Machine-readable "will read+web be granted?" — the SAME condition the run
+  # path gates on (_read_web_safe: working OS jail AND resolvable repo root), so
+  # the /swarm:review skill's CAP_RULES + run-start notice can't promise reads/
+  # web the adapter then strips. jail=no ⇒ the fail-closed degrade applies (grok
+  # tool-less/no-web, codex web hard-off); the transport discards adapter
+  # stderr, so this is the visible channel for that warning. Runs from the same
+  # cwd as the review, so its _repo_root matches the run's.
+  if _read_web_safe codex; then echo "jail=yes"; else echo "jail=no"; fi
+}
+
 subcmd_run() {
   local backend="${1:-}"
   [[ -z "$backend" ]] && usage
@@ -573,6 +740,28 @@ run_codex() {
   # argv word, matching the effort_args idiom in run_grok.
   local model_args=(-m "${model:-$CODEX_DEFAULT_MODEL}")
 
+  # Scope the working root to the repo so exploration reads project files (not
+  # an ambient cwd). `-C` is a working root — do NOT use `--add-dir` (writable).
+  # Web research is enabled under read-only via tools.web_search (model-native;
+  # verified under -s read-only + --strict-config; no sandbox loosen needed).
+  # OS secret-jail + prompt egress guard bound the blast radius.
+  local repo_args=() a
+  while IFS= read -r a; do repo_args+=("$a"); done < <(_scope_args -C codex)
+
+  # FAIL CLOSED without the OS jail: web + FS-read with no read-deny boundary
+  # would let an injected read reach ~/.aws etc. and exfiltrate via web_search.
+  # Degrade closes the EGRESS half: web is HARD-disabled (=false, not merely
+  # omitted — an omitted flag would inherit a future codex default or a user
+  # config that turns web on). FS reads remain: -s read-only is codex's most
+  # restrictive sandbox tier (there is no no-read tier), the same read surface
+  # codex always had in 0.5.x — the degrade is per-voice, not "tool-less", and
+  # the docs describe it that way (do not over-claim).
+  local web_args=(-c tools.web_search=true)
+  if ! _read_web_safe codex; then
+    echo "warning: no working OS jail or unresolvable repo root — codex web search HARD-disabled (fail closed); FS reads stay inside codex's own read-only sandbox (0.5.x read surface)" >&2
+    web_args=(-c tools.web_search=false)
+  fi
+
   # The schema-validated JSON lands in $TMP_OUT; codex's stdout copy of the
   # final message is discarded (its transcript goes to stderr = debug info).
   # stdin must be closed: with an inherited open non-TTY stdin, codex waits
@@ -583,7 +772,10 @@ run_codex() {
   # injection it could echo a secret it read, and it never passes scrub_secrets.
   # The exit code (incl. 124 timeout) still drives error handling.
   local rc=0
-  sandboxed codex codex exec -s read-only --skip-git-repo-check \
+  sandboxed codex codex exec -s read-only \
+      ${repo_args[@]+"${repo_args[@]}"} \
+      --skip-git-repo-check \
+      ${web_args[@]+"${web_args[@]}"} \
       -c model_reasoning_effort="$effort" \
       ${model_args[@]+"${model_args[@]}"} \
       --output-schema "$schema" \
@@ -609,6 +801,14 @@ if not (isinstance(d, dict) and isinstance(d.get("findings"), list)):
   echo
 }
 
+# grok tool allowlist: read/explore + verified web tools only. STRICT allowlist
+# — mutating tools (write, search_replace, run_terminal_command, spawn_*, …)
+# stay out. Web IDs probed 2026-07-20 on grok 0.2.103: web_search, web_fetch.
+# Do NOT fall back to a denylist that could admit a mutating tool.
+GROK_READ_TOOLS="read_file,list_dir,grep"
+GROK_WEB_TOOLS="web_search,web_fetch"
+GROK_TOOLS="${GROK_READ_TOOLS},${GROK_WEB_TOOLS}"
+
 run_grok() {
   local prompt="$1" effort="$2" model="$3" schema="$4"
   # grok's effort ladder is low|medium|high (0.2.101 dropped max) — map the two
@@ -628,15 +828,31 @@ run_grok() {
 
   # --single=<prompt> (not "-p <prompt>"): as a separate argv word a prompt
   # starting with "-" would be parsed as a flag.
-  # Sandbox: the diff is untrusted and could try to steer grok into reading
-  # local secrets or fetching a URL to exfiltrate. grok reviews the diff INLINE
-  # in the prompt, so it needs NO tools — `--tools ""` (empty allowlist)
-  # removes file/shell access (verified: grok then can't read files), and
-  # `--disable-web-search` closes the network channel. scrub_secrets on the
-  # output is the belt-and-braces backstop.
+  # Read+web posture (0.6.0): strict --tools allowlist grants file-read
+  # (read_file,list_dir,grep) + web (web_search,web_fetch) so grok can find
+  # out-of-diff bugs and research external knowledge. No write/shell tools.
+  # --cwd pins the project root. The OS secret-jail (sandboxed) blocks
+  # credential paths; the prompt egress guard (SKILL.md HDR, outside the diff
+  # fence) is the model-cooperation web policy; scrub_secrets is the output
+  # backstop. Do NOT re-add --disable-web-search or --tools "" unconditionally —
+  # they are reserved for the no-jail fail-closed degrade below.
+  local cwd_args=() a
+  while IFS= read -r a; do cwd_args+=("$a"); done < <(_scope_args --cwd grok)
+
+  # FAIL CLOSED without the OS jail: grok's file+web tools with no read-deny
+  # boundary would re-open the exfil channel 0.5.x closed by flags. Degrade to
+  # the 0.5.x posture (tool-less, no web) and say so — the review still runs on
+  # the inlined diff, just without exploration.
+  local tool_args=(--tools "$GROK_TOOLS")
+  if ! _read_web_safe grok; then
+    echo "warning: no working OS jail or unresolvable repo root — grok degraded to tool-less/no-web (fail closed; read+web needs the OS secret-jail AND a resolvable repo to scope+deny)" >&2
+    tool_args=(--tools "" --disable-web-search)
+  fi
+
   local raw rc=0
   raw="$(sandboxed grok grok -m "$grok_model" --effort "$effort" \
-      --tools "" --disable-web-search \
+      ${tool_args[@]+"${tool_args[@]}"} \
+      ${cwd_args[@]+"${cwd_args[@]}"} \
       --json-schema "$(cat "$schema")" \
       --single="$prompt" </dev/null 2>/dev/null)" || rc=$?
   if (( rc != 0 )); then
@@ -682,6 +898,7 @@ main() {
     list)          subcmd_list "$@" ;;
     available)     subcmd_available "$@" ;;
     ready)         subcmd_ready "$@" ;;
+    jail)          subcmd_jail ;;
     run)           subcmd_run "$@" ;;
     -h|--help)     print_usage; exit 0 ;;
     "")            usage ;;
@@ -689,4 +906,9 @@ main() {
   esac
 }
 
-main "$@"
+# Source guard: run the CLI only when executed, not when sourced. Lets tests
+# `source` this file for its helpers without the sed-extraction surgery (and
+# without tripping `main`'s usage exit). Executed → BASH_SOURCE[0]==$0 → run.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi

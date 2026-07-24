@@ -17,7 +17,7 @@
 - `features/herdr-tab-glyphs.md` — Task-state glyphs (`○ ● ◇ ◆ ✓`) + main-root `◉` on herdr tab labels: `states` mode in the self-contained renderer, sync-vs-`--cached` PR refresh per caller, exact-cwd rename rules, soft pr-flow shim
 - `features/kickoff-agent-selection.md` — `/kickoff` worker choice: single committed per-repo default (no global/fallback/ranking) else picker; `agent-registry.sh` as SoT; bounded model-aware grok probe (inconclusive→trust-auth); non-claude "document, don't fake" degradation; announce-not-prompt for external defaults
 - `features/task-archiving-on-close.md` — `/close` archives (not deletes) the task file; adaptive commit + ff-push to main
-- `features/swarm-backend-adapter.md` — Verified codex/grok CLI facts (schema-enforced JSON, effort mapping, stdin hang, model-aware grok readiness) behind `swarm`'s adapter script
+- `features/swarm-backend-adapter.md` — 0.6.0 read+web posture: OS secret-jail (denylist, worktree-aware, git-config-safe), per-voice fail-closed degrade, `jail` verb, prompt egress guard + residual risks; plus verified codex/grok CLI facts (schema JSON, effort mapping, model-aware readiness)
 - `features/swarm-review-pipeline.md` — `/swarm:review` pipeline: skill↔Workflow wiring, family-consensus, 0.5.0 lens clusters + design-kind verify, `--fix`/`--loop` (deterministic close-out via `loop-closeout.py`), `--pr` publish via deterministic `pr-post.py`
 
 ## Deployment

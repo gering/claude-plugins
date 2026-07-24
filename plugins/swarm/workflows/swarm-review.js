@@ -126,11 +126,10 @@ for (const l of CANDIDATE_LENSES) {
 // lenses (incl. the methodological two) are factual defects.
 const lensKind = (lens) => (LENS_CLUSTERS.design.includes(lens) ? 'design' : 'defect')
 // Methodological lenses (the non-topical members of the breakage cluster) assert
-// REPO-WIDE facts a diff-only external voice cannot confirm: it never opens repo
-// files, so two external families can agree on a stale-caller / removed-API claim
-// that nobody checked — correlated hallucination, exactly like a design reuse
-// target. Such a consensus is verified (needsVerify below) UNLESS a repo-reading
-// Claude voice tagged the same lens. test_lens_sync.py pins these names to
+// REPO-WIDE facts. Externals may now read project files (0.6.0), but a
+// cross-family methodological consensus is still verified (needsVerify below)
+// UNLESS a Claude voice tagged the same lens — correlated hallucination on a
+// reuse/stale-caller claim remains real. test_lens_sync.py pins these names to
 // LENS_CLUSTERS so a lens rename can't silently orphan this list.
 const METHODOLOGICAL_LENSES = ['removed-behavior', 'cross-file-trace']
 
@@ -449,8 +448,9 @@ if (pool.length > 0) {
     // default, and one untagged voice must not drag a properly tagged design
     // cluster into the defect ranking. An ALL-untagged cluster is kind 'defect'
     // but flagged — its "consensus" is backed by no tagged lens, so it must never
-    // be auto-accepted (see needsVerify below): two diff-scoped externals can
-    // agree on an unverifiable suggestion without ever tagging it.
+    // be auto-accepted (see needsVerify below): two externals can agree on an
+    // unverifiable suggestion without ever tagging it (and since 0.6.0 they read
+    // the same repo files, so shared-input agreement is even cheaper to reach).
     const known = members.filter((i) => pool[i].lens !== 'unspecified')
     const kind = known.length > 0 && known.every((i) => pool[i].kind === 'design') ? 'design' : 'defect'
     const untaggedOnly = known.length === 0
@@ -506,10 +506,9 @@ log(`Merge: ${clusters.length} clusters — ${consensusClusters.length} cross-fa
 // with zero extra pipeline surface. Methodological lenses are factual and use
 // the normal defect prompt unchanged.
 // Design clusters are verified EVEN WITH cross-family consensus: consensus
-// attests agreement, not repo-grounded applicability — the external voices only
-// see the inlined diff and cannot open repo files, so two of them can agree on
-// a reuse target that does not exist (correlated hallucination). Defect
-// consensus stays auto-accepted (the strong signal, unchanged).
+// attests agreement, not repo-grounded applicability — two externals can still
+// agree on a reuse target that does not exist (correlated hallucination).
+// Defect consensus stays auto-accepted (the strong signal, unchanged).
 phase('Verify')
 const VERDICT_SCHEMA = {
   type: 'object', additionalProperties: false, required: ['verdict', 'evidence'],
@@ -538,7 +537,7 @@ const claudeCheckedLens = (c) =>
 // applicability); every all-untagged cluster (no tagged lens backs it — its
 // "defect consensus" may be an unverifiable suggestion nobody prefixed); every
 // methodological-lens consensus not repo-checked by a Claude voice that tagged it
-// (two diff-only externals can agree on a repo fact neither could check).
+// (two externals can still agree on a repo fact neither actually checked).
 // Gate on the RESOLVED cluster KIND, not on "has a design member": a MIXED cluster
 // (a design member + a defect member) resolves to kind 'defect', and a cross-family
 // one is a real multi-family defect that must AUTO-ACCEPT — routing it through the
