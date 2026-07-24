@@ -149,6 +149,16 @@ once to commit **and** fast-forward-push it to `main` (so local `main` never
 diverges; a failed push just leaves the commit local). `/list` shows the archived
 count in its summary.
 
+**Skip the prompt with a per-repo opt-in.** In a repo where archiving-to-main is
+the established norm, the commit+push ask is pure friction. Commit
+`.claude/work-system-close-autocommit` (content `yes`) and `/close` skips the
+prompt and commits+pushes the archive directly — still reporting the outcome, and
+still bounded by the same safety guards (archive-scoped commit, fast-forward
+only, never force-pushes, refuses when `main` has other unpushed commits). This
+is the durable authorization for exactly that one narrow action, nothing else.
+Set it with `archive-task.sh autocommit set <repo>` (unset with `unset`, check
+with `get`); off by default, and per-repo only — no global default.
+
 ## Worker agent selection
 
 `/kickoff` doesn't hardcode Claude as the worktree worker. Each agent is a

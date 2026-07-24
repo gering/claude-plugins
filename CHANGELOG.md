@@ -52,6 +52,9 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.10.0 — 2026-07-24
+- `/close` step 10's commit+push prompt is now skippable per repo: a committed `.claude/work-system-close-autocommit` flag (mirrors the `.claude/work-system-agent` default precedent) routes straight to `archive-task.sh commit-push` — no `AskUserQuestion` — and reports the result exactly as the manual path does. Off by default; unset repos keep today's ask-once behavior. Per-repo only, no global default. `archive-task.sh` grew an `autocommit get|set|unset` subcommand as the single source of truth for the flag (get returns `enabled=yes` only for content `yes`/`true`).
+
 ### 1.9.4 — 2026-07-24
 - Add two more herdr tab-glyph refresh triggers: `/kickoff` (after the launch step, so the freshly-created tab is included) and `/define` (after the task file is written). Both call the same best-effort, silent `herdr-tab-glyph.sh refresh --cached <main-repo>` that `/close`/`/list`/`/status` already use — outside herdr, or on failure, it's a silent no-op. Fixes the Manager tab's `◉` hub mark sometimes not appearing until an unrelated `/close`/`/list`/`/status` happened to run in a repo where you mostly `/kickoff`.
 

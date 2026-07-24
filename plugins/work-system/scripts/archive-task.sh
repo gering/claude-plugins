@@ -34,6 +34,17 @@
 #       pathspec commit, so unrelated pre-staged work is never swept in), and
 #       fast-forward push to origin. Refuses if the main repo isn't on
 #       <main-branch>. Never force-pushes.
+#   autocommit get <main-repo-path>
+#       Print `enabled=yes` when the repo opts into skipping /close's commit+push
+#       prompt (committed `.claude/work-system-close-autocommit`, content `yes` or
+#       `true`), else `enabled=no` (missing file, any other content, or no such
+#       repo). Per-repo only — no global default.
+#   autocommit set <main-repo-path>
+#       Write `yes` to the repo's `.claude/work-system-close-autocommit` (creating
+#       `.claude/` if needed). This is itself a tracked change to commit.
+#   autocommit unset <main-repo-path>
+#       Remove the repo's `.claude/work-system-close-autocommit`, reverting to the
+#       default ask-once behavior.
 #
 # `archive` output: key=value lines (paths relative to the main repo) —
 #   archived_path=tasks/archive/<name>[-N].md
@@ -248,8 +259,35 @@ commit_push() {
   fi
 }
 
+autocommit() {
+  local op="${1:-}" repo="${2:-}"
+  local file="$repo/.claude/work-system-close-autocommit"
+  case "$op" in
+    get)
+      [ -n "$repo" ] || { echo "usage: ${0##*/} autocommit get <main-repo-path>" >&2; exit 2; }
+      local enabled="no"
+      if [ -f "$file" ]; then
+        local content; content="$(tr -d '[:space:]' < "$file" 2>/dev/null || true)"
+        case "$content" in yes|true) enabled="yes" ;; esac
+      fi
+      printf 'enabled=%s\n' "$enabled"
+      ;;
+    set)
+      [ -n "$repo" ] || { echo "usage: ${0##*/} autocommit set <main-repo-path>" >&2; exit 2; }
+      mkdir -p "$repo/.claude"
+      printf 'yes\n' > "$file"
+      ;;
+    unset)
+      [ -n "$repo" ] || { echo "usage: ${0##*/} autocommit unset <main-repo-path>" >&2; exit 2; }
+      rm -f "$file"
+      ;;
+    *) echo "usage: ${0##*/} autocommit {get|set|unset} <main-repo-path>" >&2; exit 2 ;;
+  esac
+}
+
 case "${1:-}" in
   archive)     shift; archive "$@" ;;
   commit-push) shift; commit_push "$@" ;;
-  *) echo "usage: ${0##*/} {archive <repo> <name> <branch> [--pr <n>] [--sha <s>] | commit-push <repo> <name> <archived-rel-path> <main-branch>}" >&2; exit 2 ;;
+  autocommit)  shift; autocommit "$@" ;;
+  *) echo "usage: ${0##*/} {archive <repo> <name> <branch> [--pr <n>] [--sha <s>] | commit-push <repo> <name> <archived-rel-path> <main-branch> | autocommit {get|set|unset} <repo>}" >&2; exit 2 ;;
 esac

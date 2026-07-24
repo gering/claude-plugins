@@ -1,10 +1,10 @@
 ---
 title: "Task Archiving on /close"
 createdAt: 2026-06-29
-updatedAt: 2026-07-12
+updatedAt: 2026-07-24
 createdFrom: "PR #19"
-updatedFrom: "session: 2026-07-12"
-pluginVersion: 1.8.2
+updatedFrom: "session: 2026-07-24"
+pluginVersion: 1.10.0
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -82,3 +82,30 @@ logic belongs in a tested script, not SKILL.md prose). See also [skill-compositi
 non-recursive `tasks/*.md`, which already excludes `tasks/archive/`. The "never
 persistent `cd`" footgun the helper's explicit paths avoid is a rule — see
 `.claude/rules/cwd-safety.md`.
+
+## Per-repo autocommit opt-in (1.10.0)
+
+- **The commit+push ask is skippable, per repo.** In a repo where
+  archiving-to-main is the norm (dotfiles, this repo), the always-yes y/n prompt
+  is pure friction — observed repeatedly across close runs. A committed
+  `.claude/work-system-close-autocommit` flag (content `yes`/`true`) routes
+  `/close` straight to `commit-push`, no `AskUserQuestion`, still reporting the
+  result exactly as the manual path does. Mirrors the `.claude/work-system-agent`
+  default precedent: a committed per-repo file, not a settings-plugin entry
+  (Phase-1, not yet consumed elsewhere) and not local git config (wouldn't travel
+  with the repo). `archive-task.sh` grew an `autocommit get|set|unset` subcommand
+  as the single source of truth for the flag, mirroring the script-owns-the-logic
+  split the rest of this feature already follows.
+- **The global-rule framing.** The user's standing rule is "ask before pushing to
+  the default branch." This flag is the durable per-repo **authorization** for
+  exactly ONE narrow action — the archive-metadata commit+push in step 10 — not a
+  general loosening of that rule. What makes it safe to grant is that
+  `commit-push`'s existing guards (above) already bound the blast radius: an
+  exact pathspec commit (never a blanket `tasks/` add), fast-forward only, never
+  a force-push, and a hard refusal (`unpushed-history`) when `main` carries other
+  unpushed commits. The opt-in only removes the prompt; it does not weaken any of
+  those guards.
+- **Off by default, per-repo only.** No global default and no shipped fallback —
+  the same shape as the agent-default. A repo that wants this opts in explicitly
+  by committing the flag file; a global toggle was explicitly deferred as a
+  separate follow-up, not built speculatively.
