@@ -222,13 +222,17 @@ credential mid-review) converged on these non-negotiable mitigations:
    (`sandbox-exec`/`bwrap`) around every call, denying HOME secret stores
    **per-backend** (a backend keeps its own cred dir but not its siblings' —
    verified: codex can't read `~/.grok`) **plus repo-root** `.env*` / `data/` /
-   `*.pem` / `id_*` / `*.key` (root-level only — nested secrets via
-   `SWARM_DENY_PATHS`, which also takes per-repo extras); **an env
-   filter** stripping secret-shaped vars (the jail blocks files, not the
-   inherited env). A prompt **egress guard** (outside the untrusted-diff fence)
-   forbids putting repository content into web queries — it is
-   **model-cooperation-dependent**, not transport-enforced; the kept+extended
-   secret-jail is the hard boundary that bounds blast radius.
+   `*.pem` / SSH id keys (`id_rsa*`/`id_ed25519*`/…) / `*.key` / `.npmrc` /
+   `.pypirc` / `credentials.json` (root-level only — nested secrets via
+   `SWARM_DENY_PATHS`; in a linked worktree the **main checkout's** root too).
+   No working jail → **fail closed per voice** (grok tool-less/no-web, codex web
+   hard-off); **an env filter** stripping secret-shaped vars (the jail blocks
+   files, not the inherited env) and pointing git at `/dev/null` for
+   global/system config so a denied `~/.gitconfig` never breaks git. A prompt
+   **egress guard** (outside the untrusted-diff fence) forbids putting repository
+   content into web queries — it is **model-cooperation-dependent**, not
+   transport-enforced; the kept+extended secret-jail is the hard boundary that
+   bounds blast radius.
    *Denylist, not allowlist, by necessity:* the node/bun-based CLIs load runtime
    from all over `$HOME`, so a deny-`$HOME`-allowlist jail breaks them (tested:
    codex's node loader dies).

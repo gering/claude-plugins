@@ -42,7 +42,9 @@
 #
 # Security floor (both external voices):
 #   - OS secret-jail (sandbox-exec/bwrap) denies HOME secret stores +
-#     repo-ROOT .env*/data/*.pem/id_*/*.key (nested via SWARM_DENY_PATHS).
+#     repo-ROOT .env*/data/*.pem/id_rsa*|id_ed25519*|…/*.key/.npmrc/.pypirc/
+#     credentials.json (nested via SWARM_DENY_PATHS; main checkout too in a
+#     linked worktree). No working jail -> fail closed per voice.
 #   - Egress guard is a prompt policy (model-cooperation-dependent) — the
 #     jail is the hard boundary. scrub_secrets filters OUTPUT only.
 #   - No write/shell/network-write tools; review is read-only.
@@ -144,7 +146,8 @@ _sandbox_deny_paths() {
     "$HOME/.aws" "$HOME/.ssh" "$HOME/.gnupg" "$HOME/.netrc" \
     "$HOME/.config/gcloud" "$HOME/.kube" "$HOME/.docker" \
     "$HOME/.git-credentials" "$HOME/.npmrc" "$HOME/.pypirc" \
-    "$HOME/.config/gh" "$HOME/.cargo/credentials" "/etc/master.passwd" \
+    "$HOME/.config/gh" "$HOME/.cargo/credentials" "$HOME/.cargo/credentials.toml" \
+    "$HOME/.gitconfig" "$HOME/.config/git" "/etc/master.passwd" \
     "$HOME/.config/anthropic" "$HOME/.config/openai" "$HOME/.claude.json"
   if [[ "$own" != "codex" ]]; then printf '%s\n' "$HOME/.codex"; fi
   if [[ "$own" != "grok" ]]; then printf '%s\n' "$HOME/.grok"; fi
@@ -165,22 +168,27 @@ _sandbox_deny_paths() {
     # the standard /kickoff layout the real secrets sit in the main checkout —
     # a plain readable sibling path without this (0.6.0 self-review, round 2).
     local roots=("$repo") common main
-    common="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+    # --path-format=absolute: --git-common-dir alone prints a CWD-RELATIVE path
+    # (e.g. `../.git` from a subdir), which resolved against $repo lands on the
+    # wrong tree — over-denying a sibling or missing the real main checkout.
+    common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
     if [[ -n "$common" ]]; then
-      case "$common" in /*) ;; *) common="$repo/$common" ;; esac  # relative when cwd IS the main root
       main="$(dirname "$common")"
       if [[ "$main" != "$repo" && -d "$main" ]]; then roots+=("$main"); fi
     fi
     # Key globs are the SSH id names (id_rsa*/id_ed25519*/…), NOT a bare id_* —
     # that would jail legit files (id_utils.py), and under bwrap a denied path
     # reads as silently EMPTY (tmpfs / /dev/null bind), not EPERM, feeding the
-    # reviewers false "file is empty" evidence. .git/config can embed a token in
-    # a remote URL; .npmrc/.pypirc/credentials.json mirror the HOME store list.
+    # reviewers false "file is empty" evidence. .npmrc/.pypirc/credentials.json
+    # mirror the HOME store list. NOTE: the repo's own .git/config is NOT denied
+    # — git treats an EPERM on it as fatal (sandbox-exec), which would break the
+    # externals' git-based exploration entirely; a repo-config-embedded token is
+    # an accepted residual ([[swarm-backend-adapter]] § residual risk).
     local r p
     for r in "${roots[@]}"; do
       for p in "$r"/.env* "$r"/data "$r"/*.pem "$r"/id_rsa* "$r"/id_ed25519* \
                "$r"/id_ecdsa* "$r"/id_dsa* "$r"/*.key "$r"/.npmrc "$r"/.pypirc \
-               "$r"/credentials.json "$r"/.git/config; do
+               "$r"/credentials.json; do
         if [[ -e "$p" ]]; then printf '%s\n' "$p"; fi
       done
     done
@@ -301,8 +309,19 @@ sandboxed() {
   fi
   local env_args=() _e
   while IFS= read -r _e; do env_args+=("$_e"); done < <(_env_filter_args)
-  # order: timeout → env (strip secrets) → sandbox-exec (jail) → backend
-  with_timeout env ${env_args[@]+"${env_args[@]}"} ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"} "$@"
+  # GIT_CONFIG_GLOBAL/SYSTEM=/dev/null: the denylist now jails ~/.gitconfig /
+  # ~/.config/git (a PAT can live there via url.insteadOf / http.extraHeader),
+  # but git treats an EPERM on a config it reads as FATAL — so point git at
+  # /dev/null for global+system config and it never opens the denied paths,
+  # keeping the externals' git-based exploration working while the files stay
+  # unreadable to a direct read_file. (repo .git/config is left readable — git
+  # needs it; see _sandbox_deny_paths.)
+  # order: timeout → env (strip secrets, redirect git config) → sandbox-exec (jail) → backend.
+  # env options (-u …) MUST precede the NAME=VALUE assignments, or env treats the
+  # first `-u` after an assignment as the command.
+  with_timeout env ${env_args[@]+"${env_args[@]}"} \
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"} "$@"
 }
 
 scrub_secrets() {
@@ -840,4 +859,9 @@ main() {
   esac
 }
 
-main "$@"
+# Source guard: run the CLI only when executed, not when sourced. Lets tests
+# `source` this file for its helpers without the sed-extraction surgery (and
+# without tripping `main`'s usage exit). Executed → BASH_SOURCE[0]==$0 → run.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi

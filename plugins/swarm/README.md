@@ -91,11 +91,13 @@ random nonce at both hops — the diff going into the backends, and the finding
 text they send back into the merge/verify prompts (closing second-order
 injection). External CLIs run **read+web** (file-read to find out-of-diff bugs;
 web for external knowledge only) under an OS secret-jail that denies HOME secret
-stores and repo-root `.env*`/`data/`/key files (root-level; nested via
-`SWARM_DENY_PATHS`) — no write/shell tools. A prompt
-egress guard forbids putting repo content into web queries (model-cooperation-
-dependent; the jail is the hard boundary). A secret scrub at the adapter
-boundary plus a final **output gate** re-scrub findings before they reach you.
+stores and repo-root `.env*`/`data/`/key/cred files (root-level; nested via
+`SWARM_DENY_PATHS`; the main checkout too in a linked worktree) — no write/shell
+tools. On a host with no working sandbox the adapter **fails closed per voice**
+(grok tool-less/no-web, codex web hard-off) rather than running read+web bare. A
+prompt egress guard forbids putting repo content into web queries (model-
+cooperation-dependent; the jail is the hard boundary). A secret scrub at the
+adapter boundary plus a final **output gate** re-scrub findings before they reach you.
 Findings are advisory by default; `--fix` / `--loop` act only on the ones you
 agreed with, and **only Claude** applies edits — external agents stay
 review-only. The full threat model lives in `docs/pipeline-blueprint.md`

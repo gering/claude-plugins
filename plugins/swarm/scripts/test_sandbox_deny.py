@@ -29,28 +29,48 @@ AGENTS = HERE / "agents.sh"
 REPO = HERE.parents[2]  # worktree root (…/plugins/swarm/scripts → …)
 
 
-def _bash_deny_paths(backend: str = "codex", cwd: Path | None = None,
-                     env_extra: dict | None = None) -> list[str]:
-    """Source agents.sh and print _sandbox_deny_paths output as lines."""
+def _sandbox_exec_works() -> bool:
+    """The SAME functional probe production uses (agents.sh _init_sandbox).
+
+    A present-but-broken sandbox-exec (on PATH yet unable to apply a profile) is
+    treated as jail-less at runtime — so the e2e must gate on the wrapper
+    actually WORKING, not on PATH presence, or CI fails on a host the runtime
+    degrades cleanly.
+    """
+    if shutil.which("sandbox-exec") is None:
+        return False
+    try:
+        r = subprocess.run(
+            ["sandbox-exec", "-p", "(version 1)(allow default)", "true"],
+            capture_output=True, timeout=10,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _source(*shell_lines: str, cwd: Path | None = None,
+            env_extra: dict | None = None, timeout: int = 30):
+    """Run a bash harness that `source`s agents.sh for its helpers.
+
+    agents.sh's source guard (`[[ ${BASH_SOURCE[0]} == $0 ]]`) keeps `main`
+    from running on source, so no sed-extraction surgery is needed.
+    """
     env = os.environ.copy()
     if env_extra:
         env.update(env_extra)
-    # agents.sh ends with `main "$@"` — sourcing it outright would run the CLI.
-    # Load only the function/variable definitions by eval'ing everything up to
-    # (but not including) the `main() {` line, then call the helper directly.
-    harness = f'''
-set -euo pipefail
-eval "$(sed -n '1,/^main() {{/p' "{AGENTS}" | sed '$d')"
-_sandbox_deny_paths "{backend}"
-'''
-    r = subprocess.run(
+    harness = "set -euo pipefail\nsource '%s'\n%s\n" % (AGENTS, "\n".join(shell_lines))
+    return subprocess.run(
         ["bash", "-c", harness],
-        cwd=str(cwd or REPO),
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=30,
+        cwd=str(cwd or REPO), env=env,
+        capture_output=True, text=True, timeout=timeout,
     )
+
+
+def _bash_deny_paths(backend: str = "codex", cwd: Path | None = None,
+                     env_extra: dict | None = None) -> list[str]:
+    """Source agents.sh and print _sandbox_deny_paths output as lines."""
+    r = _source(f'_sandbox_deny_paths "{backend}"', cwd=cwd, env_extra=env_extra)
     if r.returncode != 0:
         raise AssertionError(
             f"_sandbox_deny_paths failed (rc={r.returncode}):\n"
@@ -165,14 +185,16 @@ class TestSandboxDenyPaths(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    shutil.which("sandbox-exec") is not None,
-    "sandbox-exec not available (macOS host-dependent; denylist unit asserts still run)",
+    _sandbox_exec_works(),
+    "no WORKING sandbox-exec (absent, or present-but-can't-apply — the runtime "
+    "degrades on such a host, so the e2e would false-fail; denylist units still run)",
 )
 class TestSandboxE2E(unittest.TestCase):
     """End-to-end: sandboxed cat of a temp .env must not emit the marker.
 
-    Gates on sandbox-exec so Linux/CI without it skips cleanly. This exercises
-    the full sandboxed() path including profile build + env filter.
+    Gates on a FUNCTIONAL sandbox-exec probe (not mere PATH presence) so Linux/CI
+    and broken-wrapper hosts skip cleanly — matching the runtime's own degrade
+    condition. Exercises the full sandboxed() path (profile build + env filter).
     """
 
     def test_sandboxed_cat_env_blocked(self):
@@ -186,29 +208,22 @@ class TestSandboxE2E(unittest.TestCase):
             ok_file = repo / "readable.txt"
             ok_file.write_text(f"OK={ok_marker}\n")
 
-            # Source agents.sh helpers, then run TWO sandboxed cats:
+            # Three sandboxed calls (dummy backend name; the repo .env is denied
+            # by the repo-local rule):
             #  1. POSITIVE CONTROL — a non-denied file MUST come through (under
-            #     set -e), proving the jail actually ran and allows normal reads.
-            #     Without it, "wrapper broke before cat" and "jail denied the
-            #     read" are indistinguishable (both leave the marker absent).
-            #  2. The denied .env — `|| true` only here, because the DENIED read
-            #     is expected to fail; the assertion is marker absence.
-            # Use a dummy backend name so both ~/.codex and ~/.grok stay denied
-            # (irrelevant here); the repo .env must be denied by the new rule.
-            harness = f'''
-set -euo pipefail
-eval "$(sed -n '1,/^main() {{/p' "{AGENTS}" | sed '$d')"
-# Force re-init for this backend in this process.
-_sandbox_ready="<none>"
-sandboxed codex cat "{ok_file}"
-sandboxed codex cat "{env_file}" || true
-'''
-            r = subprocess.run(
-                ["bash", "-c", harness],
-                cwd=str(repo),
-                capture_output=True,
-                text=True,
-                timeout=30,
+            #     set -e), proving the jail ran and allows normal reads. Without
+            #     it, "wrapper broke before cat" and "jail denied the read" are
+            #     indistinguishable (both leave the marker absent).
+            #  2. git must WORK inside the jail — guards the GIT_CONFIG_GLOBAL/
+            #     SYSTEM=/dev/null redirect that keeps git alive while the global
+            #     config paths are denied (a regression there breaks exploration).
+            #  3. The denied .env — `|| true`, the DENIED read is expected to
+            #     fail; the assertion is marker absence.
+            r = _source(
+                f'sandboxed codex cat "{ok_file}"',
+                f'sandboxed codex git -C "{repo}" rev-parse --is-inside-work-tree',
+                f'sandboxed codex cat "{env_file}" || true',
+                cwd=repo,
             )
             combined = r.stdout + r.stderr
             self.assertEqual(
@@ -219,10 +234,77 @@ sandboxed codex cat "{env_file}" || true
                 ok_marker, r.stdout,
                 f"positive control missing — jail blocked (or never ran) a non-denied read:\n{combined!r}",
             )
+            self.assertIn(
+                "true", r.stdout,
+                f"git broke inside the jail (config redirect regressed?):\n{combined!r}",
+            )
             self.assertNotIn(
                 marker, combined,
                 f"secret marker leaked through sandboxed cat:\n{combined!r}",
             )
+
+
+SCHEMA = HERE / "schema" / "finding.schema.json"
+
+# Override sandboxed() to record the exact backend argv and emit canned valid
+# output (grok envelope on stdout; codex JSON into its --output-last-message
+# file), so run_codex/run_grok complete without a real CLI or jail. `_source`
+# writes the argv to $ARGV.
+_RECORD_SANDBOXED = r'''
+sandboxed() {
+  shift  # drop the backend name arg
+  printf '%s\n' "$@" > "$ARGV"
+  local a prev="" out=""
+  for a in "$@"; do [ "$prev" = "--output-last-message" ] && out="$a"; prev="$a"; done
+  [ -n "$out" ] && printf '{"findings":[]}' > "$out"
+  printf '{"structuredOutput":{"findings":[]}}'
+}
+'''
+
+
+class TestFailClosedDegrade(unittest.TestCase):
+    """The load-bearing fail-closed contract: a jail-less host must strip the
+    read+web tools (grok) and hard-disable web (codex); a jailed host must grant
+    them. Asserted on the actual argv run_grok/run_codex build."""
+
+    def _argv(self, backend: str, jail: bool) -> str:
+        with tempfile.NamedTemporaryFile("r", suffix=".argv") as tf:
+            jail_fn = "_jail_available() { return 0; }" if jail \
+                else "_jail_available() { return 1; }"
+            r = _source(
+                jail_fn,
+                _RECORD_SANDBOXED,
+                f'run_{backend} "prompt text" high "" "{SCHEMA}" >/dev/null 2>&1 || true',
+                env_extra={"ARGV": tf.name},
+            )
+            self.assertEqual(r.returncode, 0, f"harness failed: {r.stderr!r}")
+            return Path(tf.name).read_text()
+
+    def test_grok_degrades_toolless_noweb(self):
+        argv = self._argv("grok", jail=False)
+        self.assertIn("--disable-web-search", argv,
+                      f"jail-less grok must disable web; argv:\n{argv}")
+        self.assertNotIn("web_search", argv,
+                         f"jail-less grok must NOT grant web tools; argv:\n{argv}")
+        self.assertNotIn("read_file", argv,
+                         f"jail-less grok must be tool-less; argv:\n{argv}")
+
+    def test_grok_grants_read_web_when_jailed(self):
+        argv = self._argv("grok", jail=True)
+        self.assertIn("read_file", argv, f"jailed grok must grant read; argv:\n{argv}")
+        self.assertIn("web_search", argv, f"jailed grok must grant web; argv:\n{argv}")
+        self.assertNotIn("--disable-web-search", argv, f"jailed grok argv:\n{argv}")
+
+    def test_codex_hard_disables_web_when_jailless(self):
+        argv = self._argv("codex", jail=False)
+        self.assertIn("tools.web_search=false", argv,
+                      f"jail-less codex must HARD-disable web (=false, not omit); argv:\n{argv}")
+        self.assertNotIn("tools.web_search=true", argv, f"argv:\n{argv}")
+
+    def test_codex_enables_web_when_jailed(self):
+        argv = self._argv("codex", jail=True)
+        self.assertIn("tools.web_search=true", argv,
+                      f"jailed codex must enable web; argv:\n{argv}")
 
 
 if __name__ == "__main__":
