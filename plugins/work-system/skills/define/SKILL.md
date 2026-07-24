@@ -104,8 +104,8 @@ Resolve the main repo path once (step 1) and use it for every path below. Never 
      never block or report on it.
 
 10. **Optional — Start immediately**:
-   - Ask: "Would you like to start working on this task now?"
-   - If yes, proceed with `/kickoff` workflow
+    - Ask: "Would you like to start working on this task now?"
+    - If yes, proceed with `/kickoff` workflow
 
 ## Tips
 
