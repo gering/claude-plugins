@@ -83,7 +83,10 @@ class TestSandboxDenyPaths(unittest.TestCase):
     def test_home_secrets_always_denied(self):
         home = os.path.expanduser("~")
         paths = _bash_deny_paths("codex")
-        for name in (".aws", ".ssh", ".gnupg", ".netrc", ".git-credentials"):
+        # Incl. the 0.6.0 additions (git/cargo config) — without asserting them,
+        # a regression that drops the new entries would pass unnoticed.
+        for name in (".aws", ".ssh", ".gnupg", ".netrc", ".git-credentials",
+                     ".gitconfig", ".config/git", ".cargo/credentials.toml"):
             target = f"{home}/{name}"
             self.assertIn(
                 target, paths,

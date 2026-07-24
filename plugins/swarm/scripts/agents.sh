@@ -168,13 +168,16 @@ _sandbox_deny_paths() {
     # the standard /kickoff layout the real secrets sit in the main checkout —
     # a plain readable sibling path without this (0.6.0 self-review, round 2).
     local roots=("$repo") common main
-    # --path-format=absolute: --git-common-dir alone prints a CWD-RELATIVE path
-    # (e.g. `../.git` from a subdir), which resolved against $repo lands on the
-    # wrong tree — over-denying a sibling or missing the real main checkout.
-    common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    # --git-common-dir can print a path RELATIVE to CWD, so run it with -C "$repo"
+    # (→ relative to $repo, which we control) and anchor any relative result there.
+    # Bash-only resolution (cd+pwd -P), NOT `--path-format=absolute` (git >= 2.31)
+    # or a python realpath: this runs on the bwrap path too, which must not gain a
+    # git-version floor or a python3 dep. `cd … && pwd -P` canonicalizes symlinks.
+    common="$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null || true)"
     if [[ -n "$common" ]]; then
-      main="$(dirname "$common")"
-      if [[ "$main" != "$repo" && -d "$main" ]]; then roots+=("$main"); fi
+      [[ "$common" = /* ]] || common="$repo/$common"
+      main="$(cd "$(dirname -- "$common")" 2>/dev/null && pwd -P || true)"
+      if [[ -n "$main" && "$main" != "$repo" && -d "$main" ]]; then roots+=("$main"); fi
     fi
     # Key globs are the SSH id names (id_rsa*/id_ed25519*/…), NOT a bare id_* —
     # that would jail legit files (id_utils.py), and under bwrap a denied path
@@ -189,7 +192,15 @@ _sandbox_deny_paths() {
       for p in "$r"/.env* "$r"/data "$r"/*.pem "$r"/id_rsa* "$r"/id_ed25519* \
                "$r"/id_ecdsa* "$r"/id_dsa* "$r"/*.key "$r"/.npmrc "$r"/.pypirc \
                "$r"/credentials.json; do
-        if [[ -e "$p" ]]; then printf '%s\n' "$p"; fi
+        [[ -e "$p" ]] || continue
+        # Skip conventionally NON-secret .env templates: they are committed for
+        # docs, and jailing them makes bwrap serve them as empty (no EPERM) —
+        # feeding reviewers a false "config is empty" finding for a file that is
+        # legitimately readable. Real secrets never use these names.
+        case "${p##*/}" in
+          .env.example|.env.sample|.env.template|.env.dist|.env.defaults) continue ;;
+        esac
+        printf '%s\n' "$p"
       done
     done
   fi
@@ -204,6 +215,22 @@ _sandbox_deny_paths() {
 # git work tree (callers fall back to the ambient cwd).
 _repo_root() {
   git rev-parse --show-toplevel 2>/dev/null || true
+}
+
+_scope_args() {
+  # Shared "scope the working root to the repo, or warn" block for run_codex
+  # (-C) and run_grok (--cwd) — one source of truth so the resolution + warning
+  # can't drift between the two. $1 = the backend's working-root flag, $2 = a
+  # label for the warning. Prints the two argv words ("<flag>\n<repo>") on
+  # success; on failure warns to stderr and prints nothing (caller runs
+  # unscoped, falling back to the ambient cwd).
+  local flag="$1" who="$2" repo
+  repo="$(_repo_root)"
+  if [[ -n "$repo" ]]; then
+    printf '%s\n%s\n' "$flag" "$repo"
+  else
+    echo "warning: $who could not resolve repo root (git rev-parse) — running without $flag" >&2
+  fi
 }
 
 _jail_available() {
@@ -258,11 +285,20 @@ sys.stdout.write("(version 1)(allow default)(deny file-read* %s)" % " ".join(rul
   elif command -v bwrap >/dev/null; then
     # --tmpfs masks a directory; a regular file (e.g. ~/.netrc) needs a bind of
     # an empty source instead — --tmpfs over a file dies with ENOTDIR.
-    local args=(--dev-bind / /) p
+    # REALPATH each path (readlink -f, resolving the final symlink component too):
+    # bwrap masks the exact path given, so a symlinked secret (~/.gitconfig →
+    # dotfiles/.gitconfig) would stay readable via its real path if only the link
+    # name were masked. sandbox-exec realpaths in its profile builder; the bwrap
+    # path must match, or Linux under-denies. Mask BOTH the link name and the
+    # resolved target so neither is a bypass.
+    local args=(--dev-bind / /) p rp q
     while IFS= read -r p; do
-      if [[ -d "$p" ]]; then args+=(--tmpfs "$p")
-      elif [[ -f "$p" ]]; then args+=(--ro-bind /dev/null "$p")
-      fi
+      rp="$(readlink -f -- "$p" 2>/dev/null || printf '%s' "$p")"
+      for q in "$p" "$rp"; do
+        if [[ -d "$q" ]]; then args+=(--tmpfs "$q")
+        elif [[ -e "$q" ]]; then args+=(--ro-bind /dev/null "$q")
+        fi
+      done
     done < <(_sandbox_deny_paths "$backend")
     SANDBOX_CMD=(bwrap "${args[@]}")
   fi
@@ -686,14 +722,8 @@ run_codex() {
   # Web research is enabled under read-only via tools.web_search (model-native;
   # verified under -s read-only + --strict-config; no sandbox loosen needed).
   # OS secret-jail + prompt egress guard bound the blast radius.
-  local repo_args=()
-  local repo
-  repo="$(_repo_root)"
-  if [[ -n "$repo" ]]; then
-    repo_args=(-C "$repo")
-  else
-    echo "warning: codex could not resolve repo root (git rev-parse) — running without -C" >&2
-  fi
+  local repo_args=() a
+  while IFS= read -r a; do repo_args+=("$a"); done < <(_scope_args -C codex)
 
   # FAIL CLOSED without the OS jail: web + FS-read with no read-deny boundary
   # would let an injected read reach ~/.aws etc. and exfiltrate via web_search.
@@ -783,14 +813,8 @@ run_grok() {
   # fence) is the model-cooperation web policy; scrub_secrets is the output
   # backstop. Do NOT re-add --disable-web-search or --tools "" unconditionally —
   # they are reserved for the no-jail fail-closed degrade below.
-  local cwd_args=()
-  local repo
-  repo="$(_repo_root)"
-  if [[ -n "$repo" ]]; then
-    cwd_args=(--cwd "$repo")
-  else
-    echo "warning: grok could not resolve repo root (git rev-parse) — running without --cwd" >&2
-  fi
+  local cwd_args=() a
+  while IFS= read -r a; do cwd_args+=("$a"); done < <(_scope_args --cwd grok)
 
   # FAIL CLOSED without the OS jail: grok's file+web tools with no read-deny
   # boundary would re-open the exfil channel 0.5.x closed by flags. Degrade to

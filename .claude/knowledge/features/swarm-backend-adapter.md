@@ -102,7 +102,15 @@ inlined diff (callers, config, types, library/CVE knowledge).
    readable (both must, to authenticate / for git to run), so a defeated prompt
    guard could exfiltrate that backend's own API token or a repo-config-embedded
    PAT — bounded to those.
-4. **No write/shell/network-write tools.** Review is read-only for both voices.
+4. **No write/shell/network-write tools** — but this is a **CLI-level** barrier
+   (grok `--tools` allowlist; codex `-s read-only`), NOT OS-enforced: the jail
+   is a `(deny file-read*)` / `--dev-bind / /` **read**-deny only, so there is no
+   OS defense-in-depth against a write/exec if a future grok build's allowlist
+   admitted a mutating tool (the allowlist is lenient about unknown ids). An
+   OS-level write-deny was deliberately NOT added — the node/bun CLIs write
+   caches/temp all over, so a write-jail risks breaking them; codex's read-only
+   IS OS-enforced. Accepted residual, documented so nobody assumes the jail
+   blocks writes.
 
 The 120-KiB inline-diff cap is **unchanged** in 0.6.0; file-read now makes a
 future reduction of inlining possible (have the agent read the file itself) —
