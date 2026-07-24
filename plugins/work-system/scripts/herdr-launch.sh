@@ -3,7 +3,7 @@
 #
 # Two modes share one precondition/JSON-parse/output contract:
 #
-#   launch  (/kickoff)  — spawn the chosen worker as ARGV via `agent start … --
+#   launch  (/kickoff, /adopt) — spawn the chosen worker as ARGV via `agent start … --
 #                         <worker-argv>`, then move it into its own background tab.
 #                         The worker is the tab's ROOT pane, so a later clean /exit
 #                         ends the pane and herdr closes the tab. Argv-exec

@@ -13,7 +13,11 @@ user_invocable: true
 
 ## Arguments
 
-- `$ARGUMENTS` - Optional: branch name to adopt
+- `$ARGUMENTS` — `<branch> [agent-selector]`: optional branch name to adopt, plus an
+  optional worker-agent selector (same set as `/kickoff`: `--fable`, `--opus`, `--sol`,
+  `--grok`, `--codex`, `--agent <cli[:model]>`, `--pick`). The selector chooses the
+  worker the herdr auto-launch (step 13) starts; omit it to use the repo default. The
+  **branch is the token that does not start with `-`**; step 2 separates the two.
 
 ## Critical: never persist a `cd` into the worktree
 
@@ -35,9 +39,14 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
    - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path` → `<main-repo>` — capture
      it for the CWD-drift check in step 11.
 
-2. **Select branch**:
-   - If `$ARGUMENTS` provided, use as branch name
-   - Otherwise, list available branches:
+2. **Select branch** (separate it from any agent selector first):
+   - The **branch** is the `$ARGUMENTS` token that does **not** start with `-`. The
+     `--…` selector tokens (`--opus`, `--pick`, …) belong to step 12, never the branch;
+     `--agent` additionally **consumes the immediately-following token** as its value
+     (`cli[:model]`), so that token is not a branch candidate either. This mirrors
+     `/kickoff`'s arg rule — set the leftover selector tokens aside for step 12.
+   - If a branch token is present, use it as the branch name.
+   - Otherwise (no non-`-` token), list available branches:
      - Run: `git branch --list --no-merged | grep -v '^\*'`
      - Exclude the current branch and any `task/*` branches that already have worktrees
      - Show the list and ask the user which branch to adopt
@@ -116,13 +125,84 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     - Run: `pwd` and compare to the `<main-repo>` path captured by the helper in step 1.
     - If they differ, **stop and report an error**: "Session CWD drifted into the worktree during adopt — investigate which step ran a persistent `cd`." Do not silently continue.
 
-12. **Final output for the user** (display this block — do *not* execute the `cd`):
+12. **Select the worker agent** — resolve the selector tokens **step 2 set aside**
+    into a concrete `SELECTOR`, and set `OFFER_DEFAULT` (`no`, flipped to `yes` only when
+    the picker asks to save). The default / picker / announce / OFFER_DEFAULT rules are
+    **identical to `skills/kickoff/SKILL.md` step 12 — follow that one copy, do not
+    re-paraphrase them here** (a divergent copy is exactly the drift this feature avoids).
+    With `REG="${CLAUDE_PLUGIN_ROOT}/scripts/agent-registry.sh"`, only the
+    token→`SELECTOR` mapping is restated, because it must match step 2's split (the
+    selector may precede or follow the branch — never assume it comes "after" it):
+    - a shorthand flag (`--fable`/`--opus`/`--sol`/`--grok`/`--codex`) → `SELECTOR` is
+      that flag verbatim;
+    - `--agent <cli[:model]>` → `SELECTOR` is the **`cli[:model]` value**, not the
+      `--agent` token (the registry resolves the bare value; the flag verbatim fails as
+      an unknown selector — exit 2);
+    - no selector token → the repo default (`SELECTOR="$(bash "$REG" default get)"`);
+      empty default, or `--pick`, → the picker.
+
+    The helper (step 13) resolves and validates `SELECTOR`, so don't resolve
+    models/availability yourself.
+
+13. **Launch the worktree session** — automate inside herdr, otherwise show the
+    manual block. Inside herdr this replaces the old "print manual instructions" final
+    step: `/adopt` now opens the task's tab for you, exactly like `/kickoff`.
+
+    Gate (same as kickoff): automate **only** when `[ "${HERDR_ENV:-}" = "1" ]`, a
+    non-empty `$HERDR_WORKSPACE_ID`, and both `command -v herdr` and `command -v
+    python3` succeed. Otherwise show the manual block (b). The helper re-checks these
+    and exits non-zero if it cannot automate, so a broken socket degrades to (b) too.
+
+    **a) Inside herdr — open a named tab that auto-continues.** Derive a short,
+    sidebar-friendly `LABEL` from the **resolved task name** (`<task-name>` from step 3,
+    which already stripped `task/`/`feature/`/`fix/`… prefixes — so the label stays
+    sensible even when step 8 kept the *original* branch name). Drop filler words,
+    hard-cap ~32 chars, pass it PLAIN (the helper prefixes the task's state glyph onto
+    the tab label). The worktree path is absolute — build it from the `<main-repo>`
+    captured in step 1 (never from a drifted CWD):
+
+    ```sh
+    WORKTREE="<main-repo>/.claude/worktrees/<task-name>"   # absolute path
+    LABEL="<short sidebar label>"
+    bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-launch.sh" launch "$LABEL" "$WORKTREE" "$HERDR_WORKSPACE_ID" "$SELECTOR"
+    ```
+
+    This is the **same helper and call `/kickoff` uses** — the single source of truth
+    for selector resolution, argv-launch, tab-move, and exit codes. **Branch on its
+    result exactly as `skills/kickoff/SKILL.md` step 13a describes** (exit 0 `moved=yes`
+    → new background tab; `moved=no` → running as a split in *this* tab, relay the
+    helper's stderr; the `OFFER_DEFAULT=yes` → `bash "$REG" default set "<agent>"`
+    persistence after a successful launch; exit 2 unknown selector → re-offer the
+    picker; exit 3 unavailable agent → report `unavailable=`/`note=` verbatim, re-offer;
+    other non-zero → relay stderr, then the manual block). Do not re-implement that
+    branching here — following one copy keeps adopt and kickoff from drifting.
+
+    Success report (adopt keeps the *adopted* branch name — use `<current-branch-name>`,
+    which is `task/<task-name>` only if step 8 renamed it):
+    ```
+    Branch adopted and launched in herdr!
+
+    Tab:       <LABEL>   (workspace <HERDR_WORKSPACE_ID>, opened in the background)
+    Agent:     <cli:model>   (the helper's `agent=` line)
+    Location:  .claude/worktrees/<task-name>
+    Branch:    <current-branch-name>   (original branch, unless step 8 renamed it)
+    Task file: TASK.md (drafted from the branch — review it)
+
+    The new tab is already running the worker. Switch to it to work there.
+    ```
+
+    **b) Outside herdr (or on any fallback) — manual instructions.** Resolve the
+    selector to the exact launch command (registry-driven — do not hand-write it per
+    CLI): `bash "$REG" resolve "$SELECTOR" --session "<task-name>"`. Take the `argv=`
+    lines in order and **shell-quote each word** (the codex/grok bootstrap prompt is one
+    `argv=` word containing spaces; space-joining raw would split it). Display this block
+    — do **not** execute the `cd`:
     ```
     Branch adopted into work system!
 
     Original branch: <original-branch-name>
     Task file:       tasks/<task-name>.md
-    Worktree:        .claude/worktrees/<task-name>
+    Location:        .claude/worktrees/<task-name>
     Branch:          <current-branch-name>
     Commits:         <count> commits ahead of <main-branch>
 
@@ -130,14 +210,18 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
        session — this session stays in the main repo) and run:
 
          cd .claude/worktrees/<task-name>
-         claude -n "<task-name>" "/work-system:continue"
+         <the argv= words, each shell-quoted>
     ```
-    `-n "<task-name>"` names the session (shown in `/resume` and the terminal title);
-    the `/work-system:continue` initial prompt runs the resume flow (load TASK.md, recent
-    commits, progress) deterministically — both in one launch. Use the plugin-qualified
-    form: a Claude Code built-in `/continue` shadows the bare skill name. Do **not** execute
-    the `cd` yourself
-    — it is for the user's new terminal.
+    For a **claude** worker that is `claude --model <m> -n "<task-name>"
+    "/work-system:continue"` — `-n` names the session (shown in `/resume`),
+    `/work-system:continue` runs the resume flow (load TASK.md, commits, progress).
+    Use the plugin-qualified form: a Claude Code built-in `/continue` shadows the bare
+    skill. For **codex/grok** it's `codex -m <model> '<bootstrap prompt>'`. Do **not**
+    execute the `cd` yourself — it is for the user's new terminal. If `resolve` exits
+    non-zero (2 unknown / 3 unavailable), surface that instead and re-offer the picker.
+    On the picker's "save default" path, persist only after the user confirms the worker
+    is up (see kickoff step 13b) — you (this main-repo session) then run
+    `bash "$REG" default set "<name>"`; it writes the committed `.claude/work-system-agent`.
 
 ## Remember
 
