@@ -94,9 +94,18 @@ Resolve the main repo path once (step 1) and use it for every path below. Never 
    ```
    - When step 1 reported `linked`, add: "Written to the main repo backlog, not this worktree."
 
-9. **Optional — Start immediately**:
-   - Ask: "Would you like to start working on this task now?"
-   - If yes, proceed with `/kickoff` workflow
+9. **Sync herdr tab glyphs** (best-effort, silent):
+   - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-tab-glyph.sh" refresh --cached "<main-repo>"`
+     (the `<main-repo>` path from step 1).
+   - The new task has no tab yet (nothing to stamp for it) — the value is the
+     main-repo tab's `◉` hub mark and re-deriving sibling worker glyphs while
+     already in the main session, so `--cached` reads the PR cache instead of a
+     blocking `gh` call. Outside herdr it is a silent no-op. Ignore its output —
+     never block or report on it.
+
+10. **Optional — Start immediately**:
+    - Ask: "Would you like to start working on this task now?"
+    - If yes, proceed with `/kickoff` workflow
 
 ## Tips
 

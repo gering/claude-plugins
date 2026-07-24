@@ -52,6 +52,9 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.9.4 — 2026-07-24
+- Add two more herdr tab-glyph refresh triggers: `/kickoff` (after the launch step, so the freshly-created tab is included) and `/define` (after the task file is written). Both call the same best-effort, silent `herdr-tab-glyph.sh refresh --cached <main-repo>` that `/close`/`/list`/`/status` already use — outside herdr, or on failure, it's a silent no-op. Fixes the Manager tab's `◉` hub mark sometimes not appearing until an unrelated `/close`/`/list`/`/status` happened to run in a repo where you mostly `/kickoff`.
+
 ### 1.9.3 — 2026-07-24
 - `/adopt` now auto-launches inside herdr, exactly like `/kickoff`: after it builds the worktree from an existing branch it opens the task's tab and starts the chosen worker there (outside herdr it prints the manual launch block unchanged). Reuses the shared `herdr-launch.sh launch` helper — no launch logic duplicated; the intricate result-branching and picker/announce rules stay a single source in `/kickoff`'s steps 12/13, which `/adopt` references. `/adopt` grew an optional `[agent-selector]` argument (`--fable`/`--opus`/`--sol`/`--grok`/`--codex`/`--agent <cli[:model]>`/`--pick`, same set as `/kickoff`); the branch is parsed position-independently from the selector. The tab label derives from the *resolved* task name, so it stays sensible when `/adopt` keeps the original branch name rather than renaming to `task/<name>`. READMEs and the `herdr-kickoff-automation` knowledge entry updated to cover both callers.
 

@@ -69,9 +69,12 @@ was shipped and caught in review.
   `claude -n` session names plain — those are stable identities, and nothing
   refreshes them, so a glyph there would freeze at its launch value.
 - **Trigger points:** stamped at launch (`herdr-launch.sh` → `prefix`, both
-  modes); re-stamped by `refresh` on `/status`, `/list`, `/close` (remaining tabs,
-  main-repo path — `$PWD` may be the just-removed worktree) and pr-flow's
-  `/open`, `/merge`, `/cycle`, `/check`.
+  modes); re-stamped by `refresh --cached` on `/status`, `/list`, `/close`
+  (remaining tabs, main-repo path — `$PWD` may be the just-removed worktree),
+  `/kickoff` (after the launch step, so the new tab is included), `/define`
+  (no tab of its own yet — the value is the `◉` + resyncing siblings while
+  already in the main session), `/continue`'s reopen, and pr-flow's `/open`,
+  `/merge`, `/cycle`, `/check`.
 - **Matching:** exact realpath equality against `<main>/.claude/worktrees/<task>`
   (→ state glyph) or the main repo root itself (→ `◉`) — same philosophy as
   `herdr-teardown.sh`: an agent cd'd into a *subdir* of either is never renamed,
