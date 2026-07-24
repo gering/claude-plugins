@@ -50,6 +50,10 @@ set -u
 
 SCRIPT_DIR="${0%/*}"
 
+# The realpath cwd↔worktree match lives ONCE in herdr-agent.sh; source it (no
+# side effects) for $HERDR_MATCH_PRELUDE, prepended to extract_glyph_tabs below.
+. "$SCRIPT_DIR/herdr-agent.sh"
+
 # Strip every leading "<glyph> " so re-prefixing is idempotent even if a prior
 # bug stacked glyphs. case-prefix matching is byte-exact, so the multibyte
 # glyphs are safe under any locale (a bracket expression would match per byte).
@@ -106,15 +110,11 @@ task_glyph() {
 # dash (first char excludes `-`) so a value like `-x`/`--foo` can never reach
 # `herdr tab rename` as an option flag; herdr ids are `wN:tM` and never start
 # with a dash, so nothing legitimate is lost.
-extract_glyph_tabs='import sys, json, os, re
+extract_glyph_tabs='import sys, json, re
 main = sys.argv[1] if len(sys.argv) > 1 else ""
-if not main.strip():
+root, wtdir = match_roots(main)   # from $HERDR_MATCH_PRELUDE (prepended below)
+if root is None:
     sys.exit(0)
-root = os.path.realpath(main)
-# realpath the whole worktrees path, not just root: cwd is resolved below, so a
-# symlinked .claude/worktrees would otherwise never match (dirname of the resolved
-# cwd follows the symlink, an unresolved wtdir does not) and task tabs would freeze.
-wtdir = os.path.realpath(os.path.join(root, ".claude", "worktrees"))
 try:
     agents = json.load(sys.stdin)["result"]["agents"]
 except Exception:
@@ -137,12 +137,8 @@ for a in agents:
         continue
     if not re.fullmatch(r"[A-Za-z0-9:_.][A-Za-z0-9:_.-]*", tab) or tab not in labels:
         continue
-    cwd = os.path.realpath(cwd)
-    if cwd == root:
-        kind, key = "main", os.path.basename(root)
-    elif os.path.dirname(cwd) == wtdir:
-        kind, key = "task", os.path.basename(cwd)
-    else:
+    kind, key = classify_cwd(cwd, root, wtdir)   # main | task | (None, None)
+    if kind is None:
         continue
     if not key or re.search(r"[\t\r\n]", key):
         continue
@@ -218,7 +214,8 @@ cmd_refresh() {
   # …) in labels as ASCII and raise UnicodeDecodeError — or fail to *encode* them
   # on the print — and the bare except / `|| true` would mask it as `checked=0`.
   tabs="$(printf '%s' "$list" \
-    | PYTHONUTF8=1 python3 -c "$extract_glyph_tabs" "$main" "$tabfile" 2>/dev/null || true)"
+    | PYTHONUTF8=1 python3 -c "$HERDR_MATCH_PRELUDE
+$extract_glyph_tabs" "$main" "$tabfile" 2>/dev/null || true)"
   if [ -z "$tabs" ]; then
     echo "checked=0 updated=0"
     return 0
