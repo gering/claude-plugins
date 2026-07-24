@@ -208,16 +208,17 @@ keeps the original branch name rather than renaming it to `task/<name>`:
 - The tab is **named after the task** (shortened for a readable sidebar — see
   `skills/kickoff/SKILL.md` step 13 for the exact rule), so the sidebar shows one
   clear entry per task instead of a wall of identical agents. The same short label
-  names the herdr agent (and, for a claude worker, the `-n` session); the
-  underlying `task/<name>` branch is unchanged, so the resume flow still resolves
-  the task.
+  names the herdr agent (and, for a claude worker, the `-n` session); the task's
+  branch — `task/<name>` from `/kickoff`, or the original branch `/adopt` kept — is
+  unchanged, so the resume flow still resolves the task.
 - The chosen worker is launched directly as argv (`herdr agent start … --
   <resolved worker command>`), so the real CLI process is what herdr's agent-state
   detection sees. A claude worker gets `claude --model <m> -n "<label>" "/work-system:continue"`
   and loads the task context automatically; a codex/grok worker gets a bootstrap
   prompt (read `TASK.md`, drive the task to a PR) since they have no work-system skills.
-- The new tab opens in the background (`--no-focus`), so your kickoff session
-  stays in front; switch to the tab when you're ready to work there.
+- The new tab opens in the background (`--no-focus`), so the session you launched
+  from (`/kickoff` or `/adopt`, in the main repo) stays in front; switch to the tab
+  when you're ready to work there.
 
 ### `/close` tears down the task's tab
 

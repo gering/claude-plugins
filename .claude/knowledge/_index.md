@@ -12,7 +12,7 @@
 ## Features
 - `features/backfill-and-origin-metadata.md` — `/backfill-knowledge` significance bar + origin-reconstruction cascade
 - `features/statusline-integration.md` — Status-line segments: plugins can't own `statusLine.command`; marker-block injection; the `[ks …]` + `[ws …]` two-segment coexistence and ws's never-block-on-network PR cache
-- `features/herdr-kickoff-automation.md` — herdr `herdr-launch.sh`: `launch` (`/kickoff` + `/adopt`, which references kickoff's step 12/13 prose to avoid drift) + `resume` (`/continue <task>` reopens an `/exit`-closed tab)
+- `features/herdr-kickoff-automation.md` — herdr `herdr-launch.sh`: `launch` (`/kickoff` + `/adopt`) + `resume` (`/continue <task>` reopens an `/exit`-closed tab)
 - `features/herdr-close-automation.md` — `/close` in herdr: cwd-tab teardown, plugin SessionEnd hook, the one TUI-exit primitive, detached self-exit onto idle
 - `features/herdr-tab-glyphs.md` — Task-state glyphs (`○ ● ◇ ◆ ✓`) + main-root `◉` on herdr tab labels: `states` mode in the self-contained renderer, sync-vs-`--cached` PR refresh per caller, exact-cwd rename rules, soft pr-flow shim
 - `features/kickoff-agent-selection.md` — `/kickoff` worker choice: single committed per-repo default (no global/fallback/ranking) else picker; `agent-registry.sh` as SoT; bounded model-aware grok probe (inconclusive→trust-auth); non-claude "document, don't fake" degradation; announce-not-prompt for external defaults

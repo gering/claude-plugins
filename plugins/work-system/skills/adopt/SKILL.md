@@ -125,20 +125,24 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     - Run: `pwd` and compare to the `<main-repo>` path captured by the helper in step 1.
     - If they differ, **stop and report an error**: "Session CWD drifted into the worktree during adopt — investigate which step ran a persistent `cd`." Do not silently continue.
 
-12. **Select the worker agent** — same as `/kickoff` step 12. Turn the selector
-    portion of `$ARGUMENTS` (anything after the branch name) into a concrete
-    `SELECTOR` for the launch helper, and set `OFFER_DEFAULT` (`no`, flipped to `yes`
-    only when the picker asks to save). With
-    `REG="${CLAUDE_PLUGIN_ROOT}/scripts/agent-registry.sh"`: an explicit flag
-    (`--fable`/`--opus`/`--sol`/`--grok`/`--codex`/`--agent <cli[:model]>`) is used verbatim, no
-    default offer; no flag reads the repo default (`SELECTOR="$(bash "$REG" default
-    get)"` — announce it before launching when it's a non-claude worker, then launch;
-    empty → the picker); `--pick`, or no flag with no default set, runs the picker
-    (`bash "$REG" list` → **AskUserQuestion**, plus a "Save as project default?"
-    question that sets `OFFER_DEFAULT=yes` only on Yes). **The picker/announce rules are
-    identical to `skills/kickoff/SKILL.md` step 12 — follow that one copy, not a
-    divergent paraphrase.** The helper (step 13) resolves and validates `SELECTOR`, so
-    don't resolve models/availability yourself.
+12. **Select the worker agent** — resolve the selector tokens **step 2 set aside**
+    into a concrete `SELECTOR`, and set `OFFER_DEFAULT` (`no`, flipped to `yes` only when
+    the picker asks to save). The default / picker / announce / OFFER_DEFAULT rules are
+    **identical to `skills/kickoff/SKILL.md` step 12 — follow that one copy, do not
+    re-paraphrase them here** (a divergent copy is exactly the drift this feature avoids).
+    With `REG="${CLAUDE_PLUGIN_ROOT}/scripts/agent-registry.sh"`, only the
+    token→`SELECTOR` mapping is restated, because it must match step 2's split (the
+    selector may precede or follow the branch — never assume it comes "after" it):
+    - a shorthand flag (`--fable`/`--opus`/`--sol`/`--grok`/`--codex`) → `SELECTOR` is
+      that flag verbatim;
+    - `--agent <cli[:model]>` → `SELECTOR` is the **`cli[:model]` value**, not the
+      `--agent` token (the registry resolves the bare value; the flag verbatim fails as
+      an unknown selector — exit 2);
+    - no selector token → the repo default (`SELECTOR="$(bash "$REG" default get)"`);
+      empty default, or `--pick`, → the picker.
+
+    The helper (step 13) resolves and validates `SELECTOR`, so don't resolve
+    models/availability yourself.
 
 13. **Launch the worktree session** — automate inside herdr, otherwise show the
     manual block. Inside herdr this replaces the old "print manual instructions" final
@@ -178,10 +182,11 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     ```
     Branch adopted and launched in herdr!
 
-    Tab:      <LABEL>   (workspace <HERDR_WORKSPACE_ID>, opened in the background)
-    Agent:    <cli:model>   (the helper's `agent=` line)
-    Worktree: .claude/worktrees/<task-name>
-    Branch:   <current-branch-name>
+    Tab:       <LABEL>   (workspace <HERDR_WORKSPACE_ID>, opened in the background)
+    Agent:     <cli:model>   (the helper's `agent=` line)
+    Location:  .claude/worktrees/<task-name>
+    Branch:    <current-branch-name>   (original branch, unless step 8 renamed it)
+    Task file: TASK.md (drafted from the branch — review it)
 
     The new tab is already running the worker. Switch to it to work there.
     ```
@@ -197,7 +202,7 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
 
     Original branch: <original-branch-name>
     Task file:       tasks/<task-name>.md
-    Worktree:        .claude/worktrees/<task-name>
+    Location:        .claude/worktrees/<task-name>
     Branch:          <current-branch-name>
     Commits:         <count> commits ahead of <main-branch>
 
