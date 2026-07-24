@@ -272,6 +272,16 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     the worktree). It writes the committed `.claude/work-system-agent` in the main
     repo; mention it's an uncommitted change to commit when ready.
 
+14. **Sync herdr tab glyphs** (best-effort, silent):
+    - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-tab-glyph.sh" refresh --cached "<main-repo>"`
+      (the `<main-repo>` path from step 1) — after the launch, so the freshly-created
+      tab is included.
+    - This stamps the state glyph (`○ ● ◇ ◆ ✓`) on the new tab, the main-repo tab's
+      `◉` hub mark, and re-derives sibling worker glyphs — whose state `/kickoff`
+      may have changed (a new task branch exists now), so `--cached` reads the PR
+      cache instead of a blocking `gh` call. Outside herdr it is a silent no-op.
+      Ignore its output — never block or report on it.
+
 ## Remember
 
 - Each worktree is an isolated workspace
