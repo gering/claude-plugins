@@ -24,14 +24,20 @@
 #   * INSIDE herdr, populated list, worktree not among the agents → confidently
 #     no live worker: liveness BLANK.
 #
-# Always exits 0 (a non-repo, or a repo with no task worktrees, prints nothing).
+# Always exits 0 for repo/herdr state: a non-repo, or a repo with no task
+# worktrees, yields NO rows — empty stdout in TSV, `[]` in --json. (python3 is a
+# hard dependency shared by every sibling script; its absence is out of scope for
+# the exit-0 promise, same as the rest of the plugin.)
 #
 # CWD safety: git is addressed with `git -C "$DIR"`; both sides of every cwd
 # compare are realpath-resolved (in classify_cwd / the porcelain walk); this
 # script never `cd`s.
 set -u
 
-SCRIPT_DIR="${0%/*}"
+# Resolve the script's own dir via BASH_SOURCE (robust to a bare-name invocation
+# like `bash lanes.sh`, where `${0%/*}` would wrongly leave `lanes.sh`), so the
+# sibling `source` below always finds herdr-agent.sh.
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # $HERDR_MATCH_PRELUDE (the realpath cwd match) + ha_list live in herdr-agent.sh;
 # source it (side-effect free) rather than re-deriving the match here.
 . "$SCRIPT_DIR/herdr-agent.sh"
@@ -128,12 +134,12 @@ if mode == "list" and agents_file:
         mode = "unverified"       # empty/repopulating list → do not guess
     else:
         for a in agents:
-            cwd = a.get("cwd")
-            kind, key = classify_cwd(cwd, root, wtdir)
+            if not isinstance(a, dict):
+                continue                  # non-dict element (e.g. a bare null) — skip, never crash
+            kind, key, wt = classify_cwd(a.get("cwd"), root, wtdir)
             if kind != "task":
                 continue
-            wt = os.path.realpath((cwd or "").rstrip("/"))
-            if wt in live:
+            if wt in live:                # first agent in a worktree wins
                 continue
             sess = ""
             s = a.get("agent_session")
@@ -147,17 +153,19 @@ if mode == "list" and agents_file:
                 "session": sess,
             }
 
-# lane set from the porcelain: keep only direct children of the worktrees dir
-# (drops the main worktree and any external/manual worktree).
+# lane set from the porcelain: keep only worktrees classify_cwd calls "task"
+# (drops the main worktree and any external/manual worktree) — the SAME shared
+# classification the liveness join and herdr-tab-glyph.sh use, so the rule can
+# never drift between the two consumers.
 lanes = []
 cur_path = None
 cur_branch = ""
 def flush():
     global cur_path, cur_branch
     if cur_path is not None:
-        rp = os.path.realpath(cur_path)
-        if rp != root and os.path.dirname(rp) == wtdir:
-            lanes.append((os.path.basename(rp), rp, cur_branch))
+        kind, key, rp = classify_cwd(cur_path, root, wtdir)
+        if kind == "task":
+            lanes.append((key, rp, cur_branch))
     cur_path = None
     cur_branch = ""
 for line in sys.stdin.read().splitlines():
@@ -193,8 +201,17 @@ for task, wt, branch in lanes:
 if fmt == "json":
     print(json.dumps(rows, ensure_ascii=False))
 else:
+    # Scrub tab/CR/LF from every cell before emitting TSV: agent/agent_status/
+    # pane/tab/session are UNTRUSTED herdr fields (any tool in the session can set
+    # them), so an embedded tab/newline would forge extra columns/rows and a
+    # consumer cut -f9/f10 would aim a herdr op at the wrong id. Mirrors the same
+    # scrub herdr-tab-glyph.sh applies to untrusted label/key fields. (--json is
+    # already safe — json.dumps quotes the control chars.)
+    import re
+    def _cell(s):
+        return re.sub(r"[\t\r\n]", " ", s)
     for r in rows:
-        print("\t".join(r[c] for c in COLS))'
+        print("\t".join(_cell(r[c]) for c in COLS))'
 
 printf '%s' "$WORKTREES" \
   | PYTHONUTF8=1 python3 -c "$HERDR_MATCH_PRELUDE

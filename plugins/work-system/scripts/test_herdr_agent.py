@@ -167,6 +167,21 @@ check("wait: default not appended over caller's", "10000" not in argv)
 check("wait: exactly one --timeout", argv.count("--timeout") == 1)
 e.close()
 
+# --- wait: the --timeout=MS form is honored too (no default appended) ------ #
+e = Env({"agent wait": ("", "", 0)}, log_argv=True)
+r = e.run("wait", "w1:p1", "--status", "idle", "--timeout=500")
+argv = e.logged_argv()
+check("wait: --timeout= form detected", "--timeout=500" in argv)
+check("wait: default not appended over --timeout= form", "10000" not in argv)
+e.close()
+
+# --- missing <target> is a usage error (2), NOT server-unreachable (4) ----- #
+for sub in ("get", "read", "wait"):
+    e = Env({f"agent {sub}": ("", "", 0)})
+    r = e.run(sub)  # no target argument
+    check(f"{sub}: missing target → exit 2", r.returncode == 2)
+    e.close()
+
 
 if FAILS:
     print("FAIL:")

@@ -48,7 +48,10 @@
 # refresh did, which is why it silently never showed up in the sidebar.
 set -u
 
-SCRIPT_DIR="${0%/*}"
+# Resolve via BASH_SOURCE (robust to a bare-name `bash herdr-tab-glyph.sh`, where
+# `${0%/*}` would wrongly leave the filename), so the sibling source below and the
+# ws-statusline.sh calls always resolve.
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # The realpath cwd↔worktree match lives ONCE in herdr-agent.sh; source it (no
 # side effects) for $HERDR_MATCH_PRELUDE, prepended to extract_glyph_tabs below.
@@ -137,7 +140,7 @@ for a in agents:
         continue
     if not re.fullmatch(r"[A-Za-z0-9:_.][A-Za-z0-9:_.-]*", tab) or tab not in labels:
         continue
-    kind, key = classify_cwd(cwd, root, wtdir)   # main | task | (None, None)
+    kind, key, _ = classify_cwd(cwd, root, wtdir)   # main | task | (None, None, None)
     if kind is None:
         continue
     if not key or re.search(r"[\t\r\n]", key):

@@ -26,11 +26,16 @@
 #
 # Exit codes (CLI + ha_* functions):
 #   0  success
+#   2  usage — a required <target> argument was missing
 #   3  herdr and/or python3 not on PATH        (degrade — tools absent)
 #   4  herdr call failed / empty output         (degrade — server unreachable)
 #   5  output was not the expected JSON shape   (degrade — malformed)
 # read/wait forward herdr's own non-zero (e.g. wait timeout) unchanged.
-set -u
+#
+# `set -u` is enabled ONLY on the executed-CLI path (foot of the file), never at
+# source time: sourcing for $HERDR_MATCH_PRELUDE / the ha_* helpers must not
+# mutate the caller's shell options (the side-effect-free contract). The wrappers
+# guard their own expansions with ${x:-}, so they are correct either way.
 
 # ---- shared realpath cwd↔worktree match (the "prelude") ---------------------
 # A python3 source string, apostrophe-free so it stays single-quotable. Both
@@ -51,24 +56,31 @@ def match_roots(main):
     return root, wtdir
 
 def classify_cwd(cwd, root, wtdir):
-    # Exact realpath match. Returns:
-    #   ("main", <repo dir name>)        cwd IS the main repo root
-    #   ("task", <worktree dir name>)    cwd IS a direct child of the worktrees dir
-    #   (None, None)                     neither (incl. a mere subdir of either)
+    # Exact realpath match. Returns a 3-tuple (kind, key, resolved):
+    #   ("main", <repo dir name>, <root>)         cwd IS the main repo root
+    #   ("task", <worktree dir name>, <worktree>) cwd IS a direct child of worktrees
+    #   (None, None, None)                         neither (incl. a mere subdir)
+    # `resolved` is the realpath of cwd — returned so a caller keying by full path
+    # (lanes.sh) reuses this resolution instead of computing realpath a second time.
     # cwd is realpath-resolved here; root/wtdir come pre-resolved from match_roots.
     cwd = (cwd or "").rstrip("/")
     if not cwd or root is None:
-        return None, None
+        return None, None, None
     cwd = os.path.realpath(cwd)
     if cwd == root:
-        return "main", os.path.basename(root)
+        return "main", os.path.basename(root), cwd
     if os.path.dirname(cwd) == wtdir:
-        return "task", os.path.basename(cwd)
-    return None, None'
+        return "task", os.path.basename(cwd), cwd
+    return None, None, None'
 
 # Default bound for `wait` when the caller passes none — a wrapper must never
 # wait unboundedly (that would be the busy loop this script exists to avoid).
 HA_WAIT_DEFAULT_TIMEOUT_MS="${HA_WAIT_DEFAULT_TIMEOUT_MS:-10000}"
+
+# Wall-clock bound for the one-shot list/get/read calls, so a herdr server that
+# accepts a request but never answers can't hang a survey (the header's "never a
+# hang" promise). `wait` is excluded — the caller's --timeout already bounds it.
+HA_CALL_TIMEOUT_SECS="${HA_CALL_TIMEOUT_SECS:-10}"
 
 # ---- primitive wrappers -----------------------------------------------------
 
@@ -76,6 +88,19 @@ HA_WAIT_DEFAULT_TIMEOUT_MS="${HA_WAIT_DEFAULT_TIMEOUT_MS:-10000}"
 ha_have() {
   command -v herdr   >/dev/null 2>&1 || return 1
   command -v python3 >/dev/null 2>&1 || return 1
+}
+
+# Run "$@" under HA_CALL_TIMEOUT_SECS. `timeout` isn't on stock macOS; fall back
+# to gtimeout, then perl's alarm (ships with macOS; the timer survives exec).
+# A host with none runs unbounded — accepted residual, same tradeoff as
+# ws-statusline.sh's run_bounded. A timeout kills the child → non-zero exit,
+# which the callers already map to their degrade code.
+_ha_bounded() {
+  if   command -v timeout  >/dev/null 2>&1; then timeout  "$HA_CALL_TIMEOUT_SECS" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$HA_CALL_TIMEOUT_SECS" "$@"
+  elif command -v perl     >/dev/null 2>&1; then perl -e 'alarm shift; exec @ARGV' "$HA_CALL_TIMEOUT_SECS" "$@"
+  else "$@"
+  fi
 }
 
 # Validate that stdin is JSON whose result.<key> is a list; exit 0/1. Used to
@@ -94,7 +119,7 @@ sys.exit(0 if isinstance(v, list) else 1)' "$1" 2>/dev/null
 ha_list() {
   ha_have || return 3
   local json
-  json="$(herdr agent list 2>/dev/null)" || return 4
+  json="$(_ha_bounded herdr agent list 2>/dev/null)" || return 4
   [ -n "$json" ] || return 4
   printf '%s' "$json" | _ha_validate_list agents || return 5
   printf '%s\n' "$json"
@@ -104,9 +129,9 @@ ha_list() {
 ha_get() {
   ha_have || return 3
   local target="${1:-}"
-  [ -n "$target" ] || return 4
+  [ -n "$target" ] || return 2
   local json
-  json="$(herdr agent get "$target" 2>/dev/null)" || return 4
+  json="$(_ha_bounded herdr agent get "$target" 2>/dev/null)" || return 4
   [ -n "$json" ] || return 4
   printf '%s' "$json" | python3 -c 'import sys, json
 try:
@@ -124,9 +149,9 @@ except Exception:
 ha_read() {
   ha_have || return 3
   local target="${1:-}"
-  [ -n "$target" ] || return 4
+  [ -n "$target" ] || return 2
   shift
-  herdr agent read "$target" "$@"
+  _ha_bounded herdr agent read "$target" "$@"
 }
 
 # `herdr agent wait <target> --status S [--timeout MS]` — BOUNDED: if the caller
@@ -136,11 +161,13 @@ ha_read() {
 ha_wait() {
   ha_have || return 3
   local target="${1:-}"
-  [ -n "$target" ] || return 4
+  [ -n "$target" ] || return 2
   shift
+  # Detect BOTH `--timeout MS` and `--timeout=MS`, so a caller's explicit bound in
+  # either form is honoured and no duplicate flag is appended.
   local a has_timeout=0
   for a in "$@"; do
-    [ "$a" = "--timeout" ] && { has_timeout=1; break; }
+    case "$a" in --timeout|--timeout=*) has_timeout=1; break ;; esac
   done
   if [ "$has_timeout" -eq 0 ]; then
     set -- "$@" --timeout "$HA_WAIT_DEFAULT_TIMEOUT_MS"
@@ -168,6 +195,7 @@ ha_main() {
 # script sources it for $HERDR_MATCH_PRELUDE / the ha_* helpers the two differ,
 # so no subcommand runs.
 if [ "${BASH_SOURCE[0]:-}" = "${0:-}" ] && [ -n "${BASH_SOURCE[0]:-}" ]; then
+  set -u                 # CLI path only — never leaked into a sourcing shell
   ha_main "$@"
   exit $?
 fi

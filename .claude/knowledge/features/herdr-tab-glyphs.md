@@ -78,7 +78,10 @@ was shipped and caught in review.
 - **Matching:** exact realpath equality against `<main>/.claude/worktrees/<task>`
   (→ state glyph) or the main repo root itself (→ `◉`) — same philosophy as
   `herdr-teardown.sh`: an agent cd'd into a *subdir* of either is never renamed,
-  and anything outside the repo never is. `◉` needs no new trigger — the same
+  and anything outside the repo never is. The match itself no longer lives inline
+  here: it is `classify_cwd` in `herdr-agent.sh`'s `$HERDR_MATCH_PRELUDE`, the
+  single source of truth this script and `lanes.sh` both consume — change match
+  semantics there, not in either consumer (see [lane-registry](lane-registry.md)). `◉` needs no new trigger — the same
   `refresh` sweep stamps both. The match needs **both** herdr lists joined on
   `tab_id`: only agents carry `cwd` (the match key), only tabs carry `label`
   (what we stamp). One tab is stamped once (first matching agent wins — a

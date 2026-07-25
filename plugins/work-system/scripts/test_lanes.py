@@ -148,6 +148,26 @@ tsv_lines = [ln for ln in r.stdout.splitlines() if ln]
 check("tsv: three rows", len(tsv_lines) == 3)
 check("tsv: 10 columns", all(len(ln.split("\t")) == 10 for ln in tsv_lines))
 
+# --- null / non-dict agent element: no crash, always exit 0 --------------- #
+mixed = jsonlib.dumps({"result": {"agents": [
+    None,
+    {"agent": "claude", "agent_status": "working", "cwd": f"{WT}/alpha",
+     "pane_id": "w1:p9", "tab_id": "w1:t9", "agent_session": {"value": "U"}},
+]}})
+r, rows = run(agents_json=mixed, herdr_env=True)
+check("null-element: exit 0 (no crash)", r.returncode == 0)
+check("null-element: valid record still joins", rows["alpha"]["agent"] == "claude")
+
+# --- TSV field-injection: tab/newline in untrusted fields is scrubbed ------ #
+inj = jsonlib.dumps({"result": {"agents": [
+    {"agent": "claude", "agent_status": "working\tfake\nrow", "cwd": f"{WT}/alpha",
+     "pane_id": "w1:p9", "tab_id": "w1:t9", "agent_session": {"value": "U"}},
+]}})
+r, _ = run(agents_json=inj, herdr_env=True, fmt=None)  # TSV path
+inj_lines = [ln for ln in r.stdout.splitlines() if ln]
+check("tsv-injection: row count unchanged (no forged line)", len(inj_lines) == 3)
+check("tsv-injection: every row still 10 columns", all(len(ln.split("\t")) == 10 for ln in inj_lines))
+
 
 if FAILS:
     print("FAIL:")
