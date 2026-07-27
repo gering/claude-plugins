@@ -78,7 +78,13 @@ check("skill: HDR carries no lens-list mirror", not re.search(r"^- Cover ALL of 
 ADAPTER = PLUGIN / "scripts" / "agents.sh"
 sh = ADAPTER.read_text(encoding="utf-8")
 check("adapter: --lens-instr flag present", "--lens-instr)" in sh)
-check("workflow: passes --lens-instr to the adapter", "--lens-instr" in js)
+# Must match the ARGUMENT the workflow builds, not merely the string appearing
+# somewhere: prose about --lens-instr (there is plenty) would otherwise keep this
+# green after the actual flag was dropped from the command.
+check(
+    "workflow: passes --lens-instr into the transport command",
+    re.search(r"--lens-instr \$\{shQuote\(lensInstr\(u\)\)\}", js),
+)
 
 # Oversize headroom: the skill refuses to run the externals above a threshold in
 # PROSE, but the real per-call cap (`max_bytes`) lives in agents.sh, and what
@@ -92,24 +98,38 @@ check("skill: oversize threshold found", sk)
 if mb and sk:
     max_bytes, threshold = int(mb.group(1)), int(sk.group(1))
     check("skill threshold is below the adapter cap", threshold < max_bytes)
-    # Largest instruction the workflow can build: the biggest cluster's briefs
-    # plus the fixed wrapper prose. Mirrors lensInstr()/unitBrief() closely enough
-    # to bound it (exactness is not the point — the headroom margin is).
+    # Largest instruction the workflow can build. The FIXED prose is DERIVED from
+    # the source (the literal chunks of lensInstr()/unitBrief()'s template
+    # strings, with every ${...} expression removed) rather than copied here — a
+    # Python copy of the template would go stale the moment someone adds a
+    # sentence to unitBrief(), and this check would then bound the wrong string
+    # while reporting green. Only the interpolated parts are modelled below.
     briefs = {}
     for m in re.finditer(r"^  (?:'([a-z-]+)'|([a-z]+)): '(.*)',$", bm.group(1) if bm else "", re.M):
         briefs[m.group(1) or m.group(2)] = m.group(3)
     check("LENS_BRIEF values parsed", set(briefs) == set(cluster_lenses))
+
+    def literal_len(fn_src):
+        """Bytes of fixed prose in a JS template-literal body (drops ${...})."""
+        return sum(
+            len(re.sub(r"\$\{[^}]*\}", "", chunk).encode("utf-8"))
+            for chunk in re.findall(r"`([^`]*)`", fn_src)
+        )
+
+    ub = re.search(r"const unitBrief = \(u, \{ inline \}\) =>(.*?)\nconst ", js, re.S)
+    li = re.search(r"const lensInstr = \(u\) =>(.*?)\n(?:const|// )", js, re.S)
+    check("workflow: unitBrief() found", ub)
+    check("workflow: lensInstr() found", li)
+    fixed = literal_len(ub.group(1) if ub else "") + literal_len(li.group(1) if li else "")
     worst = 0
     for lenses in clusters.values():
-        body = "; ".join(f"{l}: {briefs.get(l, '')}" for l in lenses)
-        tags = " / ".join(f'"[{l}] "' for l in lenses)
-        worst = max(worst, len(("Review ONLY through these lens(es) — report nothing outside them. "
-                                f"Lenses — {body}. One finding per distinct issue (defect or substantive improvement), "
-                                "each with a concrete falsifiable failure_scenario. "
-                                f"Prefix each summary with the ONE lens it belongs to: {tags}. "
-                                "An empty findings list is valid.").encode("utf-8")))
+        # inline form: "<lens>: <brief>" joined by "; ", plus the '"[lens] "'
+        # tag list joined by " / " — the two ${...} expansions that scale.
+        body = len("; ".join(f"{l}: {briefs.get(l, '')}" for l in lenses).encode("utf-8"))
+        tags = len(" / ".join(f'"[{l}] "' for l in lenses).encode("utf-8"))
+        worst = max(worst, fixed + body + tags)
     check(
-        f"oversize headroom ({max_bytes - threshold} B) covers the largest lens instruction ({worst} B)",
+        f"oversize headroom ({max_bytes - threshold} B) covers the largest lens instruction (<= {worst} B)",
         max_bytes - threshold >= worst,
     )
 
