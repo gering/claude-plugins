@@ -60,7 +60,7 @@ PORCELAIN = "\n".join([
 STATES = "alpha\tactive\t●\nbeta\treview\t◇\n"
 
 
-def run(agents_json=None, herdr_env=False, fmt="--json"):
+def run(agents_json=None, herdr_env=False, fmt="--json", worktrees=PORCELAIN):
     """Run lanes.sh with injected worktrees/states and (optionally) an agent
     list. Returns parsed JSON rows keyed by task."""
     env = dict(os.environ)
@@ -69,7 +69,7 @@ def run(agents_json=None, herdr_env=False, fmt="--json"):
         env["HERDR_ENV"] = "1"
     tmp = tempfile.TemporaryDirectory()
     d = Path(tmp.name)
-    (d / "wt").write_text(PORCELAIN)
+    (d / "wt").write_text(worktrees)
     (d / "states").write_text(STATES)
     env["LANES_WORKTREES_FILE"] = str(d / "wt")
     env["LANES_STATES_FILE"] = str(d / "states")
@@ -148,7 +148,8 @@ tsv_lines = [ln for ln in r.stdout.splitlines() if ln]
 check("tsv: three rows", len(tsv_lines) == 3)
 check("tsv: 10 columns", all(len(ln.split("\t")) == 10 for ln in tsv_lines))
 
-# --- null / non-dict agent element: no crash, always exit 0 --------------- #
+# --- null / non-dict agent element: no crash; matched keeps value, UNMATCHED --
+#     lanes fail closed to unverified (the list can't be fully trusted) -------- #
 mixed = jsonlib.dumps({"result": {"agents": [
     None,
     {"agent": "claude", "agent_status": "working", "cwd": f"{WT}/alpha",
@@ -156,7 +157,19 @@ mixed = jsonlib.dumps({"result": {"agents": [
 ]}})
 r, rows = run(agents_json=mixed, herdr_env=True)
 check("null-element: exit 0 (no crash)", r.returncode == 0)
-check("null-element: valid record still joins", rows["alpha"]["agent"] == "claude")
+check("null-element: matched lane keeps confident value", rows["alpha"]["agent"] == "claude")
+check("null-element: unmatched lane fails closed to unverified",
+      rows["beta"]["agent_status"] == "unverified")
+
+# --- non-string agent field: coerced, never crashes the TSV scrub ---------- #
+nonstr = jsonlib.dumps({"result": {"agents": [
+    {"agent": "claude", "agent_status": 7, "cwd": f"{WT}/alpha",
+     "pane_id": "w1:p9", "tab_id": "w1:t9", "agent_session": {"value": "U"}},
+]}})
+r, _ = run(agents_json=nonstr, herdr_env=True, fmt=None)  # TSV path
+check("non-string field: exit 0 (no TypeError)", r.returncode == 0)
+r, rows = run(agents_json=nonstr, herdr_env=True)
+check("non-string field: coerced to str in JSON", rows["alpha"]["agent_status"] == "7")
 
 # --- TSV field-injection: tab/newline in untrusted fields is scrubbed ------ #
 inj = jsonlib.dumps({"result": {"agents": [
@@ -167,6 +180,13 @@ r, _ = run(agents_json=inj, herdr_env=True, fmt=None)  # TSV path
 inj_lines = [ln for ln in r.stdout.splitlines() if ln]
 check("tsv-injection: row count unchanged (no forged line)", len(inj_lines) == 3)
 check("tsv-injection: every row still 10 columns", all(len(ln.split("\t")) == 10 for ln in inj_lines))
+
+# --- --json early-exit paths emit [] (never empty stdout) ------------------ #
+r, _ = run(worktrees="", fmt="--json")          # empty worktree porcelain
+check("json-empty: exit 0", r.returncode == 0)
+check("json-empty: prints [] not empty", r.stdout.strip() == "[]")
+r, _ = run(worktrees="", fmt=None)              # TSV counterpart prints nothing
+check("tsv-empty: prints nothing", r.stdout.strip() == "")
 
 
 if FAILS:

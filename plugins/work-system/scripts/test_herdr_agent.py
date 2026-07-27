@@ -182,6 +182,22 @@ for sub in ("get", "read", "wait"):
     check(f"{sub}: missing target → exit 2", r.returncode == 2)
     e.close()
 
+# --- a leading-dash <target> is rejected (never passed as an option flag) --- #
+for sub in ("get", "read", "wait"):
+    e = Env({f"agent {sub}": ("", "", 0)})
+    r = e.run(sub, "-x")
+    check(f"{sub}: leading-dash target → exit 2", r.returncode == 2)
+    e.close()
+
+# --- wait injects a client wall-bound sized above the server --timeout ------ #
+# The fake herdr still receives the herdr args verbatim through the bounding
+# wrapper, so the arg contract is unchanged; this just confirms it still runs.
+e = Env({"agent wait": ("", "", 0)}, log_argv=True)
+r = e.run("wait", "w1:p1", "--status", "idle")
+check("wait: still exits 0 through the wall-bound wrapper", r.returncode == 0)
+check("wait: herdr args reach the server through the bound", "wait" in e.logged_argv())
+e.close()
+
 
 if FAILS:
     print("FAIL:")

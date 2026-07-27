@@ -46,22 +46,26 @@ FORMAT=tsv
 [ "${1:-}" = "--json" ] && { FORMAT=json; shift; }
 DIR="${1:-$PWD}"
 
+# The empty result, emitted by every early-exit guard: `[]` in --json (so a
+# consumer's json.loads never hits empty stdout), nothing in TSV. Always exit 0.
+_empty_exit() { [ "$FORMAT" = json ] && printf '[]\n'; exit 0; }
+
 # --- lane set + branch: `git worktree list` (authoritative) ------------------
 # LANES_WORKTREES_FILE is a TEST SEAM: it injects porcelain content so the join
 # logic is exercisable without a real repo/worktrees. Production reads live git.
 if [ -n "${LANES_WORKTREES_FILE:-}" ]; then
   WORKTREES="$(cat "$LANES_WORKTREES_FILE")"
 else
-  git -C "$DIR" rev-parse --git-dir >/dev/null 2>&1 || exit 0
+  git -C "$DIR" rev-parse --git-dir >/dev/null 2>&1 || _empty_exit
   WORKTREES="$(git -C "$DIR" worktree list --porcelain 2>/dev/null)"
 fi
-[ -n "$WORKTREES" ] || exit 0
+[ -n "$WORKTREES" ] || _empty_exit
 
 # The main worktree is the first porcelain entry — the backlog + worktrees dir
 # live there. Strip "worktree " without field-splitting so a path with spaces
 # survives.
 MAIN="$(printf '%s\n' "$WORKTREES" | sed -n 's/^worktree //p' | head -1)"
-[ -n "$MAIN" ] || exit 0
+[ -n "$MAIN" ] || _empty_exit
 
 # --- backlog state: `ws-statusline.sh states --cached` -----------------------
 # --cached = pure survey (read the PR cache, never a synchronous gh call): the
@@ -102,15 +106,24 @@ fi
 # argv   = main, format, liveness-mode, agents-file, states-blob
 # The prelude (match_roots / classify_cwd) is prepended so the agent→worktree
 # match is the SAME one herdr-tab-glyph.sh uses.
-lanes_join='import sys, json, os
+lanes_join='import sys, json
 main = sys.argv[1]
 fmt = sys.argv[2]
 mode = sys.argv[3]
 agents_file = sys.argv[4]
 states_blob = sys.argv[5] if len(sys.argv) > 5 else ""
 
+# realpath helpers come from the prepended $HERDR_MATCH_PRELUDE (it imports os).
+def _s(v):
+    # Coerce any cell value to a string: herdr fields are untrusted and may be
+    # non-string JSON (e.g. a numeric agent_status), which would crash the TSV
+    # scrub or type-mismatch the JSON. None -> "".
+    return "" if v is None else str(v)
+
 root, wtdir = match_roots(main)
 if root is None:
+    if fmt == "json":
+        print("[]")
     sys.exit(0)
 
 # state + glyph by task name (ws-statusline states emits task\tstate\tglyph)
@@ -123,6 +136,7 @@ for line in states_blob.splitlines():
 # liveness by worktree realpath (first agent in a worktree wins). mode may be
 # demoted to "unverified" here when the list is malformed/empty (fail-closed).
 live = {}
+saw_malformed = False   # a non-dict element seen → the list is partly untrustworthy
 if mode == "list" and agents_file:
     try:
         agents = json.load(open(agents_file))["result"]["agents"]
@@ -135,7 +149,8 @@ if mode == "list" and agents_file:
     else:
         for a in agents:
             if not isinstance(a, dict):
-                continue                  # non-dict element (e.g. a bare null) — skip, never crash
+                saw_malformed = True      # non-dict element (e.g. a bare null) — skip, never crash
+                continue
             kind, key, wt = classify_cwd(a.get("cwd"), root, wtdir)
             if kind != "task":
                 continue
@@ -144,12 +159,12 @@ if mode == "list" and agents_file:
             sess = ""
             s = a.get("agent_session")
             if isinstance(s, dict):
-                sess = s.get("value") or ""
+                sess = _s(s.get("value"))
             live[wt] = {
-                "agent": a.get("agent") or "",
-                "agent_status": a.get("agent_status") or "",
-                "pane": a.get("pane_id") or "",
-                "tab": a.get("tab_id") or "",
+                "agent": _s(a.get("agent")),
+                "agent_status": _s(a.get("agent_status")),
+                "pane": _s(a.get("pane_id")),
+                "tab": _s(a.get("tab_id")),
                 "session": sess,
             }
 
@@ -183,7 +198,11 @@ def liveness_for(wt):
     if wt in live:
         L = live[wt]
         return (L["agent"], L["agent_status"], L["pane"], L["tab"], L["session"])
-    if mode == "unverified":
+    # A matched lane keeps its confident values above. For an UNMATCHED lane, a
+    # list that carried a malformed element can no longer be fully trusted to
+    # assert "no worker here" (the junk element may have been this lane agent) —
+    # fail closed to unverified, same as an unreachable/empty list.
+    if mode == "unverified" or saw_malformed:
         return ("", "unverified", "", "", "")
     return ("", "", "", "", "")   # absent (outside herdr) OR present-but-no-agent
 

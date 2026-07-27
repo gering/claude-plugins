@@ -90,15 +90,16 @@ ha_have() {
   command -v python3 >/dev/null 2>&1 || return 1
 }
 
-# Run "$@" under HA_CALL_TIMEOUT_SECS. `timeout` isn't on stock macOS; fall back
+# Run "$@" under a $1-second wall bound. `timeout` isn't on stock macOS; fall back
 # to gtimeout, then perl's alarm (ships with macOS; the timer survives exec).
 # A host with none runs unbounded — accepted residual, same tradeoff as
 # ws-statusline.sh's run_bounded. A timeout kills the child → non-zero exit,
 # which the callers already map to their degrade code.
 _ha_bounded() {
-  if   command -v timeout  >/dev/null 2>&1; then timeout  "$HA_CALL_TIMEOUT_SECS" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$HA_CALL_TIMEOUT_SECS" "$@"
-  elif command -v perl     >/dev/null 2>&1; then perl -e 'alarm shift; exec @ARGV' "$HA_CALL_TIMEOUT_SECS" "$@"
+  local secs="$1"; shift
+  if   command -v timeout  >/dev/null 2>&1; then timeout  "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"
+  elif command -v perl     >/dev/null 2>&1; then perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
   else "$@"
   fi
 }
@@ -119,7 +120,7 @@ sys.exit(0 if isinstance(v, list) else 1)' "$1" 2>/dev/null
 ha_list() {
   ha_have || return 3
   local json
-  json="$(_ha_bounded herdr agent list 2>/dev/null)" || return 4
+  json="$(_ha_bounded "$HA_CALL_TIMEOUT_SECS" herdr agent list 2>/dev/null)" || return 4
   [ -n "$json" ] || return 4
   printf '%s' "$json" | _ha_validate_list agents || return 5
   printf '%s\n' "$json"
@@ -130,8 +131,9 @@ ha_get() {
   ha_have || return 3
   local target="${1:-}"
   [ -n "$target" ] || return 2
+  case "$target" in -*) return 2 ;; esac   # a leading-dash target would be read as an option flag
   local json
-  json="$(_ha_bounded herdr agent get "$target" 2>/dev/null)" || return 4
+  json="$(_ha_bounded "$HA_CALL_TIMEOUT_SECS" herdr agent get "$target" 2>/dev/null)" || return 4
   [ -n "$json" ] || return 4
   printf '%s' "$json" | python3 -c 'import sys, json
 try:
@@ -150,8 +152,9 @@ ha_read() {
   ha_have || return 3
   local target="${1:-}"
   [ -n "$target" ] || return 2
+  case "$target" in -*) return 2 ;; esac   # a leading-dash target would be read as an option flag
   shift
-  _ha_bounded herdr agent read "$target" "$@"
+  _ha_bounded "$HA_CALL_TIMEOUT_SECS" herdr agent read "$target" "$@"
 }
 
 # `herdr agent wait <target> --status S [--timeout MS]` — BOUNDED: if the caller
@@ -162,17 +165,28 @@ ha_wait() {
   ha_have || return 3
   local target="${1:-}"
   [ -n "$target" ] || return 2
+  case "$target" in -*) return 2 ;; esac   # a leading-dash target would be read as an option flag
   shift
   # Detect BOTH `--timeout MS` and `--timeout=MS`, so a caller's explicit bound in
-  # either form is honoured and no duplicate flag is appended.
-  local a has_timeout=0
+  # either form is honoured (no duplicate appended), and capture its value to size
+  # the client wall-bound below.
+  local a has_timeout=0 next=0 eff_ms="$HA_WAIT_DEFAULT_TIMEOUT_MS"
   for a in "$@"; do
-    case "$a" in --timeout|--timeout=*) has_timeout=1; break ;; esac
+    if [ "$next" = 1 ]; then eff_ms="$a"; next=0; continue; fi
+    case "$a" in
+      --timeout)   has_timeout=1; next=1 ;;
+      --timeout=*) has_timeout=1; eff_ms="${a#--timeout=}" ;;
+    esac
   done
   if [ "$has_timeout" -eq 0 ]; then
     set -- "$@" --timeout "$HA_WAIT_DEFAULT_TIMEOUT_MS"
+    eff_ms="$HA_WAIT_DEFAULT_TIMEOUT_MS"
   fi
-  herdr agent wait "$target" "$@"
+  # Client wall-bound sized ABOVE the server --timeout (+5s margin), so it only
+  # fires if the server wedges and ignores its own timeout — the "never a hang"
+  # contract holds for wait too, without cutting a legitimately long wait short.
+  case "$eff_ms" in ''|*[!0-9]*) eff_ms="$HA_WAIT_DEFAULT_TIMEOUT_MS" ;; esac
+  _ha_bounded "$(( eff_ms / 1000 + 5 ))" herdr agent wait "$target" "$@"
 }
 
 # ---- CLI dispatch (only when executed directly, never when sourced) ---------

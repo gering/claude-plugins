@@ -194,7 +194,9 @@ cmd_refresh() {
   # Empty list output = herdr unreachable (binary present, server down) →
   # silent no-op, NOT `checked=0` — that line means "reachable, nothing to do".
   # Agents carry the cwd we match on; tabs carry the label we stamp. Both.
-  list="$(herdr agent list 2>/dev/null || true)"
+  # ha_list (from the sourced herdr-agent.sh) bounds the call with a wall-clock
+  # timeout, so a wedged server can't hang a refresh (runs on /status, /list, …).
+  list="$(ha_list 2>/dev/null || true)"
   [ -n "$list" ] || return 0
   tablist="$(herdr tab list 2>/dev/null || true)"
   [ -n "$tablist" ] || return 0
