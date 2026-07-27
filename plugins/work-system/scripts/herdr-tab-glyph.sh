@@ -48,7 +48,14 @@
 # refresh did, which is why it silently never showed up in the sidebar.
 set -u
 
-SCRIPT_DIR="${0%/*}"
+# Resolve via BASH_SOURCE (robust to a bare-name `bash herdr-tab-glyph.sh`, where
+# `${0%/*}` would wrongly leave the filename), so the sibling source below and the
+# ws-statusline.sh calls always resolve.
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+# The realpath cwd↔worktree match lives ONCE in herdr-agent.sh; source it (no
+# side effects) for $HERDR_MATCH_PRELUDE, prepended to extract_glyph_tabs below.
+. "$SCRIPT_DIR/herdr-agent.sh"
 
 # Strip every leading "<glyph> " so re-prefixing is idempotent even if a prior
 # bug stacked glyphs. case-prefix matching is byte-exact, so the multibyte
@@ -106,15 +113,11 @@ task_glyph() {
 # dash (first char excludes `-`) so a value like `-x`/`--foo` can never reach
 # `herdr tab rename` as an option flag; herdr ids are `wN:tM` and never start
 # with a dash, so nothing legitimate is lost.
-extract_glyph_tabs='import sys, json, os, re
+extract_glyph_tabs='import sys, json, re
 main = sys.argv[1] if len(sys.argv) > 1 else ""
-if not main.strip():
+root, wtdir = match_roots(main)   # from $HERDR_MATCH_PRELUDE (prepended below)
+if root is None:
     sys.exit(0)
-root = os.path.realpath(main)
-# realpath the whole worktrees path, not just root: cwd is resolved below, so a
-# symlinked .claude/worktrees would otherwise never match (dirname of the resolved
-# cwd follows the symlink, an unresolved wtdir does not) and task tabs would freeze.
-wtdir = os.path.realpath(os.path.join(root, ".claude", "worktrees"))
 try:
     agents = json.load(sys.stdin)["result"]["agents"]
 except Exception:
@@ -128,21 +131,19 @@ try:
         tabs = json.load(fh)["result"]["tabs"]
 except Exception:
     sys.exit(0)
-labels = {t.get("tab_id"): (t.get("label") or "") for t in tabs}
+labels = {t.get("tab_id"): (t.get("label") or "") for t in tabs if isinstance(t, dict)}
 seen = set()
 for a in agents:
+    if not isinstance(a, dict):
+        continue                     # non-dict element (e.g. a bare null) — skip, never crash the refresh
     cwd = (a.get("cwd") or "").rstrip("/")
     tab = a.get("tab_id") or ""
     if not cwd or tab in seen:
         continue
     if not re.fullmatch(r"[A-Za-z0-9:_.][A-Za-z0-9:_.-]*", tab) or tab not in labels:
         continue
-    cwd = os.path.realpath(cwd)
-    if cwd == root:
-        kind, key = "main", os.path.basename(root)
-    elif os.path.dirname(cwd) == wtdir:
-        kind, key = "task", os.path.basename(cwd)
-    else:
+    kind, key, _ = classify_cwd(cwd, root, wtdir)   # main | task | (None, None, None)
+    if kind is None:
         continue
     if not key or re.search(r"[\t\r\n]", key):
         continue
@@ -195,9 +196,14 @@ cmd_refresh() {
   # Empty list output = herdr unreachable (binary present, server down) →
   # silent no-op, NOT `checked=0` — that line means "reachable, nothing to do".
   # Agents carry the cwd we match on; tabs carry the label we stamp. Both.
-  list="$(herdr agent list 2>/dev/null || true)"
+  # ha_list (from the sourced herdr-agent.sh) bounds the call with a wall-clock
+  # timeout, so a wedged server can't hang a refresh (runs on /status, /list, …).
+  list="$(ha_list 2>/dev/null || true)"
   [ -n "$list" ] || return 0
-  tablist="$(herdr tab list 2>/dev/null || true)"
+  # Bound `herdr tab list` too (via herdr-agent.sh's _ha_bounded, already sourced):
+  # ha_list guards the agent call, but an unbounded tab-list would still let a
+  # server that wedges on THIS call hang the refresh — complete the no-hang promise.
+  tablist="$(_ha_bounded "$HA_CALL_TIMEOUT_SECS" herdr tab list 2>/dev/null || true)"
   [ -n "$tablist" ] || return 0
   # Pass the tab-list JSON by FILE, not as a python argv element: on a big server
   # it is hundreds of KB and would blow ARG_MAX (E2BIG), a failure the `|| true`
@@ -218,7 +224,8 @@ cmd_refresh() {
   # …) in labels as ASCII and raise UnicodeDecodeError — or fail to *encode* them
   # on the print — and the bare except / `|| true` would mask it as `checked=0`.
   tabs="$(printf '%s' "$list" \
-    | PYTHONUTF8=1 python3 -c "$extract_glyph_tabs" "$main" "$tabfile" 2>/dev/null || true)"
+    | PYTHONUTF8=1 python3 -c "$HERDR_MATCH_PRELUDE
+$extract_glyph_tabs" "$main" "$tabfile" 2>/dev/null || true)"
   if [ -z "$tabs" ]; then
     echo "checked=0 updated=0"
     return 0
