@@ -57,10 +57,12 @@
 #       actor who can already commit in the repo. commit-push's own guards
 #       (archive-scoped pathspec, ff-only, never force-push, refusal on unpushed
 #       history) are what bound the damage in that case.
-#       A repo that never opted in answers a BARE `enabled=no`. Otherwise two
-#       extra lines say why it was not honored: `reason=` one of
+#       A repo that never opted in answers a BARE `enabled=no` — that bare form
+#       is reserved for exactly that case. Every other non-honored outcome adds
+#       two lines saying why: `reason=` one of
 #       symlink | not-a-file | untracked | modified | locally-disabled |
-#       unrecognized-content | git-error | unsupported-layout | not-a-repo, plus
+#       unrecognized-content | git-error | unsupported-layout | not-a-repo |
+#       unresolvable-branch | checkout-not-on-main, plus
 #       `note=<ready-to-print sentence>` — callers relay the note rather than
 #       re-spelling this vocabulary in their own prose (it drifts).
 #       Accepted content (case-insensitive, leading/trailing whitespace trimmed,
@@ -72,13 +74,15 @@
 #       pre-plant), refusing when the flag OR its `.claude` parent is a symlink or
 #       resolves outside the repo. Echoes `flag=<path>` plus a reminder that it
 #       takes effect only once COMMITTED.
-#   autocommit unset <main-repo-path>
+#   autocommit unset <main-repo-path> [<main-branch>]
 #       Remove the repo's `.claude/work-system-close-autocommit` (same path
-#       guards), reverting to the default ask-once behavior. Echoes `flag=<path>`.
+#       guards), reverting to the default ask-once behavior. Echoes `flag=<path>`,
+#       plus a reminder to commit the deletion when the flag is still live on the
+#       authorization ref (pass <main-branch> so that check matches get's).
 #   All three resolve <main-repo-path> to the MAIN checkout by delegating to
 #   main-repo-path.sh — the same resolver /close uses, so `set` can never write
-#   where `get` doesn't look. A non-git path is a usage error for set/unset and a
-#   plain `enabled=no` for get.
+#   where `get` doesn't look. A non-git path is a usage error for set/unset, and
+#   for get an `enabled=no` carrying `reason=not-a-repo` + `note=`.
 #
 # `archive` output: key=value lines (paths relative to the main repo) —
 #   archived_path=tasks/archive/<name>[-N].md
@@ -100,6 +104,17 @@ set -eu
 # resolve against that other repo when $0 is relative — looking up (and running)
 # whatever happens to sit at that path there.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# `:(literal)` pathspec prefix. Task names flow in from task files and reach git
+# as PATHSPECS, where `*`/`?`/`[` are globs: a task named `x*` yields
+# `tasks/archive/x*.md`, matching every archived file with that prefix. The rule
+# is NOT "mutating commands only" — it is: prefix every git command that
+# INTERPRETS pathspec magic (add, commit, diff, ls-files), and omit it for
+# `check-ignore`, which rejects magic outright ("pathspec magic not supported by
+# this command") and would fail every probe if prefixed. Drifting either way is a
+# real bug: unprefixed `ls-files` mis-detects a neighbouring file, prefixed
+# `check-ignore` breaks gitignore detection entirely.
+lit() { printf ':(literal)%s' "$1"; }
 
 archive() {
   local repo="${1:-}" name="${2:-}" branch="${3:-}"
@@ -179,8 +194,19 @@ archive() {
     echo "failed to write archive $dest" >&2
     exit 1
   fi
-  chmod 644 "$tmp" 2>/dev/null || true   # mktemp creates 600; the archive is repo content
+  # mktemp creates 600; the archive is ordinary repo content, so restore the mode
+  # the caller's umask would have produced for a plain redirect — do NOT force
+  # 644, which would override a deliberately stricter umask and make archived
+  # task files world-readable in a private checkout.
+  chmod "$(printf '%o' "$(( 0666 & ~0$(umask) ))")" "$tmp" 2>/dev/null || true
   mv "$tmp" "$dest"
+  # The source is removed next, so make sure a REAL archive is in place first: if
+  # the destination is not a regular file (a swapped-in symlink, an interrupted
+  # rename), removing the source would destroy the task with no copy left.
+  if [ ! -f "$dest" ] || [ -L "$dest" ]; then
+    echo "archive at $dest is not a regular file — refusing to remove the original" >&2
+    exit 1
+  fi
 
   # Remove the original BEFORE recording the index, rolling the moved archive back
   # if the remove fails (immutable/locked source, read-only parent). This keeps the
@@ -212,7 +238,7 @@ archive() {
   if git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
     if ! git -C "$repo" check-ignore -q "tasks/archive/$base"; then
       committable="yes"
-    elif git -C "$repo" ls-files --error-unmatch -- "tasks/$safe.md" >/dev/null 2>&1; then
+    elif git -C "$repo" ls-files --error-unmatch -- "$(lit "tasks/$safe.md")" >/dev/null 2>&1; then
       committable="yes"
     fi
   fi
@@ -247,18 +273,7 @@ commit_push() {
   # only when not gitignored (`git add` errors on an ignored path), and the
   # original's removal only when it was tracked.
   #
-  # The MUTATING commands get the `:(literal)` pathspec prefix. git otherwise
-  # reads these as GLOBS, and the task name flows in from the task file: a task
-  # named `x*` yields `tasks/archive/x*.md`, which would match — and commit —
-  # every archived file with that prefix. Literal magic makes the pathspec mean
-  # exactly the one file it names. (`lit()` keeps the raw path for comparisons.)
-  #
-  # NOT for `check-ignore`, which rejects pathspec magic outright ("pathspec
-  # magic not supported by this command") — prefixing it there made every probe
-  # fail, so `archive_ignored` was stuck at `no` and a gitignored archive would
-  # have hit `git add`'s error path instead. It is a read-only probe, so a glob
-  # there cannot commit anything.
-  lit() { printf ':(literal)%s' "$1"; }
+  # Pathspec handling: see lit()'s contract at the top of the file.
   local archive_ignored=no
   if git -C "$repo" check-ignore -q -- "$archived"; then archive_ignored=yes; fi
   local paths=()
@@ -363,6 +378,26 @@ autocommit_root() {
   return 0
 }
 
+# Normalize a flag value to one token: `on`, `off`, or `bad`. ONE implementation
+# for both the committed value and the working-tree copy — they had drifted apart
+# (only one rejected multi-line content), which is how a value accepted in one
+# place and rejected in the other becomes possible.
+# Trim leading/trailing whitespace ONLY: deleting all whitespace would collapse
+# `y e s` into an accepted token. Multi-line is never a valid flag.
+autocommit_normalize() {
+  local raw="$1" v
+  case "$raw" in
+    *"
+"*) printf 'bad\n'; return 0 ;;
+  esac
+  v="$(printf '%s' "$raw" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+  case "$v" in
+    yes|true|1|on)  printf 'on\n' ;;
+    no|false|0|off) printf 'off\n' ;;
+    *)              printf 'bad\n' ;;
+  esac
+}
+
 # Explain WHY the main checkout could not be resolved. "Not a git repository" is
 # wrong (and sends the user hunting in the wrong direction) when the path IS in a
 # repo whose layout the resolver can't handle — e.g. a separate-git-dir checkout,
@@ -420,10 +455,10 @@ autocommit() {
   local op="${1:-}" repo="${2:-}" mainbr="${3:-}"
   case "$op" in
     get|set|unset) ;;
-    *) echo "usage: ${0##*/} autocommit {get|set|unset} <main-repo-path>" >&2; exit 2 ;;
+    *) echo "usage: ${0##*/} autocommit {get|set|unset} <main-repo-path> [<main-branch>]" >&2; exit 2 ;;
   esac
   if [ -z "$repo" ]; then
-    echo "usage: ${0##*/} autocommit $op <main-repo-path>" >&2; exit 2
+    echo "usage: ${0##*/} autocommit $op <main-repo-path> [<main-branch>]  (branch omitted: get/unset fall back to HEAD)" >&2; exit 2
   fi
 
   local rel=".claude/work-system-close-autocommit"
@@ -490,14 +525,37 @@ autocommit() {
       # WHICH REF: the archive lands on <main-branch>, and commit_push refuses to
       # commit anywhere else, so the authorization must be read from that same
       # branch — not from whatever the main checkout happens to be parked on.
-      # Reading HEAD made the verdict depend on the current branch: a checkout on
-      # an unrelated branch reported "not committed" for a flag that IS committed
-      # on main, and a checkout on a branch carrying the flag announced
-      # "auto-committing" before commit_push bailed out with wrong-branch.
-      # Falls back to HEAD when no branch is passed (standalone/manual use).
-      local ref="HEAD"
-      if [ -n "$mainbr" ] && git -C "$root" rev-parse --verify -q "$mainbr" >/dev/null 2>&1; then
-        ref="$mainbr"
+      #
+      # FULLY QUALIFIED (`refs/heads/<branch>`), never the bare name: git resolves
+      # `refs/tags/<name>` BEFORE `refs/heads/<name>`, so a tag named like the
+      # default branch shadows it — and tags are auto-followed on fetch. A bare
+      # `$mainbr` therefore let a tag supply the authorization value that the
+      # branch itself never carried. Verified.
+      local ref=""
+      if [ -n "$mainbr" ]; then
+        if git -C "$root" rev-parse --verify -q "refs/heads/$mainbr" >/dev/null 2>&1; then
+          ref="refs/heads/$mainbr"
+        else
+          # FAIL CLOSED. Falling back to HEAD here would reinstate exactly the
+          # branch-dependent verdict this argument exists to remove — and in the
+          # failing direction (a flag on the parked branch would read as
+          # authorization for a branch that has none).
+          printf 'enabled=no\nreason=unresolvable-branch\nnote=%s\n' \
+            "the authorization branch could not be resolved in this repository — falling back to asking"
+          return 0
+        fi
+        # commit_push refuses unless the checkout is ON that branch, so an
+        # `enabled=yes` here would only announce an auto-commit the next command
+        # declines. Answer for what can actually happen.
+        local cur; cur="$(git -C "$root" branch --show-current 2>/dev/null || true)"
+        if [ "$cur" != "$mainbr" ]; then
+          printf 'enabled=no\nreason=checkout-not-on-main\nnote=%s\n' \
+            "the main checkout is not on the branch the archive would be committed to — falling back to asking"
+          return 0
+        fi
+      else
+        # No branch passed (standalone/manual use): HEAD is the only sensible ref.
+        ref="HEAD"
       fi
       local head_val rc=0
       head_val="$(git -C "$root" show "$ref:$rel" 2>/dev/null)" || rc=$?
@@ -533,40 +591,22 @@ autocommit() {
         # is neither the committed value nor an explicit off gets the corrective
         # wording.
         local local_val
-        local_val="$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//' < "$file" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
-        case "$local_val" in
-          no|false|0|off)
-            printf 'enabled=no\nreason=locally-disabled\nnote=%s\n' \
-              "the autocommit opt-in is switched off in your working copy (the committed flag is unchanged)" ;;
-          *)
-            printf 'enabled=no\nreason=modified\nnote=%s\n' \
-              "the autocommit flag differs from the committed version — commit or revert it to make it effective" ;;
-        esac
+        local_val="$(autocommit_normalize "$(cat "$file" 2>/dev/null || true)")"
+        if [ "$local_val" = off ]; then
+          printf 'enabled=no\nreason=locally-disabled\nnote=%s\n' \
+            "the autocommit opt-in is switched off in your working copy (the committed flag is unchanged)"
+        else
+          printf 'enabled=no\nreason=modified\nnote=%s\n' \
+            "the autocommit flag differs from the committed version — commit or revert it to make it effective"
+        fi
         return 0
       fi
 
-      # TRIM, not "delete every space": `tr -d '[:space:]'` would collapse `y e s`
-      # (or a value split across lines) into an accepted token, honoring content
-      # that matches no documented value. Strip only leading/trailing whitespace,
-      # and treat anything multi-line as unrecognized. Case-insensitive, because
-      # the file is hand-edited by design and `Yes`/`TRUE` must not read as "off".
-      local content
-      case "$head_val" in
-        # Pure-shell newline test — a `grep -c ''` pipeline exits 1 on empty
-        # input, so an `|| echo 0` fallback fires on TOP of grep's own "0" and
-        # yields the two-line string "0\n0", which `[ -gt ]` then rejects with a
-        # bash error on stderr mid-close.
-        *"
-"*) content="__multiline__" ;;
-        *)  content="$(printf '%s' "$head_val" \
-              | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
-              | tr '[:upper:]' '[:lower:]')" ;;
-      esac
-      case "$content" in
-        yes|true|1|on)  printf 'enabled=yes\n' ;;
-        no|false|0|off) printf 'enabled=no\n' ;;
-        *)              printf 'enabled=no\nreason=unrecognized-content\nnote=%s\n' \
-                          "the autocommit flag's content is not a recognized value (expected yes/true/1/on)" ;;
+      case "$(autocommit_normalize "$head_val")" in
+        on)  printf 'enabled=yes\n' ;;
+        off) printf 'enabled=no\n' ;;
+        *)   printf 'enabled=no\nreason=unrecognized-content\nnote=%s\n' \
+               "the autocommit flag's content is not a recognized value (expected yes/true/1/on)" ;;
       esac
       ;;
     set)
@@ -618,8 +658,15 @@ autocommit() {
       # delete a file outside the repo. (`rm` on a symlinked LEAF is safe — it
       # removes the link, not its target — but a symlinked parent is not.)
       autocommit_guard_paths "$root" "$file" unset || exit 2
+      # Check the SAME ref `get` authorizes from — a HEAD-based check skipped the
+      # reminder in exactly the case that needs it (flag still live on the
+      # authorization branch while the checkout sits elsewhere).
+      local unset_ref="HEAD"
+      if [ -n "$mainbr" ] && git -C "$root" rev-parse --verify -q "refs/heads/$mainbr" >/dev/null 2>&1; then
+        unset_ref="refs/heads/$mainbr"
+      fi
       local was_committed=no
-      git -C "$root" cat-file -e "HEAD:$rel" 2>/dev/null && was_committed=yes
+      git -C "$root" cat-file -e "$unset_ref:$rel" 2>/dev/null && was_committed=yes
       rm -f "$file"
       printf 'flag=%s\n' "$file"
       # Deleting the file makes `get` report disabled immediately, which LOOKS
@@ -636,5 +683,5 @@ case "${1:-}" in
   archive)     shift; archive "$@" ;;
   commit-push) shift; commit_push "$@" ;;
   autocommit)  shift; autocommit "$@" ;;
-  *) echo "usage: ${0##*/} {archive <repo> <name> <branch> [--pr <n>] [--sha <s>] | commit-push <repo> <name> <archived-rel-path> <main-branch> | autocommit {get|set|unset} <repo>}" >&2; exit 2 ;;
+  *) echo "usage: ${0##*/} {archive <repo> <name> <branch> [--pr <n>] [--sha <s>] | commit-push <repo> <name> <archived-rel-path> <main-branch> | autocommit {get|set|unset} <repo> [<main-branch>]}" >&2; exit 2 ;;
 esac

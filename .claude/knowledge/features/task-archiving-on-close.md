@@ -173,10 +173,14 @@ persistent `cd`" footgun the helper's explicit paths avoid is a rule — see
   - The dirty-check compares **blob hashes**, not `git diff --quiet`, so the index
     bits (`--assume-unchanged`/`--skip-worktree`) can't hide a deliberate local
     disable either.
-  - The verdict is read from **`<main-branch>`**, not `HEAD` — the flag authorizes
-    a commit onto that branch and `commit_push` refuses any other, so reading HEAD
-    made the answer depend on which branch the main checkout happened to sit on
-    (a flag on a feature branch announced an auto-commit that then bailed out).
+  - The verdict is read from **`refs/heads/<main-branch>`**, not `HEAD` and not the
+    bare branch name. Reading HEAD made the answer depend on which branch the main
+    checkout sat on; reading the BARE name was worse — git resolves `refs/tags/`
+    before `refs/heads/`, so a tag named like the default branch (tags auto-follow
+    on fetch) supplied an authorization value the branch never carried. Verified.
+    `get` also declines when the checkout is not on that branch, since
+    `commit_push` would refuse anyway, and fails **closed** when the branch cannot
+    be resolved rather than falling back to HEAD.
   - `commit_push` passes `:(literal)` pathspecs: a task named `x*` would otherwise
     glob `tasks/archive/x*.md` and commit every matching archive. **Not** for
     `check-ignore`, which rejects pathspec magic outright — prefixing it there

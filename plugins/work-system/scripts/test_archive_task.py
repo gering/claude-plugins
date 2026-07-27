@@ -363,10 +363,18 @@ with tempfile.TemporaryDirectory() as tmp:
     (brepo / REL).write_text("yes\n")
     git(brepo, "add", REL)
     git(brepo, "commit", "-qm", "flag on feature only")
-    check("flag only on a feature branch -> not honored for the default branch",
-          kv(run("autocommit", "get", str(brepo), default_branch).stdout).get("enabled") == "no")
-    check("...and says it is not committed there",
-          kv(run("autocommit", "get", str(brepo), default_branch).stdout).get("reason") == "untracked")
+    # Checked out ON the feature branch: commit_push would refuse anyway, so the
+    # unattended path must not be announced.
+    g = kv(run("autocommit", "get", str(brepo), default_branch).stdout)
+    check("flag only on a feature branch -> not honored", g.get("enabled") == "no")
+    check("...because the checkout is not on the authorization branch",
+          g.get("reason") == "checkout-not-on-main")
+    # Back on the default branch the flag file isn't even in the working tree
+    # (it lives only on `feature`), so this is a plain "never opted in" answer.
+    git(brepo, "checkout", "-q", default_branch)
+    g = kv(run("autocommit", "get", str(brepo), default_branch).stdout)
+    check("flag absent on the default branch -> bare enabled=no", g.get("enabled") == "no")
+    check("...with no reason line", "reason" not in g)
     # committed on the default branch -> honored
     git(brepo, "checkout", "-q", default_branch)
     (brepo / ".claude").mkdir(exist_ok=True)   # tracked only on `feature` until now
@@ -375,6 +383,37 @@ with tempfile.TemporaryDirectory() as tmp:
     git(brepo, "commit", "-qm", "flag on default")
     check("flag on the default branch -> honored",
           kv(run("autocommit", "get", str(brepo), default_branch).stdout).get("enabled") == "yes")
+
+    # --- REGRESSION: a TAG must not shadow the authorization branch ----------- #
+    # git resolves refs/tags/<name> BEFORE refs/heads/<name>, and tags are
+    # auto-followed on fetch — so a bare refname let a tag supply an
+    # authorization value the branch never carried.
+    trepo2 = new_repo(root, "trepo2")
+    tbranch = git(trepo2, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    (trepo2 / ".claude").mkdir()
+    (trepo2 / REL).write_text("yes\n")
+    git(trepo2, "add", REL)
+    git(trepo2, "commit", "-qm", "flag on")
+    git(trepo2, "tag", "flagged-on")
+    (trepo2 / REL).write_text("no\n")
+    git(trepo2, "add", REL)
+    git(trepo2, "commit", "-qm", "flag off")
+    # a tag named exactly like the branch, pointing at the "yes" commit
+    git(trepo2, "tag", "-f", tbranch, "flagged-on")
+    check("branch really says off",
+          git(trepo2, "show", f"refs/heads/{tbranch}:{REL}").stdout.strip() == "no")
+    check("a same-named tag really shadows the branch for a bare refname",
+          git(trepo2, "show", f"{tbranch}:{REL}").stdout.strip() == "yes")
+    check("tag cannot supply the authorization",
+          kv(run("autocommit", "get", str(trepo2), tbranch).stdout).get("enabled") == "no")
+
+    # --- REGRESSION: an unresolvable authorization branch fails CLOSED -------- #
+    # Falling back to HEAD here would reinstate the branch-dependent verdict in
+    # the failing direction.
+    g = kv(run("autocommit", "get", str(brepo), "no-such-branch").stdout)
+    check("unresolvable branch -> enabled=no", g.get("enabled") == "no")
+    check("unresolvable branch -> reason=unresolvable-branch",
+          g.get("reason") == "unresolvable-branch")
 
     # --- REGRESSION: a deliberate local disable gets neutral wording ---------- #
     # "commit or revert it to make it effective" would tell the user to undo the
