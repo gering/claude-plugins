@@ -76,8 +76,42 @@ check("skill: HDR carries no lens-list mirror", not re.search(r"^- Cover ALL of 
 # workflow's per-cluster briefs would be silently dropped and every external voice
 # would review lens-free.
 ADAPTER = PLUGIN / "scripts" / "agents.sh"
-check("adapter: --lens-instr flag present", "--lens-instr)" in ADAPTER.read_text(encoding="utf-8"))
+sh = ADAPTER.read_text(encoding="utf-8")
+check("adapter: --lens-instr flag present", "--lens-instr)" in sh)
 check("workflow: passes --lens-instr to the adapter", "--lens-instr" in js)
+
+# Oversize headroom: the skill refuses to run the externals above a threshold in
+# PROSE, but the real per-call cap (`max_bytes`) lives in agents.sh, and what
+# exec() sees is lens-instruction + diff. Nothing but this check ties the two
+# numbers together, so a brief that grows past the headroom — or a changed cap —
+# would surface only as a per-call backend error at review time.
+mb = re.search(r"local max_bytes=(\d+)", sh)
+check("adapter: max_bytes found", mb)
+sk = re.search(r"`PROMPT_BYTES` > (\d+)", skill)
+check("skill: oversize threshold found", sk)
+if mb and sk:
+    max_bytes, threshold = int(mb.group(1)), int(sk.group(1))
+    check("skill threshold is below the adapter cap", threshold < max_bytes)
+    # Largest instruction the workflow can build: the biggest cluster's briefs
+    # plus the fixed wrapper prose. Mirrors lensInstr()/unitBrief() closely enough
+    # to bound it (exactness is not the point — the headroom margin is).
+    briefs = {}
+    for m in re.finditer(r"^  (?:'([a-z-]+)'|([a-z]+)): '(.*)',$", bm.group(1) if bm else "", re.M):
+        briefs[m.group(1) or m.group(2)] = m.group(3)
+    check("LENS_BRIEF values parsed", set(briefs) == set(cluster_lenses))
+    worst = 0
+    for lenses in clusters.values():
+        body = "; ".join(f"{l}: {briefs.get(l, '')}" for l in lenses)
+        tags = " / ".join(f'"[{l}] "' for l in lenses)
+        worst = max(worst, len(("Review ONLY through these lens(es) — report nothing outside them. "
+                                f"Lenses — {body}. One finding per distinct issue (defect or substantive improvement), "
+                                "each with a concrete falsifiable failure_scenario. "
+                                f"Prefix each summary with the ONE lens it belongs to: {tags}. "
+                                "An empty findings list is valid.").encode("utf-8")))
+    check(
+        f"oversize headroom ({max_bytes - threshold} B) covers the largest lens instruction ({worst} B)",
+        max_bytes - threshold >= worst,
+    )
 
 # METHODOLOGICAL_LENSES: the verify-gating list of breakage-cluster lenses that
 # assert repo-wide facts (everything in `breakage` EXCEPT the diff-local topical
