@@ -4,14 +4,17 @@ hook (plugins/*/scripts/test_*.py).
 
 The 11-lens set is defined ONCE in swarm-review.js (LENS_CLUSTERS; the file
 derives CANDIDATE_LENSES from it and asserts LENS_BRIEF coverage at startup),
-but two runtime surfaces hand-mirror it and cannot be derived at runtime:
+and since 0.7.0 the external voices receive it through the adapter's
+--lens-instr (per gated cluster) instead of a hand-mirrored SKILL.md list.
+What still hand-mirrors the set, and cannot be derived at runtime:
 
-  - the SKILL.md external-prompt HDR ("Cover ALL of these lenses: ...") — a
-    lens missing there is never reviewed by codex/grok, so cross-family
-    consensus can silently never form on it;
   - swarm-review.js's METHODOLOGICAL_LENSES — the hand-maintained verify-gating
     subset of the breakage cluster; a methodological lens missing here stops
-    being verified on a cross-family external consensus.
+    being verified on a cross-family external consensus;
+  - pr-post.py's DESIGN_LENS_TAGS — the publish path's design-tag guard.
+
+Plus the structural checks that keep the single-source path intact (the
+--lens-instr wiring, and the absence of a reintroduced SKILL.md lens list).
 
 Prose DRIFT WARNINGs mark both mirrors; this test makes the sync mechanical
 (the same pattern as test_pr_post.py for the publish path).
@@ -61,17 +64,20 @@ brief_pairs = re.findall(r"^  (?:'([a-z-]+)'|([a-z]+)): '", bm.group(1) if bm el
 brief_keys = {a or b for a, b in brief_pairs}
 check("LENS_BRIEF keys == LENS_CLUSTERS lenses", brief_keys == set(cluster_lenses))
 
-# SKILL.md external-prompt HDR mirror: "- Cover ALL of these lenses: a; b (…); …"
+# SKILL.md external-prompt HDR: NO lens mirror since 0.7.0. The external voices
+# run per gated CLUSTER and the workflow ships that cluster's briefs through the
+# adapter's --lens-instr, so LENS_BRIEF is single-source in swarm-review.js. This
+# is now a NEGATIVE check: reintroducing a broad lens list in the HDR would both
+# recreate the drift this test existed to catch AND fight the per-cluster
+# instruction (a "cover ALL lenses" line contradicts "review ONLY these").
 skill = SKILL.read_text(encoding="utf-8")
-hm = re.search(r"^- Cover ALL of these lenses: (.+)$", skill, re.M)
-check("skill: HDR lens line found", hm)
-hdr_lenses = set()
-if hm:
-    for seg in hm.group(1).split(";"):
-        lm = re.match(r"\s*([a-z][a-z-]*)", seg)
-        if lm:
-            hdr_lenses.add(lm.group(1))
-check("SKILL.md HDR lenses == LENS_CLUSTERS lenses", hdr_lenses == set(cluster_lenses))
+check("skill: HDR carries no lens-list mirror", not re.search(r"^- Cover ALL of these lenses:", skill, re.M))
+# The adapter flag the single-source design depends on must exist: without it the
+# workflow's per-cluster briefs would be silently dropped and every external voice
+# would review lens-free.
+ADAPTER = PLUGIN / "scripts" / "agents.sh"
+check("adapter: --lens-instr flag present", "--lens-instr)" in ADAPTER.read_text(encoding="utf-8"))
+check("workflow: passes --lens-instr to the adapter", "--lens-instr" in js)
 
 # METHODOLOGICAL_LENSES: the verify-gating list of breakage-cluster lenses that
 # assert repo-wide facts (everything in `breakage` EXCEPT the diff-local topical

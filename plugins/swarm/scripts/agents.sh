@@ -11,6 +11,7 @@
 #   jail                  Print jail=yes|no (working OS sandbox wrapper?)
 #   run <backend> [opts]  Run a review prompt -> findings JSON on stdout
 #       --prompt-file <f>   Read the lens prompt from a file (default: stdin)
+#       --lens-instr <s>    Lens instruction prepended to the prompt (see below)
 #       --effort <level>    low|medium|high|xhigh|max (default: xhigh)
 #       --model <name>      Backend model override
 #       --schema <file>     JSON schema to enforce (default: bundled finding.schema.json)
@@ -677,11 +678,12 @@ subcmd_run() {
     exit 2
   fi
 
-  local prompt_file="" effort="xhigh" model="" schema="$DEFAULT_SCHEMA"
+  local prompt_file="" lens_instr="" effort="xhigh" model="" schema="$DEFAULT_SCHEMA"
   while [[ $# -gt 0 ]]; do
     [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
     case "$1" in
       --prompt-file) prompt_file="$2"; shift 2 ;;
+      --lens-instr)  lens_instr="$2";  shift 2 ;;
       --effort)      effort="$2"; shift 2 ;;
       --model)       model="$2";       shift 2 ;;
       --schema)      schema="$2";      shift 2 ;;
@@ -717,6 +719,21 @@ subcmd_run() {
     (( nbytes > max_bytes )) && { echo "Prompt too large ($(( nbytes / 1024 )) KiB > 120 KiB) — inline less of the diff, or have the agent read it itself" >&2; exit 2; }
   fi
   [[ -z "$prompt" ]] && { echo "Empty prompt (use --prompt-file or stdin)" >&2; exit 2; }
+
+  # Per-cluster external voices: the WORKFLOW owns LENS_BRIEF (single source of
+  # truth for the lens set) and passes the gated cluster's briefs here; the
+  # adapter prepends them to the fenced-diff prompt. The assembly stays
+  # DETERMINISTIC shell — never an LLM step, the same contract the skill's diff
+  # fencing follows — and it is backend-agnostic, so a future voice inherits
+  # per-cluster prompts for free. Checked AFTER the empty-prompt guard so a
+  # lens instruction can never disguise an empty diff as a runnable prompt.
+  if [[ -n "$lens_instr" ]]; then
+    prompt="$lens_instr"$'\n\n'"$prompt"
+    # Re-measure: the pre-read file check bounded the DIFF alone, but what
+    # exec() sees is instruction+diff as one argv word.
+    nbytes=$(printf '%s' "$prompt" | wc -c)
+    (( nbytes > max_bytes )) && { echo "Prompt too large with lens instruction ($(( nbytes / 1024 )) KiB > 120 KiB) — narrow the diff range" >&2; exit 2; }
+  fi
 
   require_usable "$backend"
   require_python3

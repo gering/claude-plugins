@@ -119,6 +119,14 @@ const LENS_BRIEF = {
 // (test_lens_sync.py guards the SKILL.md external-prompt mirror the same way.)
 for (const l of CANDIDATE_LENSES) {
   if (!LENS_BRIEF[l]) throw new Error(`LENS_BRIEF is missing an entry for lens "${l}"`)
+  // Briefs travel to the external voices as ONE single-quoted argv word inside a
+  // command a transport agent must retype VERBATIM. An apostrophe would force
+  // `'\''` escaping into that line — correct shell, but a needless retype hazard.
+  // Keep briefs apostrophe-free rather than trust the retype (shQuote below is
+  // still applied: defense in depth, not the primary contract).
+  if (LENS_BRIEF[l].includes("'")) {
+    throw new Error(`LENS_BRIEF["${l}"] must not contain a single quote — it is shell-quoted into the external transport command`)
+  }
 }
 // `kind` is DERIVED from the lens — no finding-schema change (respects the
 // 3-place schema mirror above): design lenses yield suggestion-shaped findings
@@ -317,11 +325,14 @@ phase('Fan-out')
 // Known cost of the cluster default: per-lens FAILURE ISOLATION is gone — one
 // crashed cluster finder drops its whole cluster's Claude coverage for the
 // round (visible as a backendError, never silent); --max restores isolation.
-const finderUnits = MAX
-  ? runLensesSafe.map((lens) => ({ name: lens, lenses: [lens] }))
+// Shared by BOTH sides (0.7.0): the external voices fan out at the same
+// granularity as the Claude finders, so a unit is a unit no matter who runs it.
+const unitsFor = (lensSet) => MAX
+  ? lensSet.map((lens) => ({ name: lens, lenses: [lens] }))
   : Object.entries(LENS_CLUSTERS)
-      .map(([name, lenses]) => ({ name, lenses: lenses.filter((l) => runLensesSafe.includes(l)) }))
+      .map(([name, lenses]) => ({ name, lenses: lenses.filter((l) => lensSet.includes(l)) }))
       .filter((u) => u.lenses.length > 0)
+const finderUnits = unitsFor(runLensesSafe)
 const claudeThunks = finderUnits.map((u) => () =>
   // "or substantive improvement" is scoped to units carrying a DESIGN lens:
   // inviting improvements from defect-lens finders would push suggestion-shaped
@@ -339,24 +350,68 @@ const claudeThunks = finderUnits.map((u) => () =>
    .catch((e) => ({ backend: 'claude', lenses: u.lenses, ok: false, error: `claude:${u.name} — ${String(e).slice(0, 120)}`, findings: [] }))
 )
 
-// External voices: thin transport wrappers. They report ok/error so a dropped
-// backend is visible, not mistaken for a clean empty review.
-const EXTERNAL_VOICES = [
-  { backend: 'codex', label: 'codex:full', cmd: `bash "${ADAPTER}" run codex ${MAX ? `--model ${MAX_CODEX_MODEL} --effort xhigh` : '--effort high'} --prompt-file "${EXTERNAL_PROMPT}"` },
-  { backend: 'grok', label: 'grok:full', cmd: `bash "${ADAPTER}" run grok --effort high --prompt-file "${EXTERNAL_PROMPT}"` },
-]
+// External voices (0.7.0: per-CLUSTER, not one broad call each). They fan out
+// over the SAME units as the Claude finders, so the gate prunes calls for
+// everyone — a fully-gated-out cluster spawns nothing for any voice — and each
+// finding's [lens] tag becomes AUTHORITATIVE (the voice *is* that lens; no
+// self-tagging from a broad prompt). Both backends read files + research since
+// 0.6.0, so neither needs a diff-only brief variant.
+// Cost: `live-backends × units` calls, each re-sending the fenced diff and
+// paying CLI startup — ≤2×4 by default, ≤2×11 under --max (the explicitly
+// ordered ceiling). Logged below; never silently capped.
+const shQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
+// Single LINE by construction: this string is embedded in a command the
+// transport agent retypes verbatim, and a multi-line command invites mangling.
+const lensInstr = (u) =>
+  `Review ONLY through these lens(es) — report nothing outside them. ` +
+  `Lenses — ${u.lenses.map((l) => `${l}: ${LENS_BRIEF[l]}`).join('; ')}. ` +
+  `One finding per distinct ${u.lenses.some((l) => LENS_CLUSTERS.design.includes(l)) ? 'issue (defect or substantive improvement)' : 'defect'}, each with a concrete falsifiable failure_scenario. ` +
+  `Prefix each summary with the ONE lens it belongs to: ${u.lenses.map((l) => `"[${l}] "`).join(' / ')}. An empty findings list is valid.`
 // Only spawn transports for backends the skill reported live (probed via the
 // adapter); absent CLIs would otherwise show up as noisy "errors".
 const wantVoices = Array.isArray(INPUT.externalVoices) ? INPUT.externalVoices : ['codex', 'grok']
-const externalThunks = EXTERNAL_VOICES.filter((v) => wantVoices.includes(v.backend)).map((v) => () =>
+const EXTERNAL_BACKENDS = [
+  { backend: 'codex', flags: MAX ? `--model ${MAX_CODEX_MODEL} --effort xhigh` : '--effort high' },
+  { backend: 'grok', flags: '--effort high' },
+]
+// A claude:false control run has no gate (the gate is a Claude agent), so the
+// externals keep their FULL-WIDTH coverage — per-cluster now, but over every
+// candidate lens. Without this they would inherit the empty Claude lens set and
+// the control run would review nothing at all.
+const externalUnits = unitsFor(runClaude ? runLensesSafe : CANDIDATE_LENSES)
+const externalVoiceSpecs = EXTERNAL_BACKENDS
+  .filter((b) => wantVoices.includes(b.backend))
+  .flatMap((b) => externalUnits.map((u) => ({
+    backend: b.backend, lenses: u.lenses, label: `${b.backend}:${u.name}`,
+    cmd: `bash "${ADAPTER}" run ${b.backend} ${b.flags} --lens-instr ${shQuote(lensInstr(u))} --prompt-file "${EXTERNAL_PROMPT}"`,
+  })))
+const liveBackends = EXTERNAL_BACKENDS.filter((b) => wantVoices.includes(b.backend)).map((b) => b.backend)
+if (externalVoiceSpecs.length) {
+  log(`External fan-out: ${externalVoiceSpecs.length} call(s) — ${liveBackends.join(' + ')} ` +
+      `× ${externalUnits.length} ${MAX ? 'lens' : 'cluster'}(es)`)
+} else if (liveBackends.length) {
+  // Live backends but zero units: the gate pruned EVERY lens. Say so explicitly —
+  // otherwise a review with no external calls looks like a dropped backend rather
+  // than the gate doing its job (gate.skip carries the per-lens reasons).
+  log(`External fan-out: no calls — the gate pruned every lens (${liveBackends.join(' + ')} idle)`)
+}
+const externalThunks = externalVoiceSpecs.map((v) => () =>
   agent(
     `You are a thin transport wrapper — do NOT review the code yourself, do NOT modify the command. Run EXACTLY this with the Bash tool (timeout 600000) and wait for it to finish:\n\n` +
     `${v.cmd}\n\n` +
+    // The --lens-instr value is one long single-quoted argv word. A reflowed or
+    // reworded copy would change the review's lens scope (or break the quoting
+    // into an "Unknown flag" exit), so make the verbatim requirement explicit
+    // rather than rely on "do NOT modify the command" alone.
+    `The command is ONE line and contains a long single-quoted argument: copy it character-for-character — never reflow, re-wrap, reword, or drop any part of it.\n` +
     `On exit 0 it prints one JSON object {"findings":[...]} on stdout: return ok=true, findings=that array (verbatim), error="".\n` +
     `On any non-zero exit or no/invalid JSON: return ok=false, findings=[], error=<the exit code and any stderr, one line>. Never invent findings.`,
     { label: v.label, phase: 'Fan-out', schema: EXTERNAL_SCHEMA, agentType: 'general-purpose', model: 'haiku', effort: 'low' }
-  ).then((r) => ({ backend: v.backend, ok: r?.ok !== false, error: r?.error || '', findings: (r && Array.isArray(r.findings)) ? r.findings : [] }))
-   .catch((e) => ({ backend: v.backend, ok: false, error: String(e).slice(0, 200), findings: [] }))
+  // `lenses` rides along so an untagged finding from a single-lens external unit
+  // resolves to that lens (same rule as the Claude finders) instead of falling
+  // back to 'unspecified' — the authoritative-tag win of the per-cluster split.
+  ).then((r) => ({ backend: v.backend, lenses: v.lenses, ok: r?.ok !== false, error: r?.error || '', findings: (r && Array.isArray(r.findings)) ? r.findings : [] }))
+   .catch((e) => ({ backend: v.backend, lenses: v.lenses, ok: false, error: `${v.label} — ${String(e).slice(0, 180)}`, findings: [] }))
 )
 
 const voices = (await parallel([...claudeThunks, ...externalThunks])).filter(Boolean)
@@ -677,9 +732,10 @@ for (const v of voices) {
   a.findings += (v.findings || []).length
   if (v.ok === false) a.failedVoices++
 }
-// A multi-voice backend (claude runs one voice per cluster, per lens under
-// --max) counts as "ok" unless ALL its voices failed — one crashed finder must
-// not mark the whole backend down.
+// EVERY backend is multi-voice since 0.7.0 (one voice per cluster, per lens
+// under --max — externals included), so a backend counts as "ok" unless ALL its
+// voices failed: one crashed cluster call must not mark the whole backend down.
+// The per-voice failure still shows up in backendErrors.
 for (const a of Object.values(agents)) a.ok = a.failedVoices < a.voices
 
 const rawPerLens = {}, survivingPerLens = {}

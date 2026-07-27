@@ -12,9 +12,9 @@ Complementary to [pr-flow](../pr-flow/): pr-flow drives the GitHub-PR
 
 ## Status
 
-**Phase 5 of 6** — the pipeline can now **act** (P3/P4 lens presets still to
-come). `/swarm:review` fans a diff
-across three voices (Claude lenses + `codex` + `grok-4.5`),
+**Phase 5 of 6** — the pipeline can now **act**. `/swarm:review` fans a diff
+across three voices (Claude lenses + `codex` + `grok-4.5`), each running one
+call per gated lens cluster,
 merges by mechanism, verifies solo findings + design suggestions, presents one
 ranked report, and —
 with `--fix` / `--loop` — applies the findings you agreed with.
@@ -26,10 +26,10 @@ with `--fix` / `--loop` — applies the findings you agreed with.
   default branch (including uncommitted work). `--fix` applies the agreed
   findings once; `--loop[=N]` re-reviews after each fix round until it converges
   (cap default `10`); `--max` runs the deepest-effort profile (codex
-  `gpt-5.6-sol`/`xhigh`, Claude finders + verifier `xhigh`, one Claude finder
-  per **lens** instead of per cluster; grok already runs
-  at `high`, its ceiling) — slower,
-  more thorough, composes with `--fix`/`--loop`.
+  `gpt-5.6-sol`/`xhigh`, Claude finders + verifier `xhigh`, and **every** voice
+  — Claude, codex, grok — fanning out per **lens** instead of per cluster;
+  grok already runs at `high`, its ceiling) — slower, more thorough, costs up
+  to `2 × 11` external calls, composes with `--fix`/`--loop`.
 - `/swarm:review --pr [<number>]` — run the same ensemble against a **GitHub
   PR's diff** (`gh pr diff`; bare `--pr` resolves the current branch's PR) and,
   after a single confirmation, post the output-gated result as a PR comment via
@@ -54,9 +54,11 @@ Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok-4.5)
    lenses are worth running (security is never gated out when code/args/files
    flow to an external process; design lenses are first-class, skipped only
    when the diff can't pay off for them).
-2. **Fan-out** — three voices in parallel: one Claude finder per lens
-   **cluster** (per lens under `--max`) plus `codex` and `grok-4.5` as full
-   reviews through the adapter.
+2. **Fan-out** — all voices at the **same granularity**: one Claude finder per
+   gated lens **cluster**, and `codex` + `grok-4.5` each once per gated cluster
+   too (per lens under `--max`). The gate prunes calls for everyone — a
+   fully-gated-out cluster spawns nothing for any voice — and each finding's
+   `[lens]` tag is authoritative, because the voice *is* that lens.
 3. **Merge** — an LLM step clusters findings by `(file, mechanism)`, not
    `(file, line)` (external CLIs number against the inlined diff).
 4. **Verify** — every solo, every design cluster (even with consensus), every
@@ -66,7 +68,7 @@ Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok-4.5)
    Design findings get an **applicability** prompt instead (is the reuse target
    real? is the simpler form behavior-identical?) — same three states.
 
-**11 lenses in 4 clusters** (the cluster is the Claude fan-out unit):
+**11 lenses in 4 clusters** (the cluster is the fan-out unit for *every* voice):
 
 | Cluster | Lenses | Guiding question |
 |---------|--------|------------------|
