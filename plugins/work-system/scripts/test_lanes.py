@@ -189,6 +189,51 @@ r, _ = run(worktrees="", fmt=None)              # TSV counterpart prints nothing
 check("tsv-empty: prints nothing", r.stdout.strip() == "")
 
 
+# --- INTEGRATION: the production HERDR_ENV → ha_list → mktemp → trap → join
+#     glue (NOT the LANES_AGENTS_FILE seam), via a fake `herdr` on PATH -------- #
+def run_with_fake_herdr(agents_json, worktrees=PORCELAIN):
+    env = dict(os.environ)
+    env["HERDR_ENV"] = "1"
+    tmp = tempfile.TemporaryDirectory()
+    d = Path(tmp.name)
+    (d / "wt").write_text(worktrees)
+    (d / "states").write_text(STATES)
+    env["LANES_WORKTREES_FILE"] = str(d / "wt")
+    env["LANES_STATES_FILE"] = str(d / "states")
+    env.pop("LANES_AGENTS_FILE", None)   # force the real ha_list branch, not the seam
+    bindir = d / "bin"
+    bindir.mkdir()
+    herdr = bindir / "herdr"
+    herdr.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$1 $2" = "agent list" ]; then\n'
+        "  cat <<'JSON'\n" + agents_json + "\nJSON\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 9\n"
+    )
+    herdr.chmod(0o755)
+    env["PATH"] = f"{bindir}:{env['PATH']}"
+    r = subprocess.run(["bash", str(SCRIPT), "--json"], env=env,
+                       capture_output=True, text=True, timeout=20)
+    tmp.cleanup()
+    rows = ({row["task"]: row for row in jsonlib.loads(r.stdout)}
+            if r.stdout.strip() else {})
+    return r, rows
+
+
+live = jsonlib.dumps({"result": {"agents": [
+    {"agent": "claude", "agent_status": "working", "cwd": f"{WT}/alpha",
+     "pane_id": "w1:p9", "tab_id": "w1:t9", "agent_session": {"value": "LIVE"}},
+]}})
+r, rows = run_with_fake_herdr(live)
+check("integration: exit 0", r.returncode == 0)
+check("integration: ha_list path joins liveness", rows.get("alpha", {}).get("agent") == "claude")
+check("integration: session from the live path", rows.get("alpha", {}).get("session") == "LIVE")
+check("integration: unmatched lane blank (list populated)",
+      rows.get("beta", {}).get("agent_status") == "")
+
+
 if FAILS:
     print("FAIL:")
     for f in FAILS:

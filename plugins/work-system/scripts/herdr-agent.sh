@@ -90,6 +90,14 @@ ha_have() {
   command -v python3 >/dev/null 2>&1 || return 1
 }
 
+# A usable <target>: non-empty and not a leading-dash value (which `herdr agent`
+# would parse as an option flag, so an untrusted id can't smuggle a flag). Fails
+# with 2 (usage). Shared by get/read/wait so the guard lives in exactly one place.
+_ha_check_target() {
+  [ -n "${1:-}" ] || return 2
+  case "$1" in -*) return 2 ;; esac
+}
+
 # Run "$@" under a $1-second wall bound. `timeout` isn't on stock macOS; fall back
 # to gtimeout, then perl's alarm (ships with macOS; the timer survives exec).
 # A host with none runs unbounded — accepted residual, same tradeoff as
@@ -130,17 +138,18 @@ ha_list() {
 ha_get() {
   ha_have || return 3
   local target="${1:-}"
-  [ -n "$target" ] || return 2
-  case "$target" in -*) return 2 ;; esac   # a leading-dash target would be read as an option flag
+  _ha_check_target "$target" || return 2
   local json
   json="$(_ha_bounded "$HA_CALL_TIMEOUT_SECS" herdr agent get "$target" 2>/dev/null)" || return 4
   [ -n "$json" ] || return 4
+  # Explicit if/exit, NOT assert: `python3 -O` / PYTHONOPTIMIZE strips asserts, so
+  # an assert would silently pass a malformed body through in an optimized runtime.
   printf '%s' "$json" | python3 -c 'import sys, json
 try:
     d = json.load(sys.stdin)
-    assert isinstance(d.get("result"), dict)
 except Exception:
-    sys.exit(1)' 2>/dev/null || return 5
+    sys.exit(1)
+sys.exit(0 if isinstance(d.get("result"), dict) else 1)' 2>/dev/null || return 5
   printf '%s\n' "$json"
 }
 
@@ -151,8 +160,7 @@ except Exception:
 ha_read() {
   ha_have || return 3
   local target="${1:-}"
-  [ -n "$target" ] || return 2
-  case "$target" in -*) return 2 ;; esac   # a leading-dash target would be read as an option flag
+  _ha_check_target "$target" || return 2
   shift
   _ha_bounded "$HA_CALL_TIMEOUT_SECS" herdr agent read "$target" "$@"
 }
@@ -164,8 +172,7 @@ ha_read() {
 ha_wait() {
   ha_have || return 3
   local target="${1:-}"
-  [ -n "$target" ] || return 2
-  case "$target" in -*) return 2 ;; esac   # a leading-dash target would be read as an option flag
+  _ha_check_target "$target" || return 2
   shift
   # Detect BOTH `--timeout MS` and `--timeout=MS`, so a caller's explicit bound in
   # either form is honoured (no duplicate appended), and capture its value to size

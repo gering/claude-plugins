@@ -131,9 +131,11 @@ try:
         tabs = json.load(fh)["result"]["tabs"]
 except Exception:
     sys.exit(0)
-labels = {t.get("tab_id"): (t.get("label") or "") for t in tabs}
+labels = {t.get("tab_id"): (t.get("label") or "") for t in tabs if isinstance(t, dict)}
 seen = set()
 for a in agents:
+    if not isinstance(a, dict):
+        continue                     # non-dict element (e.g. a bare null) — skip, never crash the refresh
     cwd = (a.get("cwd") or "").rstrip("/")
     tab = a.get("tab_id") or ""
     if not cwd or tab in seen:
@@ -198,7 +200,10 @@ cmd_refresh() {
   # timeout, so a wedged server can't hang a refresh (runs on /status, /list, …).
   list="$(ha_list 2>/dev/null || true)"
   [ -n "$list" ] || return 0
-  tablist="$(herdr tab list 2>/dev/null || true)"
+  # Bound `herdr tab list` too (via herdr-agent.sh's _ha_bounded, already sourced):
+  # ha_list guards the agent call, but an unbounded tab-list would still let a
+  # server that wedges on THIS call hang the refresh — complete the no-hang promise.
+  tablist="$(_ha_bounded "$HA_CALL_TIMEOUT_SECS" herdr tab list 2>/dev/null || true)"
   [ -n "$tablist" ] || return 0
   # Pass the tab-list JSON by FILE, not as a python argv element: on a big server
   # it is hundreds of KB and would blow ARG_MAX (E2BIG), a failure the `|| true`
