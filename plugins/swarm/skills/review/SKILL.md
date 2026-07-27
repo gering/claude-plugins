@@ -1,9 +1,8 @@
 ---
 name: review
 description: |
-  Local mixture-of-agents review: Claude lenses plus codex and grok, one ranked
-  report. --fix/--loop applies agreed findings; --pr reviews and posts on a
-  GitHub PR.
+  Local mixture-of-agents review: Claude lenses, codex and grok, one ranked
+  report. --fix/--loop applies agreed findings; --pr posts to a PR.
   Trigger: "swarm review", "review my changes", "review this PR".
 user_invocable: true
 ---

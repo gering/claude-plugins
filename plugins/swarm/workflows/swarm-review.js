@@ -154,9 +154,14 @@ const METHODOLOGICAL_LENSES = ['removed-behavior', 'cross-file-trace']
 // external calls absorbed a mis-gate, and that redundancy is gone. The gate runs
 // on haiku/effort-low against a diff that is itself untrusted input, and its only
 // other protection is a sentence in its own prompt (model-cooperation-dependent,
-// injection-reachable). These two lenses are the code-level backstop: a diff that
-// talks the gate into "docs-only, no security needed" still gets a threat review.
-const MANDATORY_LENSES = ['security', 'adversarial']
+// injection-reachable). These are the code-level backstop: a diff that talks the
+// gate into "docs-only" still gets a threat review AND a correctness pass.
+// KNOWN COST (accepted, user call): flooring correctness + the threat pair means
+// the `breakage` and `threat` clusters ALWAYS spawn — the gate can only ever
+// prune `design` and `consistency`, so a doc-only diff still pays 2 clusters ×
+// live voices. That is the deliberate price for never shipping a clean report on
+// the two dimensions most costly to miss.
+const MANDATORY_LENSES = ['security', 'adversarial', 'correctness']
 
 // One finding. DRIFT WARNING: this schema is hand-mirrored in TWO places —
 // scripts/schema/finding.schema.json (canonical, CLI-enforced on codex/grok)

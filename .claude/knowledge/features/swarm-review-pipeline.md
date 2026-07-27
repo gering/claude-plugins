@@ -287,10 +287,20 @@ Three decisions worth keeping:
 - **A gate that prunes for everyone needs a floor.** With externals gated too, a
   lens the low-effort haiku gate drops is reviewed by *nobody* — the full-width
   external calls used to absorb a mis-gate. `MANDATORY_LENSES`
-  (`security`, `adversarial`) is the code-level backstop, since the gate's only
-  other protection is a sentence in its own prompt (injection-reachable via the
-  diff it classifies). Lenses the gate lists in neither `run` nor `skip` are
-  materialized into `skip` so the report can't under-report what was pruned.
+  (`security`, `adversarial`, `correctness`) is the code-level backstop, since the
+  gate's only other protection is a sentence in its own prompt (injection-reachable
+  via the diff it classifies). **Accepted cost:** flooring these pins the
+  `breakage` and `threat` clusters always-on, so the gate can only prune `design`
+  and `consistency` — a doc-only diff still pays 2 clusters × live voices. Chosen
+  deliberately: a clean report on the dimensions most costly to miss is worse than
+  the calls saved.
+- **The coverage line must partition the lens set.** Both halves are easy to get
+  wrong and neither fails loudly: lenses the gate lists in neither `run` nor
+  `skip` are dropped silently (seen live — a real run swallowed `adversarial`),
+  and a floored-in lens left out of `gate.run` *runs* while appearing in neither
+  report column (the external-only control run caught exactly that regression in
+  the floor's first version). The workflow now rewrites both fields and asserts
+  they partition `CANDIDATE_LENSES`.
 
 For routine depth prefer higher external `--effort` / grok `--best-of-n` (one
 call, more thinking) over more calls.
