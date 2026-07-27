@@ -43,7 +43,9 @@ logic belongs in a tested script, not SKILL.md prose). See also [skill-compositi
 - **All git-stateful work is in `commit-push`, gated by `/close`.** Honoring the
   never-commit-without-approval rule, `archive-task.sh archive` only moves the file
   + appends the index. When `committable=yes`, `/close` asks **once** ("commit and
-  push?") and then delegates the entire stage→commit→push to `archive-task.sh
+  push?") — **unless the repo carries the committed per-repo autocommit opt-in, which
+  replaces that per-close ask with a durable authorization (see the 1.10.0 section
+  below)** — and then delegates the entire stage→commit→push to `archive-task.sh
   commit-push` — kept out of SKILL.md prose so the multi-step git logic can't drift
   (the project's prose-drift lesson). Two correctness guards earned in review:
   it commits with an explicit **pathspec** (`git commit -- <archive> <index>
@@ -109,3 +111,84 @@ persistent `cd`" footgun the helper's explicit paths avoid is a rule — see
   the same shape as the agent-default. A repo that wants this opts in explicitly
   by committing the flag file; a global toggle was explicitly deferred as a
   separate follow-up, not built speculatively.
+- **Presence is not authorization; the committed value is (swarm-review).** The
+  first cut honored the flag if the file merely *existed* — too weak for a flag
+  whose job is waiving an approval gate for a push to the default branch: any
+  tool, or a prompt-injected worker agent in a task worktree, can write a file
+  with nobody approving a push. So `get` reads the value from the **committed
+  object** (`git show HEAD:<rel>`), never from the working tree. That one call is
+  both the tracked-check and the value read, and it is immune to the working-tree
+  tricks that fool a diff-based guard (`git update-index --assume-unchanged` /
+  `--skip-worktree` make `ls-files`/`diff --quiet` report a dirty file as clean —
+  round 2 of the review reproduced that bypass against the diff-based version).
+  A dirty flag additionally falls back to asking, so a local edit can still
+  *disable* the opt-in deliberately. Every unresolved case (not a git repo,
+  symlinked flag or `.claude`, unreadable git state) reports `enabled=no`, which
+  merely restores the prompt.
+- **What the guard is worth — stated honestly, because the docs are the claim.**
+  It stops a flag that was merely *written*. It does **not** stop an actor who
+  can already commit in your repo: they can commit the flag like any other
+  change, and an agent-authored flag merged through a normal PR is indistinguishable
+  from a human one. The guard raises the bar from "any file write" to "a commit",
+  not to "reviewed by a human". What actually bounds the damage is `commit-push`
+  itself — archive-scoped pathspec, fast-forward only, never a force-push, refusal
+  on `unpushed-history` — so the worst case is inert archived markdown reaching
+  `main` unreviewed. **Accepted residual:** requiring the flag's commit to be an
+  ancestor of `origin/<default>` would make "reviewed" true, but it breaks
+  origin-less repos, depends on freshly-fetched refs, and is disproportionate to
+  that blast radius. Revisit only if the flag ever authorizes more than this.
+- **Resolution delegates to `main-repo-path.sh`** — the plugin's one resolver, and
+  the same helper that produces the `<main-repo-path>` `/close` passes in. Sharing
+  it is the point: an independent second resolver could disagree with `/close`'s,
+  so `set` would write a flag `get` never reads. An earlier cut open-coded a
+  `--git-common-dir` + `basename == .git` heuristic (copied from
+  `agent-registry.sh`) and broke on separate-git-dir/submodule layouts. The
+  resolver's answer is then **cross-checked** (`--is-inside-work-tree` +
+  `--show-toplevel`): under `git init --separate-git-dir`, `git worktree list`
+  reports the *git dir* as the first worktree (verified), and without the check
+  `set` cheerfully created `.claude/` inside `.git` — a flag that can never be
+  committed, reported as success. Now such a layout is refused with a diagnostic
+  naming it. **Caveat to a claim made earlier here:** `agent-registry.sh` still
+  uses the old heuristic, so the two per-repo files do *not* share one resolver
+  yet — migrating it is follow-up work, deliberately out of this task's scope
+  (it sits on the `/kickoff` hot path with its own tests).
+- **Sharp edges the script owns** (the accepted-token list, `reason=` codes and
+  their meanings live in `archive-task.sh`'s header — do not restate them here or
+  in the README; that vocabulary drifted across five surfaces once already):
+  - Trim, *not* `tr -d '[:space:]'` — deleting all whitespace collapses `y e s`
+    into an accepted token, waiving the gate on undocumented content.
+  - `set`/`unset` refuse a symlinked flag **or `.claude` parent**, and re-validate
+    after `mkdir -p` — guarding only the leaf let a symlinked `.claude` make
+    `mkdir` succeed through the link and land the write outside the repo while the
+    reported path still read in-repo. Residual: a shell can't do this race-free
+    (no `openat`/`O_NOFOLLOW`); the re-checks narrow the window, they don't close it.
+  - `set` writes a `mktemp`'d file **in the target directory**, `chmod`s it *before*
+    the rename, and renames. A fixed `$file.tmp.$$` is PID-predictable (pre-plant
+    it as a symlink → the redirect clobbers an arbitrary file and `mv` installs the
+    symlink *as* the flag), and a post-rename `chmod` can follow a swapped-in link.
+  - `set` warns when `.claude/` is **gitignored** — otherwise `git add` refuses the
+    path and `get` reports `untracked` forever while `set` claims success.
+  - `unset` reminds you to commit the *deletion*: removing the file makes `get`
+    report disabled at once, but HEAD still carries the flag for every other clone.
+  - The dirty-check compares **blob hashes**, not `git diff --quiet`, so the index
+    bits (`--assume-unchanged`/`--skip-worktree`) can't hide a deliberate local
+    disable either.
+  - The verdict is read from **`<main-branch>`**, not `HEAD` — the flag authorizes
+    a commit onto that branch and `commit_push` refuses any other, so reading HEAD
+    made the answer depend on which branch the main checkout happened to sit on
+    (a flag on a feature branch announced an auto-commit that then bailed out).
+  - `commit_push` passes `:(literal)` pathspecs: a task named `x*` would otherwise
+    glob `tasks/archive/x*.md` and commit every matching archive. **Not** for
+    `check-ignore`, which rejects pathspec magic outright — prefixing it there
+    silently broke the gitignored-archive detection (caught by a smoke test, not
+    the suite).
+  - A repo that never opted in must answer a **bare** `enabled=no`: callers relay
+    any `note=` verbatim, so ordering the symlink check before the existence check
+    made every close in a symlinked-`.claude` repo warn about an opt-in nobody
+    configured.
+  - Sibling helpers are addressed via an absolute `SCRIPT_DIR` captured at load:
+    a `$(dirname "$0")` expanded inside `( cd "$repo" && … )` resolves against the
+    *target* repo when `$0` is relative — and runs whatever sits there.
+- **`get` ships the human sentence with the machine code.** Alongside `reason=` it
+  emits a ready-to-print `note=`, and callers relay that instead of re-spelling the
+  vocabulary — the prose-drift failure this project already recorded.
