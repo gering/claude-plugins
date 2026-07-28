@@ -50,10 +50,13 @@ Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok-4.5)
           → Merge (file, mechanism) → Verify (solos + design + unverified consensus) → Ranked synthesis
 ```
 
-1. **Scope + gate** — a cheap agent classifies the diff and picks which Claude
-   lenses are worth running (security is never gated out when code/args/files
-   flow to an external process; design lenses are first-class, skipped only
-   when the diff can't pay off for them).
+1. **Scope + gate** — a cheap agent classifies the diff and picks which lenses
+   are worth running, **for every voice** (design lenses are first-class,
+   skipped only when the diff can't pay off for them). `security`,
+   `adversarial` and `correctness` are a **mandatory floor the gate cannot
+   prune** — since it now prunes for everyone, a lens it drops would be reviewed
+   by nobody. Every pruned lens is reported as gated-out, never silently
+   dropped.
 2. **Fan-out** — all voices at the **same granularity**: one Claude finder per
    gated lens **cluster**, and `codex` + `grok-4.5` each once per gated cluster
    too (per lens under `--max`). The gate prunes calls for everyone — a

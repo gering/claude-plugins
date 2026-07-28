@@ -156,12 +156,26 @@ const METHODOLOGICAL_LENSES = ['removed-behavior', 'cross-file-trace']
 // other protection is a sentence in its own prompt (model-cooperation-dependent,
 // injection-reachable). These are the code-level backstop: a diff that talks the
 // gate into "docs-only" still gets a threat review AND a correctness pass.
-// KNOWN COST (accepted, user call): flooring correctness + the threat pair means
-// the `breakage` and `threat` clusters ALWAYS spawn — the gate can only ever
-// prune `design` and `consistency`, so a doc-only diff still pays 2 clusters ×
-// live voices. That is the deliberate price for never shipping a clean report on
-// the two dimensions most costly to miss.
+// KNOWN COST (accepted, user call): the `breakage` and `threat` clusters always
+// SPAWN, so a doc-only diff still pays 2 clusters × live voices.
+// KNOWN LIMIT (be precise — an earlier version of this comment overstated it):
+// the floor guarantees CLUSTER SPAWN, not full lens coverage. Within `breakage`
+// the gate may still prune `removed-behavior` / `cross-file-trace`, leaving that
+// unit running with lenses:['correctness'] for every voice. Those pruned lenses
+// are forced into the report's gated-out column, so the loss is disclosed rather
+// than silent — but "breakage ran" does not mean "deletions were reviewed".
+// Deliberately NOT derived from LENS_CLUSTERS.threat: which lenses are
+// non-negotiable is a judgement call, not a consequence of cluster membership —
+// adding a lens to `threat` must not silently make it mandatory. The subset
+// assertion below + test_lens_sync.py keep the explicit list honest instead.
 const MANDATORY_LENSES = ['security', 'adversarial', 'correctness']
+// A lens renamed in LENS_CLUSTERS but not here would leave a stale entry that can
+// never match, silently voiding the floor while every existing check stays green.
+for (const l of MANDATORY_LENSES) {
+  if (!CANDIDATE_LENSES.includes(l)) {
+    throw new Error(`MANDATORY_LENSES contains "${l}", which is not in LENS_CLUSTERS — the gate floor would be silently void`)
+  }
+}
 
 // One finding. DRIFT WARNING: this schema is hand-mirrored in TWO places —
 // scripts/schema/finding.schema.json (canonical, CLI-enforced on codex/grok)
@@ -351,15 +365,21 @@ if (gate && gateRun !== null) {
   const listedSkip = Array.isArray(gate.skip) ? gate.skip : []
   gate.run = runLensesSafe
   gate.skip = [
-    ...listedSkip.filter((s) => !runLensesSafe.includes(s?.lens)),
+    // `lens` is free text in GATE_SCHEMA, so a hallucinated name ("typo") would
+    // otherwise be rendered as a gated-out lens that does not exist.
+    ...listedSkip.filter((s) => CANDIDATE_LENSES.includes(s?.lens) && !runLensesSafe.includes(s.lens)),
     ...CANDIDATE_LENSES
       .filter((l) => !runLensesSafe.includes(l) && !listedSkip.some((s) => s?.lens === l))
       .map((l) => ({ lens: l, why: 'omitted by the gate without a reason' })),
   ]
-  const covered = new Set([...gate.run, ...gate.skip.map((s) => s?.lens)])
-  if (CANDIDATE_LENSES.some((l) => !covered.has(l))) {
-    log(`⚠️ gate report incomplete: [${CANDIDATE_LENSES.filter((l) => !covered.has(l)).join(', ')}] appear in neither run nor gated-out`)
-  }
+  // run + skip must PARTITION the lens set: every lens in exactly one column.
+  // Neither half fails loudly on its own, and both halves have regressed before
+  // (a silently dropped lens; a floored lens missing from run), so assert it.
+  const skipped = gate.skip.map((s) => s?.lens)
+  const missing = CANDIDATE_LENSES.filter((l) => !gate.run.includes(l) && !skipped.includes(l))
+  const both = gate.run.filter((l) => skipped.includes(l))
+  if (missing.length) log(`⚠️ gate report incomplete: [${missing.join(', ')}] appear in neither run nor gated-out`)
+  if (both.length) log(`⚠️ gate report inconsistent: [${both.join(', ')}] appear as BOTH run and gated-out`)
 }
 
 // ============================================================================
@@ -432,6 +452,24 @@ const shQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
 const lensInstr = (u) =>
   `Review ONLY through these lens(es) — report nothing outside them. ` +
   unitBrief(u, { inline: true })
+// Memoized per unit so the command string and its byte count can never describe
+// two different builds of the same instruction.
+const _instrCache = new Map()
+const instrFor = (u) => {
+  if (!_instrCache.has(u.name)) _instrCache.set(u.name, lensInstr(u))
+  return _instrCache.get(u.name)
+}
+// UTF-8 byte length in pure JS: the workflow sandbox exposes no Node globals
+// (Buffer) and TextEncoder is not guaranteed either, while the briefs contain
+// multi-byte characters (em dashes) that a `.length` char count would undercount.
+const utf8Bytes = (s) => {
+  let n = 0
+  for (const ch of s) {
+    const c = ch.codePointAt(0)
+    n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4
+  }
+  return n
+}
 // Only spawn transports for backends the skill reported live (probed via the
 // adapter); absent CLIs would otherwise show up as noisy "errors".
 const wantVoices = Array.isArray(INPUT.externalVoices) ? INPUT.externalVoices : ['codex', 'grok']
@@ -451,7 +489,13 @@ const liveBackends = liveExternals.map((b) => b.backend)
 const externalVoiceSpecs = liveExternals
   .flatMap((b) => externalUnits.map((u) => ({
     backend: b.backend, unit: u.name, lenses: u.lenses, label: `${b.backend}:${u.name}`,
-    cmd: `bash "${ADAPTER}" run ${b.backend} ${b.flags} --lens-instr ${shQuote(lensInstr(u))} --prompt-file "${EXTERNAL_PROMPT}"`,
+    // --lens-instr-bytes is an INTEGRITY check on the retype: an empty value is
+    // already refused, but a transport that shortens or paraphrases the
+    // instruction would otherwise run and have its findings attributed to lenses
+    // it was never told to review — quietly hollowing out the "the voice IS its
+    // cluster" guarantee. A short integer survives a retype far more reliably
+    // than 1 KB of prose, and any edit to the prose changes its length.
+    cmd: `bash "${ADAPTER}" run ${b.backend} ${b.flags} --lens-instr ${shQuote(instrFor(u))} --lens-instr-bytes ${utf8Bytes(instrFor(u))} --prompt-file "${EXTERNAL_PROMPT}"`,
   })))
 if (externalVoiceSpecs.length) {
   log(`External fan-out: ${externalVoiceSpecs.length} call(s) — ${liveBackends.join(' + ')} ` +

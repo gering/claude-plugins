@@ -83,7 +83,14 @@ check("adapter: --lens-instr flag present", "--lens-instr)" in sh)
 # green after the actual flag was dropped from the command.
 check(
     "workflow: passes --lens-instr into the transport command",
-    re.search(r"--lens-instr \$\{shQuote\(lensInstr\(u\)\)\}", js),
+    re.search(r"--lens-instr \$\{shQuote\([A-Za-z_]+\(u\)\)\}", js),
+)
+# The integrity check is only worth anything if the declared length travels with
+# the text — and it must be DERIVED from the same expression, never a literal.
+check("adapter: --lens-instr-bytes flag present", "--lens-instr-bytes)" in sh)
+check(
+    "workflow: declares --lens-instr-bytes from the built instruction",
+    re.search(r"--lens-instr-bytes \$\{utf8Bytes\([A-Za-z_]+\(u\)\)\}", js),
 )
 
 # Oversize headroom: the skill refuses to run the externals above a threshold in
@@ -142,6 +149,20 @@ if mb and sk:
 # to `breakage - {correctness}` forces a conscious test edit either way — add a
 # methodological lens and it must appear here; add a topical one and it must be
 # named in the exclusion below.
+# MANDATORY_LENSES: the gate floor. Deliberately an explicit list (which lenses
+# are non-negotiable is a judgement call, not a consequence of cluster
+# membership), which makes it a MIRROR — a lens renamed in LENS_CLUSTERS leaves a
+# stale entry here that can never match, silently voiding the floor. The workflow
+# throws on that at startup; this catches it in CI, before any run.
+mand = re.search(r"const MANDATORY_LENSES = \[([^\]]*)\]", js)
+check("workflow: MANDATORY_LENSES found", mand)
+mandatory = set(re.findall(r"'([a-z][a-z-]*)'", mand.group(1) if mand else ""))
+check("MANDATORY_LENSES non-empty", bool(mandatory))
+check(
+    f"MANDATORY_LENSES ⊆ LENS_CLUSTERS lenses (stale: {sorted(mandatory - set(cluster_lenses))})",
+    mandatory <= set(cluster_lenses),
+)
+
 TOPICAL_BREAKAGE = {"correctness"}
 mm = re.search(r"const METHODOLOGICAL_LENSES = \[([^\]]*)\]", js)
 check("workflow: METHODOLOGICAL_LENSES found", mm)

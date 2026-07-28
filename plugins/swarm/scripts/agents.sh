@@ -14,6 +14,8 @@
 #       --lens-instr <s>    Per-cluster lens instruction, prepended VERBATIM
 #                           before the prompt body (the workflow passes the
 #                           gated cluster's briefs here). Rejected if empty.
+#       --lens-instr-bytes <n>  Expected byte length of --lens-instr; a mismatch
+#                           means it was altered in transport -> hard error.
 #       --effort <level>    low|medium|high|xhigh|max (default: xhigh)
 #       --model <name>      Backend model override
 #       --schema <file>     JSON schema to enforce (default: bundled finding.schema.json)
@@ -680,12 +682,13 @@ subcmd_run() {
     exit 2
   fi
 
-  local prompt_file="" lens_instr="" lens_instr_set=0 effort="xhigh" model="" schema="$DEFAULT_SCHEMA"
+  local prompt_file="" lens_instr="" lens_instr_set=0 lens_instr_bytes="" effort="xhigh" model="" schema="$DEFAULT_SCHEMA"
   while [[ $# -gt 0 ]]; do
     [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
     case "$1" in
       --prompt-file) prompt_file="$2"; shift 2 ;;
       --lens-instr)  lens_instr="$2";  lens_instr_set=1; shift 2 ;;
+      --lens-instr-bytes) lens_instr_bytes="$2"; shift 2 ;;
       --effort)      effort="$2"; shift 2 ;;
       --model)       model="$2";       shift 2 ;;
       --schema)      schema="$2";      shift 2 ;;
@@ -737,6 +740,21 @@ subcmd_run() {
   # flag stays legal (manual/ad-hoc `run` calls have no cluster).
   if [[ "$lens_instr_set" == 1 && -z "$lens_instr" ]]; then
     echo "Empty --lens-instr: the per-cluster lens instruction was lost in transport; refusing a lens-free review the caller would mislabel" >&2; exit 2
+  fi
+  # INTEGRITY: the empty check above only catches a TOTAL loss. A transport that
+  # shortens or paraphrases the instruction would still run, and the caller would
+  # attribute the findings to lenses the backend was never told to review. The
+  # caller sends the exact byte count it built; a mismatch means the text changed
+  # in transit, so fail rather than review a different scope than we report.
+  if [[ -n "$lens_instr_bytes" ]]; then
+    [[ "$lens_instr_bytes" =~ ^[0-9]+$ ]] \
+      || { echo "Invalid --lens-instr-bytes '$lens_instr_bytes' — must be a non-negative integer" >&2; exit 2; }
+    local actual_instr_bytes
+    actual_instr_bytes=$(printf '%s' "$lens_instr" | wc -c | tr -d ' ')
+    if [[ "$actual_instr_bytes" != "$lens_instr_bytes" ]]; then
+      echo "--lens-instr integrity check failed: caller declared $lens_instr_bytes bytes, received $actual_instr_bytes — the lens instruction was altered in transport; refusing to review a scope different from the one being reported" >&2
+      exit 2
+    fi
   fi
   if [[ -n "$lens_instr" ]]; then
     prompt="$lens_instr"$'\n\n'"$prompt"

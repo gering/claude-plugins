@@ -42,9 +42,9 @@ truth** — every voice's fan-out units come from it, Claude and externals alike
   stays per-lens** (a fully-pruned cluster spawns no agent for anyone); design lenses are
   first-class in the gate prompt, skipped only when the diff can't pay off.
   **Accepted tradeoff of the cluster default:** per-lens failure isolation is
-  gone — one crashed cluster finder drops that whole cluster's Claude coverage
-  for the round (a visible `backendError`, never silent); `--max` restores
-  per-lens isolation. Documented, not retried per-lens (minimal — the default
+  gone — one crashed cluster call drops that whole cluster's coverage *for that
+  voice* (a visible `backendError` carrying the unit + its lenses, never
+  silent); `--max` restores per-lens isolation. Documented, not retried per-lens (minimal — the default
   trades isolation for fewer agents).
 - **`kind` is derived from the lens name** (`design` vs `defect`) — no
   finding-schema change, so the 3-place schema mirror is untouched. A merged
@@ -264,7 +264,7 @@ units once; `externalUnits` reuses `finderUnits` whenever a gate ran, so the two
 sides cannot drift). Cost is `live-backends × units` — ≤2×4 default, ≤2×11 under
 `--max` — logged at fan-out, never silently capped.
 
-Three decisions worth keeping:
+Decisions worth keeping:
 
 - **Where the prompt is assembled.** `LENS_BRIEF` stays single-source in the
   workflow, so the briefs must *travel*. The workflow sandbox cannot write files
@@ -294,6 +294,20 @@ Three decisions worth keeping:
   and `consistency` — a doc-only diff still pays 2 clusters × live voices. Chosen
   deliberately: a clean report on the dimensions most costly to miss is worse than
   the calls saved.
+- **The transport retype is guarded by length, not trust.** The instruction
+  rides as one argv word a haiku agent retypes; an EMPTY value is refused, and
+  `--lens-instr-bytes` (the caller's own byte count) makes a *paraphrased or
+  truncated* one fail too — otherwise the backend would review a narrower scope
+  than the findings get labelled with, hollowing out "the voice IS its cluster".
+  A short integer survives a retype far better than 1 KB of prose.
+- **Accepted residuals** (re-found by every review round — decided, not
+  overlooked): (a) the oversize skip stays *prose* in SKILL.md with a constant
+  pinned to `max_bytes` by `test_lens_sync.py`, rather than a deterministic
+  prep/adapter decision — the drift risk is closed by the pin, and the failure
+  mode needs model non-compliance; (b) one adapter process per unit re-runs
+  grok's process-local model probe per cluster (4× instead of 1×) — wasted
+  network calls, but they overlap the review calls, so wall-clock cost is ~0 and
+  caching would add staleness for no user-visible gain.
 - **The coverage line must partition the lens set.** Both halves are easy to get
   wrong and neither fails loudly: lenses the gate lists in neither `run` nor
   `skip` are dropped silently (seen live — a real run swallowed `adversarial`),
