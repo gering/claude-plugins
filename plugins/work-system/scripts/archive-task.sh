@@ -58,11 +58,13 @@
 #       (archive-scoped pathspec, ff-only, never force-push, refusal on unpushed
 #       history) are what bound the damage in that case.
 #       A repo that never opted in answers a BARE `enabled=no` — that bare form
-#       is reserved for exactly that case. Every other non-honored outcome adds
-#       two lines saying why: `reason=` one of
+#       is reserved for exactly that case (nothing here AND nothing on the
+#       authorization ref; a flag deleted locally but still committed there is
+#       `locally-deleted`, not "never opted in"). Every other non-honored outcome
+#       adds two lines saying why: `reason=` one of
 #       symlink | not-a-file | untracked | modified | locally-disabled |
-#       unrecognized-content | git-error | unsupported-layout | not-a-repo |
-#       unresolvable-branch | checkout-not-on-main, plus
+#       locally-deleted | unrecognized-content | git-error | unsupported-layout |
+#       not-a-repo | unresolvable-branch | checkout-not-on-main, plus
 #       `note=<ready-to-print sentence>` — callers relay the note rather than
 #       re-spelling this vocabulary in their own prose (it drifts).
 #       Accepted content (case-insensitive, leading/trailing whitespace trimmed,
@@ -378,6 +380,22 @@ autocommit_root() {
   return 0
 }
 
+# Resolve the ref the authorization is read from. FULLY QUALIFIED
+# (`refs/heads/<branch>`), never the bare name: git resolves `refs/tags/<name>`
+# BEFORE `refs/heads/<name>`, so a tag named like the default branch shadows it —
+# and tags are auto-followed on fetch, so a bare `$mainbr` let a tag supply an
+# authorization value the branch never carried. Verified.
+# Prints the ref, or NOTHING when a branch was passed but does not resolve (the
+# caller fails closed on that). With no branch, HEAD — standalone/manual use.
+autocommit_ref() {
+  local root="$1" mainbr="$2"
+  if [ -z "$mainbr" ]; then printf 'HEAD\n'; return 0; fi
+  if git -C "$root" rev-parse --verify -q "refs/heads/$mainbr" >/dev/null 2>&1; then
+    printf 'refs/heads/%s\n' "$mainbr"
+  fi
+  return 0
+}
+
 # Normalize a flag value to one token: `on`, `off`, or `bad`. ONE implementation
 # for both the committed value and the working-tree copy — they had drifted apart
 # (only one rejected multi-line content), which is how a value accepted in one
@@ -486,12 +504,31 @@ autocommit() {
         fi
         return 0
       fi
+      # Resolve the authorization ref up front — the "nothing configured" test
+      # below needs it, not just the value read further down.
+      local ref; ref="$(autocommit_ref "$root" "$mainbr")"
+      local on_ref=no
+      if [ -n "$ref" ] && git -C "$root" cat-file -e "$ref:$rel" 2>/dev/null; then on_ref=yes; fi
+
       # NOTHING CONFIGURED comes first: a repo that never opted in must answer a
       # bare `enabled=no`, with no reason/note. Testing the symlink before this
       # made every /close in a repo with a symlinked `.claude` (a normal dotfiles
       # layout) warn about an opt-in the user never set up — and callers are told
       # a note means "an existing flag was not honored".
-      if [ ! -e "$file" ] && [ ! -L "$file" ]; then printf 'enabled=no\n'; return 0; fi
+      #
+      # "Nothing configured" means nothing HERE *and* nothing on the authorization
+      # ref. A flag that is merely deleted locally while still committed there is
+      # not the same thing: this checkout is fail-safe, but every other clone keeps
+      # auto-committing until the deletion is committed — so say so instead of
+      # answering with the form reserved for never-opted-in repos.
+      if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+        if [ "$on_ref" = yes ]; then
+          printf 'enabled=no\nreason=locally-deleted\nnote=%s\n' \
+            "the autocommit flag is deleted here but still committed on the authorization branch — commit the deletion, or other checkouts keep auto-committing"
+          return 0
+        fi
+        printf 'enabled=no\n'; return 0
+      fi
       # A symlinked flag — or a symlinked `.claude` parent — means the on-disk
       # state is redirected; never honor it. (The value itself comes from the
       # committed object below, so this cannot change the answer, but a redirected
@@ -508,12 +545,14 @@ autocommit() {
       fi
 
       # PROVENANCE — presence alone is NOT authorization. Read the value from the
-      # COMMITTED object (`git show HEAD:<rel>`), never from the working tree:
-      # that single call is both the tracked-check (it fails when the path isn't
-      # in HEAD) and the value read, and it is immune to the working-tree tricks
-      # that fool a `diff`-based guard — `git update-index --assume-unchanged` /
-      # `--skip-worktree` make `ls-files`/`diff --quiet` report a modified file as
-      # clean, but they cannot change what HEAD contains.
+      # COMMITTED object on the authorization ref (`git show "$ref:<rel>"`, where
+      # $ref is `refs/heads/<main-branch>`; HEAD only in standalone/no-branch
+      # use), never from the working tree: that single call is both the
+      # committed-check (it fails when the path isn't on that ref) and the value
+      # read, and it is immune to the working-tree tricks that fool a `diff`-based
+      # guard — `git update-index --assume-unchanged` / `--skip-worktree` make
+      # `ls-files`/`diff --quiet` report a modified file as clean, but they cannot
+      # change what the ref contains.
       #
       # Scope of this guard (documented honestly — see the knowledge entry): it
       # stops a flag that was merely WRITTEN (a tool, a stray file, an agent's
@@ -526,16 +565,9 @@ autocommit() {
       # commit anywhere else, so the authorization must be read from that same
       # branch — not from whatever the main checkout happens to be parked on.
       #
-      # FULLY QUALIFIED (`refs/heads/<branch>`), never the bare name: git resolves
-      # `refs/tags/<name>` BEFORE `refs/heads/<name>`, so a tag named like the
-      # default branch shadows it — and tags are auto-followed on fetch. A bare
-      # `$mainbr` therefore let a tag supply the authorization value that the
-      # branch itself never carried. Verified.
-      local ref=""
+      # $ref was resolved above (see autocommit_ref for why it is fully qualified).
       if [ -n "$mainbr" ]; then
-        if git -C "$root" rev-parse --verify -q "refs/heads/$mainbr" >/dev/null 2>&1; then
-          ref="refs/heads/$mainbr"
-        else
+        if [ -z "$ref" ]; then
           # FAIL CLOSED. Falling back to HEAD here would reinstate exactly the
           # branch-dependent verdict this argument exists to remove — and in the
           # failing direction (a flag on the parked branch would read as
@@ -553,12 +585,9 @@ autocommit() {
             "the main checkout is not on the branch the archive would be committed to — falling back to asking"
           return 0
         fi
-      else
-        # No branch passed (standalone/manual use): HEAD is the only sensible ref.
-        ref="HEAD"
       fi
-      local head_val rc=0
-      head_val="$(git -C "$root" show "$ref:$rel" 2>/dev/null)" || rc=$?
+      local ref_val rc=0
+      ref_val="$(git -C "$root" show "$ref:$rel" 2>/dev/null)" || rc=$?
       if [ "$rc" -ne 0 ]; then
         # Not on that ref (never committed there), or git could not read it at
         # all. Both are "not authorized"; distinguish them so debugging isn't
@@ -575,16 +604,19 @@ autocommit() {
       # The committed value is what authorizes, so a local edit can never silently
       # ENABLE the skip. A local edit SHOULD still be able to disable it (that is
       # a deliberate act by whoever holds the checkout), so a flag whose working
-      # copy differs from HEAD falls back to asking.
+      # copy differs from the authorization ref falls back to asking.
       #
       # Compare BLOB HASHES, not `git diff --quiet`: the index bits that hide a
       # dirty file (`--assume-unchanged`, `--skip-worktree`) make diff report
       # "clean", which would silently ignore a deliberate local disable. Hashing
-      # the file and the HEAD blob is index-independent, so both directions hold.
-      local head_oid work_oid
-      head_oid="$(git -C "$root" rev-parse "$ref:$rel" 2>/dev/null || true)"
+      # the file and the ref blob is index-independent, so both directions hold.
+      # `git hash-object <path>` applies that path's gitattributes/clean filters
+      # by default (that is what `--no-filters` turns off), so an eol=crlf or
+      # text=auto checkout still compares equal — verified, not assumed.
+      local ref_oid work_oid
+      ref_oid="$(git -C "$root" rev-parse "$ref:$rel" 2>/dev/null || true)"
       work_oid="$(git -C "$root" hash-object -- "$file" 2>/dev/null || true)"
-      if [ -z "$work_oid" ] || [ "$work_oid" != "$head_oid" ]; then
+      if [ -z "$work_oid" ] || [ "$work_oid" != "$ref_oid" ]; then
         # Deliberately disabling locally is a SUPPORTED move, so don't answer it
         # with "commit or revert it to make it effective" — that tells the user to
         # undo the thing they just did, on every single close. Only content that
@@ -602,7 +634,7 @@ autocommit() {
         return 0
       fi
 
-      case "$(autocommit_normalize "$head_val")" in
+      case "$(autocommit_normalize "$ref_val")" in
         on)  printf 'enabled=yes\n' ;;
         off) printf 'enabled=no\n' ;;
         *)   printf 'enabled=no\nreason=unrecognized-content\nnote=%s\n' \
@@ -661,10 +693,8 @@ autocommit() {
       # Check the SAME ref `get` authorizes from — a HEAD-based check skipped the
       # reminder in exactly the case that needs it (flag still live on the
       # authorization branch while the checkout sits elsewhere).
-      local unset_ref="HEAD"
-      if [ -n "$mainbr" ] && git -C "$root" rev-parse --verify -q "refs/heads/$mainbr" >/dev/null 2>&1; then
-        unset_ref="refs/heads/$mainbr"
-      fi
+      local unset_ref; unset_ref="$(autocommit_ref "$root" "$mainbr")"
+      [ -n "$unset_ref" ] || unset_ref="HEAD"
       local was_committed=no
       git -C "$root" cat-file -e "$unset_ref:$rel" 2>/dev/null && was_committed=yes
       rm -f "$file"

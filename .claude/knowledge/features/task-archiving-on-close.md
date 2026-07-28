@@ -189,7 +189,15 @@ persistent `cd`" footgun the helper's explicit paths avoid is a rule — see
   - A repo that never opted in must answer a **bare** `enabled=no`: callers relay
     any `note=` verbatim, so ordering the symlink check before the existence check
     made every close in a symlinked-`.claude` repo warn about an opt-in nobody
-    configured.
+    configured. "Nothing configured" means nothing here **and** nothing on the
+    authorization ref — a flag deleted locally but still committed there is
+    `locally-deleted`, since every other clone keeps auto-committing until the
+    deletion is committed.
+  - `git hash-object <path>` applies that path's gitattributes/clean filters by
+    default (that is what `--no-filters` disables), so the blob-hash dirty-check
+    stays correct under `core.autocrlf`/`eol=crlf` — checked directly after a
+    review round claimed otherwise. Verify such claims against git rather than
+    taking them on trust; the reviewer was wrong here.
   - Sibling helpers are addressed via an absolute `SCRIPT_DIR` captured at load:
     a `$(dirname "$0")` expanded inside `( cd "$repo" && … )` resolves against the
     *target* repo when `$0` is relative — and runs whatever sits there.

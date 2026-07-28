@@ -273,9 +273,15 @@ with tempfile.TemporaryDirectory() as tmp:
     check("unset exits 0", r.returncode == 0)
     check("unset removes the flag", not flag.exists())
     check("unset echoes the path", kv(r.stdout).get("flag") == str(flag))
-    # removed but still tracked in HEAD -> the deletion is a modification
-    check("after unset -> enabled=no",
-          kv(run("autocommit", "get", str(repo)).stdout).get("enabled") == "no")
+    # Deleted here but STILL COMMITTED on the authorization ref: fail-safe for
+    # this checkout, but every other clone keeps auto-committing. That must not
+    # answer with the bare form reserved for never-opted-in repos.
+    g = kv(run("autocommit", "get", str(repo)).stdout)
+    check("after unset -> enabled=no", g.get("enabled") == "no")
+    check("after unset -> reason=locally-deleted", g.get("reason") == "locally-deleted")
+    check("after unset -> warns other checkouts still auto-commit",
+          "other checkouts" in g.get("note", ""))
+    git(repo, "checkout", "--", REL)
 
     # --- REGRESSION: relative invocation must not resolve the sibling helper --- #
     # `$(dirname "$0")` expanded inside `( cd "$repo" && … )` resolves against the
@@ -469,6 +475,39 @@ with tempfile.TemporaryDirectory() as tmp:
     check("set missing repo -> exit 2", run("autocommit", "set").returncode == 2)
     check("unknown op -> exit 2", run("autocommit", "bogus", str(repo)).returncode == 2)
     check("bare autocommit -> exit 2", run("autocommit").returncode == 2)
+
+
+    # --- REGRESSION: a glob-y task name must not widen the commit ------------- #
+    # `archive`/`commit-push` pass task-derived paths to git as PATHSPECS, where
+    # `*` is a glob: without the `:(literal)` prefix a task named `x*` would stage
+    # and commit every `tasks/archive/x*.md`. Under the autocommit opt-in that
+    # commit is pushed to the default branch with no prompt at all, so this is
+    # worth an automated guard rather than the manual smoke test it had.
+    grepo = new_repo(root, "grepo")
+    gbranch = git(grepo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    (grepo / "tasks" / "archive").mkdir(parents=True)
+    # The task name itself carries the glob metacharacter — that is the whole
+    # point. `x*` archives to `tasks/archive/x*.md`, a pathspec that matches every
+    # `x…​.md` unless it is passed as :(literal).
+    (grepo / "tasks" / "x*.md").write_text("# Star\n")
+    for decoy in ("x-decoy-1.md", "x-decoy-2.md"):     # both match the glob x*.md
+        (grepo / "tasks" / "archive" / decoy).write_text("# decoy\n")
+    git(grepo, "add", "-A", "tasks")
+    git(grepo, "commit", "-qm", "task + decoys")
+    # dirty the decoys, so a glob-widened pathspec WOULD have something to sweep in
+    for decoy in ("x-decoy-1.md", "x-decoy-2.md"):
+        (grepo / "tasks" / "archive" / decoy).write_text("# decoy touched\n")
+
+    r = run("archive", str(grepo), "x*", "task/x-star")
+    archived = kv(r.stdout).get("archived_path")
+    check("glob-y task archives to its own file", archived == "tasks/archive/x*.md")
+    run("commit-push", str(grepo), "x*", archived, gbranch)
+    committed = git(grepo, "show", "--name-only", "--format=", "HEAD").stdout.split()
+    check("commit-push did commit the archive", "tasks/archive/x*.md" in committed)
+    check("commit-push swept in no decoy",
+          not any(f.startswith("tasks/archive/x-decoy") for f in committed))
+    check("decoy edits stay uncommitted",
+          "x-decoy-1.md" in git(grepo, "status", "--porcelain").stdout)
 
 
 if FAILS:
