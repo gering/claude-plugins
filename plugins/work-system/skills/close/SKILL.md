@@ -172,19 +172,58 @@ Rules:
       at `tasks/<task-name>.md`"; the rest of the cleanup (worktree/branch) already happened.
     - Read the helper's `key=value` output (`archived_path`, `collision`, `committable`):
       - **`committable=yes`** (there is a git change to commit — the archive isn't gitignored,
-        or the original task file was tracked so its removal needs recording): show
-        `git -C <main-repo-path> status --short tasks/archive/ tasks/<task-name>.md` (scoped — not
-        the whole `tasks/`, which would surface unrelated pending tasks) and ask **once**:
-        "Commit the archived task file to `<main-branch>` and push? [y/n]" — one approval covers
-        both (the archive is metadata, and the push is what keeps local `<main-branch>` from
-        diverging and breaking the next `/close`'s step-5 sync). If yes, delegate the whole
-        stage→commit→fast-forward-push to the helper (all the git-stateful steps live there, not
-        here, so they can't drift; step 5 already synced local `<main-branch>`, so its commit is
-        a clean ff for origin — it never force-pushes):
+        or the original task file was tracked so its removal needs recording): check the repo's
+        opt-in flag first (per-repo only, off by default — never a global setting):
+        ```sh
+        bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" autocommit get <main-repo-path> <main-branch>
+        ```
+        Pass `<main-branch>`: the flag authorizes a commit onto *that* branch, so it is read
+        from it. Without it the answer would follow whatever branch the main checkout happens
+        to be on, which can disagree with where `commit-push` will actually commit.
+        - **A line that is exactly `enabled=yes`** — match the **whole line**, never a
+          substring of the output: other lines (notably `note=`) can legitimately contain a
+          branch name or other repo-controlled text, and a substring scan would let that text
+          supply the authorization token. Anything short of a standalone `enabled=yes` line is
+          not authorization. It means the repo carries a **committed**
+          `.claude/work-system-close-autocommit`. That file IS the durable
+          per-repo authorization for exactly this one narrow, contained action (archive-scoped
+          pathspec commit, fast-forward only, never force-pushes, and it refuses to push on
+          `unpushed-history`). Skip the AskUserQuestion below and go straight to the
+          commit+push — but **show the same scoped preview first**, then say what you are
+          doing. An unattended commit+push to `<main-branch>` must never be invisible: the
+          user gave standing authorization for this action, not for doing it unseen.
+          ```sh
+          git -C <main-repo-path> status --short tasks/archive/ tasks/<task-name>.md
+          ```
+          Then one line — "Auto-committing archived task file to `<main-branch>`
+          (`.claude/work-system-close-autocommit` is set)…" — and proceed without asking.
+        - **`enabled=no` — the default, unchanged behavior:** show
+          `git -C <main-repo-path> status --short tasks/archive/ tasks/<task-name>.md` (scoped —
+          not the whole `tasks/`, which would surface unrelated pending tasks) and ask **once**:
+          "Commit the archived task file to `<main-branch>` and push? [y/n]" — one approval covers
+          both (the archive is metadata, and the push is what keeps local `<main-branch>` from
+          diverging and breaking the next `/close`'s step-5 sync). Only continue below on yes.
+          If a **`note=`** line accompanies `enabled=no`, a flag file exists but was not honored
+          (most often: `set` was run but never committed) — **relay that note verbatim** in one
+          line so the opt-in doesn't just look broken. Do not re-spell the `reason=` codes here;
+          the script owns that vocabulary and ships the human sentence with it.
+        - **No `enabled=` line at all → also ask**, and add one line that the opt-in check could
+          not run. This covers empty stdout, a usage error (an older installed plugin whose
+          `archive-task.sh` predates the `autocommit` subcommand), a non-zero exit, or any
+          unparseable output. **Fail-closed on purpose:** guessing "yes" here would commit and
+          push to `<main-branch>` with no prompt. Note this is *not* the ordinary `enabled=no`
+          case above — say "could not run" only when there is genuinely no verdict to read.
+
+        Either way (auto-enabled or approved), delegate the whole stage→commit→fast-forward-push
+        to the helper (all the git-stateful steps live there, not here, so they can't drift; step
+        5 already synced local `<main-branch>`, so its commit is a clean ff for origin — it never
+        force-pushes):
         ```sh
         bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" commit-push <main-repo-path> <task-name> <archived_path> <main-branch>
         ```
-        Report from its `result=` (and `archive_committed=` on the committed-* results — when
+        Report from its `result=` exactly the same way regardless of which entry path got here —
+        never claim "committed and pushed" unless `result=committed-pushed` (and
+        `archive_committed=` on the committed-* results — when
         `no`, the archive is gitignored and the commit recorded only the source file's removal,
         so say "task file removal committed; archive kept local (gitignored)" rather than
         claiming the archive itself was committed):

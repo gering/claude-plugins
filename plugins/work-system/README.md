@@ -149,6 +149,30 @@ once to commit **and** fast-forward-push it to `main` (so local `main` never
 diverges; a failed push just leaves the commit local). `/list` shows the archived
 count in its summary.
 
+**Skip the prompt with a per-repo opt-in.** In a repo where archiving-to-main is
+the established norm, the commit+push ask is pure friction. Commit
+`.claude/work-system-close-autocommit` (content `yes`) and `/close` skips the
+prompt and commits+pushes the archive directly — still reporting the outcome, and
+still bounded by the same safety guards (archive-scoped commit, fast-forward
+only, never force-pushes, refuses when `main` has other unpushed commits).
+
+Set it with `archive-task.sh autocommit set <repo>` (`unset` to disable, `get` to
+check — that subcommand's header documents the exact accepted values and status
+codes). Off by default, per-repo only — no global default. The flag is honored
+**only once it is committed**: the value is read from the committed version, not
+the working tree, so a file that was merely written — by a tool, or by an agent
+working in a worktree — never authorizes the skip. Anything unresolved reports
+`enabled=no`, you simply get the prompt back, and the tool tells you why. Paths
+resolve to the main checkout, so `set` from inside a worktree still writes where
+`/close` reads.
+
+Be clear on what that buys you: it raises the bar from *"anything can write a
+file"* to *"something had to commit"* — **not** proof a human reviewed it, since
+whoever can commit in your repo can commit this too. What bounds the damage is
+the commit+push itself: archive-scoped, fast-forward only, never a force-push,
+refused when `main` carries other unpushed commits — so the worst case is inert
+archived markdown reaching `main` unreviewed.
+
 ## Worker agent selection
 
 `/kickoff` doesn't hardcode Claude as the worktree worker. Each agent is a
