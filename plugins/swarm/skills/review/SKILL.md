@@ -268,6 +268,13 @@ if [ -z "$FINDING_NONCE" ]; then echo "SWARM_NONCE_UNAVAILABLE=empty finding non
 
 echo "TMPD=$TMPD"; echo "DIFF=$DIFF"; echo "PROMPT=$PROMPT"; echo "FINDING_NONCE=$FINDING_NONCE"
 echo "PROMPT_BYTES=$(wc -c < "$PROMPT")"
+# Decide the oversize skip HERE, deterministically — do not leave the arithmetic
+# to the model (a compaction or a stale ceiling in context would let live voices
+# through and turn one clean skip into N per-call backend errors). Same pattern
+# as the --pr/--fix rejection above: the Bash block decides, the model reads a
+# flag. The constant is pinned against the adapter's max_bytes and the largest
+# lens instruction by test_lens_sync.py — change it there, not here alone.
+if [ "$(wc -c < "$PROMPT")" -gt 118784 ]; then echo "EXTERNALS_OVERSIZE=1"; else echo "EXTERNALS_OVERSIZE=0"; fi
 echo "JAIL=$JAIL"
 echo "LIVE_JSON=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json | tr -d '\n')"
 ```
@@ -292,16 +299,16 @@ echo "LIVE_JSON=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json | t
 - From `LIVE_JSON` build `externalVoices`: include `"codex"` iff codex is
   `available && ready`; include `"grok"` iff grok is `available && ready`. If
   none are live, the review runs with the Claude lenses alone — say so.
-- **Oversize** — if `PROMPT_BYTES` > 118784 the diff cannot clear the adapter's
-  120 KiB (122880-byte) per-call cap, so the external CLIs cannot run: set
-  `externalVoices` to `[]` (Claude-lens-only review), tell the user the external
-  backends were skipped, and suggest narrowing the range. Do NOT pass live voices
-  the adapter would only reject with an error. The threshold sits 4 KiB *under*
-  the cap because the workflow prepends a per-cluster lens instruction via
-  `--lens-instr`: what `exec` sees is instruction+diff, so a prompt that only just
-  fits here would fail later, per call, as a backend error. `test_lens_sync.py`
-  pins this number against the adapter's `max_bytes` and the largest instruction
-  the briefs can produce — do not edit it here alone.
+- **Oversize** — `EXTERNALS_OVERSIZE=1` means the diff cannot clear the adapter's
+  120 KiB (122880-byte) per-call cap: set `externalVoices` to `[]` (Claude-lens-only
+  review), tell the user the external backends were skipped as *prompt too large*,
+  and suggest narrowing the range. Do NOT pass live voices the adapter would only
+  reject — one clean skip beats N per-call backend errors. **The block decides
+  this, not you**: read the flag, never re-derive it from `PROMPT_BYTES`. The
+  threshold sits 4 KiB *under* the cap because the workflow prepends a per-cluster
+  lens instruction via `--lens-instr`, so what `exec` sees is instruction+diff;
+  `test_lens_sync.py` pins it against the adapter's `max_bytes` and the largest
+  instruction the briefs can produce.
 
 ### 2. Run the workflow
 

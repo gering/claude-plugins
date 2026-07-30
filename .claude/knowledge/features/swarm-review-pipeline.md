@@ -65,9 +65,12 @@ truth** — every voice's fan-out units come from it, Claude and externals alike
   suggestion-shaped, but each has a falsifiable applicability core (reuse
   target exists? simpler form behavior-identical? claimed waste real?) — the
   same 3-state verifier runs with an applicability prompt, **even for design
-  clusters with cross-family consensus** (agreement ≠ applicability: externals
-  only see the diff, so two of them can agree on a nonexistent reuse target —
-  the first live swarm run over this very feature caught that gap). Bypassing
+  clusters with cross-family consensus** (agreement ≠ applicability: two voices
+  can agree on a nonexistent reuse target — the first live swarm run over this
+  very feature caught that gap. That was originally because externals were
+  diff-only; since 0.6.0 they read the repo, so the residual reason is
+  correlation, not blindness: the voices share a prompt frame, a cluster scope
+  and — per-cluster since 0.7.0 — the same lens briefs). Bypassing
   into an unverified "maintainability" section would have surfaced unchecked
   suggestions from precisely the noisiest lenses. Methodological lenses are
   factual → normal defect verify; defect consensus stays auto-accepted.
@@ -296,15 +299,15 @@ Decisions worth keeping:
   the calls saved.
 - **The transport retype is guarded by length, not trust.** The instruction
   rides as one argv word a haiku agent retypes; an EMPTY value is refused, and
-  `--lens-instr-bytes` (the caller's own byte count) makes a *paraphrased or
-  truncated* one fail too — otherwise the backend would review a narrower scope
+  `--lens-instr-sum` (an FNV-1a/32 of the exact text, REQUIRED alongside it) makes
+  a *reworded, paraphrased or truncated* one fail too — otherwise the backend would review a narrower scope
   than the findings get labelled with, hollowing out "the voice IS its cluster".
-  A short integer survives a retype far better than 1 KB of prose.
+  8 hex chars survive a retype far better than 1 KB of prose. A byte COUNT was the first attempt and was not enough — `security`/`altitude`, `ONLY`/`ALSO` are same-length swaps that change the scope while the count still matches; the check must bind content, and must be refused-if-absent or a dropped flag voids it.
 - **Accepted residuals** (re-found by every review round — decided, not
-  overlooked): (a) the oversize skip stays *prose* in SKILL.md with a constant
-  pinned to `max_bytes` by `test_lens_sync.py`, rather than a deterministic
-  prep/adapter decision — the drift risk is closed by the pin, and the failure
-  mode needs model non-compliance; (b) one adapter process per unit re-runs
+  overlooked): (a) [RESOLVED 0.7.0] the oversize skip is now
+  decided in the prep Bash (`EXTERNALS_OVERSIZE`), not by model arithmetic — the
+  constant stays in the skill but is pinned to `max_bytes` by `test_lens_sync.py`;
+  (b) one adapter process per unit re-runs
   grok's process-local model probe per cluster (4× instead of 1×) — wasted
   network calls, but they overlap the review calls, so wall-clock cost is ~0 and
   caching would add staleness for no user-visible gain.

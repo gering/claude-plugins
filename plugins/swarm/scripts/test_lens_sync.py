@@ -87,21 +87,30 @@ check(
 )
 # The integrity check is only worth anything if the declared length travels with
 # the text — and it must be DERIVED from the same expression, never a literal.
-check("adapter: --lens-instr-bytes flag present", "--lens-instr-bytes)" in sh)
+check("adapter: --lens-instr-sum flag present", "--lens-instr-sum)" in sh)
 check(
-    "workflow: declares --lens-instr-bytes from the built instruction",
-    re.search(r"--lens-instr-bytes \$\{utf8Bytes\([A-Za-z_]+\(u\)\)\}", js),
+    "workflow: declares --lens-instr-sum from the built instruction",
+    re.search(r"--lens-instr-sum \$\{utf8Checksum\([A-Za-z_]+\(u\)\)\}", js),
+)
+# The checksum only guards anything if the adapter REFUSES an instruction that
+# arrives without one — otherwise dropping a flag silently voids the check.
+check(
+    "adapter: --lens-instr without --lens-instr-sum is refused",
+    re.search(r'lens_instr_set" == 1 && -z "\$lens_instr_sum', sh),
 )
 
-# Oversize headroom: the skill refuses to run the externals above a threshold in
-# PROSE, but the real per-call cap (`max_bytes`) lives in agents.sh, and what
-# exec() sees is lens-instruction + diff. Nothing but this check ties the two
-# numbers together, so a brief that grows past the headroom — or a changed cap —
-# would surface only as a per-call backend error at review time.
+# Oversize headroom: the skill skips the externals above a threshold, but the
+# real per-call cap (`max_bytes`) lives in agents.sh, and what exec() sees is
+# lens-instruction + diff. Nothing but this check ties the two numbers together,
+# so a brief that grows past the headroom — or a changed cap — would surface only
+# as a per-call backend error at review time.
+# Read the threshold from the EXECUTABLE guard in the prep block (the `-gt N`
+# that sets EXTERNALS_OVERSIZE), not from the surrounding prose: prose can drift
+# from the code, and it is the code that decides.
 mb = re.search(r"local max_bytes=(\d+)", sh)
 check("adapter: max_bytes found", mb)
-sk = re.search(r"`PROMPT_BYTES` > (\d+)", skill)
-check("skill: oversize threshold found", sk)
+sk = re.search(r'-gt (\d+) \]; then echo "EXTERNALS_OVERSIZE=1"', skill)
+check("skill: EXTERNALS_OVERSIZE guard + threshold found", sk)
 if mb and sk:
     max_bytes, threshold = int(mb.group(1)), int(sk.group(1))
     check("skill threshold is below the adapter cap", threshold < max_bytes)

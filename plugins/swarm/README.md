@@ -121,13 +121,18 @@ agents.sh available <backend> # installed? prints version
 agents.sh ready <backend>     # authenticated? hint on stderr if not
 agents.sh jail                # jail=yes|no — will read+web be granted? (working
                               # OS sandbox AND a resolvable repo root)
-agents.sh run <backend> [--prompt-file f] [--lens-instr s] [--effort E]
-                        [--model M] [--schema f]
+agents.sh run <backend> [--prompt-file f] [--lens-instr s --lens-instr-sum hex]
+                        [--effort E] [--model M] [--schema f]
                               # lens prompt in → findings JSON out
                               # --lens-instr: the gated cluster's lens briefs,
                               # prepended verbatim before the prompt body. The
                               # workflow passes it on every per-cluster call;
                               # an empty value is refused, never run lens-free.
+                              # --lens-instr-sum: FNV-1a/32 of that text, and
+                              # REQUIRED with it — the transport retypes the
+                              # instruction, so the adapter verifies it rather
+                              # than trusting it (a reworded scope would
+                              # otherwise be reported under the wrong lenses).
 ```
 
 Backends:
