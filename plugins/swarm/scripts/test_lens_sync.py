@@ -4,19 +4,25 @@ hook (plugins/*/scripts/test_*.py).
 
 The 11-lens set is defined ONCE in swarm-review.js (LENS_CLUSTERS; the file
 derives CANDIDATE_LENSES from it and asserts LENS_BRIEF coverage at startup),
-but two runtime surfaces hand-mirror it and cannot be derived at runtime:
+and since 0.7.0 the external voices receive it through the adapter's
+--lens-instr (per gated cluster) instead of a hand-mirrored SKILL.md list.
+What still hand-mirrors the set, and cannot be derived at runtime:
 
-  - the SKILL.md external-prompt HDR ("Cover ALL of these lenses: ...") — a
-    lens missing there is never reviewed by codex/grok, so cross-family
-    consensus can silently never form on it;
   - swarm-review.js's METHODOLOGICAL_LENSES — the hand-maintained verify-gating
     subset of the breakage cluster; a methodological lens missing here stops
-    being verified on a cross-family external consensus.
+    being verified on a cross-family external consensus;
+  - pr-post.py's DESIGN_LENS_TAGS — the publish path's design-tag guard.
+
+Plus the structural checks that keep the single-source path intact (the
+--lens-instr wiring, and the absence of a reintroduced SKILL.md lens list).
 
 Prose DRIFT WARNINGs mark both mirrors; this test makes the sync mechanical
 (the same pattern as test_pr_post.py for the publish path).
 """
+import json
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -61,17 +67,140 @@ brief_pairs = re.findall(r"^  (?:'([a-z-]+)'|([a-z]+)): '", bm.group(1) if bm el
 brief_keys = {a or b for a, b in brief_pairs}
 check("LENS_BRIEF keys == LENS_CLUSTERS lenses", brief_keys == set(cluster_lenses))
 
-# SKILL.md external-prompt HDR mirror: "- Cover ALL of these lenses: a; b (…); …"
+# SKILL.md external-prompt HDR: NO lens mirror since 0.7.0. The external voices
+# run per gated CLUSTER and the workflow ships that cluster's briefs through the
+# adapter's --lens-instr, so LENS_BRIEF is single-source in swarm-review.js. This
+# is now a NEGATIVE check: reintroducing a broad lens list in the HDR would both
+# recreate the drift this test existed to catch AND fight the per-cluster
+# instruction (a "cover ALL lenses" line contradicts "review ONLY these").
 skill = SKILL.read_text(encoding="utf-8")
-hm = re.search(r"^- Cover ALL of these lenses: (.+)$", skill, re.M)
-check("skill: HDR lens line found", hm)
-hdr_lenses = set()
-if hm:
-    for seg in hm.group(1).split(";"):
-        lm = re.match(r"\s*([a-z][a-z-]*)", seg)
-        if lm:
-            hdr_lenses.add(lm.group(1))
-check("SKILL.md HDR lenses == LENS_CLUSTERS lenses", hdr_lenses == set(cluster_lenses))
+check("skill: HDR carries no lens-list mirror", not re.search(r"^- Cover ALL of these lenses:", skill, re.M))
+# The adapter flag the single-source design depends on must exist: without it the
+# workflow's per-cluster briefs would be silently dropped and every external voice
+# would review lens-free.
+ADAPTER = PLUGIN / "scripts" / "agents.sh"
+sh = ADAPTER.read_text(encoding="utf-8")
+check("adapter: --lens-instr flag present", "--lens-instr)" in sh)
+# Must match the ARGUMENT the workflow builds, not merely the string appearing
+# somewhere: prose about --lens-instr (there is plenty) would otherwise keep this
+# green after the actual flag was dropped from the command.
+check(
+    "workflow: passes --lens-instr into the transport command",
+    re.search(r"--lens-instr \$\{shQuote\([A-Za-z_]+\(u\)\)\}", js),
+)
+# The integrity check is only worth anything if the declared length travels with
+# the text — and it must be DERIVED from the same expression, never a literal.
+check("adapter: --lens-instr-sum flag present", "--lens-instr-sum)" in sh)
+check(
+    "workflow: declares --lens-instr-sum from the built instruction",
+    re.search(r"--lens-instr-sum \$\{utf8Checksum\([A-Za-z_]+\(u\)\)\}", js),
+)
+# The checksum only guards anything if the adapter REFUSES an instruction that
+# arrives without one — otherwise dropping a flag silently voids the check.
+check(
+    "adapter: --lens-instr without --lens-instr-sum is refused",
+    re.search(r'lens_instr_set" == 1 && -z "\$lens_instr_sum', sh),
+)
+
+# FNV-1a/32 EQUIVALENCE. The checksum is implemented TWICE — hand-rolled JS in the
+# workflow (no Buffer/crypto in the sandbox) and python3 in the adapter — and the
+# checks above only prove both flags exist. A one-sided edit to either (algorithm,
+# hex padding, UTF-8 handling) would make every external call fail its own
+# integrity check: exit 2 per unit, i.e. the whole external half of the ensemble
+# collapses into backendErrors while Claude still runs. Pin them against a
+# reference implementation of the published FNV-1a spec (an oracle, not a third
+# mirror), over inputs that exercise the multi-byte paths the briefs actually use.
+def fnv1a32(text):
+    h = 0x811C9DC5
+    for byte in text.encode("utf-8"):
+        h = ((h ^ byte) * 0x01000193) & 0xFFFFFFFF
+    return "%08x" % h
+
+
+# "f8" hashes to 0d226273 — a LEADING ZERO, so it is the vector that catches a
+# dropped zero-pad on either side (JS `padStart(8,'0')` vs python `%08x`). Without
+# it every other vector still matches while the two sides disagree on short
+# hashes; found by search, kept deliberately. The rest cover the multi-byte
+# encoding paths (2-, 3- and 4-byte code points) the briefs actually contain.
+VECTORS = ["", "f8", "plain ascii", "em — dash", "ä ö ü", "emoji 🐝", "Review ONLY through these lens(es) — report nothing outside them."]
+
+# Adapter side: run its OWN inlined python snippet, not a copy of it.
+py_snippet = re.search(r"actual_sum=\$\(printf '%s' \"\$lens_instr\" \| python3 -c '\n(.*?)'\)", sh, re.S)
+check("adapter: FNV python snippet found", py_snippet)
+if py_snippet:
+    for v in VECTORS:
+        got = subprocess.run(
+            [sys.executable, "-c", py_snippet.group(1)],
+            input=v.encode("utf-8"), capture_output=True,
+        ).stdout.decode().strip()
+        check(f"adapter FNV matches reference for {v!r}", got == fnv1a32(v))
+
+# Workflow side: extract utf8Checksum() and run it under node. node ships with the
+# CI image and is a hard requirement here rather than a skip — a silently skipped
+# equivalence check is exactly the false assurance this test exists to prevent.
+js_fn = re.search(r"const utf8Checksum = \(s\) => \{.*?\n\}", js, re.S)
+check("workflow: utf8Checksum() found", js_fn)
+if js_fn and shutil.which("node"):
+    prog = js_fn.group(0) + "\n" + "console.log(JSON.parse(process.argv[1]).map(utf8Checksum).join(','))"
+    out = subprocess.run(
+        ["node", "-e", prog, json.dumps(VECTORS)], capture_output=True,
+    ).stdout.decode().strip()
+    check(
+        "workflow FNV matches reference (all vectors)",
+        out == ",".join(fnv1a32(v) for v in VECTORS),
+    )
+elif js_fn:
+    FAILS.append("node not found — cannot verify the workflow/adapter checksum implementations agree")
+
+# Oversize headroom: the skill skips the externals above a threshold, but the
+# real per-call cap (`max_bytes`) lives in agents.sh, and what exec() sees is
+# lens-instruction + diff. Nothing but this check ties the two numbers together,
+# so a brief that grows past the headroom — or a changed cap — would surface only
+# as a per-call backend error at review time.
+# Read the threshold from the EXECUTABLE guard in the prep block (the `-gt N`
+# that sets EXTERNALS_OVERSIZE), not from the surrounding prose: prose can drift
+# from the code, and it is the code that decides.
+mb = re.search(r"local max_bytes=(\d+)", sh)
+check("adapter: max_bytes found", mb)
+sk = re.search(r'-gt (\d+) \]; then echo "EXTERNALS_OVERSIZE=1"', skill)
+check("skill: EXTERNALS_OVERSIZE guard + threshold found", sk)
+if mb and sk:
+    max_bytes, threshold = int(mb.group(1)), int(sk.group(1))
+    check("skill threshold is below the adapter cap", threshold < max_bytes)
+    # Largest instruction the workflow can build. The FIXED prose is DERIVED from
+    # the source (the literal chunks of lensInstr()/unitBrief()'s template
+    # strings, with every ${...} expression removed) rather than copied here — a
+    # Python copy of the template would go stale the moment someone adds a
+    # sentence to unitBrief(), and this check would then bound the wrong string
+    # while reporting green. Only the interpolated parts are modelled below.
+    briefs = {}
+    for m in re.finditer(r"^  (?:'([a-z-]+)'|([a-z]+)): '(.*)',$", bm.group(1) if bm else "", re.M):
+        briefs[m.group(1) or m.group(2)] = m.group(3)
+    check("LENS_BRIEF values parsed", set(briefs) == set(cluster_lenses))
+
+    def literal_len(fn_src):
+        """Bytes of fixed prose in a JS template-literal body (drops ${...})."""
+        return sum(
+            len(re.sub(r"\$\{[^}]*\}", "", chunk).encode("utf-8"))
+            for chunk in re.findall(r"`([^`]*)`", fn_src)
+        )
+
+    ub = re.search(r"const unitBrief = \(u, \{ inline \}\) =>(.*?)\nconst ", js, re.S)
+    li = re.search(r"const lensInstr = \(u\) =>(.*?)\n(?:const|// )", js, re.S)
+    check("workflow: unitBrief() found", ub)
+    check("workflow: lensInstr() found", li)
+    fixed = literal_len(ub.group(1) if ub else "") + literal_len(li.group(1) if li else "")
+    worst = 0
+    for lenses in clusters.values():
+        # inline form: "<lens>: <brief>" joined by "; ", plus the '"[lens] "'
+        # tag list joined by " / " — the two ${...} expansions that scale.
+        body = len("; ".join(f"{l}: {briefs.get(l, '')}" for l in lenses).encode("utf-8"))
+        tags = len(" / ".join(f'"[{l}] "' for l in lenses).encode("utf-8"))
+        worst = max(worst, fixed + body + tags)
+    check(
+        f"oversize headroom ({max_bytes - threshold} B) covers the largest lens instruction (<= {worst} B)",
+        max_bytes - threshold >= worst,
+    )
 
 # METHODOLOGICAL_LENSES: the verify-gating list of breakage-cluster lenses that
 # assert repo-wide facts (everything in `breakage` EXCEPT the diff-local topical
@@ -82,6 +211,20 @@ check("SKILL.md HDR lenses == LENS_CLUSTERS lenses", hdr_lenses == set(cluster_l
 # to `breakage - {correctness}` forces a conscious test edit either way — add a
 # methodological lens and it must appear here; add a topical one and it must be
 # named in the exclusion below.
+# MANDATORY_LENSES: the gate floor. Deliberately an explicit list (which lenses
+# are non-negotiable is a judgement call, not a consequence of cluster
+# membership), which makes it a MIRROR — a lens renamed in LENS_CLUSTERS leaves a
+# stale entry here that can never match, silently voiding the floor. The workflow
+# throws on that at startup; this catches it in CI, before any run.
+mand = re.search(r"const MANDATORY_LENSES = \[([^\]]*)\]", js)
+check("workflow: MANDATORY_LENSES found", mand)
+mandatory = set(re.findall(r"'([a-z][a-z-]*)'", mand.group(1) if mand else ""))
+check("MANDATORY_LENSES non-empty", bool(mandatory))
+check(
+    f"MANDATORY_LENSES ⊆ LENS_CLUSTERS lenses (stale: {sorted(mandatory - set(cluster_lenses))})",
+    mandatory <= set(cluster_lenses),
+)
+
 TOPICAL_BREAKAGE = {"correctness"}
 mm = re.search(r"const METHODOLOGICAL_LENSES = \[([^\]]*)\]", js)
 check("workflow: METHODOLOGICAL_LENSES found", mm)

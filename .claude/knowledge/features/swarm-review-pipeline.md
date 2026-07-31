@@ -1,9 +1,9 @@
 ---
 title: "Swarm Review Pipeline (/swarm:review)"
 createdAt: 2026-07-08
-updatedAt: 2026-07-23
+updatedAt: 2026-07-27
 createdFrom: "PR #24"
-updatedFrom: "open-swarm-external-exploration"
+updatedFrom: "swarm-per-lens-externals"
 pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
@@ -25,7 +25,7 @@ Grown from 5 topical lenses by importing `/code-review`'s other two
 decomposition axes — methodological (HOW to look) and design quality — all
 **default-on** (user directive 2026-07-15: maintainability reviewed on every
 run, not opt-in). `LENS_CLUSTERS` in the workflow is the **single source of
-truth** (the per-cluster externals follow-up consumes it):
+truth** — every voice's fan-out units come from it, Claude and externals alike:
 
 | cluster | lenses | guiding question |
 |---|---|---|
@@ -34,15 +34,17 @@ truth** (the per-cluster externals follow-up consumes it):
 | `design` | reuse, simplification, efficiency, altitude | is this good, maintainable code? |
 | `consistency` | style, conventions | does it fit the codebase? |
 
-- **The cluster is the Claude fan-out unit** (≤4 finders); `--max` splits to
-  one finder per lens (≤11) — the granularity ladder is `--quick` (future) =
+- **The cluster is the fan-out unit for EVERY voice** since 0.7.0 — Claude
+  finders (≤4) *and* codex/grok (one CLI call per gated cluster each);
+  `--max` splits all of them to one call per lens (≤11 units → ≤22 external
+  calls) — the granularity ladder is `--quick` (future) =
   one broad pass → default = per-cluster → `--max` = per-lens. The **gate
-  stays per-lens** (a fully-pruned cluster spawns no agent); design lenses are
+  stays per-lens** (a fully-pruned cluster spawns no agent for anyone); design lenses are
   first-class in the gate prompt, skipped only when the diff can't pay off.
   **Accepted tradeoff of the cluster default:** per-lens failure isolation is
-  gone — one crashed cluster finder drops that whole cluster's Claude coverage
-  for the round (a visible `backendError`, never silent); `--max` restores
-  per-lens isolation. Documented, not retried per-lens (minimal — the default
+  gone — one crashed cluster call drops that whole cluster's coverage *for that
+  voice* (a visible `backendError` carrying the unit + its lenses, never
+  silent); `--max` restores per-lens isolation. Documented, not retried per-lens (minimal — the default
   trades isolation for fewer agents).
 - **`kind` is derived from the lens name** (`design` vs `defect`) — no
   finding-schema change, so the 3-place schema mirror is untouched. A merged
@@ -63,9 +65,12 @@ truth** (the per-cluster externals follow-up consumes it):
   suggestion-shaped, but each has a falsifiable applicability core (reuse
   target exists? simpler form behavior-identical? claimed waste real?) — the
   same 3-state verifier runs with an applicability prompt, **even for design
-  clusters with cross-family consensus** (agreement ≠ applicability: externals
-  only see the diff, so two of them can agree on a nonexistent reuse target —
-  the first live swarm run over this very feature caught that gap). Bypassing
+  clusters with cross-family consensus** (agreement ≠ applicability: two voices
+  can agree on a nonexistent reuse target — the first live swarm run over this
+  very feature caught that gap. That was originally because externals were
+  diff-only; since 0.6.0 they read the repo, so the residual reason is
+  correlation, not blindness: the voices share a prompt frame, a cluster scope
+  and — per-cluster since 0.7.0 — the same lens briefs). Bypassing
   into an unverified "maintainability" section would have surfaced unchecked
   suggestions from precisely the noisiest lenses. Methodological lenses are
   factual → normal defect verify; defect consensus stays auto-accepted.
@@ -254,15 +259,68 @@ filled* — `gh pr diff <n>` (bare `--pr` resolves the current branch's PR via
   retired `DESIGN_LENSES` was): it runs only inside the already-`kind`-decided
   design branch and never moves a row between tables.
 
-## Future idea (P3+): per-cluster external prompts
+## Per-cluster external prompts (shipped 0.7.0)
 
-Today externals run ONE broad multi-lens review each (the prompt names all 11
-lenses); Claude fans out per cluster. Running externals **per cluster** too
-(re-scoped 2026-07-15 from the original per-lens idea — clusters cap the
-multiplier at 4×, not 11×) would add depth + symmetry + authoritative lens tags
-+ let the gate prune external calls. That is the `swarm-per-lens-externals`
-follow-up task, built on `LENS_CLUSTERS`; for routine depth prefer higher
-external `--effort` / grok `--best-of-n` (one call, more thinking) over N calls.
+Externals no longer run ONE broad multi-lens review each: codex and grok fan out
+over the **same gated clusters** as the Claude finders (`unitsFor()` builds the
+units once; `externalUnits` reuses `finderUnits` whenever a gate ran, so the two
+sides cannot drift). Cost is `live-backends × units` — ≤2×4 default, ≤2×11 under
+`--max` — logged at fan-out, never silently capped.
+
+Decisions worth keeping:
+
+- **Where the prompt is assembled.** `LENS_BRIEF` stays single-source in the
+  workflow, so the briefs must *travel*. The workflow sandbox cannot write files
+  and the skill's Bash prep runs **before** the gate exists (so it cannot know the
+  surviving clusters) — so the adapter grew `run --lens-instr <s>`, which prepends
+  the briefs to the fenced-diff prompt in **deterministic shell**. Handing that
+  write to the transport agent was the rejected alternative: it would put prompt
+  assembly inside an LLM, breaking the same "fencing/assembly is never an LLM step"
+  contract the diff fencing follows. Being on the adapter also makes it
+  backend-agnostic — a future voice (Kimi) inherits per-cluster prompts for free.
+  Consequence: the instruction rides as one single-quoted argv word in a command a
+  haiku transport retypes, so briefs are guarded apostrophe-/control-char-free and
+  the command is kept to one line. E2E: 8/8 calls round-tripped byte-exact.
+- **The SKILL.md HDR is now LENS-FREE** — the hand-mirrored lens list is gone
+  (that was the drift risk `test_lens_sync.py` existed to catch; the check flipped
+  to a *negative* one). The HDR must also stay lens-*agnostic* about finding kinds:
+  a leftover "report every design-quality improvement" line contradicts a
+  defect-only cluster's "one finding per distinct defect" instruction and invites
+  off-cluster tags.
+- **A gate that prunes for everyone needs a floor.** With externals gated too, a
+  lens the low-effort haiku gate drops is reviewed by *nobody* — the full-width
+  external calls used to absorb a mis-gate. `MANDATORY_LENSES`
+  (`security`, `adversarial`, `correctness`) is the code-level backstop, since the
+  gate's only other protection is a sentence in its own prompt (injection-reachable
+  via the diff it classifies). **Accepted cost:** flooring these pins the
+  `breakage` and `threat` clusters always-on, so the gate can only prune `design`
+  and `consistency` — a doc-only diff still pays 2 clusters × live voices. Chosen
+  deliberately: a clean report on the dimensions most costly to miss is worse than
+  the calls saved.
+- **The transport retype is guarded by a content checksum, not trust.** The instruction
+  rides as one argv word a haiku agent retypes; an EMPTY value is refused, and
+  `--lens-instr-sum` (an FNV-1a/32 of the exact text, REQUIRED alongside it) makes
+  a *reworded, paraphrased or truncated* one fail too — otherwise the backend would review a narrower scope
+  than the findings get labelled with, hollowing out "the voice IS its cluster".
+  8 hex chars survive a retype far better than 1 KB of prose. A byte COUNT was the first attempt and was not enough — `security`/`altitude`, `ONLY`/`ALSO` are same-length swaps that change the scope while the count still matches; the check must bind content, and must be refused-if-absent or a dropped flag voids it.
+- **Accepted residuals** (re-found by every review round — decided, not
+  overlooked): (a) [RESOLVED 0.7.0] the oversize skip is now
+  decided in the prep Bash (`EXTERNALS_OVERSIZE`), not by model arithmetic — the
+  constant stays in the skill but is pinned to `max_bytes` by `test_lens_sync.py`;
+  (b) one adapter process per unit re-runs
+  grok's process-local model probe per cluster (4× instead of 1×) — wasted
+  network calls, but they overlap the review calls, so wall-clock cost is ~0 and
+  caching would add staleness for no user-visible gain.
+- **The coverage line must partition the lens set.** Both halves are easy to get
+  wrong and neither fails loudly: lenses the gate lists in neither `run` nor
+  `skip` are dropped silently (seen live — a real run swallowed `adversarial`),
+  and a floored-in lens left out of `gate.run` *runs* while appearing in neither
+  report column (the external-only control run caught exactly that regression in
+  the floor's first version). The workflow now rewrites both fields and asserts
+  they partition `CANDIDATE_LENSES`.
+
+For routine depth prefer higher external `--effort` / grok `--best-of-n` (one
+call, more thinking) over more calls.
 
 ## Verified end-to-end (2026-07-05)
 

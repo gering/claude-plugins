@@ -11,6 +11,12 @@
 #   jail                  Print jail=yes|no (working OS sandbox wrapper?)
 #   run <backend> [opts]  Run a review prompt -> findings JSON on stdout
 #       --prompt-file <f>   Read the lens prompt from a file (default: stdin)
+#       --lens-instr <s>    Per-cluster lens instruction, prepended VERBATIM
+#                           before the prompt body (the workflow passes the
+#                           gated cluster's briefs here). Rejected if empty.
+#       --lens-instr-sum <hex>  FNV-1a/32 checksum of --lens-instr (8 hex).
+#                           REQUIRED whenever --lens-instr is given; a mismatch
+#                           means it was altered in transport -> hard error.
 #       --effort <level>    low|medium|high|xhigh|max (default: xhigh)
 #       --model <name>      Backend model override
 #       --schema <file>     JSON schema to enforce (default: bundled finding.schema.json)
@@ -677,11 +683,13 @@ subcmd_run() {
     exit 2
   fi
 
-  local prompt_file="" effort="xhigh" model="" schema="$DEFAULT_SCHEMA"
+  local prompt_file="" lens_instr="" lens_instr_set=0 lens_instr_sum="" effort="xhigh" model="" schema="$DEFAULT_SCHEMA"
   while [[ $# -gt 0 ]]; do
     [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
     case "$1" in
       --prompt-file) prompt_file="$2"; shift 2 ;;
+      --lens-instr)  lens_instr="$2";  lens_instr_set=1; shift 2 ;;
+      --lens-instr-sum) lens_instr_sum="$2"; shift 2 ;;
       --effort)      effort="$2"; shift 2 ;;
       --model)       model="$2";       shift 2 ;;
       --schema)      schema="$2";      shift 2 ;;
@@ -706,7 +714,7 @@ subcmd_run() {
   if [[ -n "$prompt_file" ]]; then
     [[ -f "$prompt_file" ]] || { echo "Prompt file not found: $prompt_file" >&2; exit 2; }
     nbytes=$(wc -c < "$prompt_file")
-    (( nbytes > max_bytes )) && { echo "Prompt file too large ($(( nbytes / 1024 )) KiB > 120 KiB) — inline less of the diff, or have the agent read it itself" >&2; exit 2; }
+    (( nbytes > max_bytes )) && { echo "Prompt file too large ($(( nbytes / 1024 )) KiB > $(( max_bytes / 1024 )) KiB) — inline less of the diff, or have the agent read it itself" >&2; exit 2; }
     prompt="$(cat "$prompt_file")"
   else
     # Guard against blocking forever on an interactive/absent stdin: with no
@@ -714,9 +722,61 @@ subcmd_run() {
     [[ -t 0 ]] && { echo "No prompt: pass --prompt-file <f> or pipe the prompt on stdin" >&2; exit 2; }
     prompt="$(cat)"
     nbytes=$(printf '%s' "$prompt" | wc -c)
-    (( nbytes > max_bytes )) && { echo "Prompt too large ($(( nbytes / 1024 )) KiB > 120 KiB) — inline less of the diff, or have the agent read it itself" >&2; exit 2; }
+    (( nbytes > max_bytes )) && { echo "Prompt too large ($(( nbytes / 1024 )) KiB > $(( max_bytes / 1024 )) KiB) — inline less of the diff, or have the agent read it itself" >&2; exit 2; }
   fi
   [[ -z "$prompt" ]] && { echo "Empty prompt (use --prompt-file or stdin)" >&2; exit 2; }
+
+  # Per-cluster external voices: the WORKFLOW owns LENS_BRIEF (single source of
+  # truth for the lens set) and passes the gated cluster's briefs here; the
+  # adapter prepends them to the fenced-diff prompt. The assembly stays
+  # DETERMINISTIC shell — never an LLM step, the same contract the skill's diff
+  # fencing follows — and it is backend-agnostic, so a future voice inherits
+  # per-cluster prompts for free. Checked AFTER the empty-prompt guard so a
+  # lens instruction can never disguise an empty diff as a runnable prompt.
+  # FAIL LOUD on a present-but-empty value: the workflow always passes a non-empty
+  # instruction, so an empty one means it was lost in transport (a mangled retype,
+  # a dropped shell quote). Silently running a lens-free review would be worse than
+  # erroring — the workflow labels the returned findings with the cluster's lenses
+  # regardless, so the coverage would be mislabeled, not merely reduced. An OMITTED
+  # flag stays legal (manual/ad-hoc `run` calls have no cluster).
+  if [[ "$lens_instr_set" == 1 && -z "$lens_instr" ]]; then
+    echo "Empty --lens-instr: the per-cluster lens instruction was lost in transport; refusing a lens-free review the caller would mislabel" >&2; exit 2
+  fi
+  # INTEGRITY: the empty check above only catches a TOTAL loss. A transport that
+  # shortens, paraphrases or rewords the instruction would still run, and the
+  # caller would attribute the findings to lenses the backend was never told to
+  # review. The caller sends a checksum of the exact text it built; a mismatch
+  # means it changed in transit, so fail rather than review a different scope
+  # than we report. COUPLED, not optional: an instruction WITHOUT a checksum is
+  # refused, or a transport could void the guard just by dropping one flag.
+  # (A checksum, not a length: `security`/`altitude` and `ONLY`/`ALSO` are
+  # same-length swaps that change the scope while a byte count still matches.)
+  if [[ "$lens_instr_set" == 1 && -z "$lens_instr_sum" ]]; then
+    echo "--lens-instr requires --lens-instr-sum: the integrity checksum is missing, so the instruction cannot be verified; refusing to review a scope that may differ from the one being reported" >&2; exit 2
+  fi
+  if [[ -n "$lens_instr_sum" ]]; then
+    [[ "$lens_instr_sum" =~ ^[0-9a-f]{8}$ ]] \
+      || { echo "Invalid --lens-instr-sum '$lens_instr_sum' — must be 8 lowercase hex digits" >&2; exit 2; }
+    local actual_sum
+    # FNV-1a/32 over the raw UTF-8 bytes — the same function the workflow computes.
+    actual_sum=$(printf '%s' "$lens_instr" | python3 -c '
+import sys
+h = 0x811c9dc5
+for b in sys.stdin.buffer.read():
+    h = ((h ^ b) * 0x01000193) & 0xffffffff
+print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (python3 failed)" >&2; exit 2; }
+    if [[ "$actual_sum" != "$lens_instr_sum" ]]; then
+      echo "--lens-instr integrity check failed: caller declared checksum $lens_instr_sum, computed $actual_sum — the lens instruction was altered in transport; refusing to review a scope different from the one being reported" >&2
+      exit 2
+    fi
+  fi
+  if [[ -n "$lens_instr" ]]; then
+    prompt="$lens_instr"$'\n\n'"$prompt"
+    # Re-measure: the pre-read file check bounded the DIFF alone, but what
+    # exec() sees is instruction+diff as one argv word.
+    nbytes=$(printf '%s' "$prompt" | wc -c)
+    (( nbytes > max_bytes )) && { echo "Prompt too large with lens instruction ($(( nbytes / 1024 )) KiB > $(( max_bytes / 1024 )) KiB) — narrow the diff range" >&2; exit 2; }
+  fi
 
   require_usable "$backend"
   require_python3
