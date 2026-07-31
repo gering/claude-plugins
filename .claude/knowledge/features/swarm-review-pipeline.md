@@ -297,7 +297,7 @@ Decisions worth keeping:
   and `consistency` — a doc-only diff still pays 2 clusters × live voices. Chosen
   deliberately: a clean report on the dimensions most costly to miss is worse than
   the calls saved.
-- **The transport retype is guarded by length, not trust.** The instruction
+- **The transport retype is guarded by a content checksum, not trust.** The instruction
   rides as one argv word a haiku agent retypes; an EMPTY value is refused, and
   `--lens-instr-sum` (an FNV-1a/32 of the exact text, REQUIRED alongside it) makes
   a *reworded, paraphrased or truncated* one fail too — otherwise the backend would review a narrower scope

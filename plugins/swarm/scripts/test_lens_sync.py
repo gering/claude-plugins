@@ -19,7 +19,10 @@ Plus the structural checks that keep the single-source path intact (the
 Prose DRIFT WARNINGs mark both mirrors; this test makes the sync mechanical
 (the same pattern as test_pr_post.py for the publish path).
 """
+import json
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -98,6 +101,56 @@ check(
     "adapter: --lens-instr without --lens-instr-sum is refused",
     re.search(r'lens_instr_set" == 1 && -z "\$lens_instr_sum', sh),
 )
+
+# FNV-1a/32 EQUIVALENCE. The checksum is implemented TWICE — hand-rolled JS in the
+# workflow (no Buffer/crypto in the sandbox) and python3 in the adapter — and the
+# checks above only prove both flags exist. A one-sided edit to either (algorithm,
+# hex padding, UTF-8 handling) would make every external call fail its own
+# integrity check: exit 2 per unit, i.e. the whole external half of the ensemble
+# collapses into backendErrors while Claude still runs. Pin them against a
+# reference implementation of the published FNV-1a spec (an oracle, not a third
+# mirror), over inputs that exercise the multi-byte paths the briefs actually use.
+def fnv1a32(text):
+    h = 0x811C9DC5
+    for byte in text.encode("utf-8"):
+        h = ((h ^ byte) * 0x01000193) & 0xFFFFFFFF
+    return "%08x" % h
+
+
+# "f8" hashes to 0d226273 — a LEADING ZERO, so it is the vector that catches a
+# dropped zero-pad on either side (JS `padStart(8,'0')` vs python `%08x`). Without
+# it every other vector still matches while the two sides disagree on short
+# hashes; found by search, kept deliberately. The rest cover the multi-byte
+# encoding paths (2-, 3- and 4-byte code points) the briefs actually contain.
+VECTORS = ["", "f8", "plain ascii", "em — dash", "ä ö ü", "emoji 🐝", "Review ONLY through these lens(es) — report nothing outside them."]
+
+# Adapter side: run its OWN inlined python snippet, not a copy of it.
+py_snippet = re.search(r"actual_sum=\$\(printf '%s' \"\$lens_instr\" \| python3 -c '\n(.*?)'\)", sh, re.S)
+check("adapter: FNV python snippet found", py_snippet)
+if py_snippet:
+    for v in VECTORS:
+        got = subprocess.run(
+            [sys.executable, "-c", py_snippet.group(1)],
+            input=v.encode("utf-8"), capture_output=True,
+        ).stdout.decode().strip()
+        check(f"adapter FNV matches reference for {v!r}", got == fnv1a32(v))
+
+# Workflow side: extract utf8Checksum() and run it under node. node ships with the
+# CI image and is a hard requirement here rather than a skip — a silently skipped
+# equivalence check is exactly the false assurance this test exists to prevent.
+js_fn = re.search(r"const utf8Checksum = \(s\) => \{.*?\n\}", js, re.S)
+check("workflow: utf8Checksum() found", js_fn)
+if js_fn and shutil.which("node"):
+    prog = js_fn.group(0) + "\n" + "console.log(JSON.parse(process.argv[1]).map(utf8Checksum).join(','))"
+    out = subprocess.run(
+        ["node", "-e", prog, json.dumps(VECTORS)], capture_output=True,
+    ).stdout.decode().strip()
+    check(
+        "workflow FNV matches reference (all vectors)",
+        out == ",".join(fnv1a32(v) for v in VECTORS),
+    )
+elif js_fn:
+    FAILS.append("node not found — cannot verify the workflow/adapter checksum implementations agree")
 
 # Oversize headroom: the skill skips the externals above a threshold, but the
 # real per-call cap (`max_bytes`) lives in agents.sh, and what exec() sees is
