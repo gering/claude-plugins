@@ -12,7 +12,7 @@
 #   resolve <selector> [--session <name>]
 #                                 Map a selector to launch argv + metadata.
 #                                 Selectors: a shorthand flag (--fable, --opus,
-#                                 --codex, --sol, --grok), a
+#                                 --codex, --sol, --grok, --kimi), a
 #                                 canonical name (claude:opus), a bare CLI
 #                                 (codex -> that CLI's default model), or
 #                                 cli:model (the --agent escape hatch).
@@ -31,10 +31,26 @@
 #              the work-system continue skill resumes TASK.md deterministically)
 #   codex   -> codex -m <model> <bootstrap-prompt>
 #   grok    -> grok  -m <model> <bootstrap-prompt>
-#   The bootstrap prompt (codex/grok have no work-system skills) tells the agent
-#   to read TASK.md and drive the task to a PR. `supports=` metadata records
+#   kimi    -> sh -c 'kimi -m "$1" -p "$2"; exec kimi -c --auto' \
+#                    kimi-worker <model> <bootstrap-prompt>          (seed+continue)
+#   The bootstrap prompt (codex/grok/kimi have no work-system skills) tells the
+#   agent to read TASK.md and drive the task to a PR. `supports=` metadata records
 #   which lifecycle hooks each agent honors, so /close and /continue can degrade
 #   for non-claude workers instead of faking claude-only behavior.
+#
+#   Why kimi needs the two-phase seed+continue shape (all probed live, 0.31.1):
+#   kimi has NO positional launch prompt (`kimi "text"` -> "unknown command"), no
+#   initial-prompt env var, and piped stdin only prefills the input box without
+#   submitting (and would steal the TUI's tty anyway). `-p` is the only way in,
+#   but it is mutually exclusive with BOTH `--auto` and `-y` and exits after one
+#   answer — so `-p` alone cannot be a worker. It does run tools unattended, and
+#   `kimi -c` inherits its full session history, so: phase 1 seeds+works the task
+#   one-shot, phase 2 `exec`s into the interactive autonomous session with that
+#   history. The `exec` matters — it re-roots the herdr pane at kimi, and `;` (not
+#   `&&`) keeps phase 2 alive if the seed fails, leaving a usable tab instead of a
+#   dead one. Values travel as "$1"/"$2" positionals, never interpolated into the
+#   script text: `-p` swallows the next token as its value, so an argv built by
+#   concatenation is one reordering away from silently eating a flag.
 #
 # State & config (override for tests / relocation):
 #   WORK_SYSTEM_AGENT_PROJECT_STATE  the repo's default-agent file
@@ -67,6 +83,10 @@ if [ -z "$PROJECT_STATE" ]; then
   [ -n "$_repo_root" ] && PROJECT_STATE="$_repo_root/.claude/work-system-agent"
 fi
 GROK_AUTH_FILE="${GROK_AUTH_FILE:-$HOME/.grok/auth.json}"
+# kimi's OAuth tokens live in credentials/, NOT in the same-named oauth/ dir —
+# `~/.kimi-code/oauth/kimi-code` exists but stays 0 bytes even when logged in, so
+# probing that path would report every authenticated install as logged out.
+KIMI_CREDENTIALS_FILE="${KIMI_CREDENTIALS_FILE:-$HOME/.kimi-code/credentials/kimi-code.json}"
 
 # The bootstrap prompt for CLIs without work-system skills (codex, grok). One
 # argv word; the launch helper passes it verbatim.
@@ -90,7 +110,8 @@ REGISTRY='--fable|claude|fable|continue,close-exit,statusline,commit,pr
 -|claude|sonnet|continue,close-exit,statusline,commit,pr
 --codex|codex|gpt-5.6-terra|commit,pr
 --sol|codex|gpt-5.6-sol|commit,pr
---grok|grok|grok-4.5|commit,pr'
+--grok|grok|grok-4.5|commit,pr
+--kimi|kimi|kimi-code/k3-256k|commit,pr'
 
 usage() {
   # Usage = header comment from line 2 up to (not including) the registry
@@ -157,7 +178,16 @@ row_for_selector() {
 #           rejects an unlisted `-m` id at launch ("unknown model id"), so a
 #           per-CLI auth check alone would mislabel a model the CLI no longer
 #           offers (grok drops/renames models between releases) as available.
-#           This is the one CLI with a usable model-list command.
+#   kimi:   install + auth file + the model must appear in `kimi provider list
+#           --json`. Model-aware for the same reason as grok, and the failure is
+#           even sharper: an unconfigured `-m` id aborts at startup
+#           ("Model ... is not configured in config.toml"), so a bad model would
+#           give the user a worker tab that dies on sight. The model id must be
+#           the QUALIFIED alias (`kimi-code/k3-256k`) — the bare model name is
+#           rejected the same way. `kimi doctor` is NOT an auth check (it only
+#           validates config file syntax), hence the credentials-file probe.
+#           The listing is local config (~0.7s, no network), but it is bounded
+#           anyway: a catalog refresh on start can make it reach out.
 
 # run_bounded <seconds> <cmd...> — run cmd with a hard time bound so an external
 # probe can never hang `list`/the picker. Prints cmd's stdout; returns cmd's exit
@@ -212,6 +242,14 @@ grok_models_raw() {
   run_bounded 10 grok models 2>/dev/null
 }
 
+# Same contract as grok_models_raw, for kimi: RAW `kimi provider list --json` on
+# stdout, exit code = fetch status. entry_status substring-matches the qualified
+# model alias against the raw JSON rather than parsing it — no jq/python
+# dependency, and a reshaped config document can't yield a wrong token.
+kimi_models_raw() {
+  run_bounded 10 kimi provider list --json 2>/dev/null
+}
+
 entry_status() {
   local cli="$1" model="$2" avail=no note=""
   case "$cli" in
@@ -252,6 +290,26 @@ entry_status() {
         else note="model not offered by this grok CLI (see: grok models)"; fi
       fi
       ;;
+    kimi)
+      if ! command -v kimi >/dev/null 2>&1; then note="not installed"
+      elif [ ! -s "$KIMI_CREDENTIALS_FILE" ]; then note="run: kimi login"
+      else
+        local _kraw krc=0
+        _kraw="$(kimi_models_raw)" || krc=$?   # exit code = fetch status
+        if [ "$krc" -ne 0 ]; then
+          # unreachable/timed out — inconclusive, trust auth (mirrors grok).
+          avail=yes; note="kimi provider list unreachable — availability assumed"
+        elif [ -z "$_kraw" ] || ! grep -qF -- '"models"' <<<"$_kraw"; then
+          # Empty, or a document without the `models` section we key off. Unlike
+          # grok's plain-text listing, a JSON reply is only self-describing while
+          # the schema holds: `{"models": {}}` IS a real "no models" answer, but a
+          # renamed/moved section is drift and must not read as one. Gate on the
+          # section's presence, so only the former reaches the match below.
+          avail=yes; note="kimi provider list unrecognized — availability assumed"
+        elif grep -qF -- "\"$model\"" <<<"$_kraw"; then avail=yes
+        else note="model not offered by this kimi CLI (see: kimi provider list)"; fi
+      fi
+      ;;
     *) note="unknown cli" ;;
   esac
   printf '%s\t%s\n' "$avail" "$note"
@@ -275,6 +333,14 @@ emit_argv() {
       ;;
     grok)
       printf 'argv=%s\n' grok -m "$model" "$BOOTSTRAP_PROMPT"
+      ;;
+    kimi)
+      # Two-phase seed+continue (see the launch-shape note in the header). The
+      # model and the prompt are passed as "$1"/"$2" positionals — NOT spliced
+      # into the script text — so no amount of prompt content can reorder the
+      # flags or be absorbed by `-p`.
+      printf 'argv=%s\n' sh -c 'kimi -m "$1" -p "$2"; exec kimi -c --auto' \
+        kimi-worker "$model" "$BOOTSTRAP_PROMPT"
       ;;
   esac
 }
@@ -303,7 +369,7 @@ subcmd_resolve() {
   local record
   record="$(row_for_selector "$selector")" || {
     echo "Unknown agent selector: $selector" >&2
-    echo "Try: --fable --opus --codex --sol --grok, a name (claude:opus), or a cli (codex)" >&2
+    echo "Try: --fable --opus --codex --sol --grok --kimi, a name (claude:opus), or a cli (codex)" >&2
     exit 2
   }
   local flag cli model supports
