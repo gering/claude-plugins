@@ -28,7 +28,7 @@ Generic task and worktree workflow system for Claude Code. Manage tasks as markd
 | Command | Description |
 |---------|-------------|
 | `/define` | Create a new task (markdown file with Goal/Context/Requirements) |
-| `/kickoff` | Start a task in an isolated git worktree, with a choice of worker agent (Claude/codex/grok) |
+| `/kickoff` | Start a task in an isolated git worktree, with a choice of worker agent (Claude/codex/grok/kimi) |
 | `/adopt` | Adopt an existing branch into the work system |
 | `/continue` | Resume the current task (in a worktree); or `/continue <task>` from the main session reopens the task's herdr tab and resumes it |
 | `/status` | Check task status (PRs, branches, commits) |
@@ -109,6 +109,7 @@ shows a picker and offers to save your choice as the default:
 > /kickoff add-dark-mode --opus      # claude on opus
 > /kickoff add-dark-mode --sol       # codex on gpt-5.6-sol
 > /kickoff add-dark-mode --grok      # grok-4.5
+> /kickoff add-dark-mode --kimi      # kimi-code on k3-256k
 > /kickoff add-dark-mode --pick      # force the interactive picker
 ```
 
@@ -187,6 +188,7 @@ flag picks another:
 | `--fable` / `--opus` | claude on fable / opus |
 | `--codex` / `--sol` | codex on gpt-5.6-terra / gpt-5.6-sol |
 | `--grok` | grok-4.5 |
+| `--kimi` | kimi-code on k3-256k (launches in two phases — see below) |
 | `--agent <cli[:model]>` | any registry entry, e.g. `--agent claude:sonnet` or `--agent codex` |
 
 **The default is a single per-repo setting** — no global default, no shipped
@@ -197,17 +199,26 @@ in a repo with no default yet. Everything is registry-driven — no ranking, no 
 call; the default is a simple, explicit choice (the hook where future task-aware
 routing can plug in).
 
-**Non-Claude workers degrade honestly.** codex/grok have no work-system skills,
-so a launched worker gets a bootstrap prompt (read `TASK.md`, commit, open a PR)
-instead of `/continue`. Everything git/PR-derived (`/status`, `/list`, the
+**Non-Claude workers degrade honestly.** codex/grok/kimi have no work-system
+skills, so a launched worker gets a bootstrap prompt (read `TASK.md`, commit, open
+a PR) instead of `/continue`. Everything git/PR-derived (`/status`, `/list`, the
 `[ws]` statusline, `/close`'s tab teardown) works for any worker; only
 claude-session concepts differ. `/continue`'s reopen **always sends `claude -c`**
 — the work-system doesn't persist which worker a task used (per-task agent memory
 is a later idea), so it can't dispatch per CLI. That resumes a claude worker; for
-a codex/grok task it's a *new* Claude session, so you resume the real worker
-yourself in the tab (`codex resume --last` / `grok -c`) — `/continue` surfaces
-this caveat inline. Since both CLIs read `AGENTS.md`, dropping a short `AGENTS.md`
-note into the worktree is an optional way to give them standing task guidance.
+a codex/grok/kimi task it's a *new* Claude session, so you resume the real worker
+yourself in the tab (`codex resume --last` / `grok -c` / `kimi -c`) — `/continue`
+surfaces this caveat inline. Since codex and grok read `AGENTS.md`, dropping a
+short `AGENTS.md` note into the worktree is an optional way to give them standing
+task guidance.
+
+**kimi launches in two phases.** It has no positional launch prompt, and its
+one-shot `-p` flag can't be combined with the autonomous `--auto`/`-y` modes — so
+the worker is `sh -c 'kimi -m "$1" -p "$2"; exec kimi -c --auto' …`: the `-p` seed
+works the task through once (it runs tools unattended), then `exec` hands over to
+the interactive autonomous session, which inherits the seed's full history. So
+unlike the other workers, a kimi tab has already made progress by the time you
+switch to it.
 
 ## herdr integration
 
@@ -225,7 +236,7 @@ Inside herdr, `/kickoff` doesn't just create the worktree and print manual
 instructions — it opens a new herdr **tab** in the *same* workspace, with the
 worktree as its cwd, and starts the task there for you. `/adopt` does exactly the
 same once it has created the worktree from an existing branch — same helper, same
-tab, same worker selection (`--opus`/`--sol`/`--grok`/`--pick`, or the repo default);
+tab, same worker selection (`--opus`/`--sol`/`--grok`/`--kimi`/`--pick`, or the repo default);
 its tab label comes from the *resolved* task name, so it's sensible even when `/adopt`
 keeps the original branch name rather than renaming it to `task/<name>`:
 
@@ -238,8 +249,10 @@ keeps the original branch name rather than renaming it to `task/<name>`:
 - The chosen worker is launched directly as argv (`herdr agent start … --
   <resolved worker command>`), so the real CLI process is what herdr's agent-state
   detection sees. A claude worker gets `claude --model <m> -n "<label>" "/work-system:continue"`
-  and loads the task context automatically; a codex/grok worker gets a bootstrap
+  and loads the task context automatically; a codex/grok/kimi worker gets a bootstrap
   prompt (read `TASK.md`, drive the task to a PR) since they have no work-system skills.
+  A kimi worker's pane roots at a short `sh -c` wrapper that `exec`s into kimi, so
+  what herdr ends up watching is the real kimi process.
 - The new tab opens in the background (`--no-focus`), so the session you launched
   from (`/kickoff` or `/adopt`, in the main repo) stays in front; switch to the tab
   when you're ready to work there.

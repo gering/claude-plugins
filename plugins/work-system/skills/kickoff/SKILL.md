@@ -121,14 +121,14 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     `REG="${CLAUDE_PLUGIN_ROOT}/scripts/agent-registry.sh"`.
 
     - **An explicit flag was given** (`--fable`, `--opus`, `--codex`, `--sol`,
-      `--grok`, or `--agent <cli[:model]>`): `SELECTOR` is that flag (for
+      `--grok`, `--kimi`, or `--agent <cli[:model]>`): `SELECTOR` is that flag (for
       `--agent`, the `cli[:model]` value, e.g. `claude:sonnet`). One-off — no
       default offer.
     - **No flag:** read the repo default: `SELECTOR="$(bash "$REG" default get)"`
       (the helper validates the committed value; a stale/unknown name prints
       empty, so it can't route the launch).
       - **Non-empty** → use it directly (the common path: no picker). **If that
-        default is a non-claude worker** (`SELECTOR` starts `codex:`/`grok:`),
+        default is a non-claude worker** (`SELECTOR` starts `codex:`/`grok:`/`kimi:`),
         first **announce** it — e.g. "Launching **codex:gpt-5.6-sol** (project
         default) — this sends the task to a third-party model; pass `--pick` to
         choose another." This is a visibility line, **not** a prompt: a committed
@@ -172,8 +172,8 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     rides only on the tab label (what the sidebar renders); the agent and session
     names stay plain. The `task/<task-name>` branch is unchanged, so `/continue`
     still resolves the task inside the worktree. (Only a claude worker runs
-    `/continue` — codex/grok get a bootstrap prompt from the registry instead; see
-    step 12.) The worktree path is
+    `/continue` — codex/grok/kimi get a bootstrap prompt from the registry instead;
+    see step 12.) The worktree path is
     absolute (`<main-repo>/.claude/worktrees/<task-name>`, with `<main-repo>` from
     step 1). Then call the shared launch helper:
 
@@ -234,10 +234,13 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
 
     Take the `argv=` lines (in order) as the command words. **Shell-quote each
     word** as you render the command — do NOT just space-join the raw values: for
-    codex/grok the whole bootstrap prompt is ONE `argv=` word containing spaces, so
-    without quotes the shell would split it into separate arguments and the CLI
-    would mangle/reject the prompt. Display this block — it is *not* a command to
-    execute:
+    codex/grok/kimi the whole bootstrap prompt is ONE `argv=` word containing spaces,
+    so without quotes the shell would split it into separate arguments and the CLI
+    would mangle/reject the prompt. **kimi makes this load-bearing**: one of its
+    words is a shell script (`kimi -m "$1" -p "$2"; exec kimi -c --auto`) carrying
+    `;`, `$` and quotes — single-quote it verbatim; an unquoted render would run the
+    `;` as a command separator and expand `$1`/`$2` in the user's own shell. Display
+    this block — it is *not* a command to execute:
     ```
     Worktree created!
 
@@ -258,7 +261,12 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     Use the plugin-qualified form: a CC built-in/alias `/continue` shadows the skill,
     so the bare word would run CC's own resume instead. For **codex/grok** it is
     `codex -m <model> '<bootstrap prompt>'` (they have no work-system skills, so the
-    prompt tells them to read TASK.md and drive to a PR). Do **not** execute the `cd`
+    prompt tells them to read TASK.md and drive to a PR). For **kimi** it is the
+    two-phase form `sh -c 'kimi -m "$1" -p "$2"; exec kimi -c --auto' kimi-worker
+    <model> '<bootstrap prompt>'` — kimi has no positional launch prompt and `-p`
+    can't be combined with `--auto`, so the seed runs the task one-shot and the
+    `exec` hands over to the interactive autonomous session with that history.
+    Do **not** execute the `cd`
     yourself — it is for the user's new terminal. If `resolve` exits non-zero
     (2 unknown / 3 unavailable), surface that instead and re-offer the picker.
 

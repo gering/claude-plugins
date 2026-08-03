@@ -11,7 +11,7 @@
 #                         the kickoff knowledge entry) — a fresh interactive shell
 #                         can eat the leading keystrokes of a typed command.
 #                         The worker argv is resolved from an agent SELECTOR via
-#                         agent-registry.sh (claude/codex/grok × model); with no
+#                         agent-registry.sh (claude/codex/grok/kimi × model); with no
 #                         selector it stays the legacy `claude … /work-system:continue`. The
 #                         registry owns every per-CLI launch detail, so this script
 #                         is CLI-agnostic — it just execs the resolved argv.
@@ -245,7 +245,7 @@ case "$mode" in
     # per-CLI launch shape; herdr-launch stays argv-exec (no shell-typing race)
     # and CLI-agnostic — it just execs whatever argv the registry resolves.
     #   no selector → legacy path: claude on the user's default model.
-    #   a selector  → resolve it (claude/codex/grok, per model). exit 2 on an
+    #   a selector  → resolve it (claude/codex/grok/kimi, per model). exit 2 on an
     #                 unknown selector; exit 3 (with note) if the CLI is not
     #                 available, so the caller shows a clear "run: … login".
     worker_argv=()
