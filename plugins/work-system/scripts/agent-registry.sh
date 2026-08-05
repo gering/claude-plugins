@@ -88,7 +88,7 @@ GROK_AUTH_FILE="${GROK_AUTH_FILE:-$HOME/.grok/auth.json}"
 # probing that path would report every authenticated install as logged out.
 KIMI_CREDENTIALS_FILE="${KIMI_CREDENTIALS_FILE:-$HOME/.kimi-code/credentials/kimi-code.json}"
 
-# The bootstrap prompt for CLIs without work-system skills (codex, grok). One
+# The bootstrap prompt for CLIs without work-system skills (codex, grok, kimi). One
 # argv word; the launch helper passes it verbatim.
 BOOTSTRAP_PROMPT='Read TASK.md in this worktree and continue the task. Commit on the current branch as you go, and open a PR when the work is complete.'
 
@@ -100,9 +100,9 @@ BOOTSTRAP_PROMPT='Read TASK.md in this worktree and continue the task. Commit on
 #   continue   -> `/continue`-reopen + `claude -c` session resume work
 #   close-exit -> /close may inject `/exit` for a clean self-teardown
 #   statusline -> the `[ws]` statusline segment tracks its session
-# codex/grok get commit,pr only — they drive git + a PR but have none of the
+# codex/grok/kimi get commit,pr only — they drive git + a PR but have none of the
 # claude-session lifecycle hooks. RESERVED / not yet consumed: the skills
-# currently hardcode the claude-vs-codex/grok distinction in prose; this field is
+# currently hardcode the claude-vs-non-claude distinction in prose; this field is
 # the seed for the manager/worker-orchestration design to read per-agent
 # capabilities from one place. Keep it in sync when that lands.
 REGISTRY='--fable|claude|fable|continue,close-exit,statusline,commit,pr
@@ -299,8 +299,10 @@ entry_status() {
         if [ "$krc" -ne 0 ]; then
           # unreachable/timed out — inconclusive, trust auth (mirrors grok).
           avail=yes; note="kimi provider list unreachable — availability assumed"
-        elif [ -z "$_kraw" ] || ! grep -qF -- '"models"' <<<"$_kraw"; then
-          # Empty, or a document without the `models` section we key off. Unlike
+        elif ! grep -qF -- '"models"' <<<"$_kraw"; then
+          # Empty output fails this grep too, so it lands here — no separate `-z`
+          # arm (unlike grok's, whose empty case carries its own note).
+          # A document without the `models` section we key off. Unlike
           # grok's plain-text listing, a JSON reply is only self-describing while
           # the schema holds: `{"models": {}}` IS a real "no models" answer, but a
           # renamed/moved section is drift and must not read as one. Gate on the

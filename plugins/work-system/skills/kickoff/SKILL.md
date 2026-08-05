@@ -2,7 +2,7 @@
 name: kickoff
 description: |
   Creates an isolated `task/<name>` worktree off main and opens a worker
-  session there (Claude, codex, or grok — your pick).
+  session there (Claude, codex, grok, or kimi — your pick).
   Trigger: "start working on X", "kickoff", "create a worktree".
 user_invocable: true
 ---
@@ -43,6 +43,7 @@ and `add-dark-mode` is the task. Every other selector is valueless. An optional
 | `--fable` / `--opus` | claude on fable / opus |
 | `--codex` / `--sol` | codex on gpt-5.6-terra / gpt-5.6-sol |
 | `--grok` | grok-4.5 |
+| `--kimi` | kimi-code on k3-256k (two-phase launch — see step 12) |
 | `--agent <cli[:model]>` | any registry entry, e.g. `--agent claude:sonnet` or `--agent codex` |
 
 This table mirrors `agent-registry.sh` for reader convenience only — **never
@@ -128,7 +129,8 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
       (the helper validates the committed value; a stale/unknown name prints
       empty, so it can't route the launch).
       - **Non-empty** → use it directly (the common path: no picker). **If that
-        default is a non-claude worker** (`SELECTOR` starts `codex:`/`grok:`/`kimi:`),
+        default is a non-claude worker** (`SELECTOR` does not start with `claude:` —
+        a negative check, so a future registry CLI is covered without editing this),
         first **announce** it — e.g. "Launching **codex:gpt-5.6-sol** (project
         default) — this sends the task to a third-party model; pass `--pick` to
         choose another." This is a visibility line, **not** a prompt: a committed

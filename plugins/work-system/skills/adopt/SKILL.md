@@ -15,7 +15,7 @@ user_invocable: true
 
 - `$ARGUMENTS` — `<branch> [agent-selector]`: optional branch name to adopt, plus an
   optional worker-agent selector (same set as `/kickoff`: `--fable`, `--opus`, `--sol`,
-  `--grok`, `--codex`, `--agent <cli[:model]>`, `--pick`). The selector chooses the
+  `--grok`, `--codex`, `--kimi`, `--agent <cli[:model]>`, `--pick`). The selector chooses the
   worker the herdr auto-launch (step 13) starts; omit it to use the repo default. The
   **branch is the token that does not start with `-`**; step 2 separates the two.
 
@@ -133,8 +133,8 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     With `REG="${CLAUDE_PLUGIN_ROOT}/scripts/agent-registry.sh"`, only the
     token→`SELECTOR` mapping is restated, because it must match step 2's split (the
     selector may precede or follow the branch — never assume it comes "after" it):
-    - a shorthand flag (`--fable`/`--opus`/`--sol`/`--grok`/`--codex`) → `SELECTOR` is
-      that flag verbatim;
+    - a shorthand flag (`--fable`/`--opus`/`--sol`/`--grok`/`--codex`/`--kimi`) →
+      `SELECTOR` is that flag verbatim;
     - `--agent <cli[:model]>` → `SELECTOR` is the **`cli[:model]` value**, not the
       `--agent` token (the registry resolves the bare value; the flag verbatim fails as
       an unknown selector — exit 2);
@@ -194,8 +194,10 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     **b) Outside herdr (or on any fallback) — manual instructions.** Resolve the
     selector to the exact launch command (registry-driven — do not hand-write it per
     CLI): `bash "$REG" resolve "$SELECTOR" --session "<task-name>"`. Take the `argv=`
-    lines in order and **shell-quote each word** (the codex/grok bootstrap prompt is one
-    `argv=` word containing spaces; space-joining raw would split it). Display this block
+    lines in order and **shell-quote each word** (the codex/grok/kimi bootstrap prompt is
+    one `argv=` word containing spaces; space-joining raw would split it — and one of
+    kimi's words is a shell script carrying `;`, `$` and quotes, which an unquoted render
+    would execute in the user's own shell). Display this block
     — do **not** execute the `cd`:
     ```
     Branch adopted into work system!
@@ -216,7 +218,9 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     "/work-system:continue"` — `-n` names the session (shown in `/resume`),
     `/work-system:continue` runs the resume flow (load TASK.md, commits, progress).
     Use the plugin-qualified form: a Claude Code built-in `/continue` shadows the bare
-    skill. For **codex/grok** it's `codex -m <model> '<bootstrap prompt>'`. Do **not**
+    skill. For **codex/grok** it's `codex -m <model> '<bootstrap prompt>'`; **kimi** uses
+    the two-phase `sh -c '…' kimi-worker <model> '<bootstrap prompt>'` form the registry
+    emits (see `/kickoff` step 12). Do **not**
     execute the `cd` yourself — it is for the user's new terminal. If `resolve` exits
     non-zero (2 unknown / 3 unavailable), surface that instead and re-offer the picker.
     On the picker's "save default" path, persist only after the user confirms the worker

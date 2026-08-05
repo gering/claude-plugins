@@ -25,7 +25,7 @@ nothing more. `--pick` forces the picker even when a default exists.
 
 ## Registry is the single source of truth
 `scripts/agent-registry.sh` owns aliases (`--fable`/`--opus`/`--codex`/`--sol`/
-`--grok`/`--agent cli[:model]`), the launch argv per CLI, availability, and
+`--grok`/`--kimi`/`--agent cli[:model]`), the launch argv per CLI, availability, and
 `default get`/`set`. `herdr-launch.sh` stays CLI-agnostic: it execs the resolved
 `argv=` words (argv-exec, no shell-typing race — same reason as the kickoff
 launch). Skills never hardcode the CLI list. `default get` **validates** its
