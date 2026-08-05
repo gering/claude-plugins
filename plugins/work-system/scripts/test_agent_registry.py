@@ -3,13 +3,17 @@
 or via scripts/check-structure.py's "plugin tests" check.
 
 Guards the registry's contract: alias/name/cli selector resolution, the per-CLI
-launch argv shape (claude `/work-system:continue` vs codex/grok bootstrap prompt), the
-availability probe (codex login status + grok auth file + grok model-list), the
-exit-code map (2 unknown selector, 3 resolved-but-unavailable), and the
-project-default state (set/get, bogus rejection, no-git-repo error).
+launch argv shape (claude `/work-system:continue` vs the codex/grok/kimi bootstrap
+prompt, incl. kimi's two-phase seed+continue argv and its argument-order
+regression), the availability probe (codex login status + grok/kimi auth file +
+grok/kimi model-list), the exit-code map (2 unknown selector, 3
+resolved-but-unavailable), and the project-default state (set/get, bogus
+rejection, no-git-repo error).
 
-Availability is made deterministic with fake `codex`/`grok`/`claude` stubs on a
-prepended PATH, so the test does not depend on what is really installed/authed.
+Availability is made deterministic with fake `codex`/`grok`/`kimi`/`claude` stubs
+on a prepended PATH, so the test does not depend on what is really
+installed/authed. The kimi stub also logs every invocation's argv, so the
+resolved launch argv can be executed for real and each phase asserted.
 """
 import json
 import os
@@ -33,7 +37,9 @@ class Env:
     """A throwaway HOME + fake-bin sandbox controlling CLI availability."""
 
     def __init__(self, codex_authed=True, grok_authed=True,
-                 grok_models=("grok-4.5",), grok_models_ok=True):
+                 grok_models=("grok-4.5",), grok_models_ok=True,
+                 kimi_authed=True, kimi_models=("kimi-code/k3-256k",),
+                 kimi_models_ok=True, kimi_schema_ok=True):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
         self.home = root / "home"
@@ -64,18 +70,43 @@ class Env:
         )
         # claude stub: only ever hit by `command -v`.
         (bindir / "claude").write_text("#!/bin/sh\nexit 0\n")
+        # kimi stub: `provider list --json` drives the model-level probe (raw
+        # JSON, substring-matched). Every invocation also appends its full argv
+        # (one tab-joined line per call) to KIMI_ARGLOG, so a test can execute
+        # the resolved launch argv for real and assert what each phase received.
+        self.kimi_arglog = root / "kimi_args.log"
+        # kimi_schema_ok=False simulates format drift: a valid but differently
+        # shaped document (no `models` section) — distinct from a well-formed
+        # listing that genuinely offers nothing.
+        kimi_section = "models" if kimi_schema_ok else "aliases"
+        kimi_model_json = ",".join('\\"%s\\": {}' % m for m in kimi_models)
+        (bindir / "kimi").write_text(
+            "#!/bin/sh\n"
+            '[ -n "$KIMI_ARGLOG" ] && { printf \'%%s\\t\' "$@" >> "$KIMI_ARGLOG"; '
+            'printf \'\\n\' >> "$KIMI_ARGLOG"; }\n'
+            'if [ "$1" = "provider" ] && [ "$2" = "list" ]; then\n'
+            '  echo "{\\"%s\\": {%s}}"\n'
+            "  exit %d\n"
+            "fi\n"
+            "exit 0\n" % (kimi_section, kimi_model_json, 0 if kimi_models_ok else 1)
+        )
         for f in bindir.iterdir():
             f.chmod(0o755)
         # grok auth file toggles grok readiness.
         self.grok_auth = root / "grok_auth.json"
         if grok_authed:
             self.grok_auth.write_text("{}\n")
+        # kimi's real tokens live in credentials/, not the same-named oauth/ dir.
+        self.kimi_creds = root / "kimi_credentials.json"
+        if kimi_authed:
+            self.kimi_creds.write_text("{}\n")
         self.project_state = root / "repo" / ".claude" / "work-system-agent"
 
         self.env = dict(os.environ)
         self.env["PATH"] = f"{bindir}:{self.env['PATH']}"
         self.env["HOME"] = str(self.home)
         self.env["GROK_AUTH_FILE"] = str(self.grok_auth)
+        self.env["KIMI_CREDENTIALS_FILE"] = str(self.kimi_creds)
         self.env["WORK_SYSTEM_AGENT_PROJECT_STATE"] = str(self.project_state)
 
     def run(self, *args, project_state=True):
@@ -88,6 +119,17 @@ class Env:
             ["bash", str(SCRIPT), *args],
             env=env, cwd=str(self.home), capture_output=True, text=True,
         )
+
+    def run_argv(self, argv):
+        """Execute a resolved launch argv against the stubs; return the per-call
+        argv lines the kimi stub recorded."""
+        env = dict(self.env)
+        env["KIMI_ARGLOG"] = str(self.kimi_arglog)
+        self.kimi_arglog.write_text("")
+        subprocess.run(argv, env=env, cwd=str(self.home), stdin=subprocess.DEVNULL,
+                       capture_output=True, text=True, timeout=30)
+        return [line.split("\t")[:-1]
+                for line in self.kimi_arglog.read_text().splitlines()]
 
     def close(self):
         self.tmp.cleanup()
@@ -133,6 +175,89 @@ check("codex supports commit,pr only", r.get("supports") == "commit,pr")
 r = kv(e.run("resolve", "--grok").stdout)
 check("--grok -> grok:grok-4.5", r.get("name") == "grok:grok-4.5")
 check("grok argv shape", r["argv"][:3] == ["grok", "-m", "grok-4.5"])
+
+# --- kimi: the two-phase seed+continue launch argv ------------------------- #
+# kimi has no positional launch prompt and `-p` cannot be combined with --auto/-y,
+# so a worker is `-p` (seed, runs tools unattended) then `exec kimi -c --auto`
+# (interactive + autonomous, inheriting the seed's session history).
+KIMI_SCRIPT = (
+    'kimi -m "$1" -p "$2" || { echo; '
+    'echo "[work-system] kimi seed FAILED (see the error above): '
+    'TASK.md was not read, nothing was started."; '
+    'echo "Press Enter to open an empty kimi session in this worktree."; '
+    'read -r _; }; exec kimi -c --auto'
+)
+
+r = kv(e.run("resolve", "--kimi").stdout)
+check("--kimi -> kimi:kimi-code/k3-256k", r.get("name") == "kimi:kimi-code/k3-256k")
+check("kimi model is the QUALIFIED alias (bare name aborts at startup)",
+      r.get("model") == "kimi-code/k3-256k")
+check("kimi supports commit,pr only", r.get("supports") == "commit,pr")
+# Exact word list — the whole point of this test.
+check("kimi argv shape",
+      r["argv"][:5] == ["sh", "-c", KIMI_SCRIPT, "kimi-worker", "kimi-code/k3-256k"])
+check("kimi argv is exactly 6 words", len(r["argv"]) == 6)
+check("kimi bootstrap is the last word and mentions TASK.md",
+      "TASK.md" in r["argv"][5])
+
+# Argument-order regression: `-p <value>` consumes the NEXT token, so an argv
+# built by concatenation can silently swallow a flag (`kimi -p --auto "…"` ->
+# --auto becomes the prompt and the prompt becomes an unknown subcommand). Two
+# structural guarantees prevent that, and both are asserted:
+#   1. the model and the prompt are passed as positionals, never spliced into
+#      the script text (so their content cannot reorder anything), and
+#   2. --auto lives in a different command than -p (after the `;`), so it can
+#      never land in -p's value position.
+script = r["argv"][2]
+check("model is not spliced into the script text", "kimi-code/k3-256k" not in script)
+# Compare against the actual prompt word, not a substring of it: the script text
+# legitimately mentions TASK.md in its seed-failure message.
+check("prompt is not spliced into the script text", r["argv"][5] not in script)
+check("-p takes the positional as its value", '-p "$2"' in script)
+check("--auto is not in the same command as -p",
+      "--auto" not in script.split("||", 1)[0])
+check("no bare -p/--prompt argv word (it stays bound inside the script)",
+      "-p" not in r["argv"] and "--prompt" not in r["argv"])
+# A failed seed must neither kill the pane (`&&`) nor slip past unseen (`;`):
+# it reports, waits for a keypress, then still hands over to phase 2.
+check("seed failure is announced, not silent", "seed FAILED" in script)
+check("seed failure waits for acknowledgement", "read -r _" in script)
+check("phase 2 still runs after a failed seed (tab survives)",
+      script.rstrip().endswith("exec kimi -c --auto")
+      and "&&" not in script.split("exec", 1)[0].replace("||", ""))
+
+# Execute the resolved argv for real against the stub and assert what each phase
+# actually received — string checks alone can't prove the shell binds the values
+# the way we think it does.
+calls = e.run_argv(r["argv"])
+check("kimi launch runs exactly two phases", len(calls) == 2)
+if len(calls) == 2:
+    seed, cont = calls
+    check("phase 1 is the -p seed with the model and prompt intact",
+          seed[:3] == ["-m", "kimi-code/k3-256k", "-p"] and "TASK.md" in seed[3])
+    check("phase 1 got exactly 4 args (nothing swallowed, nothing extra)",
+          len(seed) == 4)
+    check("phase 1 never carries --auto/-y (mutually exclusive with -p)",
+          "--auto" not in seed and "-y" not in seed)
+    check("phase 2 is the interactive autonomous continue", cont == ["-c", "--auto"])
+
+# A FAILING seed must still reach phase 2 — the tab has to survive. Runs the real
+# argv against a stub whose non-`provider` calls exit 1 (the first stub always
+# exits 0, so this path was previously untested).
+e_fail = Env()
+(Path(e_fail.env["PATH"].split(":")[0]) / "kimi").write_text(
+    "#!/bin/sh\n"
+    '[ -n "$KIMI_ARGLOG" ] && { printf \'%s\\t\' "$@" >> "$KIMI_ARGLOG"; '
+    'printf \'\\n\' >> "$KIMI_ARGLOG"; }\n'
+    'if [ "$1" = "provider" ]; then echo \'{"models": {"kimi-code/k3-256k": {}}}\'; exit 0; fi\n'
+    "exit 1\n"
+)
+(Path(e_fail.env["PATH"].split(":")[0]) / "kimi").chmod(0o755)
+fail_calls = e_fail.run_argv(kv(e_fail.run("resolve", "--kimi").stdout)["argv"])
+check("a failed seed still reaches phase 2", len(fail_calls) == 2)
+if len(fail_calls) == 2:
+    check("phase 2 after a failed seed is still -c --auto", fail_calls[1] == ["-c", "--auto"])
+e_fail.close()
 
 # canonical name and bare-cli-default selectors
 check("name selector claude:sonnet",
@@ -203,6 +328,58 @@ e = Env(grok_models=(), grok_models_ok=True)
 by = {r["name"]: r for r in json.loads(e.run("list", "--json").stdout)}
 check("grok models empty-but-ok -> assumed available", by["grok:grok-4.5"]["available"] is True)
 check("empty note is soft", "assumed" in by["grok:grok-4.5"]["note"])
+e.close()
+
+# --- kimi model-level availability (same contract as grok) ----------------- #
+# Model-aware for a sharper reason than grok's: an unconfigured `-m` id aborts
+# kimi at startup, so a stale model would hand the user a tab that dies on sight.
+e = Env(kimi_models=("kimi-code/k3-256k",))
+by = {r["name"]: r for r in json.loads(e.run("list", "--json").stdout)}
+check("kimi model listed -> available", by["kimi:kimi-code/k3-256k"]["available"] is True)
+check("resolve --kimi available -> exit 0", e.run("resolve", "--kimi").returncode == 0)
+e.close()
+
+# authed, but the registry's model is not in the provider listing -> refuse now.
+e = Env(kimi_models=("kimi-code/k9-imaginary",))
+by = {r["name"]: r for r in json.loads(e.run("list", "--json").stdout)}
+check("kimi model not listed -> unavailable", by["kimi:kimi-code/k3-256k"]["available"] is False)
+check("kimi unlisted note points at the listing",
+      "kimi provider list" in by["kimi:kimi-code/k3-256k"]["note"])
+check("resolve --kimi unavailable -> exit 3", e.run("resolve", "--kimi").returncode == 3)
+e.close()
+
+# no credentials file -> logged out. (Probing ~/.kimi-code/oauth/ instead would
+# report every authenticated install as logged out: that file stays 0 bytes.)
+e = Env(kimi_authed=False)
+by = {r["name"]: r for r in json.loads(e.run("list", "--json").stdout)}
+check("kimi unauthed -> unavailable", by["kimi:kimi-code/k3-256k"]["available"] is False)
+check("kimi note is login hint", "kimi login" in by["kimi:kimi-code/k3-256k"]["note"])
+e.close()
+
+# listing unreachable / empty-but-ok -> inconclusive, trust auth (mirrors grok).
+e = Env(kimi_models=(), kimi_models_ok=False)
+by = {r["name"]: r for r in json.loads(e.run("list", "--json").stdout)}
+check("kimi listing unreachable -> assumed available",
+      by["kimi:kimi-code/k3-256k"]["available"] is True)
+check("kimi unreachable note is soft", "unreachable" in by["kimi:kimi-code/k3-256k"]["note"])
+e.close()
+
+# A well-formed listing that offers NO models is a real answer, not drift ->
+# unavailable (the launch would abort at startup anyway).
+e = Env(kimi_models=(), kimi_models_ok=True)
+by = {r["name"]: r for r in json.loads(e.run("list", "--json").stdout)}
+check("kimi listing with zero models -> unavailable",
+      by["kimi:kimi-code/k3-256k"]["available"] is False)
+e.close()
+
+# Schema drift (the `models` section renamed/moved) is NOT a real answer: the
+# match would fail for a reason that says nothing about the model, so trust auth
+# rather than silently disabling the whole kimi backend on a format change.
+e = Env(kimi_schema_ok=False)
+by = {r["name"]: r for r in json.loads(e.run("list", "--json").stdout)}
+check("kimi schema drift -> assumed available",
+      by["kimi:kimi-code/k3-256k"]["available"] is True)
+check("kimi drift note is soft", "assumed" in by["kimi:kimi-code/k3-256k"]["note"])
 e.close()
 
 # --- project default (the only persisted state) ---------------------------- #

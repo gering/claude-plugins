@@ -12,7 +12,7 @@
 #   resolve <selector> [--session <name>]
 #                                 Map a selector to launch argv + metadata.
 #                                 Selectors: a shorthand flag (--fable, --opus,
-#                                 --codex, --sol, --grok), a
+#                                 --codex, --sol, --grok, --kimi), a
 #                                 canonical name (claude:opus), a bare CLI
 #                                 (codex -> that CLI's default model), or
 #                                 cli:model (the --agent escape hatch).
@@ -31,10 +31,26 @@
 #              the work-system continue skill resumes TASK.md deterministically)
 #   codex   -> codex -m <model> <bootstrap-prompt>
 #   grok    -> grok  -m <model> <bootstrap-prompt>
-#   The bootstrap prompt (codex/grok have no work-system skills) tells the agent
-#   to read TASK.md and drive the task to a PR. `supports=` metadata records
+#   kimi    -> sh -c 'kimi -m "$1" -p "$2"; exec kimi -c --auto' \
+#                    kimi-worker <model> <bootstrap-prompt>          (seed+continue)
+#   The bootstrap prompt (codex/grok/kimi have no work-system skills) tells the
+#   agent to read TASK.md and drive the task to a PR. `supports=` metadata records
 #   which lifecycle hooks each agent honors, so /close and /continue can degrade
 #   for non-claude workers instead of faking claude-only behavior.
+#
+#   Why kimi needs the two-phase seed+continue shape (all probed live, 0.31.1):
+#   kimi has NO positional launch prompt (`kimi "text"` -> "unknown command"), no
+#   initial-prompt env var, and piped stdin only prefills the input box without
+#   submitting (and would steal the TUI's tty anyway). `-p` is the only way in,
+#   but it is mutually exclusive with BOTH `--auto` and `-y` and exits after one
+#   answer — so `-p` alone cannot be a worker. It does run tools unattended, and
+#   `kimi -c` inherits its full session history, so: phase 1 seeds+works the task
+#   one-shot, phase 2 `exec`s into the interactive autonomous session with that
+#   history. The `exec` matters — it re-roots the herdr pane at kimi, and `;` (not
+#   `&&`) keeps phase 2 alive if the seed fails, leaving a usable tab instead of a
+#   dead one. Values travel as "$1"/"$2" positionals, never interpolated into the
+#   script text: `-p` swallows the next token as its value, so an argv built by
+#   concatenation is one reordering away from silently eating a flag.
 #
 # State & config (override for tests / relocation):
 #   WORK_SYSTEM_AGENT_PROJECT_STATE  the repo's default-agent file
@@ -67,10 +83,29 @@ if [ -z "$PROJECT_STATE" ]; then
   [ -n "$_repo_root" ] && PROJECT_STATE="$_repo_root/.claude/work-system-agent"
 fi
 GROK_AUTH_FILE="${GROK_AUTH_FILE:-$HOME/.grok/auth.json}"
+# kimi's OAuth tokens live in credentials/, NOT in the same-named oauth/ dir —
+# `~/.kimi-code/oauth/kimi-code` exists but stays 0 bytes even when logged in, so
+# probing that path would report every authenticated install as logged out.
+KIMI_CREDENTIALS_FILE="${KIMI_CREDENTIALS_FILE:-$HOME/.kimi-code/credentials/kimi-code.json}"
 
-# The bootstrap prompt for CLIs without work-system skills (codex, grok). One
+# The bootstrap prompt for CLIs without work-system skills (codex, grok, kimi). One
 # argv word; the launch helper passes it verbatim.
 BOOTSTRAP_PROMPT='Read TASK.md in this worktree and continue the task. Commit on the current branch as you go, and open a PR when the work is complete.'
+
+# kimi's two-phase launch script (see the header). Defined once here so the shape
+# has exactly one home; emit_argv passes it as the `sh -c` word.
+#
+# The seed's failure is made LOUD on purpose. `;` would run phase 2 regardless and
+# the TUI's first repaint scrolls the error off-screen — leaving a tab that looks
+# like a healthy worker but never read TASK.md. `&&` is not the fix either: it
+# kills the pane, and the task's whole point is that the tab survives. So: report,
+# wait for an explicit keypress, then hand over to an (empty) session the user now
+# knows is empty. Verified: a failed seed in a fresh worktree yields a NEW empty
+# session, never a foreign one — `kimi -c` is scoped to the working directory.
+# Kept ASCII-only and free of backslash escapes so `printf %q` renders it as a
+# plain single-quoted word in `argv_shell=` — a `$'…'` form would be bash/zsh-only
+# and near-unreadable in the copy-paste block.
+KIMI_LAUNCH_SCRIPT='kimi -m "$1" -p "$2" || { echo; echo "[work-system] kimi seed FAILED (see the error above): TASK.md was not read, nothing was started."; echo "Press Enter to open an empty kimi session in this worktree."; read -r _; }; exec kimi -c --auto'
 
 # ---------- registry ----------
 # `flag|cli|model|supports`. flag `-` = no shorthand (name/--agent only). The
@@ -80,9 +115,9 @@ BOOTSTRAP_PROMPT='Read TASK.md in this worktree and continue the task. Commit on
 #   continue   -> `/continue`-reopen + `claude -c` session resume work
 #   close-exit -> /close may inject `/exit` for a clean self-teardown
 #   statusline -> the `[ws]` statusline segment tracks its session
-# codex/grok get commit,pr only — they drive git + a PR but have none of the
+# codex/grok/kimi get commit,pr only — they drive git + a PR but have none of the
 # claude-session lifecycle hooks. RESERVED / not yet consumed: the skills
-# currently hardcode the claude-vs-codex/grok distinction in prose; this field is
+# currently hardcode the claude-vs-non-claude distinction in prose; this field is
 # the seed for the manager/worker-orchestration design to read per-agent
 # capabilities from one place. Keep it in sync when that lands.
 REGISTRY='--fable|claude|fable|continue,close-exit,statusline,commit,pr
@@ -90,7 +125,8 @@ REGISTRY='--fable|claude|fable|continue,close-exit,statusline,commit,pr
 -|claude|sonnet|continue,close-exit,statusline,commit,pr
 --codex|codex|gpt-5.6-terra|commit,pr
 --sol|codex|gpt-5.6-sol|commit,pr
---grok|grok|grok-4.5|commit,pr'
+--grok|grok|grok-4.5|commit,pr
+--kimi|kimi|kimi-code/k3-256k|commit,pr'
 
 usage() {
   # Usage = header comment from line 2 up to (not including) the registry
@@ -157,7 +193,20 @@ row_for_selector() {
 #           rejects an unlisted `-m` id at launch ("unknown model id"), so a
 #           per-CLI auth check alone would mislabel a model the CLI no longer
 #           offers (grok drops/renames models between releases) as available.
-#           This is the one CLI with a usable model-list command.
+#   kimi:   install + auth file + the model must appear in `kimi provider list
+#           --json`. Model-aware for the same reason as grok, and the failure is
+#           even sharper: an unconfigured `-m` id aborts at startup
+#           ("Model ... is not configured in config.toml"), so a bad model would
+#           give the user a worker tab that dies on sight. The model id must be
+#           the QUALIFIED alias (`kimi-code/k3-256k`) — the bare model name is
+#           rejected the same way. `kimi doctor` is NOT an auth check (it only
+#           validates config file syntax), hence the credentials-file probe.
+#           The listing is local config (~0.7s, no network), but it is bounded
+#           anyway: a catalog refresh on start can make it reach out. The match
+#           requires the alias in KEY position (`"<model>":`) — the real document
+#           is flat-qualified (`"models": {"kimi-code/k3-256k": {…}}`, verified
+#           live), so a bare substring would also fire on the alias appearing as
+#           a VALUE (a `default_model`/metadata field) while `models` is empty.
 
 # run_bounded <seconds> <cmd...> — run cmd with a hard time bound so an external
 # probe can never hang `list`/the picker. Prints cmd's stdout; returns cmd's exit
@@ -212,6 +261,14 @@ grok_models_raw() {
   run_bounded 10 grok models 2>/dev/null
 }
 
+# Same contract as grok_models_raw, for kimi: RAW `kimi provider list --json` on
+# stdout, exit code = fetch status. entry_status substring-matches the qualified
+# model alias against the raw JSON rather than parsing it — no jq/python
+# dependency, and a reshaped config document can't yield a wrong token.
+kimi_models_raw() {
+  run_bounded 10 kimi provider list --json 2>/dev/null
+}
+
 entry_status() {
   local cli="$1" model="$2" avail=no note=""
   case "$cli" in
@@ -252,6 +309,28 @@ entry_status() {
         else note="model not offered by this grok CLI (see: grok models)"; fi
       fi
       ;;
+    kimi)
+      if ! command -v kimi >/dev/null 2>&1; then note="not installed"
+      elif [ ! -s "$KIMI_CREDENTIALS_FILE" ]; then note="run: kimi login"
+      else
+        local _kraw krc=0
+        _kraw="$(kimi_models_raw)" || krc=$?   # exit code = fetch status
+        if [ "$krc" -ne 0 ]; then
+          # unreachable/timed out — inconclusive, trust auth (mirrors grok).
+          avail=yes; note="kimi provider list unreachable — availability assumed"
+        elif ! grep -qF -- '"models"' <<<"$_kraw"; then
+          # Empty output fails this grep too, so it lands here — no separate `-z`
+          # arm (unlike grok's, whose empty case carries its own note).
+          # A document without the `models` section we key off. Unlike
+          # grok's plain-text listing, a JSON reply is only self-describing while
+          # the schema holds: `{"models": {}}` IS a real "no models" answer, but a
+          # renamed/moved section is drift and must not read as one. Gate on the
+          # section's presence, so only the former reaches the match below.
+          avail=yes; note="kimi provider list unrecognized — availability assumed"
+        elif grep -qF -- "\"$model\":" <<<"$_kraw"; then avail=yes
+        else note="model not offered by this kimi CLI (see: kimi provider list)"; fi
+      fi
+      ;;
     *) note="unknown cli" ;;
   esac
   printf '%s\t%s\n' "$avail" "$note"
@@ -259,24 +338,55 @@ entry_status() {
 
 # ---------- subcommands ----------
 
+# POSIX single-quote one word for `argv_shell=`. Not `printf %q`: bash 3.2
+# renders that as per-character backslash escapes (and `$'…'` for anything
+# non-ASCII) — correct, but the result is a wall of backslashes that a user
+# cannot read before pasting it, and `$'…'` is bash/zsh-only. Words made only of
+# safe characters are passed through bare; everything else is wrapped, with any
+# embedded quote closed-escaped-reopened ('\'') the way every POSIX shell parses.
+shell_quote() {
+  case "$1" in
+    ''|*[!A-Za-z0-9_@%+=:,./-]*)
+      printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 emit_argv() {
-  # Print `argv=<word>` lines for a resolved entry. $1=cli $2=model $3=session.
+  # Print `argv=<word>` lines for a resolved entry, then ONE `argv_shell=` line
+  # with the same words shell-quoted. $1=cli $2=model $3=session.
   local cli="$1" model="$2" session="$3"
+  local words=()
   case "$cli" in
     claude)
-      printf 'argv=%s\n' claude --model "$model"
-      [ -n "$session" ] && printf 'argv=%s\n' -n "$session"
+      words=(claude --model "$model")
+      [ -n "$session" ] && words+=(-n "$session")
       # Plugin-qualified: a CC built-in/alias `/continue` shadows the skill, so
       # the bare form would run CC's own resume, not the work-system flow.
-      printf 'argv=%s\n' /work-system:continue
+      words+=(/work-system:continue)
       ;;
-    codex)
-      printf 'argv=%s\n' codex -m "$model" "$BOOTSTRAP_PROMPT"
-      ;;
-    grok)
-      printf 'argv=%s\n' grok -m "$model" "$BOOTSTRAP_PROMPT"
+    codex) words=(codex -m "$model" "$BOOTSTRAP_PROMPT") ;;
+    grok)  words=(grok  -m "$model" "$BOOTSTRAP_PROMPT") ;;
+    kimi)
+      # Two-phase seed+continue (see the launch-shape note in the header). The
+      # model and the prompt are passed as "$1"/"$2" positionals — NOT spliced
+      # into the script text — so no amount of prompt content can reorder the
+      # flags or be absorbed by `-p`.
+      words=(sh -c "$KIMI_LAUNCH_SCRIPT" kimi-worker "$model" "$BOOTSTRAP_PROMPT")
       ;;
   esac
+  # Guard the expansion: under `set -u` a bash 3.2 `"${words[@]}"` on an EMPTY
+  # array is an unbound-variable error, which an unknown cli would hit.
+  [ "${#words[@]}" -gt 0 ] || return 0
+  printf 'argv=%s\n' "${words[@]}"
+  # A ready-to-paste command line, quoted by printf %q rather than by whoever
+  # renders the manual-launch block. That rendering used to be a prose rule, and
+  # for kimi a mis-quote is not cosmetic: its argv carries `;` and `exec`, so an
+  # unquoted paste would replace the USER'S OWN interactive shell with an
+  # unattended agent. Skills print this verbatim instead of re-deriving it.
+  local shell_cmd="" w
+  for w in "${words[@]}"; do shell_cmd="$shell_cmd$(shell_quote "$w") "; done
+  printf 'argv_shell=%s\n' "${shell_cmd% }"
 }
 
 subcmd_resolve() {
@@ -303,7 +413,9 @@ subcmd_resolve() {
   local record
   record="$(row_for_selector "$selector")" || {
     echo "Unknown agent selector: $selector" >&2
-    echo "Try: --fable --opus --codex --sol --grok, a name (claude:opus), or a cli (codex)" >&2
+    # Derive the flag list from REGISTRY rather than restating it — a new entry
+    # must not need a second edit here to appear in the hint.
+    echo "Try: $(registry_rows | cut -d'|' -f1 | grep -v '^-$' | tr '\n' ' ')— a name (claude:opus), or a cli (codex)" >&2
     exit 2
   }
   local flag cli model supports

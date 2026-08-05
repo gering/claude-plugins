@@ -35,7 +35,10 @@ truth; this entry captures the durable design and one non-obvious gotcha.
   `claude --model <m> -n "<label>" "/work-system:continue"` (plugin-qualified — see
   the shadowing gotcha below), while codex/grok get their own
   `-m` form — `codex -m <model> "<bootstrap prompt>"` /
-  `grok -m <model> "<bootstrap prompt>"` (see [[kickoff-agent-selection]]).
+  `grok -m <model> "<bootstrap prompt>"`, and kimi (1.11.0) a two-phase
+  `sh -c 'kimi -m "$1" -p "$2" || …; exec kimi -c --auto' …` — it has no positional
+  launch prompt (see [[kickoff-agent-selection]]). `emit_argv` is the SoT; never
+  reconstruct an argv from this list.
   herdr-launch stays CLI-agnostic — it just execs the resolved `argv=` words. The
   `-- argv` form sidesteps the interactive shell entirely, so there is no keystroke
   race against shell startup (see the gotcha below) and no readiness handshake to

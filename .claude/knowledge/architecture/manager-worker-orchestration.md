@@ -20,7 +20,7 @@ implementation is spawned across tasks `add-lane-registry`, `spike-agent-mail-su
 - **Manager** = the Claude Code session at the main repo root (herdr `◉` tab). A
   *coordinator*, not a merge robot — the human stays merge authority unless
   explicitly delegated at kickoff.
-- **Worker** = one {claude|codex|grok} session per worktree, driving its task to a
+- **Worker** = one {claude|codex|grok|kimi} session per worktree, driving its task to a
   reviewed, mergeable PR.
 - **Lane** = `(worktree_path, task, branch)`. **Identity = worktree_path** — the one
   key stable across agent types and restarts. herdr pane/tab, `agent_status`,

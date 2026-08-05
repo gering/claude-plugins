@@ -271,13 +271,13 @@ Rules:
     tab matched, `/close` is already done — stop here.
 
     **Worker-agent degradation (why this is CLI-safe).** `/kickoff` can launch a
-    codex/grok worker, not just claude — but the teardown needs no per-worker
+    codex/grok/kimi worker, not just claude — but the teardown needs no per-worker
     branching. Scenario A closes a *different* tab with `close-tab`, a tab-level
     herdr op that works for any CLI (the idle worker dies with the tab). Scenario B
     (`self-exit` injects `/exit`, backed by the plugin `SessionEnd` hook) is
     claude-specific — but it is only ever reached from *inside* a claude session
     (`SELF=yes` means this Claude Code session **is** the worktree tab, and only a
-    claude session can run `/close`). So `/exit` is never injected into a codex/grok
+    claude session can run `/close`). So `/exit` is never injected into a non-claude
     worker: a non-claude worker tab is always the *other* tab and closes via
     Scenario A. Do **not** add a self-exit path for non-claude workers. **Only proceed if the cleanup
     above (steps 7–10) actually completed**: if any step stopped for a confirmation
