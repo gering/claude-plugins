@@ -136,6 +136,14 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
         choose another." This is a visibility line, **not** a prompt: a committed
         default from a cloned repo shouldn't silently route your code off-Claude,
         but it also shouldn't block. Claude defaults launch with no such line.
+    - **Whenever the resolved worker is `kimi:…`** — default, flag or picker alike —
+      the announce line must ALSO say it runs **unattended**: e.g. "kimi starts
+      working on TASK.md immediately, without tool-approval prompts." kimi is the
+      only worker that acts before you open the tab (`-p` seed + `--auto`), so
+      whatever TASK.md says is executed in a worktree holding your git credentials.
+      That is the intended shape, not a defect — but it must be visible, especially
+      for an `/adopt`-generated TASK.md, which is summarized from someone else's
+      commits. Still announce-not-prompt: state it, don't block.
       - **Empty** (no project default set, or the committed value was invalid) →
         fall through to the **picker** below.
     - **`--pick`, or no flag with no default set → the picker.** Run

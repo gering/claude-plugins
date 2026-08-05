@@ -1,9 +1,9 @@
 ---
 title: "Kickoff Agent Selection: registry, per-repo default, honest degradation"
 createdAt: 2026-07-17
-updatedAt: 2026-08-03
+updatedAt: 2026-08-05
 createdFrom: "session: 2026-07-17 (task/kickoff-agent-selection)"
-updatedFrom: "session: 2026-08-03 (task/add-kimi-worker-support)"
+updatedFrom: "session: 2026-08-05 (task/add-kimi-worker-support, post-swarm)"
 pluginVersion: 1.11.0
 prime: false
 ---
@@ -53,7 +53,8 @@ entry point but is mutually exclusive with **both** `--auto` and `-y` and exits
 after one answer, so it cannot *be* the worker. What makes it work: `-p` runs
 tools unattended, and `kimi -c` inherits its session history. Hence two phases:
 
-    sh -c 'kimi -m "$1" -p "$2"; exec kimi -c --auto' kimi-worker <model> <prompt>
+    sh -c 'kimi -m "$1" -p "$2" || <report+wait>; exec kimi -c --auto' \
+       kimi-worker <model> <prompt>        # exact text: KIMI_LAUNCH_SCRIPT
 
 `exec` re-roots the pane at kimi (herdr then watches the real process). A failed
 seed must neither kill the pane (`&&`) nor pass unnoticed (a bare `;` — the TUI's
@@ -78,6 +79,19 @@ non-empty yet a *real* "no models" answer. So the gate is the **section's
 presence**: no `"models"` key → drift → trust auth; present but no match → truly
 unavailable. Transplanting the sibling's rule verbatim would have mislabeled
 either case.
+
+## kimi's unattended posture is a decision, not an oversight
+kimi is the only worker without tool-approval prompts: the seed can't have them
+(`-p` refuses `--auto`/`-y`, and `-p` is the only way to deliver the task) and
+phase 2 opts into `--auto` because a worker should keep going. Reviewed twice as
+a security finding and **kept deliberately** (2026-08-05) — the mitigation is
+visibility, matching the announce-not-prompt precedent below: `/kickoff` states
+the unattended start whenever the worker resolves to kimi, `/adopt` additionally
+warns because its TASK.md is summarized from someone else's commits. Dropping
+`--auto` was rejected as a half-measure: it would leave the seed — the phase that
+does the work — just as unattended. If this is ever revisited, the real lever is
+a second registry entry (interactive `--kimi` vs. opt-in autonomous), not the
+`--auto` flag alone.
 
 ## `argv_shell=`: quoting belongs to the registry, not to prose
 `resolve` emits, next to the `argv=` words, one `argv_shell=` line with the same

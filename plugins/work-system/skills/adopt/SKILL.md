@@ -144,6 +144,12 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     The helper (step 13) resolves and validates `SELECTOR`, so don't resolve
     models/availability yourself.
 
+    **If the resolved worker is `kimi:…`, warn before launching** (announce, don't
+    block): kimi runs unattended (no tool-approval prompts), and an adopted TASK.md
+    is summarized from *another branch's* commits — so it is the one path where an
+    unattended worker acts on content the user did not write. Suggest reading the
+    generated task file first.
+
 13. **Launch the worktree session** — automate inside herdr, otherwise show the
     manual block. Inside herdr this replaces the old "print manual instructions" final
     step: `/adopt` now opens the task's tab for you, exactly like `/kickoff`.

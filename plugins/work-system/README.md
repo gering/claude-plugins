@@ -214,11 +214,21 @@ task guidance.
 
 **kimi launches in two phases.** It has no positional launch prompt, and its
 one-shot `-p` flag can't be combined with the autonomous `--auto`/`-y` modes — so
-the worker is `sh -c 'kimi -m "$1" -p "$2"; exec kimi -c --auto' …`: the `-p` seed
+the worker is `sh -c 'kimi -m "$1" -p "$2" || <report+wait>; exec kimi -c --auto' …`:
+the `-p` seed
 works the task through once (it runs tools unattended), then `exec` hands over to
 the interactive autonomous session, which inherits the seed's full history. So
 unlike the other workers, a kimi tab has already made progress by the time you
 switch to it.
+
+**What that costs you, stated plainly.** Both kimi phases run *without
+tool-approval prompts* — the seed by construction (`-p` cannot be combined with
+an approval mode) and phase 2 by choice (`--auto`). claude/codex/grok all ask
+before acting; kimi does not. So whatever `TASK.md` says is carried out in a
+worktree that holds your git credentials, before you have looked at the tab. For
+`/kickoff` that file is yours. For `/adopt` it is summarized from **someone
+else's** commits and diff — read it before launching a kimi worker on it.
+`/kickoff` announces the unattended start whenever the resolved worker is kimi.
 
 ## herdr integration
 
