@@ -194,10 +194,10 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     **b) Outside herdr (or on any fallback) — manual instructions.** Resolve the
     selector to the exact launch command (registry-driven — do not hand-write it per
     CLI): `bash "$REG" resolve "$SELECTOR" --session "<task-name>"`. Take the `argv=`
-    lines in order and **shell-quote each word** (the codex/grok/kimi bootstrap prompt is
-    one `argv=` word containing spaces; space-joining raw would split it — and one of
-    kimi's words is a shell script carrying `;`, `$` and quotes, which an unquoted render
-    would execute in the user's own shell). Display this block
+    `argv_shell=` line **verbatim** — the registry already shell-quoted it, and
+    re-deriving the quoting is exactly the hazard: one of kimi's words is a shell
+    script carrying `;` and `exec`, which a mis-quoted render would run in the
+    user's own interactive shell. Display this block
     — do **not** execute the `cd`:
     ```
     Branch adopted into work system!
@@ -212,15 +212,14 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
        session — this session stays in the main repo) and run:
 
          cd .claude/worktrees/<task-name>
-         <the argv= words, each shell-quoted>
+         <the argv_shell= line, verbatim>
     ```
     For a **claude** worker that is `claude --model <m> -n "<task-name>"
     "/work-system:continue"` — `-n` names the session (shown in `/resume`),
     `/work-system:continue` runs the resume flow (load TASK.md, commits, progress).
     Use the plugin-qualified form: a Claude Code built-in `/continue` shadows the bare
-    skill. For **codex/grok** it's `codex -m <model> '<bootstrap prompt>'`; **kimi** uses
-    the two-phase `sh -c '…' kimi-worker <model> '<bootstrap prompt>'` form the registry
-    emits (see `/kickoff` step 12). Do **not**
+    skill. **codex/grok/kimi** get the bootstrap prompt instead; kimi's is a two-phase
+    form the registry emits (see `/kickoff` step 13b). Do **not**
     execute the `cd` yourself — it is for the user's new terminal. If `resolve` exits
     non-zero (2 unknown / 3 unavailable), surface that instead and re-offer the picker.
     On the picker's "save default" path, persist only after the user confirms the worker

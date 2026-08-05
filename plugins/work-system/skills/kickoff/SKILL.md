@@ -43,7 +43,7 @@ and `add-dark-mode` is the task. Every other selector is valueless. An optional
 | `--fable` / `--opus` | claude on fable / opus |
 | `--codex` / `--sol` | codex on gpt-5.6-terra / gpt-5.6-sol |
 | `--grok` | grok-4.5 |
-| `--kimi` | kimi-code on k3-256k (two-phase launch — see step 12) |
+| `--kimi` | kimi-code on k3-256k (two-phase launch — see step 13b) |
 | `--agent <cli[:model]>` | any registry entry, e.g. `--agent claude:sonnet` or `--agent codex` |
 
 This table mirrors `agent-registry.sh` for reader convenience only — **never
@@ -234,15 +234,14 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     bash "$REG" resolve "$SELECTOR" --session "<task-name>"
     ```
 
-    Take the `argv=` lines (in order) as the command words. **Shell-quote each
-    word** as you render the command — do NOT just space-join the raw values: for
-    codex/grok/kimi the whole bootstrap prompt is ONE `argv=` word containing spaces,
-    so without quotes the shell would split it into separate arguments and the CLI
-    would mangle/reject the prompt. **kimi makes this load-bearing**: one of its
-    words is a shell script (`kimi -m "$1" -p "$2"; exec kimi -c --auto`) carrying
-    `;`, `$` and quotes — single-quote it verbatim; an unquoted render would run the
-    `;` as a command separator and expand `$1`/`$2` in the user's own shell. Display
-    this block — it is *not* a command to execute:
+    Use the **`argv_shell=` line verbatim** as the command to show — it is the
+    `argv=` words already shell-quoted by the registry (`shell_quote`, POSIX
+    single-quoting). Do **not** re-derive it by joining the `argv=` words yourself:
+    quoting here is load-bearing, and for kimi it is safety-critical — one of its
+    words is a shell script carrying `;` and `exec`, so a mis-quoted render would
+    run the `;` in the **user's own interactive shell** and replace it with an
+    unattended agent. Copy the line as-is. Display this block — it is *not* a
+    command to execute:
     ```
     Worktree created!
 
@@ -255,20 +254,15 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
        session — this session stays in the main repo) and run:
 
          cd .claude/worktrees/<task-name>
-         <the argv= words, each shell-quoted — e.g. codex -m gpt-5.6-sol 'Read TASK.md …'>
+         <the argv_shell= line, verbatim — e.g. codex -m gpt-5.6-sol 'Read TASK.md …'>
     ```
-    For a **claude** worker the command is `claude --model <m> -n "<task-name>"
-    "/work-system:continue"` — `-n` names the session (shown in `/resume`),
-    `/work-system:continue` runs the resume flow (load TASK.md, commits, progress).
-    Use the plugin-qualified form: a CC built-in/alias `/continue` shadows the skill,
-    so the bare word would run CC's own resume instead. For **codex/grok** it is
-    `codex -m <model> '<bootstrap prompt>'` (they have no work-system skills, so the
-    prompt tells them to read TASK.md and drive to a PR). For **kimi** it is the
-    two-phase form `sh -c 'kimi -m "$1" -p "$2"; exec kimi -c --auto' kimi-worker
-    <model> '<bootstrap prompt>'` — kimi has no positional launch prompt and `-p`
-    can't be combined with `--auto`, so the seed runs the task one-shot and the
-    `exec` hands over to the interactive autonomous session with that history.
-    Do **not** execute the `cd`
+    What that line contains is the registry's business, not this skill's — but so
+    the report reads sensibly: a **claude** worker resumes via `/work-system:continue`
+    (plugin-qualified, since a CC built-in `/continue` shadows the skill);
+    **codex/grok/kimi** have no work-system skills and get the bootstrap prompt
+    instead (read TASK.md, drive to a PR), with **kimi** launching in two phases
+    because it has no positional launch prompt and `-p` cannot be combined with
+    `--auto`. Do **not** execute the `cd`
     yourself — it is for the user's new terminal. If `resolve` exits non-zero
     (2 unknown / 3 unavailable), surface that instead and re-offer the picker.
 

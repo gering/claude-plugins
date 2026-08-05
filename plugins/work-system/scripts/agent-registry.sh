@@ -92,6 +92,21 @@ KIMI_CREDENTIALS_FILE="${KIMI_CREDENTIALS_FILE:-$HOME/.kimi-code/credentials/kim
 # argv word; the launch helper passes it verbatim.
 BOOTSTRAP_PROMPT='Read TASK.md in this worktree and continue the task. Commit on the current branch as you go, and open a PR when the work is complete.'
 
+# kimi's two-phase launch script (see the header). Defined once here so the shape
+# has exactly one home; emit_argv passes it as the `sh -c` word.
+#
+# The seed's failure is made LOUD on purpose. `;` would run phase 2 regardless and
+# the TUI's first repaint scrolls the error off-screen — leaving a tab that looks
+# like a healthy worker but never read TASK.md. `&&` is not the fix either: it
+# kills the pane, and the task's whole point is that the tab survives. So: report,
+# wait for an explicit keypress, then hand over to an (empty) session the user now
+# knows is empty. Verified: a failed seed in a fresh worktree yields a NEW empty
+# session, never a foreign one — `kimi -c` is scoped to the working directory.
+# Kept ASCII-only and free of backslash escapes so `printf %q` renders it as a
+# plain single-quoted word in `argv_shell=` — a `$'…'` form would be bash/zsh-only
+# and near-unreadable in the copy-paste block.
+KIMI_LAUNCH_SCRIPT='kimi -m "$1" -p "$2" || { echo; echo "[work-system] kimi seed FAILED (see the error above): TASK.md was not read, nothing was started."; echo "Press Enter to open an empty kimi session in this worktree."; read -r _; }; exec kimi -c --auto'
+
 # ---------- registry ----------
 # `flag|cli|model|supports`. flag `-` = no shorthand (name/--agent only). The
 # FIRST entry of each CLI is that CLI's default model (for a bare `--agent codex`).
@@ -187,7 +202,11 @@ row_for_selector() {
 #           rejected the same way. `kimi doctor` is NOT an auth check (it only
 #           validates config file syntax), hence the credentials-file probe.
 #           The listing is local config (~0.7s, no network), but it is bounded
-#           anyway: a catalog refresh on start can make it reach out.
+#           anyway: a catalog refresh on start can make it reach out. The match
+#           requires the alias in KEY position (`"<model>":`) — the real document
+#           is flat-qualified (`"models": {"kimi-code/k3-256k": {…}}`, verified
+#           live), so a bare substring would also fire on the alias appearing as
+#           a VALUE (a `default_model`/metadata field) while `models` is empty.
 
 # run_bounded <seconds> <cmd...> — run cmd with a hard time bound so an external
 # probe can never hang `list`/the picker. Prints cmd's stdout; returns cmd's exit
@@ -308,7 +327,7 @@ entry_status() {
           # renamed/moved section is drift and must not read as one. Gate on the
           # section's presence, so only the former reaches the match below.
           avail=yes; note="kimi provider list unrecognized — availability assumed"
-        elif grep -qF -- "\"$model\"" <<<"$_kraw"; then avail=yes
+        elif grep -qF -- "\"$model\":" <<<"$_kraw"; then avail=yes
         else note="model not offered by this kimi CLI (see: kimi provider list)"; fi
       fi
       ;;
@@ -319,32 +338,55 @@ entry_status() {
 
 # ---------- subcommands ----------
 
+# POSIX single-quote one word for `argv_shell=`. Not `printf %q`: bash 3.2
+# renders that as per-character backslash escapes (and `$'…'` for anything
+# non-ASCII) — correct, but the result is a wall of backslashes that a user
+# cannot read before pasting it, and `$'…'` is bash/zsh-only. Words made only of
+# safe characters are passed through bare; everything else is wrapped, with any
+# embedded quote closed-escaped-reopened ('\'') the way every POSIX shell parses.
+shell_quote() {
+  case "$1" in
+    ''|*[!A-Za-z0-9_@%+=:,./-]*)
+      printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 emit_argv() {
-  # Print `argv=<word>` lines for a resolved entry. $1=cli $2=model $3=session.
+  # Print `argv=<word>` lines for a resolved entry, then ONE `argv_shell=` line
+  # with the same words shell-quoted. $1=cli $2=model $3=session.
   local cli="$1" model="$2" session="$3"
+  local words=()
   case "$cli" in
     claude)
-      printf 'argv=%s\n' claude --model "$model"
-      [ -n "$session" ] && printf 'argv=%s\n' -n "$session"
+      words=(claude --model "$model")
+      [ -n "$session" ] && words+=(-n "$session")
       # Plugin-qualified: a CC built-in/alias `/continue` shadows the skill, so
       # the bare form would run CC's own resume, not the work-system flow.
-      printf 'argv=%s\n' /work-system:continue
+      words+=(/work-system:continue)
       ;;
-    codex)
-      printf 'argv=%s\n' codex -m "$model" "$BOOTSTRAP_PROMPT"
-      ;;
-    grok)
-      printf 'argv=%s\n' grok -m "$model" "$BOOTSTRAP_PROMPT"
-      ;;
+    codex) words=(codex -m "$model" "$BOOTSTRAP_PROMPT") ;;
+    grok)  words=(grok  -m "$model" "$BOOTSTRAP_PROMPT") ;;
     kimi)
       # Two-phase seed+continue (see the launch-shape note in the header). The
       # model and the prompt are passed as "$1"/"$2" positionals — NOT spliced
       # into the script text — so no amount of prompt content can reorder the
       # flags or be absorbed by `-p`.
-      printf 'argv=%s\n' sh -c 'kimi -m "$1" -p "$2"; exec kimi -c --auto' \
-        kimi-worker "$model" "$BOOTSTRAP_PROMPT"
+      words=(sh -c "$KIMI_LAUNCH_SCRIPT" kimi-worker "$model" "$BOOTSTRAP_PROMPT")
       ;;
   esac
+  # Guard the expansion: under `set -u` a bash 3.2 `"${words[@]}"` on an EMPTY
+  # array is an unbound-variable error, which an unknown cli would hit.
+  [ "${#words[@]}" -gt 0 ] || return 0
+  printf 'argv=%s\n' "${words[@]}"
+  # A ready-to-paste command line, quoted by printf %q rather than by whoever
+  # renders the manual-launch block. That rendering used to be a prose rule, and
+  # for kimi a mis-quote is not cosmetic: its argv carries `;` and `exec`, so an
+  # unquoted paste would replace the USER'S OWN interactive shell with an
+  # unattended agent. Skills print this verbatim instead of re-deriving it.
+  local shell_cmd="" w
+  for w in "${words[@]}"; do shell_cmd="$shell_cmd$(shell_quote "$w") "; done
+  printf 'argv_shell=%s\n' "${shell_cmd% }"
 }
 
 subcmd_resolve() {
@@ -371,7 +413,9 @@ subcmd_resolve() {
   local record
   record="$(row_for_selector "$selector")" || {
     echo "Unknown agent selector: $selector" >&2
-    echo "Try: --fable --opus --codex --sol --grok --kimi, a name (claude:opus), or a cli (codex)" >&2
+    # Derive the flag list from REGISTRY rather than restating it — a new entry
+    # must not need a second edit here to appear in the hint.
+    echo "Try: $(registry_rows | cut -d'|' -f1 | grep -v '^-$' | tr '\n' ' ')— a name (claude:opus), or a cli (codex)" >&2
     exit 2
   }
   local flag cli model supports

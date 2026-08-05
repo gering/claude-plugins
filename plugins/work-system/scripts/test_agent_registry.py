@@ -126,7 +126,7 @@ class Env:
         env = dict(self.env)
         env["KIMI_ARGLOG"] = str(self.kimi_arglog)
         self.kimi_arglog.write_text("")
-        subprocess.run(argv, env=env, cwd=str(self.home),
+        subprocess.run(argv, env=env, cwd=str(self.home), stdin=subprocess.DEVNULL,
                        capture_output=True, text=True, timeout=30)
         return [line.split("\t")[:-1]
                 for line in self.kimi_arglog.read_text().splitlines()]
@@ -180,7 +180,13 @@ check("grok argv shape", r["argv"][:3] == ["grok", "-m", "grok-4.5"])
 # kimi has no positional launch prompt and `-p` cannot be combined with --auto/-y,
 # so a worker is `-p` (seed, runs tools unattended) then `exec kimi -c --auto`
 # (interactive + autonomous, inheriting the seed's session history).
-KIMI_SCRIPT = 'kimi -m "$1" -p "$2"; exec kimi -c --auto'
+KIMI_SCRIPT = (
+    'kimi -m "$1" -p "$2" || { echo; '
+    'echo "[work-system] kimi seed FAILED (see the error above): '
+    'TASK.md was not read, nothing was started."; '
+    'echo "Press Enter to open an empty kimi session in this worktree."; '
+    'read -r _; }; exec kimi -c --auto'
+)
 
 r = kv(e.run("resolve", "--kimi").stdout)
 check("--kimi -> kimi:kimi-code/k3-256k", r.get("name") == "kimi:kimi-code/k3-256k")
@@ -204,12 +210,21 @@ check("kimi bootstrap is the last word and mentions TASK.md",
 #      never land in -p's value position.
 script = r["argv"][2]
 check("model is not spliced into the script text", "kimi-code/k3-256k" not in script)
-check("prompt is not spliced into the script text", "TASK.md" not in script)
+# Compare against the actual prompt word, not a substring of it: the script text
+# legitimately mentions TASK.md in its seed-failure message.
+check("prompt is not spliced into the script text", r["argv"][5] not in script)
 check("-p takes the positional as its value", '-p "$2"' in script)
-check("--auto is in a separate command from -p",
-      "--auto" in script.split(";", 1)[1] and "--auto" not in script.split(";", 1)[0])
+check("--auto is not in the same command as -p",
+      "--auto" not in script.split("||", 1)[0])
 check("no bare -p/--prompt argv word (it stays bound inside the script)",
       "-p" not in r["argv"] and "--prompt" not in r["argv"])
+# A failed seed must neither kill the pane (`&&`) nor slip past unseen (`;`):
+# it reports, waits for a keypress, then still hands over to phase 2.
+check("seed failure is announced, not silent", "seed FAILED" in script)
+check("seed failure waits for acknowledgement", "read -r _" in script)
+check("phase 2 still runs after a failed seed (tab survives)",
+      script.rstrip().endswith("exec kimi -c --auto")
+      and "&&" not in script.split("exec", 1)[0].replace("||", ""))
 
 # Execute the resolved argv for real against the stub and assert what each phase
 # actually received — string checks alone can't prove the shell binds the values
@@ -225,6 +240,24 @@ if len(calls) == 2:
     check("phase 1 never carries --auto/-y (mutually exclusive with -p)",
           "--auto" not in seed and "-y" not in seed)
     check("phase 2 is the interactive autonomous continue", cont == ["-c", "--auto"])
+
+# A FAILING seed must still reach phase 2 — the tab has to survive. Runs the real
+# argv against a stub whose non-`provider` calls exit 1 (the first stub always
+# exits 0, so this path was previously untested).
+e_fail = Env()
+(Path(e_fail.env["PATH"].split(":")[0]) / "kimi").write_text(
+    "#!/bin/sh\n"
+    '[ -n "$KIMI_ARGLOG" ] && { printf \'%s\\t\' "$@" >> "$KIMI_ARGLOG"; '
+    'printf \'\\n\' >> "$KIMI_ARGLOG"; }\n'
+    'if [ "$1" = "provider" ]; then echo \'{"models": {"kimi-code/k3-256k": {}}}\'; exit 0; fi\n'
+    "exit 1\n"
+)
+(Path(e_fail.env["PATH"].split(":")[0]) / "kimi").chmod(0o755)
+fail_calls = e_fail.run_argv(kv(e_fail.run("resolve", "--kimi").stdout)["argv"])
+check("a failed seed still reaches phase 2", len(fail_calls) == 2)
+if len(fail_calls) == 2:
+    check("phase 2 after a failed seed is still -c --auto", fail_calls[1] == ["-c", "--auto"])
+e_fail.close()
 
 # canonical name and bare-cli-default selectors
 check("name selector claude:sonnet",

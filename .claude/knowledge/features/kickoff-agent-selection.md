@@ -55,8 +55,13 @@ tools unattended, and `kimi -c` inherits its session history. Hence two phases:
 
     sh -c 'kimi -m "$1" -p "$2"; exec kimi -c --auto' kimi-worker <model> <prompt>
 
-`exec` re-roots the pane at kimi (herdr then watches the real process); `;` not
-`&&` keeps phase 2 alive if the seed fails, leaving a usable tab. Values ride as
+`exec` re-roots the pane at kimi (herdr then watches the real process). A failed
+seed must neither kill the pane (`&&`) nor pass unnoticed (a bare `;` — the TUI's
+first repaint scrolls the error away, leaving a tab that looks like a working
+worker but never read TASK.md), so the script **reports and waits for a keypress**
+before handing over. Verified: a failed seed in a fresh worktree yields a NEW empty
+session, never a foreign one — `kimi -c` is scoped to the working directory, so two
+worktrees cannot cross-resume. Values ride as
 `"$1"`/`"$2"` positionals, never spliced into the script text — `-p` swallows the
 next token, so a concatenated argv is one reordering away from silently eating a
 flag (`kimi -p --auto "…"` makes `--auto` the prompt). The test asserts the exact
@@ -73,6 +78,17 @@ non-empty yet a *real* "no models" answer. So the gate is the **section's
 presence**: no `"models"` key → drift → trust auth; present but no match → truly
 unavailable. Transplanting the sibling's rule verbatim would have mislabeled
 either case.
+
+## `argv_shell=`: quoting belongs to the registry, not to prose
+`resolve` emits, next to the `argv=` words, one `argv_shell=` line with the same
+words POSIX-single-quoted (`shell_quote`, not `printf %q` — bash 3.2 renders that
+as per-character backslashes and `$'…'` for non-ASCII: correct but unreadable and
+bash/zsh-only). The skills print that line **verbatim** for their outside-herdr
+block. Before this, quoting was a *prose rule* the model had to follow; for kimi
+that is safety-critical, because its argv carries `;` and `exec` — a mis-quoted
+render would run the `;` in the **user's own interactive shell** and replace it
+with an unattended agent. Same reason the seed message stays ASCII-only: any
+backslash escape or non-ASCII char forces the unreadable `$'…'` form.
 
 ## Non-claude degradation: document, don't fake
 codex/grok/kimi have no work-system skills, so a launched worker gets a bootstrap
