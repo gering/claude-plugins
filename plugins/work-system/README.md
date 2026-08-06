@@ -28,7 +28,7 @@ Generic task and worktree workflow system for Claude Code. Manage tasks as markd
 | Command | Description |
 |---------|-------------|
 | `/define` | Create a new task (markdown file with Goal/Context/Requirements) |
-| `/kickoff` | Start a task in an isolated git worktree, with a choice of worker agent (Claude/codex/grok/kimi) |
+| `/kickoff` | Start a task in an isolated git worktree, with a choice of worker agent (Claude/codex/grok/kimi, or a PATH-detected cc-harness agent) |
 | `/adopt` | Adopt an existing branch into the work system |
 | `/continue` | Resume the current task (in a worktree); or `/continue <task>` from the main session reopens the task's herdr tab and resumes it |
 | `/status` | Check task status (PRs, branches, commits) |
@@ -190,6 +190,7 @@ flag picks another:
 | `--grok` | grok-4.5 |
 | `--kimi` | kimi-code on k3-256k (launches in two phases — see below) |
 | `--agent <cli[:model]>` | any registry entry, e.g. `--agent claude:sonnet` or `--agent codex` |
+| `--agent cc-harness:<id>` | foreign model *inside* the CC harness (only when `cc-harness-agents` is on PATH) |
 
 **The default is a single per-repo setting** — no global default, no shipped
 fallback. It lives in a committed `.claude/work-system-agent` file, so it travels
@@ -199,18 +200,32 @@ in a repo with no default yet. Everything is registry-driven — no ranking, no 
 call; the default is a simple, explicit choice (the hook where future task-aware
 routing can plug in).
 
+**Optional cc-harness agents (PATH-detected).** When a `cc-harness-agents` helper
+is on `PATH`, `/kickoff` offers its foreign agents — e.g. `cc-harness:grok`,
+`cc-harness:kimi`, `cc-harness:sol`. These are full Claude Code sessions driven by
+a foreign model via a local gateway (skills, lenses, `/continue`, `/close` all
+work), not the native CLI voice. The picker keeps them **one page down**: page 1 is
+the usual worker list plus a single `cc-harness agents ▸` entry, and only choosing
+that opens a second page with the concrete agents — so the familiar path stays one
+page and the harness list can grow freely. The plugin is a pure consumer of a small
+contract (`list` / `exec`); it hardcodes no gateway, no models, no agent table.
+Helper absent → one `command -v`, no aggregate entry, no change. Setup + contract:
+[docs/cc-harness-agents.md](docs/cc-harness-agents.md).
+
 **Non-Claude workers degrade honestly.** codex/grok/kimi have no work-system
 skills, so a launched worker gets a bootstrap prompt (read `TASK.md`, commit, open
-a PR) instead of `/continue`. Everything git/PR-derived (`/status`, `/list`, the
-`[ws]` statusline, `/close`'s tab teardown) works for any worker; only
-claude-session concepts differ. `/continue`'s reopen **always sends `claude -c`**
-— the work-system doesn't persist which worker a task used (per-task agent memory
-is a later idea), so it can't dispatch per CLI. That resumes a claude worker; for
-a codex/grok/kimi task it's a *new* Claude session, so you resume the real worker
-yourself in the tab (`codex resume --last` / `grok -c` / `kimi -c`) — `/continue`
-surfaces this caveat inline. Since codex and grok read `AGENTS.md`, dropping a
-short `AGENTS.md` note into the worktree is an optional way to give them standing
-task guidance.
+a PR) instead of `/continue`. A `cc-harness:…` worker is still a full CC session
+(the helper only routes the model), so it does **not** degrade — lifecycle is
+unchanged. Everything git/PR-derived (`/status`, `/list`, the `[ws]` statusline,
+`/close`'s tab teardown) works for any worker; only claude-session concepts
+differ. `/continue`'s reopen **always sends `claude -c`** — the work-system
+doesn't persist which worker a task used (per-task agent memory is a later idea),
+so it can't dispatch per CLI. That resumes a claude worker (including a
+cc-harness one); for a codex/grok/kimi task it's a *new* Claude session, so you
+resume the real worker yourself in the tab (`codex resume --last` / `grok -c` /
+`kimi -c`) — `/continue` surfaces this caveat inline. Since codex and grok read
+`AGENTS.md`, dropping a short `AGENTS.md` note into the worktree is an optional
+way to give them standing task guidance.
 
 **kimi launches in two phases.** It has no positional launch prompt, and its
 one-shot `-p` flag can't be combined with the autonomous `--auto`/`-y` modes — so

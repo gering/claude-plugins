@@ -2,7 +2,7 @@
 name: kickoff
 description: |
   Creates an isolated `task/<name>` worktree off main and opens a worker
-  session there (Claude, codex, grok, or kimi — your pick).
+  session there (Claude/codex/grok/kimi, or a PATH-detected cc-harness agent).
   Trigger: "start working on X", "kickoff", "create a worktree".
 user_invocable: true
 ---
@@ -45,6 +45,7 @@ and `add-dark-mode` is the task. Every other selector is valueless. An optional
 | `--grok` | grok-4.5 |
 | `--kimi` | kimi-code on k3-256k (two-phase launch — see step 13b) |
 | `--agent <cli[:model]>` | any registry entry, e.g. `--agent claude:sonnet` or `--agent codex` |
+| `--agent cc-harness:<id>` | foreign model *inside* the CC harness (only when `cc-harness-agents` is on PATH; e.g. `cc-harness:grok`) |
 
 This table mirrors `agent-registry.sh` for reader convenience only — **never
 hardcode it in a decision**. Step 12 resolves the selector through the script,
@@ -122,18 +123,22 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     `REG="${CLAUDE_PLUGIN_ROOT}/scripts/agent-registry.sh"`.
 
     - **An explicit flag was given** (`--fable`, `--opus`, `--codex`, `--sol`,
-      `--grok`, `--kimi`, or `--agent <cli[:model]>`): `SELECTOR` is that flag (for
-      `--agent`, the `cli[:model]` value, e.g. `claude:sonnet`). One-off — no
-      default offer.
+      `--grok`, `--kimi`, or `--agent <cli[:model]|cc-harness:<id>>`): `SELECTOR` is
+      that flag (for `--agent`, the value, e.g. `claude:sonnet` or
+      `cc-harness:grok`). One-off — no default offer.
     - **No flag:** read the repo default: `SELECTOR="$(bash "$REG" default get)"`
-      (the helper validates the committed value; a stale/unknown name prints
-      empty, so it can't route the launch).
+      (the helper validates the committed value; a stale/unknown name — including a
+      `cc-harness:…` default when the helper is off PATH — prints empty, so it
+      can't route the launch).
       - **Non-empty** → use it directly (the common path: no picker). **If that
         default is a non-claude worker** (`SELECTOR` does not start with `claude:` —
-        a negative check, so a future registry CLI is covered without editing this),
-        first **announce** it — e.g. "Launching **codex:gpt-5.6-sol** (project
-        default) — this sends the task to a third-party model; pass `--pick` to
-        choose another." This is a visibility line, **not** a prompt: a committed
+        a negative check, so a future registry CLI *and* `cc-harness:…` are covered
+        without editing this), first **announce** it — e.g. "Launching
+        **codex:gpt-5.6-sol** (project default) — this sends the task to a
+        third-party model; pass `--pick` to choose another." For a `cc-harness:…`
+        default, the announce is the same third-party line plus "foreign model
+        inside the Claude Code harness (full CC session, routed via local
+        gateway)." This is a visibility line, **not** a prompt: a committed
         default from a cloned repo shouldn't silently route your code off-Claude,
         but it also shouldn't block. Claude defaults launch with no such line.
     - **Whenever the resolved worker is `kimi:…`** — default, flag or picker alike —
@@ -143,19 +148,46 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
       whatever TASK.md says is executed in a worktree holding your git credentials.
       That is the intended shape, not a defect — but it must be visible, especially
       for an `/adopt`-generated TASK.md, which is summarized from someone else's
-      commits. Still announce-not-prompt: state it, don't block.
+      commits. Still announce-not-prompt: state it, don't block. (A `cc-harness:kimi`
+      worker is a full CC session and does **not** get this unattended line — only
+      the native `kimi:…` CLI voice does.)
       - **Empty** (no project default set, or the committed value was invalid) →
         fall through to the **picker** below.
-    - **`--pick`, or no flag with no default set → the picker.** Run
-      `bash "$REG" list` and present the rows with **AskUserQuestion**: one option
-      per entry, label = the `NAME` (`cli:model`), description = the model plus its
-      availability (append the `NOTE`, e.g. "unavailable — run: grok login", for
-      any row with `AVAILABLE=no`). **List unavailable entries too — do not hide
-      them** (mark them), order available first. In the **same** AskUserQuestion
-      call add a second question, "Save this as the project default?" (Yes / No).
-      Set `SELECTOR` = the picked `NAME`; set `OFFER_DEFAULT=yes` **only if** the
-      user chose Yes to that second question (otherwise leave it `no`). (Interpret
-      the answer, don't string-match a label — "Yes" means yes.)
+    - **`--pick`, or no flag with no default set → the picker (two pages).** Run
+      `bash "$REG" list` **once** and split its rows by the `CLI` column: rows with
+      `CLI=cc-harness` are the **harness** set, everything else the **native** set.
+      The harness set is empty whenever the helper is off PATH — then the picker is
+      exactly the single page it has always been.
+
+      **Page 1 — AskUserQuestion.** One option per *native* row: label = the `NAME`
+      (`cli:model`), description = the model plus, for any row with `AVAILABLE=no`,
+      the `NOTE` (e.g. "unavailable — run: grok login"). **Plus, only when the
+      harness set is non-empty, one aggregate option** labelled `cc-harness agents ▸`
+      and described "foreign model inside the Claude Code harness, routed via a
+      local gateway — full CC session (`<N>` available)". **List unavailable entries
+      too — do not hide them** (mark them), available first. In the **same** call add
+      a second question, "Save this as the project default?" (Yes / No).
+      - **Picked a native row** → `SELECTOR` = that `NAME`; `OFFER_DEFAULT=yes` only
+        if the save answer was Yes. Done — one page, exactly as before.
+      - **Picked the aggregate** → go to page 2. It is a *class*, not an agent: never
+        set `SELECTOR` to it, and discard page 1's save answer (it applied to a choice
+        the user had not made yet).
+
+      **Page 2 — a second AskUserQuestion, only on the aggregate path.** One option per
+      *harness* row (label = the `NAME` `cc-harness:<id>`, description = the model plus
+      the `NOTE` for unavailable ones), available first, unavailable marked not hidden.
+      Add the same "Save this as the project default?" question. `SELECTOR` = the picked
+      `NAME`; `OFFER_DEFAULT` comes from **page 2's** answer.
+
+      (Interpret the answers, don't string-match a label — "Yes" means yes.)
+
+      **An AskUserQuestion holds at most 4 options**, so a longer set must be
+      *consolidated, never silently truncated*: keep the available entries and (on
+      page 1) the aggregate, group same-CLI models into one option where needed (e.g.
+      "codex — gpt-5.6-terra / -sol", then confirm the model), and name what you left
+      out in the question text with the hint that `--agent <name>` reaches any entry
+      directly. Same rule on page 2. Do not invent harness rows the helper did not
+      print, and do not show the aggregate when the harness set is empty.
 
     Do not resolve models, the default, or availability yourself — the helper owns
     that. Step 13 passes `SELECTOR` to `herdr-launch.sh`, which resolves +
@@ -277,12 +309,13 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
          <the argv_shell= line, verbatim — e.g. codex -m gpt-5.6-sol 'Read TASK.md …'>
     ```
     What that line contains is the registry's business, not this skill's — but so
-    the report reads sensibly: a **claude** worker resumes via `/work-system:continue`
-    (plugin-qualified, since a CC built-in `/continue` shadows the skill);
-    **codex/grok/kimi** have no work-system skills and get the bootstrap prompt
-    instead (read TASK.md, drive to a PR), with **kimi** launching in two phases
-    because it has no positional launch prompt and `-p` cannot be combined with
-    `--auto`. Do **not** execute the `cd`
+    the report reads sensibly: a **claude** worker (including a `cc-harness:…`
+    worker, which is still a full CC session — the helper only routes the model)
+    resumes via `/work-system:continue` (plugin-qualified, since a CC built-in
+    `/continue` shadows the skill); **codex/grok/kimi** have no work-system skills
+    and get the bootstrap prompt instead (read TASK.md, drive to a PR), with
+    **kimi** launching in two phases because it has no positional launch prompt
+    and `-p` cannot be combined with `--auto`. Do **not** execute the `cd`
     yourself — it is for the user's new terminal. If `resolve` exits non-zero
     (2 unknown / 3 unavailable), surface that instead and re-offer the picker.
 

@@ -1,10 +1,10 @@
 ---
 title: "Kickoff Agent Selection: registry, per-repo default, honest degradation"
 createdAt: 2026-07-17
-updatedAt: 2026-08-11
+updatedAt: 2026-08-16
 createdFrom: "session: 2026-07-17 (task/kickoff-agent-selection)"
-updatedFrom: "session: 2026-08-11 (herdr transport metadata + kimi seed stop)"
-pluginVersion: 1.11.1
+updatedFrom: "session: 2026-08-16 (task/offer-cc-harness-agents-at-kickoff, rebased onto 1.11.1)"
+pluginVersion: 1.12.0
 prime: false
 ---
 
@@ -15,32 +15,86 @@ prime: false
 
 ## Single per-repo default, no global, no fallback
 The **only** persisted selection state is one committed
-`<repo>/.claude/work-system-agent` (`default=<cli:model>`). No global per-user
-default, no shipped fallback, no `--auto` ranking, no `--last`. With no flag:
-use the repo default if set, else the **picker** — which offers (in the same
-AskUserQuestion) to save the pick as the project default (applied only after a
-successful launch). This was deliberately simplified *down* to this from an
-earlier ranking/two-tier design — the user wanted "project default or picker,"
-nothing more. `--pick` forces the picker even when a default exists.
+`<repo>/.claude/work-system-agent` (`default=<cli:model>` or
+`default=cc-harness:<id>`). No global per-user default, no shipped fallback, no
+`--auto` ranking, no `--last`. With no flag: use the repo default if set, else
+the **picker** — which offers (in the same AskUserQuestion) to save the pick as
+the project default (applied only after a successful launch). This was
+deliberately simplified *down* to this from an earlier ranking/two-tier design
+— the user wanted "project default or picker," nothing more. `--pick` forces
+the picker even when a default exists.
 
 ## Registry is the single source of truth
 `scripts/agent-registry.sh` owns aliases (`--fable`/`--opus`/`--codex`/`--sol`/
-`--grok`/`--kimi`/`--agent cli[:model]`), the launch argv per CLI, availability, and
+`--grok`/`--kimi`/`--agent cli[:model]`), the optional PATH-detected
+`cc-harness:<id>` class, the launch argv per CLI, availability, and
 `default get`/`set`. `herdr-launch.sh` stays CLI-agnostic: it execs the resolved
 `argv=` words (argv-exec, no shell-typing race — same reason as the kickoff
 launch). Skills never hardcode the CLI list. `default get` **validates** its
 committed value against the registry — a stale/removed/attacker-supplied name
-reads as "no default" (→ picker), never routes or bricks kickoff.
+(including a `cc-harness:…` default when the helper is off PATH) reads as "no
+default" (→ picker), never routes or bricks kickoff.
+
+## Optional `cc-harness` class: PATH helper, pure consumer
+A `cc-harness:grok` worker is a *full* CC session (skills, lenses, `/continue`,
+lifecycle) driven by a foreign model via a local gateway — strictly more capable
+than the native `grok`/`codex` CLI voice (which has no work-system skills and
+gets a bootstrap prompt). Its subagents also run on the foreign model.
+
+Detection is one `command -v cc-harness-agents`. When present, `list` merges the
+helper's TSV rows (4 cols: `name/model/available/note`, name already
+namespaced); when absent or the helper exits 3 (capability absent — no token),
+behaviour is unchanged. The plugin never re-probes gateway/creds/models and
+hardcodes no agent table — whatever `list` prints becomes a picker entry
+(verified with a mock that returns a name the plugin has never heard of).
+Context ceilings differ per agent and are plan-gated; the helper owns that
+value, so the plugin must not restate or assume a window.
+
+Resolve shape (no `--model` — the helper sets it via env, then `exec`s into
+claude so the herdr pane roots at claude and agent_status + `/close` stay
+intact):
+
+    cc-harness-agents exec <id> -- claude [-n <session>] /work-system:continue
+
+`supports=` is the full claude set (`continue,close-exit,statusline,commit,pr`).
+**Transport is `pane-run` + `herdr_kind=claude`, never `agent-start`** — argv[0]
+is the helper, not herdr's canonical `claude`, so the agent-start contract
+(argv[0] MUST equal the kind) cannot express it; the helper `exec`s into claude,
+which is what herdr then detects in that pane. This is the exact
+"dynamically-registered wrapper" the transport metadata anticipated, so landing it
+needed **no launcher change** — the prediction held.
+
+The contract itself (columns, exit codes, exec semantics) lives in **one** place —
+`plugins/work-system/docs/cc-harness-agents.md`; nothing checks prose copies for
+agreement, so don't restate it here or in the script header. Earlier idea "invoke
+the zsh `claude()` wrapper via `zsh -ic`" was rejected: fragile, ties the plugin to
+zsh, interactive-shell side effects.
+
+## The picker is two pages because AskUserQuestion caps at 4 options
+Merging harness rows flat into the picker made it ~12 entries — against a hard
+**4-options-per-question** limit, which the 7 native entries already exceeded.
+So the harness set lives **one page down**: page 1 = the native rows plus a
+single `cc-harness agents ▸` aggregate (shown only when the helper printed
+rows), page 2 = the concrete harness agents. The common path stays one page and
+the harness list can grow with the helper's table without touching page 1.
+
+Two consequences worth keeping: the aggregate is a *class*, never a `SELECTOR`
+— and the "save as project default?" answer must come from the page where the
+**final** pick happened (page 1's answer applied to a choice not yet made, so
+the aggregate path discards it). Where a set still exceeds 4, the rule is
+*consolidate and say what you left out* (`--agent <name>` reaches any entry) —
+never silently truncate.
 
 Ownership extends to **how the worker reaches herdr** (1.11.1): each entry declares
 `herdr_mode=agent-start|pane-run` + `herdr_kind`, so the launcher never infers
 transport from a selector name or by parsing `argv[0]`. `agent-start` asserts
 argv[0] *equals* the kind (herdr's canonical executable) and hands the untouched
-tail to `--kind`; `pane-run` is for wrappers that no native kind can express — kimi
-today, and a dynamically-registered cc-harness entry (`pane-run` +
-`herdr_kind=claude`) tomorrow, with no launcher change. An entry whose mode the
-launcher does not know fails closed before anything is created. See
-[[herdr-kickoff-automation]] for the launch-side contract.
+tail to `--kind`; `pane-run` is for wrappers that no native kind can express — kimi,
+and (since 1.12.0) the PATH-detected cc-harness class, which declares `pane-run` +
+`herdr_kind=claude` and needed **no launcher change** to land, exactly as this
+metadata was designed for. An entry whose mode the launcher does not know fails
+closed before anything is created. See [[herdr-kickoff-automation]] for the
+launch-side contract.
 
 ## grok availability is model-aware and bounded
 grok drops/renames models between releases (composer `grok-composer-2.5-fast`

@@ -5,15 +5,18 @@ or via scripts/check-structure.py's "plugin tests" check.
 Guards the registry's contract: alias/name/cli selector resolution, the per-CLI
 launch argv shape (claude `/work-system:continue` vs the codex/grok/kimi bootstrap
 prompt, incl. kimi's two-phase seed+continue argv and its argument-order
-regression), the availability probe (codex login status + grok/kimi auth file +
-grok/kimi model-list), the exit-code map (2 unknown selector, 3
+regression; plus the optional cc-harness-agents PATH helper: list merge, the
+`exec … -- claude …` resolve shape, clean degrade when absent, exit-3
+capability-absent), the availability probe (codex login status + grok/kimi auth
+file + grok/kimi model-list), the exit-code map (2 unknown selector, 3
 resolved-but-unavailable), and the project-default state (set/get, bogus
 rejection, no-git-repo error).
 
-Availability is made deterministic with fake `codex`/`grok`/`kimi`/`claude` stubs
-on a prepended PATH, so the test does not depend on what is really
-installed/authed. The kimi stub also logs every invocation's argv, so the
-resolved launch argv can be executed for real and each phase asserted.
+Availability is made deterministic with fake `codex`/`grok`/`kimi`/`claude`
+stubs (and an optional `cc-harness-agents` stub) on a prepended PATH, so the
+test does not depend on what is really installed/authed. The kimi stub also
+logs every invocation's argv, so the resolved launch argv can be executed for
+real and each phase asserted.
 """
 import json
 import os
@@ -39,7 +42,11 @@ class Env:
     def __init__(self, codex_authed=True, grok_authed=True,
                  grok_models=("grok-4.5",), grok_models_ok=True,
                  kimi_authed=True, kimi_models=("kimi-code/k3-256k",),
-                 kimi_models_ok=True, kimi_schema_ok=True):
+                 kimi_models_ok=True, kimi_schema_ok=True,
+                 harness_agents=None, harness_list_rc=0):
+        # harness_agents: None → no helper on PATH (today's default).
+        # Otherwise a list of (name, model, available, note) tuples the stub
+        # prints as TSV. harness_list_rc=3 simulates "capability absent".
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
         self.home = root / "home"
@@ -90,6 +97,28 @@ class Env:
             "fi\n"
             "exit 0\n" % (kimi_section, kimi_model_json, 0 if kimi_models_ok else 1)
         )
+        # Optional cc-harness-agents stub. The contract is four TSV columns
+        # (name/model/available/note); names are already namespaced. `exec`
+        # just re-execs the remaining argv so a resolved launch can be run.
+        self.harness_bin = bindir / "cc-harness-agents"
+        if harness_agents is not None:
+            rows = "".join(
+                '  echo "%s\\t%s\\t%s\\t%s"\n' % (n, m, a, note)
+                for (n, m, a, note) in harness_agents
+            )
+            (self.harness_bin).write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = "list" ]; then\n'
+                "%s"
+                "  exit %d\n"
+                "fi\n"
+                'if [ "$1" = "exec" ]; then\n'
+                '  shift\n'                          # drop "exec"
+                '  [ "$2" = "--" ] && shift 2 || shift\n'  # name, optional --
+                '  exec "$@"\n'
+                "fi\n"
+                "exit 2\n" % (rows, harness_list_rc)
+            )
         for f in bindir.iterdir():
             f.chmod(0o755)
         # grok auth file toggles grok readiness.
@@ -465,6 +494,143 @@ e = Env()
 check("auto removed -> exit 2", e.run("auto").returncode == 2)
 check("rank removed -> exit 2", e.run("rank").returncode == 2)
 check("last removed -> exit 2", e.run("last", "get").returncode == 2)
+e.close()
+
+# --- optional cc-harness-agents PATH helper -------------------------------- #
+# Absent helper → today's behaviour: one `command -v`, no extra rows, and a
+# cc-harness:… selector is unknown (exit 2). Never hardcodes a gateway.
+e = Env(harness_agents=None)
+rows = json.loads(e.run("list", "--json").stdout)
+check("no helper → no harness rows",
+      all(not r["name"].startswith("cc-harness:") for r in rows))
+check("native rows still present without helper",
+      any(r["name"] == "claude:fable" for r in rows))
+u = e.run("resolve", "cc-harness:grok")
+check("no helper → cc-harness selector exit 2", u.returncode == 2)
+check("no helper → hint mentions the helper",
+      "cc-harness-agents" in u.stderr)
+e.close()
+
+# Present helper → merge its rows (incl. a name the plugin has never heard of)
+# and resolve to `cc-harness-agents exec <id> -- claude … /work-system:continue`.
+# No --model: the helper sets ANTHROPIC_MODEL via env before exec'ing.
+HARNESS_ROWS = [
+    ("cc-harness:grok", "grok-4.5", "yes", "-"),
+    ("cc-harness:kimi", "kimi-k3", "no", "run: cliproxyapi -kimi-login"),
+    # Agent the plugin has never shipped a row for — whatever list prints wins.
+    ("cc-harness:sol", "gpt-5.6-sol", "yes", "-"),
+    ("cc-harness:never-seen", "imaginary-9.9", "yes", "-"),
+]
+e = Env(harness_agents=HARNESS_ROWS)
+rows = json.loads(e.run("list", "--json").stdout)
+by = {r["name"]: r for r in rows}
+check("helper merges cc-harness:grok", "cc-harness:grok" in by)
+check("helper merges never-seen agent (no per-agent code)",
+      "cc-harness:never-seen" in by)
+check("harness cli column is cc-harness", by["cc-harness:grok"]["cli"] == "cc-harness")
+check("harness model comes from the helper",
+      by["cc-harness:grok"]["model"] == "grok-4.5")
+check("harness available=yes from helper", by["cc-harness:grok"]["available"] is True)
+check("harness available=no from helper (no re-probe)",
+      by["cc-harness:kimi"]["available"] is False)
+check("harness note is the helper's fix hint",
+      "kimi-login" in by["cc-harness:kimi"]["note"])
+check("native rows still present with helper", "claude:fable" in by)
+
+r = kv(e.run("resolve", "cc-harness:grok", "--session", "close-herdr").stdout)
+check("resolve harness name", r.get("name") == "cc-harness:grok")
+check("resolve harness cli", r.get("cli") == "cc-harness")
+check("resolve harness model is the real model (display)",
+      r.get("model") == "grok-4.5")
+check("resolve harness supports full CC lifecycle",
+      "continue" in r.get("supports", "") and "close-exit" in r.get("supports", ""))
+# Transport: a harness entry is the "dynamically-registered wrapper" the metadata
+# was designed for. argv[0] is the HELPER, not herdr's canonical `claude`, so
+# agent-start (which asserts argv[0] == kind) cannot express it — it must be
+# pane-run, and the kind is `claude` because the helper execs into claude.
+check("harness declares pane-run transport", r.get("herdr_mode") == "pane-run")
+check("harness kind is claude (what the helper execs into)",
+      r.get("herdr_kind") == "claude")
+check("harness argv[0] is NOT the kind (why agent-start is impossible)",
+      r["argv"][0] != "claude" and "claude" in r["argv"])
+check("resolve harness argv shape",
+      r["argv"] == [
+          "cc-harness-agents", "exec", "grok", "--",
+          "claude", "-n", "close-herdr", "/work-system:continue",
+      ])
+check("resolve harness has no --model (helper owns it)",
+      "--model" not in r["argv"])
+check("resolve harness argv_shell is set",
+      "argv_shell" in r and "cc-harness-agents" in r["argv_shell"])
+check("resolve available harness -> exit 0",
+      e.run("resolve", "cc-harness:grok").returncode == 0)
+
+# Never-seen agent resolves the same way — no plugin-side allow-list.
+r = kv(e.run("resolve", "cc-harness:never-seen").stdout)
+check("never-seen harness argv uses bare id",
+      r["argv"][:4] == ["cc-harness-agents", "exec", "never-seen", "--"])
+check("never-seen still lands on claude + qualified continue",
+      r["argv"][-2:] == ["claude", "/work-system:continue"])
+
+# Listed-but-unavailable still emits argv and exits 3 (mirrors native).
+res = e.run("resolve", "cc-harness:kimi")
+check("unavailable harness -> exit 3", res.returncode == 3)
+rr = kv(res.stdout)
+check("unavailable harness still prints argv",
+      rr["argv"][:4] == ["cc-harness-agents", "exec", "kimi", "--"])
+check("unavailable harness available=no", rr.get("available") == "no")
+check("unavailable harness note is the fix hint",
+      "kimi-login" in rr.get("note", ""))
+
+# Unknown harness id (helper present, name not listed) → exit 2.
+u = e.run("resolve", "cc-harness:nope")
+check("unknown harness id -> exit 2", u.returncode == 2)
+
+# The PICKER reads the human table (`list`, no --json), so it must carry every
+# row too. Regression: `$( )` strips the trailing newline off the merged harness
+# block, and a plain `while read` then drops the LAST line — silently, and only
+# in the table, since the --json path parses a newline-less final line fine. The
+# dropped row is an agent the user can never pick, so assert the table directly.
+table = e.run("list").stdout
+for nm in ("cc-harness:grok", "cc-harness:kimi", "cc-harness:sol",
+           "cc-harness:never-seen"):
+    check("human table lists %s (last-row regression)" % nm, nm in table)
+check("human table still lists native rows", "kimi:kimi-code/k3-256k" in table)
+check("human table has no blank data line",
+      all(line.strip() for line in table.splitlines()))
+# Table and JSON must agree on the row set — neither view may silently drop one.
+check("table and --json agree on row count",
+      len(table.strip().splitlines()) - 1  # minus the header
+      == len(json.loads(e.run("list", "--json").stdout)))
+
+# A committed harness default is accepted when the helper lists it, and falls
+# through to "no default" (→ picker) when the helper is gone — same validation
+# path as a stale native name.
+e.run("default", "set", "cc-harness:sol")
+check("harness default set/get",
+      e.run("default", "get").stdout.strip() == "cc-harness:sol")
+e.close()
+
+# Helper present but capability absent (exit 3, no token) → silent degrade,
+# no harness rows, native list untouched. Distinct from "provider not logged in".
+e = Env(harness_agents=[("cc-harness:grok", "grok-4.5", "yes", "-")],
+        harness_list_rc=3)
+rows = json.loads(e.run("list", "--json").stdout)
+check("capability-absent → no harness rows",
+      all(not r["name"].startswith("cc-harness:") for r in rows))
+check("capability-absent still lists native",
+      any(r["name"] == "claude:fable" for r in rows))
+check("capability-absent resolve is unknown (not exit 3)",
+      e.run("resolve", "cc-harness:grok").returncode == 2)
+e.close()
+
+# Helper's "unknown" available cell maps to no (fail closed for launch).
+e = Env(harness_agents=[("cc-harness:grok", "grok-4.5", "unknown", "probe inconclusive")])
+by = {r["name"]: r for r in json.loads(e.run("list", "--json").stdout)}
+check("harness available=unknown → treated as no",
+      by["cc-harness:grok"]["available"] is False)
+check("resolve unknown-avail harness -> exit 3",
+      e.run("resolve", "cc-harness:grok").returncode == 3)
 e.close()
 
 
