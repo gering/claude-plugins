@@ -153,19 +153,32 @@ elif js_fn:
     FAILS.append("node not found — cannot verify the workflow/adapter checksum implementations agree")
 
 # Oversize headroom: the skill skips the externals above a threshold, but the
-# real per-call cap (`max_bytes`) lives in agents.sh, and what exec() sees is
-# lens-instruction + diff. Nothing but this check ties the two numbers together,
-# so a brief that grows past the headroom — or a changed cap — would surface only
-# as a per-call backend error at review time.
-# Read the threshold from the EXECUTABLE guard in the prep block (the `-gt N`
-# that sets EXTERNALS_OVERSIZE), not from the surrounding prose: prose can drift
-# from the code, and it is the code that decides.
-mb = re.search(r"local max_bytes=(\d+)", sh)
-check("adapter: max_bytes found", mb)
-sk = re.search(r'-gt (\d+) \]; then echo "EXTERNALS_OVERSIZE=1"', skill)
-check("skill: EXTERNALS_OVERSIZE guard + threshold found", sk)
+# real per-call cap (`max_bytes`) lives in agents.sh, and what the backend
+# ingests is lens-instruction + diff. Nothing but this check ties the two
+# numbers together, so a brief that grows past the headroom — or a changed cap —
+# would surface only as a per-call backend error at review time.
+# Both sides read the SAME env knob (SWARM_MAX_PROMPT_BYTES), so what has to
+# agree is the DEFAULT each falls back to: a skill default below the adapter's
+# would skip externals the adapter would have accepted, one above it would send
+# calls the adapter then rejects. Read both from the EXECUTABLE code (the
+# adapter's assignment, the skill's `-gt` guard), never from prose: prose can
+# drift, and it is the code that decides.
+mb = re.search(r'local max_bytes="\$\{SWARM_MAX_PROMPT_BYTES:-(\d+)\}"', sh)
+check("adapter: max_bytes default found", mb)
+sk = re.search(
+    r'SWARM_CAP="\$\{SWARM_MAX_PROMPT_BYTES:-(\d+)\}"(?s:.*?)'
+    r'-gt "\$\(\( SWARM_CAP - (\d+) \)\)" \]; then echo "EXTERNALS_OVERSIZE=1"',
+    skill,
+)
+check("skill: EXTERNALS_OVERSIZE guard + shared cap default found", sk)
 if mb and sk:
-    max_bytes, threshold = int(mb.group(1)), int(sk.group(1))
+    max_bytes = int(mb.group(1))
+    skill_default, headroom = int(sk.group(1)), int(sk.group(2))
+    check(
+        f"skill cap default ({skill_default}) equals the adapter's ({max_bytes})",
+        skill_default == max_bytes,
+    )
+    threshold = skill_default - headroom
     check("skill threshold is below the adapter cap", threshold < max_bytes)
     # Largest instruction the workflow can build. The FIXED prose is DERIVED from
     # the source (the literal chunks of lensInstr()/unitBrief()'s template

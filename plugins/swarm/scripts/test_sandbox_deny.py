@@ -295,13 +295,26 @@ class TestFailClosedDegrade(unittest.TestCase):
     them. Asserted on the actual argv run_grok/run_codex build."""
 
     def _argv(self, backend: str, jail: bool) -> str:
-        with tempfile.NamedTemporaryFile("r", suffix=".argv") as tf:
+        with tempfile.NamedTemporaryFile("r", suffix=".argv") as tf, \
+                tempfile.NamedTemporaryFile("w", suffix=".prompt") as pf:
+            # run_codex/run_grok take the prompt as a PATH, not as text: the
+            # prompt reaches the backend out-of-band (codex stdin redirect, grok
+            # --prompt-file) so it never hits exec's argv limit. codex's stdin
+            # redirect makes a non-existent path a hard failure, so the harness
+            # has to hand over a real file.
+            pf.write("prompt text\n")
+            pf.flush()
             jail_fn = "_jail_available() { return 0; }" if jail \
                 else "_jail_available() { return 1; }"
             r = _source(
                 jail_fn,
+                # Stub the grok capability probe: it shells out to `grok --help`,
+                # which would make these argv assertions depend on a real CLI
+                # being installed (CI has none). The probe's own behaviour is not
+                # what this test covers.
+                "_grok_has_prompt_file() { return 0; }",
                 _RECORD_SANDBOXED,
-                f'run_{backend} "prompt text" high "" "{SCHEMA}" >/dev/null 2>&1 || true',
+                f'run_{backend} "{pf.name}" high "" "{SCHEMA}" >/dev/null 2>&1 || true',
                 env_extra={"ARGV": tf.name},
             )
             self.assertEqual(r.returncode, 0, f"harness failed: {r.stderr!r}")
@@ -332,6 +345,43 @@ class TestFailClosedDegrade(unittest.TestCase):
         argv = self._argv("codex", jail=True)
         self.assertIn("tools.web_search=true", argv,
                       f"jailed codex must enable web; argv:\n{argv}")
+
+
+class TestPromptTransport(unittest.TestCase):
+    """The prompt must never travel on argv. It used to, which made exec's
+    MAX_ARG_STRLEN the binding limit and forced a 120 KiB cap — above it the
+    skill dropped EVERY external voice, the same damage as a backend timeout.
+    Lives next to the fail-closed tests because it reuses their argv harness:
+    both assert on the exact command line run_codex/run_grok build.
+
+    A regression here is silent — the reviews still work on small diffs and only
+    the large ones start failing — so pin the transport itself, not just its
+    effect."""
+
+    def _argv(self, backend: str) -> str:
+        return TestFailClosedDegrade._argv(self, backend, jail=True)
+
+    def test_grok_uses_prompt_file_not_single(self):
+        argv = self._argv("grok")
+        self.assertIn("--prompt-file", argv,
+                      f"grok must take the prompt out-of-band; argv:\n{argv}")
+        self.assertNotIn("--single", argv,
+                         f"--single puts the prompt back on argv (120 KiB wall); argv:\n{argv}")
+
+    def test_codex_reads_prompt_from_stdin(self):
+        argv = self._argv("codex")
+        words = argv.splitlines()
+        self.assertEqual(words[-2:], ["--", "-"],
+                         f"codex must end in `-- -` (prompt from stdin); argv:\n{argv}")
+        self.assertNotIn("prompt text", argv,
+                         f"the prompt body must not appear on argv; argv:\n{argv}")
+
+    def test_neither_backend_receives_the_prompt_body(self):
+        # The harness prompt file contains "prompt text"; if either backend
+        # inlines the file's CONTENT, this catches it regardless of the flag used.
+        for backend in ("codex", "grok"):
+            with self.subTest(backend=backend):
+                self.assertNotIn("prompt text", self._argv(backend))
 
 
 if __name__ == "__main__":

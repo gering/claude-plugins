@@ -21,14 +21,20 @@
 #       --model <name>      Backend model override
 #       --schema <file>     JSON schema to enforce (default: bundled finding.schema.json)
 #
-# Backend notes (probed against codex 0.144.6 / grok 0.2.103, 2026-07):
+# The prompt reaches the backend OUT-OF-BAND (codex: stdin · grok:
+# --prompt-file), never on argv — so the diff is bounded by model context, not
+# by exec's MAX_ARG_STRLEN. SWARM_MAX_PROMPT_BYTES (default 512 KiB) is that
+# sanity cap.
+#
+# Backend notes (probed against codex 0.144.6 / grok 0.2.112, 2026-07..08):
 #   claude — probe-only: reviews run in-session via the Agent tool, so
 #            `run claude` is a usage error. available/ready/list include it.
 #   codex  — `codex exec --output-schema` under `-s read-only` with
 #            `-C <repo>` + `-c tools.web_search=true` (web works under read-only;
 #            no sandbox loosen). Pure schema JSON via --output-last-message.
+#            Prompt via `-- -` = read instructions from stdin.
 #            Auth: `codex login status`. Effort has no "max" tier -> max→xhigh.
-#   grok   — headless `--single=` with inline --json-schema; the validated
+#   grok   — headless `--prompt-file` with inline --json-schema; the validated
 #            object is `.structuredOutput` of a response envelope. Needs an
 #            explicit model (-m): grok-4.5 is the sole schema-capable model and
 #            accepts --effort (ladder is low|medium|high — no max tier, so the
@@ -68,10 +74,17 @@ GROK_DEFAULT_MODEL="grok-4.5"
 HOME="${HOME:-$(cd ~ 2>/dev/null && pwd || echo /nonexistent)}"
 GROK_AUTH_FILE="${GROK_AUTH_FILE:-$HOME/.grok/auth.json}"
 
-# Temp file for codex's --output-last-message; must be a global (not a
-# function-local) so the EXIT trap still sees it under `set -u`.
+# Temp files: codex's --output-last-message, and the assembled prompt the
+# backends read out-of-band (see the transport note in `run`). Both must be
+# globals (not function-locals) so the EXIT trap still sees them under `set -u`.
+# TMP_PROMPT holds the untrusted diff, so it is removed on EVERY exit path,
+# including the error ones.
 TMP_OUT=""
-cleanup() { if [[ -n "${TMP_OUT:-}" ]]; then rm -f "$TMP_OUT"; fi; }
+TMP_PROMPT=""
+cleanup() {
+  if [[ -n "${TMP_OUT:-}" ]]; then rm -f "$TMP_OUT"; fi
+  if [[ -n "${TMP_PROMPT:-}" ]]; then rm -f "$TMP_PROMPT"; fi
+}
 trap cleanup EXIT
 
 print_usage() {
@@ -702,29 +715,56 @@ subcmd_run() {
   esac
   [[ -f "$schema" ]] || { echo "Schema not found: $schema" >&2; exit 2; }
 
-  # The prompt travels as ONE argv word, so the binding limit is the per-argument
-  # cap, not total ARG_MAX: Linux MAX_ARG_STRLEN is 128 KiB (macOS has no
-  # per-arg cap but a ~1 MiB total). Cap at 120 KiB to stay under the Linux
-  # per-arg limit with headroom for the schema arg + environment. Measure BYTES
-  # (a multibyte prompt would slip a `${#prompt}` char-count yet overflow exec),
-  # and for a file check its size BEFORE reading it (a 500 MiB file would
-  # otherwise be slurped into a shell variable first).
-  local max_bytes=122880 nbytes
-  local prompt
+  # PROMPT TRANSPORT: the prompt NEVER travels on argv. It used to, which made
+  # `exec`'s per-argument limit the binding cap (Linux MAX_ARG_STRLEN = 128 KiB)
+  # and forced a 120 KiB ceiling — above it the SKILL dropped ALL external
+  # voices (EXTERNALS_OVERSIZE), i.e. the same damage as a backend timeout.
+  # Both CLIs accept the prompt out-of-band, so the adapter now normalizes every
+  # input form to ONE file and hands the PATH (never the content) to the backend:
+  #   codex — `[PROMPT]` omitted or `-` reads the instructions from stdin
+  #   grok  — `--prompt-file <PATH>` (>= 0.2.112; falls back to --single below)
+  # The content is therefore never read into a shell variable either, so a large
+  # diff no longer costs a full in-memory copy.
+  #
+  # Do NOT "solve" this instead by telling the backend to read the diff file
+  # itself as a tool call: delivery would stop being verifiable (a model that
+  # reads only the head of the file silently loses coverage), the untrusted diff
+  # would arrive as a tool result rather than inside the nonce fence, and each
+  # voice would pay an extra round-trip — the wrong direction while the 600 s
+  # wall is still unfixed.
+  #
+  # What remains is a sanity cap on MODEL CONTEXT, not an exec limit: 512 KiB
+  # (~4x the old ceiling, roughly 128k tokens of diff) leaves the models room to
+  # reason and keeps a runaway range from burning a full timeout window. Raise it
+  # with SWARM_MAX_PROMPT_BYTES when a review genuinely needs more — but note a
+  # bigger prompt costs wall-clock, so it trades the size wall for the timeout
+  # one. Measure BYTES (a multibyte prompt would slip a `${#prompt}` char count),
+  # and check a file's size BEFORE copying it (a 500 MiB file must not be
+  # duplicated into TMPDIR first).
+  local max_bytes="${SWARM_MAX_PROMPT_BYTES:-524288}" nbytes
+  [[ "$max_bytes" =~ ^[0-9]+$ && "$max_bytes" != 0 ]] \
+    || { echo "Invalid SWARM_MAX_PROMPT_BYTES='$max_bytes' — must be a positive integer (bytes)" >&2; exit 2; }
+  local prompt_path
   if [[ -n "$prompt_file" ]]; then
     [[ -f "$prompt_file" ]] || { echo "Prompt file not found: $prompt_file" >&2; exit 2; }
     nbytes=$(wc -c < "$prompt_file")
-    (( nbytes > max_bytes )) && { echo "Prompt file too large ($(( nbytes / 1024 )) KiB > $(( max_bytes / 1024 )) KiB) — inline less of the diff, or have the agent read it itself" >&2; exit 2; }
-    prompt="$(cat "$prompt_file")"
+    (( nbytes > max_bytes )) && { echo "Prompt file too large ($nbytes bytes > $max_bytes) — narrow the diff range, or raise SWARM_MAX_PROMPT_BYTES" >&2; exit 2; }
+    prompt_path="$prompt_file"
   else
     # Guard against blocking forever on an interactive/absent stdin: with no
     # --prompt-file and a TTY on fd 0, `cat` would hang waiting for input.
     [[ -t 0 ]] && { echo "No prompt: pass --prompt-file <f> or pipe the prompt on stdin" >&2; exit 2; }
-    prompt="$(cat)"
-    nbytes=$(printf '%s' "$prompt" | wc -c)
-    (( nbytes > max_bytes )) && { echo "Prompt too large ($(( nbytes / 1024 )) KiB > $(( max_bytes / 1024 )) KiB) — inline less of the diff, or have the agent read it itself" >&2; exit 2; }
+    # 0600 BEFORE any content lands: the file carries the untrusted diff, and on
+    # a shared host a default-umask temp file would be world-readable in the
+    # window between creation and the first write.
+    TMP_PROMPT="$(mktemp)" || { echo "Could not create a temp file for the prompt" >&2; exit 2; }
+    chmod 600 "$TMP_PROMPT"
+    cat > "$TMP_PROMPT"
+    nbytes=$(wc -c < "$TMP_PROMPT")
+    (( nbytes > max_bytes )) && { echo "Prompt too large ($nbytes bytes > $max_bytes) — narrow the diff range, or raise SWARM_MAX_PROMPT_BYTES" >&2; exit 2; }
+    prompt_path="$TMP_PROMPT"
   fi
-  [[ -z "$prompt" ]] && { echo "Empty prompt (use --prompt-file or stdin)" >&2; exit 2; }
+  (( nbytes > 0 )) || { echo "Empty prompt (use --prompt-file or stdin)" >&2; exit 2; }
 
   # Per-cluster external voices: the WORKFLOW owns LENS_BRIEF (single source of
   # truth for the lens set) and passes the gated cluster's briefs here; the
@@ -771,11 +811,27 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
     fi
   fi
   if [[ -n "$lens_instr" ]]; then
-    prompt="$lens_instr"$'\n\n'"$prompt"
-    # Re-measure: the pre-read file check bounded the DIFF alone, but what
-    # exec() sees is instruction+diff as one argv word.
-    nbytes=$(printf '%s' "$prompt" | wc -c)
-    (( nbytes > max_bytes )) && { echo "Prompt too large with lens instruction ($(( nbytes / 1024 )) KiB > $(( max_bytes / 1024 )) KiB) — narrow the diff range" >&2; exit 2; }
+    # Assemble instruction+diff into a NEW file rather than concatenating
+    # strings: the whole point of the transport rework is that the diff never
+    # enters a shell variable. Writing into a fresh file (not appending in
+    # place) also keeps a caller-owned --prompt-file untouched — the workflow
+    # hands the SAME prompt file to every voice, so mutating it would corrupt
+    # the sibling calls running concurrently.
+    local assembled
+    assembled="$(mktemp)" || { echo "Could not create a temp file for the assembled prompt" >&2; exit 2; }
+    chmod 600 "$assembled"
+    { printf '%s\n\n' "$lens_instr"; cat "$prompt_path"; } > "$assembled" \
+      || { rm -f "$assembled"; echo "Could not assemble the lens instruction and prompt" >&2; exit 2; }
+    # Hand the trap the new file before dropping the old one, so no exit path in
+    # between can leak an untracked temp file holding the diff.
+    local previous="$TMP_PROMPT"
+    TMP_PROMPT="$assembled"
+    [[ -n "$previous" ]] && rm -f "$previous"
+    prompt_path="$TMP_PROMPT"
+    # Re-measure: the check above bounded the DIFF alone, but what the backend
+    # ingests is instruction+diff.
+    nbytes=$(wc -c < "$prompt_path")
+    (( nbytes > max_bytes )) && { echo "Prompt too large with lens instruction ($nbytes bytes > $max_bytes) — narrow the diff range, or raise SWARM_MAX_PROMPT_BYTES" >&2; exit 2; }
   fi
 
   require_usable "$backend"
@@ -783,13 +839,13 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
   require_valid_timeout
 
   case "$backend" in
-    codex) run_codex "$prompt" "$effort" "$model" "$schema" ;;
-    grok)  run_grok  "$prompt" "$effort" "$model" "$schema" ;;
+    codex) run_codex "$prompt_path" "$effort" "$model" "$schema" ;;
+    grok)  run_grok  "$prompt_path" "$effort" "$model" "$schema" ;;
   esac
 }
 
 run_codex() {
-  local prompt="$1" effort="$2" model="$3" schema="$4"
+  local prompt_path="$1" effort="$2" model="$3" schema="$4"
   [[ "$effort" == "max" ]] && effort="xhigh"
 
   TMP_OUT="$(mktemp)"
@@ -824,8 +880,14 @@ run_codex() {
 
   # The schema-validated JSON lands in $TMP_OUT; codex's stdout copy of the
   # final message is discarded (its transcript goes to stderr = debug info).
-  # stdin must be closed: with an inherited open non-TTY stdin, codex waits
-  # for "additional input from stdin" and hangs.
+  # PROMPT ON STDIN: `-` as the positional PROMPT makes codex read the
+  # instructions from stdin, which is what keeps the diff off argv (see the
+  # transport note in `run`). Pass it EXPLICITLY rather than omitting the
+  # argument — an omitted prompt is the same code path today, but `-` states the
+  # intent and cannot be re-interpreted as "no prompt given" by a future release.
+  # This does NOT resurrect the documented hang: codex waits for "additional
+  # input from stdin" when a prompt arrives on ARGV *and* stdin is an open pipe;
+  # here stdin IS the prompt and hits EOF at the end of the file.
   # `--` ends flag parsing: a prompt starting with "-" (e.g. a markdown
   # bullet) would otherwise be rejected as an unknown flag.
   # 2>/dev/null discards codex's reasoning transcript (goes to stderr): under
@@ -840,7 +902,7 @@ run_codex() {
       ${model_args[@]+"${model_args[@]}"} \
       --output-schema "$schema" \
       --output-last-message "$TMP_OUT" \
-      -- "$prompt" </dev/null >/dev/null 2>/dev/null || rc=$?
+      -- - <"$prompt_path" >/dev/null 2>/dev/null || rc=$?
   if (( rc != 0 )); then
     (( rc == 124 )) && echo "codex exec timed out after ${ADAPTER_TIMEOUT}s" >&2 || echo "codex exec failed" >&2
     exit 1
@@ -865,12 +927,31 @@ if not (isinstance(d, dict) and isinstance(d.get("findings"), list)):
 # — mutating tools (write, search_replace, run_terminal_command, spawn_*, …)
 # stay out. Web IDs probed 2026-07-20 on grok 0.2.103: web_search, web_fetch.
 # Do NOT fall back to a denylist that could admit a mutating tool.
+_grok_has_prompt_file() {
+  # Preflight for the out-of-band prompt flag. `--prompt-file` is what keeps the
+  # diff off argv (see the transport note in `run`); an older CLI without it
+  # would fail with a bare "unknown flag" and rc=1, which the caller reports as
+  # a generic backend error. Probe the help text rather than parse a version:
+  # the release that introduced the flag is not documented, and the capability
+  # is what actually matters (~40 ms, next to a multi-minute review call).
+  # Do NOT silently fall back to `--single`: that is exactly the argv path this
+  # rework removed, so it would reintroduce the 120 KiB wall as a mystery
+  # failure on big diffs instead of a clear "upgrade the CLI".
+  # Capture into a variable instead of piping to grep: under `pipefail` an
+  # early-exiting `grep -q` SIGPIPEs the CLI and the pipeline reports failure
+  # even on a match. Its OWN function so the argv tests can stub it — otherwise
+  # they would need a real grok on PATH to exercise run_grok.
+  local help
+  help="$(grok --help 2>/dev/null || true)"
+  case "$help" in *--prompt-file*) return 0 ;; *) return 1 ;; esac
+}
+
 GROK_READ_TOOLS="read_file,list_dir,grep"
 GROK_WEB_TOOLS="web_search,web_fetch"
 GROK_TOOLS="${GROK_READ_TOOLS},${GROK_WEB_TOOLS}"
 
 run_grok() {
-  local prompt="$1" effort="$2" model="$3" schema="$4"
+  local prompt_path="$1" effort="$2" model="$3" schema="$4"
   # grok's effort ladder is low|medium|high (0.2.101 dropped max) — map the two
   # higher adapter tiers down so a stale caller degrades instead of erroring,
   # mirroring codex's max→xhigh mapping.
@@ -886,8 +967,14 @@ run_grok() {
     exit 2
   fi
 
-  # --single=<prompt> (not "-p <prompt>"): as a separate argv word a prompt
-  # starting with "-" would be parsed as a flag.
+  _grok_has_prompt_file \
+    || { echo "grok CLI has no --prompt-file (present on 0.2.112) — the adapter passes the prompt out-of-band so a large diff cannot hit the argv limit; upgrade the grok CLI" >&2; exit 2; }
+
+  # --prompt-file <path> (not --single=<prompt>): the prompt stays out of argv,
+  # so the diff size is bounded by model context, not MAX_ARG_STRLEN. grok reads
+  # the file from INSIDE the OS jail, so it must be jail-readable — mktemp's
+  # TMPDIR is (the denylist covers credential paths, not the temp dir). A user
+  # who adds TMPDIR to SWARM_DENY_PATHS breaks their own prompt delivery.
   # Read+web posture (0.6.0): strict --tools allowlist grants file-read
   # (read_file,list_dir,grep) + web (web_search,web_fetch) so grok can find
   # out-of-diff bugs and research external knowledge. No write/shell tools.
@@ -914,7 +1001,7 @@ run_grok() {
       ${tool_args[@]+"${tool_args[@]}"} \
       ${cwd_args[@]+"${cwd_args[@]}"} \
       --json-schema "$(cat "$schema")" \
-      --single="$prompt" </dev/null 2>/dev/null)" || rc=$?
+      --prompt-file "$prompt_path" </dev/null 2>/dev/null)" || rc=$?
   if (( rc != 0 )); then
     # stderr is deliberately discarded (injection guard), so name the likely
     # cause: an older CLI that predates the pinned model reports Ready (auth

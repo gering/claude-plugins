@@ -1,9 +1,9 @@
 ---
 title: "Swarm Backend Adapter Layer"
 createdAt: 2026-07-03
-updatedAt: 2026-07-23
+updatedAt: 2026-08-06
 createdFrom: "PR #21"
-updatedFrom: "open-swarm-external-exploration"
+updatedFrom: "fix-swarm-timeout-ceiling"
 pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
@@ -129,8 +129,32 @@ The 120-KiB inline-diff cap is **unchanged** in 0.6.0; file-read now makes a
 future reduction of inlining possible (have the agent read the file itself) —
 coordinate that separately, do not duplicate transport work here.
 
-## Verified CLI facts (codex 0.144.6 / grok 0.2.103, 2026-07)
+## Verified CLI facts (codex 0.144.6 / grok 0.2.112, 2026-07..08)
 
+- **The prompt travels OUT-OF-BAND, never on argv** — codex reads it from stdin
+  (`-- -`; the help states an omitted or `-` PROMPT reads stdin), grok takes
+  `--prompt-file <path>` (present on 0.2.112; the introducing release is not
+  documented, so the adapter probes `grok --help` for the flag rather than
+  parsing a version). *Why it matters:* on argv the binding limit is
+  `MAX_ARG_STRLEN` (128 KiB on Linux), which forced a 120 KiB prompt cap — and
+  above that cap `/swarm:review` dropped **every** external voice, i.e. the same
+  damage as a backend timeout, from a size limit that was never inherent to the
+  backends. What remains is a model-context sanity cap
+  (`SWARM_MAX_PROMPT_BYTES`, default 512 KiB), read by the adapter AND the
+  skill's oversize guard from the same env knob so an override reaches both.
+  Verified end-to-end at 164 KiB through both backends (2026-08-05).
+  - **Do not "solve" a size limit by having the backend read the diff file
+    itself.** Both voices have file-read, so it looks equivalent — it is not:
+    delivery stops being verifiable (a model that reads only the file's head
+    silently loses coverage), the untrusted diff arrives as a tool result
+    instead of inside the nonce fence, and every voice pays an extra
+    round-trip. Out-of-band transport keeps the fence and the delivery
+    guarantee intact.
+  - grok reads that file from **inside the OS jail**, so it must be
+    jail-readable — `TMPDIR` is (the denylist covers credential paths). The
+    adapter's own temp prompt is `chmod 600` before content lands and is removed
+    by the EXIT trap on every path, including errors: it holds the untrusted
+    diff.
 - **Uniform findings JSON** is achievable from both CLIs: `codex exec
   --output-schema <file>` and `grok --json-schema '<inline>'` both enforce a
   JSON Schema on the final answer. One bundled schema
@@ -145,8 +169,7 @@ coordinate that separately, do not duplicate transport work here.
 - **The adapter pins `-m grok-4.5`** — the schema-capable model, and since
   swarm 0.4.3 the *only* grok model it supports. grok 0.2.101 renamed it from
   `grok-build` (same upstream pin-rename class as codex's `gpt-5.6-terra`;
-  verified drop-in: identical envelope/`structuredOutput` shape, `--single`
-  unchanged). Any other `--model` is preflight-rejected with a usage error —
+  verified drop-in: identical envelope/`structuredOutput` shape). Any other `--model` is preflight-rejected with a usage error —
   only grok-4.5 enforces `--json-schema`, and an unlisted model fails late with
   `structuredOutput: null` after burning a full review.
 - **Effort ladders**: grok is `low|medium|high` since 0.2.101 (the `max` tier
@@ -260,10 +283,14 @@ coordinate that separately, do not duplicate transport work here.
 
 ## Gotchas (found in E2E testing, fixed in the adapter)
 
-- **codex hangs on inherited stdin.** With an open non-TTY stdin, `codex exec`
-  waits for "additional input from stdin" *in addition to* the positional
-  prompt — in a background shell this hangs forever. Always call it with
-  `</dev/null` (the adapter does).
+- **codex hangs on inherited stdin *when the prompt is on argv*.** With a
+  positional prompt AND an open non-TTY stdin, `codex exec` waits for
+  "additional input from stdin" (it appends it as a `<stdin>` block) — in a
+  background shell that hangs forever. The rule is "never leave stdin dangling",
+  NOT "always `</dev/null`": since the prompt-transport rework the adapter
+  deliberately feeds the prompt ON stdin (`-- -`) and closes the dangling case
+  by construction — stdin is the prompt and hits EOF. Any call that keeps a
+  positional prompt still needs `</dev/null`.
 - **`set -u` + EXIT trap + `local`**: a trap like `trap 'rm -f "$out"' EXIT`
   referencing a function-`local` variable fires after the function returned —
   under `set -u` the script then dies with "unbound variable" and **exit 1

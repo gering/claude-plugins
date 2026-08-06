@@ -140,8 +140,13 @@ Backends:
 | Backend | Role | Mechanics |
 |---------|------|-----------|
 | `claude` | probe-only | reviews run in-session via the Agent tool |
-| `codex` | external reviewer | `codex exec -s read-only -C <repo> -c tools.web_search=true --output-schema` (model `gpt-5.6-terra`); file-read + web under read-only; auth via `codex login status` |
-| `grok` | external reviewer | headless `--single=` with inline `--json-schema` (model `grok-4.5`, the only supported grok model); strict `--tools` allowlist (`read_file,list_dir,grep,web_search,web_fetch`) + `--cwd <repo>` — no write/shell. Readiness is model-aware: auth **and** `grok-4.5` present in `grok models`. |
+| `codex` | external reviewer | `codex exec -s read-only -C <repo> -c tools.web_search=true --output-schema` (model `gpt-5.6-terra`), prompt on stdin (`-- -`); file-read + web under read-only; auth via `codex login status` |
+| `grok` | external reviewer | headless `--prompt-file` with inline `--json-schema` (model `grok-4.5`, the only supported grok model); strict `--tools` allowlist (`read_file,list_dir,grep,web_search,web_fetch`) + `--cwd <repo>` — no write/shell. Readiness is model-aware: auth **and** `grok-4.5` present in `grok models`. |
+
+The prompt always reaches a backend **out-of-band** — never as an argv word — so
+the diff is bounded by model context rather than `exec`'s `MAX_ARG_STRLEN`.
+`SWARM_MAX_PROMPT_BYTES` (default 512 KiB) is that sanity cap; above it
+`/swarm:review` cleanly skips the externals instead of letting each call fail.
 
 Unavailable backends drop from the ensemble — `claude` alone still works.
 `/swarm:review` reports a backend that *errored* mid-run distinctly from one
