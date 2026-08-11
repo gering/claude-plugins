@@ -118,7 +118,15 @@ BOOTSTRAP_PROMPT='Read TASK.md in this worktree and continue the task. Commit on
 # worker to be detected, so a dead seed is a DEFINITIVE failure (roll the tab back)
 # instead of an ambiguous "maybe still starting" timeout. Emitted to callers as
 # `herdr_marker=` for every pane-run entry — never hardcode it in a consumer.
+#
+# The wrapper ASSEMBLES the token at runtime (`m=WORKER_SEED` … `${m}_FAILED`) so
+# the whole literal never appears in the command line itself. Found live: a pane
+# echoes the command it was given, so a script containing the literal token made
+# the launcher "detect" a seed failure the instant it typed the command — killing
+# a perfectly healthy launch. Splitting it keeps the printed output greppable while
+# the typed command is not.
 SEED_FAIL_MARKER='WORKER_SEED_FAILED'
+SEED_MARKER_HEAD="${SEED_FAIL_MARKER%_FAILED}"
 
 # kimi's two-phase launch script (see the header). Defined once here so the shape
 # has exactly one home; emit_argv passes it as the `sh -c` word.
@@ -141,7 +149,7 @@ SEED_FAIL_MARKER='WORKER_SEED_FAILED'
 # Kept ASCII-only and free of backslash escapes so `shell_quote` renders it as a
 # plain single-quoted word in `argv_shell=` — a `$'…'` form would be bash/zsh-only
 # and near-unreadable in the copy-paste block.
-KIMI_LAUNCH_SCRIPT='if kimi -m "$1" -p "$2"; then exec kimi -c --auto; else rc=$?; echo; echo "[work-system] '"$SEED_FAIL_MARKER"': kimi seed exited $rc - TASK.md was NOT started and no session was opened."; exit $rc; fi'
+KIMI_LAUNCH_SCRIPT='if kimi -m "$1" -p "$2"; then exec kimi -c --auto; else rc=$?; m='"$SEED_MARKER_HEAD"'; echo; echo "[work-system] ${m}_FAILED: kimi seed exited $rc - TASK.md was NOT started and no session was opened."; exit $rc; fi'
 
 # ---------- registry ----------
 # `flag|cli|model|supports|herdr_mode|herdr_kind`. flag `-` = no shorthand

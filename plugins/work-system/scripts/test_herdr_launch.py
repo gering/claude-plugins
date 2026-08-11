@@ -694,6 +694,21 @@ check("wrapper seed failure: tab closed exactly once",
 check("wrapper seed failure: no stdout", r.stdout == "")
 e.close()
 
+# --- the ECHOED command must not read as a seed failure -------------------- #
+# A pane shows the command it was given. The wrapper therefore assembles its marker
+# at runtime, and this pins the consequence: a pane whose only content is that
+# command must still be treated as "starting", never as a failed seed.
+e, r = kimi_run(wrapper_cases(**{
+    "pane read": ("$ sh -c 'if kimi -m \"$1\" -p \"$2\"; then exec kimi -c --auto; "
+                  'else rc=$?; m=WORKER_SEED; echo; echo "[work-system] ${m}_FAILED: '
+                  "kimi seed exited $rc - TASK.md was NOT started and no session was "
+                  "opened.\"; exit $rc; fi' kimi-worker kimi-code/k3-256k '...'\n", "", 0),
+}))
+check("echoed command: still a normal launch, not a seed failure", r.returncode == 0)
+check("echoed command: the tab was NOT rolled back",
+      "tab close" not in [n for n, _ in e.calls()])
+e.close()
+
 # --- the shell never reaches a prompt -> nothing typed, tab rolled back ---- #
 e, r = kimi_run(wrapper_cases(**{"pane process-info": (SHELL_BUSY, "", 0)}))
 check("wrapper shell busy: exit 1", r.returncode == 1)
