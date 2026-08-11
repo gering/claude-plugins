@@ -31,12 +31,33 @@
 #              the work-system continue skill resumes TASK.md deterministically)
 #   codex   -> codex -m <model> <bootstrap-prompt>
 #   grok    -> grok  -m <model> <bootstrap-prompt>
-#   kimi    -> sh -c 'kimi -m "$1" -p "$2"; exec kimi -c --auto' \
+#   kimi    -> sh -c '<seed-or-fail>; exec kimi -c --auto' \
 #                    kimi-worker <model> <bootstrap-prompt>          (seed+continue)
 #   The bootstrap prompt (codex/grok/kimi have no work-system skills) tells the
 #   agent to read TASK.md and drive the task to a PR. `supports=` metadata records
 #   which lifecycle hooks each agent honors, so /close and /continue can degrade
 #   for non-claude workers instead of faking claude-only behavior.
+#
+# HERDR TRANSPORT metadata (`herdr_mode=` / `herdr_kind=` / `herdr_marker=`).
+# herdr 0.7.5+ starts agents in an ALREADY-OPEN pane (`agent start <name> --kind
+# <kind> --pane <id> -- <native args>`) instead of placing them itself. That needs
+# two facts the launcher must NOT guess from a selector name or by parsing argv[0]:
+#   herdr_mode=agent-start  the argv IS a canonical CLI invocation, so the launcher
+#                           drops argv[0] (which MUST equal herdr_kind, herdr's
+#                           canonical executable for that kind) and hands the rest
+#                           to `--kind`. Native claude/codex/grok entries.
+#   herdr_mode=pane-run     the argv is a WRAPPER that cannot be projected onto
+#                           `--kind` (kimi's two-phase seed+continue `sh -c`). The
+#                           launcher sends `argv_shell=` as one `pane run` command
+#                           and then waits until herdr detects `herdr_kind` in that
+#                           exact pane. `herdr_marker=` is the ASCII token such a
+#                           wrapper prints when its seed phase fails, so the
+#                           launcher can tell a definitive failure from "still
+#                           starting" instead of guessing.
+# The pair is generic on purpose: a future dynamically-registered wrapper (e.g. a
+# cc-harness agent that ends up as an interactive `claude`) declares
+# `pane-run` + `herdr_kind=claude` without any launcher change. An entry whose
+# mode the launcher does not know must fail CLOSED before anything is created.
 #
 #   Why kimi needs the two-phase seed+continue shape (all probed live, 0.31.1):
 #   kimi has NO positional launch prompt (`kimi "text"` -> "unknown command"), no
@@ -92,23 +113,39 @@ KIMI_CREDENTIALS_FILE="${KIMI_CREDENTIALS_FILE:-$HOME/.kimi-code/credentials/kim
 # argv word; the launch helper passes it verbatim.
 BOOTSTRAP_PROMPT='Read TASK.md in this worktree and continue the task. Commit on the current branch as you go, and open a PR when the work is complete.'
 
+# The ASCII token a wrapper worker prints when its seed phase fails. Machine
+# readable on purpose: herdr-launch.sh greps the pane for it while it waits for the
+# worker to be detected, so a dead seed is a DEFINITIVE failure (roll the tab back)
+# instead of an ambiguous "maybe still starting" timeout. Emitted to callers as
+# `herdr_marker=` for every pane-run entry — never hardcode it in a consumer.
+SEED_FAIL_MARKER='WORKER_SEED_FAILED'
+
 # kimi's two-phase launch script (see the header). Defined once here so the shape
 # has exactly one home; emit_argv passes it as the `sh -c` word.
 #
-# The seed's failure is made LOUD on purpose. `;` would run phase 2 regardless and
-# the TUI's first repaint scrolls the error off-screen — leaving a tab that looks
-# like a healthy worker but never read TASK.md. `&&` is not the fix either: it
-# kills the pane, and the task's whole point is that the tab survives. So: report,
-# wait for an explicit keypress, then hand over to an (empty) session the user now
-# knows is empty. Verified: a failed seed in a fresh worktree yields a NEW empty
-# session, never a foreign one — `kimi -c` is scoped to the working directory.
-# Kept ASCII-only and free of backslash escapes so `printf %q` renders it as a
+# A failed seed must be UNAMBIGUOUS, and it must not leave anything behind that
+# could be mistaken for a working worker. The earlier shape ran phase 2 regardless
+# (`;`) after a keypress, which produced exactly that trap: an empty `kimi -c
+# --auto` session that never read TASK.md but looks alive to herdr's detection —
+# and to the user. So on a seed failure this now prints the machine-readable
+# marker, states that TASK.md was not started, and exits with the SEED'S exit code
+# WITHOUT running phase 2 and without waiting for input (an unattended background
+# tab has nobody to press Enter). Only a successful seed reaches `exec kimi -c
+# --auto`; the `exec` re-roots the pane at kimi so herdr detects it.
+# Consequence on the LEGACY herdr path (0.7.0-0.7.4), where the worker argv is the
+# tab's ROOT process: a failed seed now ends that process, so herdr closes the tab.
+# Accepted deliberately — a closed tab is honest, whereas the empty session it
+# replaces was actively misleading. On modern herdr the wrapper runs inside a shell
+# pane, so the marker and the error stay on screen and the launcher rolls the tab
+# back itself.
+# Kept ASCII-only and free of backslash escapes so `shell_quote` renders it as a
 # plain single-quoted word in `argv_shell=` — a `$'…'` form would be bash/zsh-only
 # and near-unreadable in the copy-paste block.
-KIMI_LAUNCH_SCRIPT='kimi -m "$1" -p "$2" || { echo; echo "[work-system] kimi seed FAILED (see the error above): TASK.md was not read, nothing was started."; echo "Press Enter to open an empty kimi session in this worktree."; read -r _; }; exec kimi -c --auto'
+KIMI_LAUNCH_SCRIPT='if kimi -m "$1" -p "$2"; then exec kimi -c --auto; else rc=$?; echo; echo "[work-system] '"$SEED_FAIL_MARKER"': kimi seed exited $rc - TASK.md was NOT started and no session was opened."; exit $rc; fi'
 
 # ---------- registry ----------
-# `flag|cli|model|supports`. flag `-` = no shorthand (name/--agent only). The
+# `flag|cli|model|supports|herdr_mode|herdr_kind`. flag `-` = no shorthand
+# (name/--agent only). The
 # FIRST entry of each CLI is that CLI's default model (for a bare `--agent codex`).
 # `supports` is per-agent capability metadata: which lifecycle hooks each agent
 # honors —
@@ -120,13 +157,18 @@ KIMI_LAUNCH_SCRIPT='kimi -m "$1" -p "$2" || { echo; echo "[work-system] kimi see
 # currently hardcode the claude-vs-non-claude distinction in prose; this field is
 # the seed for the manager/worker-orchestration design to read per-agent
 # capabilities from one place. Keep it in sync when that lands.
-REGISTRY='--fable|claude|fable|continue,close-exit,statusline,commit,pr
---opus|claude|opus|continue,close-exit,statusline,commit,pr
--|claude|sonnet|continue,close-exit,statusline,commit,pr
---codex|codex|gpt-5.6-terra|commit,pr
---sol|codex|gpt-5.6-sol|commit,pr
---grok|grok|grok-4.5|commit,pr
---kimi|kimi|kimi-code/k3-256k|commit,pr'
+#
+# `herdr_mode|herdr_kind` is the modern-herdr transport contract (see the header):
+# agent-start entries hand their argv TAIL to `--kind <herdr_kind>` (so argv[0]
+# MUST equal herdr_kind), pane-run entries are wrappers sent as one shell command
+# and then waited for until herdr detects herdr_kind in that pane.
+REGISTRY='--fable|claude|fable|continue,close-exit,statusline,commit,pr|agent-start|claude
+--opus|claude|opus|continue,close-exit,statusline,commit,pr|agent-start|claude
+-|claude|sonnet|continue,close-exit,statusline,commit,pr|agent-start|claude
+--codex|codex|gpt-5.6-terra|commit,pr|agent-start|codex
+--sol|codex|gpt-5.6-sol|commit,pr|agent-start|codex
+--grok|grok|grok-4.5|commit,pr|agent-start|grok
+--kimi|kimi|kimi-code/k3-256k|commit,pr|pane-run|kimi'
 
 usage() {
   # Usage = header comment from line 2 up to (not including) the registry
@@ -136,34 +178,39 @@ usage() {
 }
 
 # ---------- registry access ----------
-# Emit one `flag|cli|model|supports` record per line (skips blank lines).
+# Emit one `flag|cli|model|supports|herdr_mode|herdr_kind` record per line.
 registry_rows() { printf '%s\n' "$REGISTRY"; }
+
+# Re-emit a record with a FIXED field count, so every row_for_* returns the same
+# shape even if a row were ever short a trailing field (a short row must not shift
+# the transport metadata into `supports`). One definition, used by all three.
+emit_row() { printf '%s|%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5" "$6"; }
 
 # Print the whole record for a canonical name (cli:model), or nothing.
 row_for_name() {
-  local want="$1" flag cli model supports
-  while IFS='|' read -r flag cli model supports; do
+  local want="$1" flag cli model supports mode kind
+  while IFS='|' read -r flag cli model supports mode kind; do
     [ -n "$cli" ] || continue
-    [ "$cli:$model" = "$want" ] && { printf '%s|%s|%s|%s\n' "$flag" "$cli" "$model" "$supports"; return 0; }
+    [ "$cli:$model" = "$want" ] && { emit_row "$flag" "$cli" "$model" "$supports" "$mode" "$kind"; return 0; }
   done < <(registry_rows)
   return 1
 }
 
 # Print the record whose shorthand flag matches, or nothing.
 row_for_flag() {
-  local want="$1" flag cli model supports
-  while IFS='|' read -r flag cli model supports; do
+  local want="$1" flag cli model supports mode kind
+  while IFS='|' read -r flag cli model supports mode kind; do
     [ "$flag" = "-" ] && continue
-    [ "$flag" = "$want" ] && { printf '%s|%s|%s|%s\n' "$flag" "$cli" "$model" "$supports"; return 0; }
+    [ "$flag" = "$want" ] && { emit_row "$flag" "$cli" "$model" "$supports" "$mode" "$kind"; return 0; }
   done < <(registry_rows)
   return 1
 }
 
 # Print the default (first) record for a bare CLI name, or nothing.
 row_for_cli_default() {
-  local want="$1" flag cli model supports
-  while IFS='|' read -r flag cli model supports; do
-    [ "$cli" = "$want" ] && { printf '%s|%s|%s|%s\n' "$flag" "$cli" "$model" "$supports"; return 0; }
+  local want="$1" flag cli model supports mode kind
+  while IFS='|' read -r flag cli model supports mode kind; do
+    [ "$cli" = "$want" ] && { emit_row "$flag" "$cli" "$model" "$supports" "$mode" "$kind"; return 0; }
   done < <(registry_rows)
   return 1
 }
@@ -418,8 +465,8 @@ subcmd_resolve() {
     echo "Try: $(registry_rows | cut -d'|' -f1 | grep -v '^-$' | tr '\n' ' ')— a name (claude:opus), or a cli (codex)" >&2
     exit 2
   }
-  local flag cli model supports
-  IFS='|' read -r flag cli model supports <<<"$record"
+  local flag cli model supports mode kind
+  IFS='|' read -r flag cli model supports mode kind <<<"$record"
 
   local avail note
   IFS=$'\t' read -r avail note < <(entry_status "$cli" "$model")
@@ -429,6 +476,12 @@ subcmd_resolve() {
   printf 'model=%s\n' "$model"
   printf 'available=%s\n' "$avail"
   printf 'supports=%s\n' "$supports"
+  # Modern-herdr transport (see the header). Always emitted — a consumer that
+  # cannot interpret the mode must fail closed rather than guess from the name.
+  printf 'herdr_mode=%s\n' "$mode"
+  printf 'herdr_kind=%s\n' "$kind"
+  # Only wrappers can fail their seed phase, so only they carry the marker.
+  [ "$mode" = pane-run ] && printf 'herdr_marker=%s\n' "$SEED_FAIL_MARKER"
   [ -n "$note" ] && printf 'note=%s\n' "$note"
   emit_argv "$cli" "$model" "$session"
 
@@ -444,8 +497,8 @@ subcmd_list() {
   esac
 
   # Build rows: name cli model available note (TAB-separated internally).
-  local rows="" flag cli model supports avail note
-  while IFS='|' read -r flag cli model supports; do
+  local rows="" flag cli model supports mode kind avail note
+  while IFS='|' read -r flag cli model supports mode kind; do
     [ -n "$cli" ] || continue
     IFS=$'\t' read -r avail note < <(entry_status "$cli" "$model")
     rows+="$cli:$model	$cli	$model	$avail	$note"$'\n'

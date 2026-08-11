@@ -122,12 +122,15 @@ class Env:
 
     def run_argv(self, argv):
         """Execute a resolved launch argv against the stubs; return the per-call
-        argv lines the kimi stub recorded."""
+        argv lines the kimi stub recorded. The CompletedProcess is kept on
+        `self.last_proc` so a test can also assert the wrapper's exit code and
+        output (the seed-failure contract is exactly that)."""
         env = dict(self.env)
         env["KIMI_ARGLOG"] = str(self.kimi_arglog)
         self.kimi_arglog.write_text("")
-        subprocess.run(argv, env=env, cwd=str(self.home), stdin=subprocess.DEVNULL,
-                       capture_output=True, text=True, timeout=30)
+        self.last_proc = subprocess.run(
+            argv, env=env, cwd=str(self.home), stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=30)
         return [line.split("\t")[:-1]
                 for line in self.kimi_arglog.read_text().splitlines()]
 
@@ -180,12 +183,11 @@ check("grok argv shape", r["argv"][:3] == ["grok", "-m", "grok-4.5"])
 # kimi has no positional launch prompt and `-p` cannot be combined with --auto/-y,
 # so a worker is `-p` (seed, runs tools unattended) then `exec kimi -c --auto`
 # (interactive + autonomous, inheriting the seed's session history).
+SEED_MARKER = "WORKER_SEED_FAILED"
 KIMI_SCRIPT = (
-    'kimi -m "$1" -p "$2" || { echo; '
-    'echo "[work-system] kimi seed FAILED (see the error above): '
-    'TASK.md was not read, nothing was started."; '
-    'echo "Press Enter to open an empty kimi session in this worktree."; '
-    'read -r _; }; exec kimi -c --auto'
+    'if kimi -m "$1" -p "$2"; then exec kimi -c --auto; else rc=$?; echo; '
+    f'echo "[work-system] {SEED_MARKER}: kimi seed exited $rc - '
+    'TASK.md was NOT started and no session was opened."; exit $rc; fi'
 )
 
 r = kv(e.run("resolve", "--kimi").stdout)
@@ -214,17 +216,19 @@ check("model is not spliced into the script text", "kimi-code/k3-256k" not in sc
 # legitimately mentions TASK.md in its seed-failure message.
 check("prompt is not spliced into the script text", r["argv"][5] not in script)
 check("-p takes the positional as its value", '-p "$2"' in script)
-check("--auto is not in the same command as -p",
-      "--auto" not in script.split("||", 1)[0])
+check("--auto is only reachable from the SUCCESS branch (never in -p's value slot)",
+      "--auto" not in script.split("then", 1)[0])
 check("no bare -p/--prompt argv word (it stays bound inside the script)",
       "-p" not in r["argv"] and "--prompt" not in r["argv"])
-# A failed seed must neither kill the pane (`&&`) nor slip past unseen (`;`):
-# it reports, waits for a keypress, then still hands over to phase 2.
-check("seed failure is announced, not silent", "seed FAILED" in script)
-check("seed failure waits for acknowledgement", "read -r _" in script)
-check("phase 2 still runs after a failed seed (tab survives)",
-      script.rstrip().endswith("exec kimi -c --auto")
-      and "&&" not in script.split("exec", 1)[0].replace("||", ""))
+# A failed seed must be unambiguous: a machine-readable marker (herdr-launch.sh
+# greps the pane for it), an explicit "not started", no phase 2, and no wait for a
+# keypress nobody is there to press.
+check("seed failure prints the machine-readable marker", SEED_MARKER in script)
+check("seed failure states TASK.md was not started", "TASK.md was NOT started" in script)
+check("seed failure does not wait for input", "read " not in script)
+check("phase 2 is gated behind the seed's success",
+      script.startswith("if kimi ") and "then exec kimi -c --auto" in script)
+check("seed failure exits with the seed's own code", "exit $rc" in script)
 
 # Execute the resolved argv for real against the stub and assert what each phase
 # actually received — string checks alone can't prove the shell binds the values
@@ -241,23 +245,62 @@ if len(calls) == 2:
           "--auto" not in seed and "-y" not in seed)
     check("phase 2 is the interactive autonomous continue", cont == ["-c", "--auto"])
 
-# A FAILING seed must still reach phase 2 — the tab has to survive. Runs the real
-# argv against a stub whose non-`provider` calls exit 1 (the first stub always
-# exits 0, so this path was previously untested).
+# A FAILING seed must be a hard, self-announcing stop: marker on stdout, the
+# seed's own exit code, and NO phase 2 — an empty `kimi -c --auto` session that
+# never read TASK.md is indistinguishable from a healthy worker to herdr's
+# detection (and to the user), which is exactly the trap this replaces. Runs the
+# real resolved argv against a stub whose non-`provider` calls exit 7, so code
+# propagation is asserted on a value nothing else could produce.
 e_fail = Env()
 (Path(e_fail.env["PATH"].split(":")[0]) / "kimi").write_text(
     "#!/bin/sh\n"
     '[ -n "$KIMI_ARGLOG" ] && { printf \'%s\\t\' "$@" >> "$KIMI_ARGLOG"; '
     'printf \'\\n\' >> "$KIMI_ARGLOG"; }\n'
     'if [ "$1" = "provider" ]; then echo \'{"models": {"kimi-code/k3-256k": {}}}\'; exit 0; fi\n'
-    "exit 1\n"
+    "exit 7\n"
 )
 (Path(e_fail.env["PATH"].split(":")[0]) / "kimi").chmod(0o755)
 fail_calls = e_fail.run_argv(kv(e_fail.run("resolve", "--kimi").stdout)["argv"])
-check("a failed seed still reaches phase 2", len(fail_calls) == 2)
-if len(fail_calls) == 2:
-    check("phase 2 after a failed seed is still -c --auto", fail_calls[1] == ["-c", "--auto"])
+check("a failed seed runs the seed and NOTHING else", len(fail_calls) == 1)
+if fail_calls:
+    check("the one call was the -p seed", "-p" in fail_calls[0])
+check("no phase-2 `-c --auto` after a failed seed",
+      ["-c", "--auto"] not in fail_calls)
+check("the seed's exit code propagates out of the wrapper",
+      e_fail.last_proc.returncode == 7)
+check("the wrapper prints the machine-readable marker",
+      SEED_MARKER in e_fail.last_proc.stdout)
+check("the marker line names the failing seed's code",
+      "exited 7" in e_fail.last_proc.stdout)
 e_fail.close()
+
+# --- herdr transport metadata (modern `agent start --kind --pane`) --------- #
+# The launcher must not infer transport from a selector name or by parsing argv[0]
+# — every entry declares it. Native CLIs are `agent-start` with a kind that EQUALS
+# their argv[0] (the launcher drops that word and hands the rest to --kind); kimi's
+# wrapper is `pane-run` and carries the seed-failure marker.
+for sel, mode, kind in (("--fable", "agent-start", "claude"),
+                        ("--opus", "agent-start", "claude"),
+                        ("claude:sonnet", "agent-start", "claude"),
+                        ("--codex", "agent-start", "codex"),
+                        ("--sol", "agent-start", "codex"),
+                        ("--grok", "agent-start", "grok"),
+                        ("--kimi", "pane-run", "kimi")):
+    t = kv(e.run("resolve", sel).stdout)
+    check(f"{sel}: herdr_mode={mode}", t.get("herdr_mode") == mode)
+    check(f"{sel}: herdr_kind={kind}", t.get("herdr_kind") == kind)
+    if mode == "agent-start":
+        check(f"{sel}: argv[0] equals the declared kind (no rebuild needed)",
+              t["argv"][0] == kind)
+        check(f"{sel}: no seed marker on a native entry", "herdr_marker" not in t)
+    else:
+        check(f"{sel}: wrapper declares the seed marker",
+              t.get("herdr_marker") == SEED_MARKER)
+        check(f"{sel}: wrapper argv[0] is NOT the kind (needs pane-run)",
+              t["argv"][0] != kind)
+# `supports` must not absorb the new trailing fields (field-order regression).
+check("supports is unchanged by the added transport columns",
+      kv(e.run("resolve", "--grok").stdout).get("supports") == "commit,pr")
 
 # canonical name and bare-cli-default selectors
 check("name selector claude:sonnet",
