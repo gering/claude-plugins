@@ -175,8 +175,25 @@ class Env:
         herdr = bindir / "herdr"
         herdr.write_text(herdr_stub(cases, help_text))
         herdr.chmod(0o755)
+        # Stub the worker CLIs too, so a launch test never depends on which agents
+        # happen to be installed and authenticated on the machine running it — the
+        # registry's live probes would otherwise make these tests skip on CI and go
+        # flaky locally (a slow `grok models` alone changes the outcome).
+        for name, body in (
+            ("codex", 'if [ "$1" = "login" ]; then exit 0; fi\nexit 0\n'),
+            ("grok", 'if [ "$1" = "models" ]; then echo "grok-4.5"; fi\nexit 0\n'),
+            ("kimi", 'if [ "$1" = "provider" ]; then '
+                     "echo '{\"models\": {\"kimi-code/k3-256k\": {}}}'; fi\nexit 0\n"),
+        ):
+            stub = bindir / name
+            stub.write_text("#!/bin/sh\n" + body)
+            stub.chmod(0o755)
+        auth = root / "auth.json"
+        auth.write_text("{}\n")
         self.env = dict(os.environ)
         self.env["PATH"] = f"{bindir}:{self.env['PATH']}"
+        self.env["GROK_AUTH_FILE"] = str(auth)
+        self.env["KIMI_CREDENTIALS_FILE"] = str(auth)
         self.env["HERDR_STUB_STATE"] = str(state)
         # Keep every bounded wait fast and deterministic.
         self.env["WORK_SYSTEM_HERDR_RETRY_DELAY"] = "0"
@@ -458,11 +475,6 @@ for selector, kind, expect_head, expect_len in (
             log_argv=True, api="modern")
     r = e.run("launch", "t", str(e.worktree), "w1", selector, "sess1")
     label = selector or "claude(default)"
-    if kind != "claude" and r.returncode == 3:
-        # The CLI is not installed on this machine — availability is agent-registry's
-        # concern and is covered by its own tests; skip the launch assertions.
-        e.close()
-        continue
     starts = e.call_args("agent start")
     check(f"modern {label}: exit 0", r.returncode == 0)
     check(f"modern {label}: stdout is the stable contract",
@@ -617,60 +629,55 @@ e.close()
 # ========================================================================== #
 
 def kimi_run(cases, log_argv=True):
-    """Run a --kimi launch against a wrapper stub. Returns (env, result) or
-    (env, None) when kimi is not installed here (agent-registry exit 3)."""
+    """Run a --kimi launch against a wrapper stub; returns (env, result)."""
     env = Env(cases, log_argv=log_argv, api="modern")
     res = env.run("launch", "t", str(env.worktree), "w1", "--kimi", "sess1")
-    if res.returncode == 3:
-        env.close()
-        return None, None
+    check("wrapper: the stubbed kimi resolves (not an availability skip)",
+          res.returncode != 3)
     return env, res
 
 
 # --- happy path: one pane run, then detection of the expected kind --------- #
 e, r = kimi_run(wrapper_cases())
-if e is not None:
-    runs = e.call_args("pane run")
-    check("wrapper: exit 0", r.returncode == 0)
-    check("wrapper: stdout is the stable contract",
-          kv(r.stdout).get("moved") == "yes" and kv(r.stdout).get("pane") == "w1:p7")
-    check("wrapper: exactly one pane run", len(runs) == 1)
-    if runs:
-        # `pane run <PANE> <COMMAND>` — the whole wrapper must arrive as ONE word,
-        # not re-split or re-quoted by the launcher.
-        check("wrapper: the command is a single argv word", len(runs[0]) == 4)
-        cmd = runs[0][3]
-        check("wrapper: the registry's argv_shell is sent verbatim",
-              cmd.startswith("sh -c ") and "exec kimi -c --auto" in cmd)
-        check("wrapper: no agent start on this path",
-              "agent start" not in [n for n, _ in e.calls()])
-    check("wrapper: waited for the shell prompt before typing",
-          len(e.call_args("pane process-info")) >= 1)
-    check("wrapper: the tab was not rolled back",
-          "tab close" not in [n for n, _ in e.calls()])
-    e.close()
+runs = e.call_args("pane run")
+check("wrapper: exit 0", r.returncode == 0)
+check("wrapper: stdout is the stable contract",
+      kv(r.stdout).get("moved") == "yes" and kv(r.stdout).get("pane") == "w1:p7")
+check("wrapper: exactly one pane run", len(runs) == 1)
+if runs:
+    # `pane run <PANE> <COMMAND>` — the whole wrapper must arrive as ONE word,
+    # not re-split or re-quoted by the launcher.
+    check("wrapper: the command is a single argv word", len(runs[0]) == 4)
+    cmd = runs[0][3]
+    check("wrapper: the registry's argv_shell is sent verbatim",
+          cmd.startswith("sh -c ") and "exec kimi -c --auto" in cmd)
+    check("wrapper: no agent start on this path",
+          "agent start" not in [n for n, _ in e.calls()])
+check("wrapper: waited for the shell prompt before typing",
+      len(e.call_args("pane process-info")) >= 1)
+check("wrapper: the tab was not rolled back",
+      "tab close" not in [n for n, _ in e.calls()])
+e.close()
 
 # --- detection never sees the worker -> unverified, no retry, tab kept ----- #
 e, r = kimi_run(wrapper_cases(**{"pane get": (pane_get(), "", 0)}))
-if e is not None:
-    check("wrapper timeout: exit 0 with blocked=unverified",
-          r.returncode == 0 and r.stdout.startswith("blocked=unverified\n"))
-    check("wrapper timeout: bounded polling", len(e.call_args("pane get")) == 3)
-    check("wrapper timeout: the command was sent exactly once (no second start)",
-          len(e.call_args("pane run")) == 1)
-    check("wrapper timeout: the tab is left for inspection",
-          "tab close" not in [n for n, _ in e.calls()])
-    e.close()
+check("wrapper timeout: exit 0 with blocked=unverified",
+      r.returncode == 0 and r.stdout.startswith("blocked=unverified\n"))
+check("wrapper timeout: bounded polling", len(e.call_args("pane get")) == 3)
+check("wrapper timeout: the command was sent exactly once (no second start)",
+      len(e.call_args("pane run")) == 1)
+check("wrapper timeout: the tab is left for inspection",
+      "tab close" not in [n for n, _ in e.calls()])
+e.close()
 
 # --- a DIFFERENT kind is detected -> unverified, not success --------------- #
 e, r = kimi_run(wrapper_cases(**{"pane get": (pane_get("claude"), "", 0)}))
-if e is not None:
-    check("wrapper wrong kind: blocked=unverified", r.stdout.startswith("blocked=unverified\n"))
-    check("wrapper wrong kind: names what was detected",
-          "'claude'" in r.stderr and "'kimi'" in r.stderr)
-    check("wrapper wrong kind: stops immediately", len(e.call_args("pane get")) == 1)
-    check("wrapper wrong kind: no rollback", "tab close" not in [n for n, _ in e.calls()])
-    e.close()
+check("wrapper wrong kind: blocked=unverified", r.stdout.startswith("blocked=unverified\n"))
+check("wrapper wrong kind: names what was detected",
+      "'claude'" in r.stderr and "'kimi'" in r.stderr)
+check("wrapper wrong kind: stops immediately", len(e.call_args("pane get")) == 1)
+check("wrapper wrong kind: no rollback", "tab close" not in [n for n, _ in e.calls()])
+e.close()
 
 # --- the seed-failure marker is DEFINITIVE -> roll the tab back ------------ #
 e, r = kimi_run(wrapper_cases(**{
@@ -678,46 +685,42 @@ e, r = kimi_run(wrapper_cases(**{
     "pane read": ("$ sh -c ...\n[work-system] WORKER_SEED_FAILED: kimi seed exited 1 - "
                   "TASK.md was NOT started and no session was opened.\n$ ", "", 0),
 }))
-if e is not None:
-    check("wrapper seed failure: exit 1", r.returncode == 1)
-    check("wrapper seed failure: names the marker", "WORKER_SEED_FAILED" in r.stderr)
-    check("wrapper seed failure: says TASK.md was not started",
-          "TASK.md was not started" in r.stderr)
-    check("wrapper seed failure: tab closed exactly once",
-          len(e.call_args("tab close")) == 1)
-    check("wrapper seed failure: no stdout", r.stdout == "")
-    e.close()
+check("wrapper seed failure: exit 1", r.returncode == 1)
+check("wrapper seed failure: names the marker", "WORKER_SEED_FAILED" in r.stderr)
+check("wrapper seed failure: says TASK.md was not started",
+      "TASK.md was not started" in r.stderr)
+check("wrapper seed failure: tab closed exactly once",
+      len(e.call_args("tab close")) == 1)
+check("wrapper seed failure: no stdout", r.stdout == "")
+e.close()
 
 # --- the shell never reaches a prompt -> nothing typed, tab rolled back ---- #
 e, r = kimi_run(wrapper_cases(**{"pane process-info": (SHELL_BUSY, "", 0)}))
-if e is not None:
-    check("wrapper shell busy: exit 1", r.returncode == 1)
-    check("wrapper shell busy: nothing was typed into the pane",
-          "pane run" not in [n for n, _ in e.calls()])
-    check("wrapper shell busy: tab closed exactly once",
-          len(e.call_args("tab close")) == 1)
-    check("wrapper shell busy: bounded wait", len(e.call_args("pane process-info")) == 3)
-    e.close()
+check("wrapper shell busy: exit 1", r.returncode == 1)
+check("wrapper shell busy: nothing was typed into the pane",
+      "pane run" not in [n for n, _ in e.calls()])
+check("wrapper shell busy: tab closed exactly once",
+      len(e.call_args("tab close")) == 1)
+check("wrapper shell busy: bounded wait", len(e.call_args("pane process-info")) == 3)
+e.close()
 
 # --- an unreadable readiness answer degrades to "proceed", not to a block -- #
 e, r = kimi_run(wrapper_cases(**{"pane process-info": ("not json at all", "", 0)}))
-if e is not None:
-    check("wrapper readiness unknown: still launches", r.returncode == 0)
-    check("wrapper readiness unknown: asked once, then proceeded",
-          len(e.call_args("pane process-info")) == 1)
-    e.close()
+check("wrapper readiness unknown: still launches", r.returncode == 0)
+check("wrapper readiness unknown: asked once, then proceeded",
+      len(e.call_args("pane process-info")) == 1)
+e.close()
 
 # --- pane run itself is rejected -> definitive, tab rolled back ------------ #
 e, r = kimi_run(wrapper_cases(**{
     "pane run": ("", jsonlib.dumps(
         {"error": {"code": "pane_not_found", "message": "pane w1:p7 not found"}}), 1)}))
-if e is not None:
-    check("wrapper run rejected: exit 1", r.returncode == 1)
-    check("wrapper run rejected: tab closed exactly once",
-          len(e.call_args("tab close")) == 1)
-    check("wrapper run rejected: never polled for detection",
-          "pane get" not in [n for n, _ in e.calls()])
-    e.close()
+check("wrapper run rejected: exit 1", r.returncode == 1)
+check("wrapper run rejected: tab closed exactly once",
+      len(e.call_args("tab close")) == 1)
+check("wrapper run rejected: never polled for detection",
+      "pane get" not in [n for n, _ in e.calls()])
+e.close()
 
 
 if FAILS:
