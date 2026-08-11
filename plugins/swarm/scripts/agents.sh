@@ -20,6 +20,10 @@
 #       --effort <level>    low|medium|high|xhigh|max (default: xhigh)
 #       --model <name>      Backend model override
 #       --schema <file>     JSON schema to enforce (default: bundled finding.schema.json)
+#       --telemetry <file>  Append one JSON line per call (backend, unit, effort,
+#                           model, prompt_bytes, seconds, rc, timed_out). Written
+#                           on EVERY exit path, so a timeout is recorded too.
+#       --unit <name>       Cluster/lens label recorded in the telemetry line
 #
 # The prompt reaches the backend OUT-OF-BAND (codex: stdin · grok:
 # --prompt-file), never on argv — so the diff is bounded by model context, not
@@ -81,9 +85,57 @@ GROK_AUTH_FILE="${GROK_AUTH_FILE:-$HOME/.grok/auth.json}"
 # including the error ones.
 TMP_OUT=""
 TMP_PROMPT=""
+
+# Per-call telemetry (opt-in via --telemetry). WHY it exists: an external voice
+# that dies at the wall is reported, but a voice that *survived* at 550s looks
+# identical to one that finished in 20s — so a cluster drifting toward the
+# ceiling is invisible until it crosses it, and "grok timed out" cannot be told
+# apart from "grok × breakage times out every single run". Duration per
+# backend×unit is the missing number; the failure attribution (backend, unit,
+# lenses) already exists in backendErrors since 0.7.0.
+TELEMETRY_FILE=""
+TELEMETRY_UNIT=""
+TELEMETRY_START=""
+TELEMETRY_BACKEND=""
+TELEMETRY_EFFORT=""
+TELEMETRY_MODEL=""
+TELEMETRY_BYTES=""
+# The backend CLI's own rc, captured before run_codex/run_grok translate it into
+# the adapter's exit code — otherwise a timeout (124) and a plain failure both
+# reach the trap as exit 1 and the one distinction worth logging is lost.
+TELEMETRY_RC=""
+
+_write_telemetry() {
+  # $1 = the adapter's exit code. Best-effort: telemetry must never turn a
+  # successful review into a failure, so every step tolerates failure and the
+  # function always returns 0.
+  local adapter_rc="${1:-}"
+  [[ -n "$TELEMETRY_FILE" && -n "$TELEMETRY_START" ]] || return 0
+  local end secs
+  end=$(date +%s 2>/dev/null) || return 0
+  secs=$(( end - TELEMETRY_START ))
+  # ONE printf of a single line: concurrent per-cluster voices append to the
+  # same file, and a lone write under the pipe-buffer size is atomic with
+  # O_APPEND, so lines interleave but never tear. Do not split this into
+  # multiple writes.
+  # Record the wall this call actually ran under: SWARM_TIMEOUT is overridable,
+  # and a reader that assumed 600 would compute "% of the wall" against a limit
+  # that was never in force.
+  printf '{"backend":"%s","unit":"%s","effort":"%s","model":"%s","prompt_bytes":%s,"seconds":%s,"timeout_seconds":%s,"backend_rc":%s,"adapter_rc":%s,"timed_out":%s}\n' \
+    "$TELEMETRY_BACKEND" "$TELEMETRY_UNIT" "$TELEMETRY_EFFORT" "$TELEMETRY_MODEL" \
+    "$(( ${TELEMETRY_BYTES:-0} + 0 ))" "$secs" "$(( ADAPTER_TIMEOUT + 0 ))" "${TELEMETRY_RC:-null}" "${adapter_rc:-null}" \
+    "$( [[ "${TELEMETRY_RC:-}" == "124" ]] && echo true || echo false )" \
+    >> "$TELEMETRY_FILE" 2>/dev/null || true
+  return 0
+}
+
 cleanup() {
+  # FIRST statement: $? here is the script's exit status, and any command below
+  # would overwrite it.
+  local rc=$?
   if [[ -n "${TMP_OUT:-}" ]]; then rm -f "$TMP_OUT"; fi
   if [[ -n "${TMP_PROMPT:-}" ]]; then rm -f "$TMP_PROMPT"; fi
+  _write_telemetry "$rc"
 }
 trap cleanup EXIT
 
@@ -706,6 +758,8 @@ subcmd_run() {
       --effort)      effort="$2"; shift 2 ;;
       --model)       model="$2";       shift 2 ;;
       --schema)      schema="$2";      shift 2 ;;
+      --telemetry)   TELEMETRY_FILE="$2"; shift 2 ;;
+      --unit)        TELEMETRY_UNIT="$2"; shift 2 ;;
       *) echo "Unknown flag: $1" >&2; exit 2 ;;
     esac
   done
@@ -838,6 +892,17 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
   require_python3
   require_valid_timeout
 
+  # Start the clock as late as possible: readiness probes and validation are
+  # adapter overhead, and folding them into the number would misattribute them
+  # to the backend we are trying to characterize.
+  if [[ -n "$TELEMETRY_FILE" ]]; then
+    TELEMETRY_START="$(date +%s 2>/dev/null || true)"
+    TELEMETRY_BACKEND="$backend"
+    TELEMETRY_EFFORT="$effort"
+    TELEMETRY_MODEL="$model"
+    TELEMETRY_BYTES="$nbytes"
+  fi
+
   case "$backend" in
     codex) run_codex "$prompt_path" "$effort" "$model" "$schema" ;;
     grok)  run_grok  "$prompt_path" "$effort" "$model" "$schema" ;;
@@ -847,6 +912,10 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
 run_codex() {
   local prompt_path="$1" effort="$2" model="$3" schema="$4"
   [[ "$effort" == "max" ]] && effort="xhigh"
+  # Record the EFFECTIVE effort/model (after the ladder mapping and the default
+  # fill-in), not what the caller asked for — the point of the number is what
+  # the backend actually ran.
+  TELEMETRY_EFFORT="$effort"; TELEMETRY_MODEL="${model:-$CODEX_DEFAULT_MODEL}"
 
   TMP_OUT="$(mktemp)"
 
@@ -903,6 +972,7 @@ run_codex() {
       --output-schema "$schema" \
       --output-last-message "$TMP_OUT" \
       -- - <"$prompt_path" >/dev/null 2>/dev/null || rc=$?
+  TELEMETRY_RC="$rc"
   if (( rc != 0 )); then
     (( rc == 124 )) && echo "codex exec timed out after ${ADAPTER_TIMEOUT}s" >&2 || echo "codex exec failed" >&2
     exit 1
@@ -957,6 +1027,8 @@ run_grok() {
   # mirroring codex's max→xhigh mapping.
   case "$effort" in xhigh|max) effort="high" ;; esac
   local grok_model="${model:-$GROK_DEFAULT_MODEL}"
+  # Effective values, same reason as run_codex.
+  TELEMETRY_EFFORT="$effort"; TELEMETRY_MODEL="$grok_model"
 
   # Preflight-reject any non-default model: only grok-4.5 enforces --json-schema
   # (and accepts --effort). Another model would silently return
@@ -1002,6 +1074,7 @@ run_grok() {
       ${cwd_args[@]+"${cwd_args[@]}"} \
       --json-schema "$(cat "$schema")" \
       --prompt-file "$prompt_path" </dev/null 2>/dev/null)" || rc=$?
+  TELEMETRY_RC="$rc"
   if (( rc != 0 )); then
     # stderr is deliberately discarded (injection guard), so name the likely
     # cause: an older CLI that predates the pinned model reports Ready (auth

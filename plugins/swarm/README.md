@@ -148,6 +148,10 @@ the diff is bounded by model context rather than `exec`'s `MAX_ARG_STRLEN`.
 `SWARM_MAX_PROMPT_BYTES` (default 512 KiB) is that sanity cap; above it
 `/swarm:review` cleanly skips the externals instead of letting each call fail.
 
+Each external call is timed (`--telemetry <file> --unit <name>`), and the report
+flags any voice at ≥60% of the `SWARM_TIMEOUT` wall — a call that *survives* at
+550 s is invisible in the error list but is the one about to start failing.
+
 Unavailable backends drop from the ensemble — `claude` alone still works.
 `/swarm:review` reports a backend that *errored* mid-run distinctly from one
 that cleanly found nothing (error ≠ empty).

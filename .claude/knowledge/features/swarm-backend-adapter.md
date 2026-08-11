@@ -281,6 +281,49 @@ coordinate that separately, do not duplicate transport work here.
   Re-verify the pinned ids when bumping the tested CLI version. Never fall
   back to a broad denylist that could admit a mutating tool.
 
+## What actually drives external-call runtime (measured 2026-08-11)
+
+The `grok × breakage` timeouts were long blamed on prompt size. **Measured, they
+are not.** Same 42 KB diff, same adapter, one variable at a time:
+
+| Backend | Effort | Cluster | Duration | Findings |
+|---------|--------|---------|----------|----------|
+| grok | high | breakage | **374 s** | 4 |
+| grok | low | breakage | **161 s** | 4 |
+| grok | high | consistency (style) | **28 s** | 6 |
+| codex | high | breakage | **104 s** | 2 |
+
+Control: a **164 KiB** prompt at `low` with no lens instruction returned in
+**20 s** (grok) / **8.6 s** (codex). Four times the bytes, a twentieth of the
+time.
+
+- **The cluster dominates — by 13x.** breakage vs. consistency at identical
+  effort: 374 s → 28 s. `breakage` holds `cross-file-trace` ("read the
+  neighboring repo files, not just the diff") and `removed-behavior`; both
+  *require* exploration, and the tool loop is the cost. Prompt bytes are noise
+  next to it.
+- **Effort is secondary — 2.3x** (374 s → 161 s) and in this sample it bought
+  **zero extra findings** (4 either way). Lowering grok's effort for the
+  breakage cluster is cheap headroom, not a quality trade — but on its own it
+  only moves 62% of the wall to 27%, it does not remove the wall.
+- **Backends are not interchangeable — 3.6x.** codex ran the same breakage
+  prompt in 104 s where grok took 374 s. That is *why* grok is the one that
+  reproducibly dies and codex never has: it is the slow voice on the expensive
+  cluster.
+- **Consequence for any fix:** chunking the *diff* addresses the one variable
+  measurement rules out. Splitting by *lens* (pulling `cross-file-trace` out of
+  `breakage` into its own call) targets the variable that actually dominates,
+  and bounds a timeout's cost to one lens instead of three. `grok --max-turns N`
+  is the untried direct cap on the tool loop; the adapter does not use it yet.
+
+`agents.sh run --telemetry <file> --unit <name>` records this per call
+(duration, effective effort/model, prompt bytes, backend rc, `timed_out`, and
+the wall the call actually ran under), written from the EXIT trap so a timeout
+is recorded too. `scripts/telemetry-report.py` renders it and flags any
+**surviving** call at ≥60% of its wall — the case `backendErrors` structurally
+cannot show, because a voice that finished at 550 s and one that finished at
+20 s are both just "ok".
+
 ## Gotchas (found in E2E testing, fixed in the adapter)
 
 - **codex hangs on inherited stdin *when the prompt is on argv*.** With a

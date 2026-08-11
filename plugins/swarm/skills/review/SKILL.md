@@ -91,7 +91,7 @@ Decide what to review from the user's argument, then run the block:
 ```sh
 set -euo pipefail
 TMPD="$(mktemp -d "${TMPDIR:-/tmp}/swarm-review.XXXXXX")"
-DIFF="$TMPD/diff.txt"; PROMPT="$TMPD/external-prompt.txt"
+DIFF="$TMPD/diff.txt"; PROMPT="$TMPD/external-prompt.txt"; TELEMETRY="$TMPD/telemetry.jsonl"
 
 # --- Diff source: ONE block, ONE `set -euo pipefail`, dispatched by a flag ----
 # The diff source is a BRANCH here, never a second self-contained script: a
@@ -266,7 +266,7 @@ FINDING_NONCE="$(python3 -c 'import secrets; print(secrets.token_hex(8))')" \
   || { echo "SWARM_NONCE_UNAVAILABLE=could not mint finding nonce (python3/secrets missing)"; rm -rf "$TMPD"; exit 1; }
 if [ -z "$FINDING_NONCE" ]; then echo "SWARM_NONCE_UNAVAILABLE=empty finding nonce"; rm -rf "$TMPD"; exit 1; fi
 
-echo "TMPD=$TMPD"; echo "DIFF=$DIFF"; echo "PROMPT=$PROMPT"; echo "FINDING_NONCE=$FINDING_NONCE"
+echo "TMPD=$TMPD"; echo "DIFF=$DIFF"; echo "PROMPT=$PROMPT"; echo "TELEMETRY=$TELEMETRY"; echo "FINDING_NONCE=$FINDING_NONCE"
 echo "PROMPT_BYTES=$(wc -c < "$PROMPT")"
 # Decide the oversize skip HERE, deterministically — do not leave the arithmetic
 # to the model (a compaction or a stale ceiling in context would let live voices
@@ -329,13 +329,14 @@ Workflow({
     adapter: "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh",
     diffFile: "<DIFF>",
     externalPromptFile: "<PROMPT>",
+    telemetryFile: "<TELEMETRY>",
     findingNonce: "<FINDING_NONCE>",
     externalVoices: [<the live voices from step 1>]
   }
 })
 ```
 
-Fill `<DIFF>`/`<PROMPT>`/`<FINDING_NONCE>` from the echoed values. Add `max: true` to `args` when
+Fill `<DIFF>`/`<PROMPT>`/`<TELEMETRY>`/`<FINDING_NONCE>` from the echoed values. Add `max: true` to `args` when
 `--max` was given (step 1 stripped it) — the deepest-effort profile. Add
 `claude: false` to `args`
 for an **external-only control run** (codex + grok-4.5, no Claude finder
@@ -439,6 +440,19 @@ Then, when present:
   `<backend> [<unit>: <lenses>]: <reason>` (every backend is multi-voice, so the
   unit names WHICH cluster lost its coverage — "codex errored" alone hides that);
   an errored voice is NOT "found nothing".
+- **Voice timing** — run this and print its stdout verbatim under the balance
+  block (skip the section when it prints nothing):
+
+  ```sh
+  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/telemetry-report.py" "<TELEMETRY>"
+  ```
+
+  It reports how long each external voice took and flags any call at ≥60% of the
+  600 s wall. **Do not summarize or re-derive these numbers** — a *surviving*
+  call is invisible in `backendErrors`, so this is the only signal that a
+  backend×cluster is drifting toward the ceiling *before* the run it finally
+  crosses. A timed-out voice appears in BOTH places by design: `backendErrors`
+  says coverage was lost, this says it was the wall that took it.
 - **Redactions** — if `balance.redactions > 0`, note the output gate scrubbed N
   finding(s).
 - The `Quelle` column is swarm-only (a single-source review omits it).
