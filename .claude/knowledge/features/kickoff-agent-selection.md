@@ -1,10 +1,10 @@
 ---
 title: "Kickoff Agent Selection: registry, per-repo default, honest degradation"
 createdAt: 2026-07-17
-updatedAt: 2026-08-05
+updatedAt: 2026-08-11
 createdFrom: "session: 2026-07-17 (task/kickoff-agent-selection)"
-updatedFrom: "session: 2026-08-05 (task/add-kimi-worker-support, post-swarm)"
-pluginVersion: 1.11.0
+updatedFrom: "session: 2026-08-11 (herdr transport metadata + kimi seed stop)"
+pluginVersion: 1.11.1
 prime: false
 ---
 
@@ -32,6 +32,16 @@ launch). Skills never hardcode the CLI list. `default get` **validates** its
 committed value against the registry — a stale/removed/attacker-supplied name
 reads as "no default" (→ picker), never routes or bricks kickoff.
 
+Ownership extends to **how the worker reaches herdr** (1.11.1): each entry declares
+`herdr_mode=agent-start|pane-run` + `herdr_kind`, so the launcher never infers
+transport from a selector name or by parsing `argv[0]`. `agent-start` asserts
+argv[0] *equals* the kind (herdr's canonical executable) and hands the untouched
+tail to `--kind`; `pane-run` is for wrappers that no native kind can express — kimi
+today, and a dynamically-registered cc-harness entry (`pane-run` +
+`herdr_kind=claude`) tomorrow, with no launcher change. An entry whose mode the
+launcher does not know fails closed before anything is created. See
+[[herdr-kickoff-automation]] for the launch-side contract.
+
 ## grok availability is model-aware and bounded
 grok drops/renames models between releases (composer `grok-composer-2.5-fast`
 died in 0.2.10x; `grok-build`→`grok-4.5` before that). So grok availability
@@ -53,16 +63,22 @@ entry point but is mutually exclusive with **both** `--auto` and `-y` and exits
 after one answer, so it cannot *be* the worker. What makes it work: `-p` runs
 tools unattended, and `kimi -c` inherits its session history. Hence two phases:
 
-    sh -c 'kimi -m "$1" -p "$2" || <report+wait>; exec kimi -c --auto' \
+    sh -c 'if kimi -m "$1" -p "$2"; then exec kimi -c --auto;
+           else <marker + exit $rc>; fi' \
        kimi-worker <model> <prompt>        # exact text: KIMI_LAUNCH_SCRIPT
 
-`exec` re-roots the pane at kimi (herdr then watches the real process). A failed
-seed must neither kill the pane (`&&`) nor pass unnoticed (a bare `;` — the TUI's
-first repaint scrolls the error away, leaving a tab that looks like a working
-worker but never read TASK.md), so the script **reports and waits for a keypress**
-before handing over. Verified: a failed seed in a fresh worktree yields a NEW empty
-session, never a foreign one — `kimi -c` is scoped to the working directory, so two
-worktrees cannot cross-resume. Values ride as
+`exec` re-roots the pane at kimi (herdr then watches the real process). **A failed
+seed is a hard stop (1.11.1).** The first shape ran phase 2 regardless after a
+keypress, which produced the very trap it meant to avoid: an empty `kimi -c --auto`
+session that never read TASK.md but looks alive to herdr's detection *and* to the
+user — and in an unattended background tab nobody is there to press the key anyway.
+Now the failure branch prints a machine-readable ASCII marker
+(`[work-system] WORKER_SEED_FAILED: …`, assembled at runtime so the literal is not
+in the typed command — see [[herdr-kickoff-automation]]), says TASK.md was not
+started, and exits with the **seed's own** code without touching phase 2, so the
+launcher can classify it as a definitive failure and roll the tab back. On legacy
+herdr, where the wrapper is the tab's root process, this also closes the tab — a
+closed tab is honest where the empty session was actively misleading. Values ride as
 `"$1"`/`"$2"` positionals, never spliced into the script text — `-p` swallows the
 next token, so a concatenated argv is one reordering away from silently eating a
 flag (`kimi -p --auto "…"` makes `--auto` the prompt). The test asserts the exact
