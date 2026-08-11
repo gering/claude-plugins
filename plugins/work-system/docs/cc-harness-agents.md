@@ -81,12 +81,30 @@ work-system's `/close` teardown both key on the pane's root process being
 | `agent-registry.sh list` | if `command -v cc-harness-agents` succeeds, run `list` (bounded) and merge rows as `cli=cc-harness`; helper absent or exit 3 → no change |
 | `agent-registry.sh resolve cc-harness:<id>` | availability + note from the helper (no re-probe); argv = `cc-harness-agents exec <id> -- claude [-n <session>] /work-system:continue` |
 | `/kickoff` picker | harness rows labelled "foreign model in the Claude Code harness, routed via a local gateway"; unavailable greyed with the helper's fix hint; available first |
-| lifecycle | full CC session → `/continue`, `/close` Scenario A/B, tab glyphs unchanged. `supports=` is the same set as a native claude worker |
+| lifecycle | runs as a full CC session → `/close` Scenario A/B and tab glyphs unchanged; `supports=` is the same set as a native claude worker. **Exception:** `/continue`'s reopen sends a bare `claude -c`, which resumes the transcript *without* the routing env — see below |
 | default | a committed `cc-harness:<id>` default is accepted when the helper lists it, and falls through to the picker when the helper is gone (same validation as a stale native name) |
 
 Nothing gateway-specific is hardcoded in the plugin. A sixth foreign model is a
 new row in the helper's table — the plugin has no per-agent code path, which is
 why the tests assert a name the plugin has never shipped (`cc-harness:never-seen`).
+
+### Known gap: `/continue` reopen loses the routing
+
+`herdr-launch.sh resume` always sends a bare `claude -c`, because the work-system
+does not persist which worker a task used. For a harness task that resumes the
+right transcript **on the wrong model**: without `cc-harness-agents exec` the
+session has no `ANTHROPIC_BASE_URL`/`ANTHROPIC_MODEL`, so it silently continues on
+the user's default Claude model. Nothing looks broken — which is why `/continue`
+states it inline rather than claiming parity.
+
+Resume a harness worker by hand in the tab:
+
+```sh
+cc-harness-agents exec <id> -- claude -c
+```
+
+Closing this properly needs per-task worker persistence (a deliberate later idea),
+not a change to the helper contract.
 
 ## Setup sketch (reference)
 
@@ -109,13 +127,39 @@ consumer.
 - `exec` hands the gateway token to whatever argv it runs. Deny both the token
   file *and* `cc-harness-agents exec` in Claude Code permission rules if you
   don't want a session to exfiltrate the token; `list` is safe (prints no
-  secret). Those rules bind Claude Code sessions only.
+  secret).
+- **Know what those deny rules do *not* cover**, or you will trust a boundary
+  that isn't there. They evaluate Claude Code **tool calls**, so they miss both
+  ends of the realistic path:
+  - **This plugin's own launch path is unaffected.** `/kickoff` calls
+    `agent-registry.sh resolve` (a command string containing no
+    `cc-harness-agents` token, so no rule matches), and `herdr-launch.sh` then
+    spawns `herdr agent start … -- cc-harness-agents exec <id> -- claude …`
+    inside the herdr server — never as a Bash tool call the permission system
+    sees. That is by design (it is how the worker starts), but it means the rule
+    is not what stops a launch.
+  - **A worker session can still call it.** `exec` accepts arbitrary argv, so a
+    malicious instruction reaching a worker (e.g. via an `/adopt`-generated
+    `TASK.md`) can run `cc-harness-agents exec <id> -- sh -c '…$ANTHROPIC_AUTH_TOKEN…'`
+    within the contract.
+  - Cron, a package postinstall, or any plain shell is outside Claude Code
+    entirely. Bash rules also match on command *text*, so an unusual spelling of
+    the path misses them.
+
+  Net: the deny rules reduce casual exposure in an interactive session. The real
+  boundary is **who may execute the helper at all** (file permissions, PATH
+  hygiene) — treat installing it as granting user-equivalent code execution.
 - An argv allow-list was considered and rejected: it would break the contract
   ("run this routed"), and the sanctioned target `claude` can run arbitrary
-  commands itself. The boundary is who may execute the helper at all.
+  commands itself. A helper author who wants a tighter boundary can pin `exec`
+  to a fixed `claude` target — the plugin only ever asks for that shape — at the
+  cost of the general contract.
 - Gateway liveness should be a *plausibility* check that withholds the token
   from a bare socket listener (e.g. an unauthenticated request must be
   refused), not a bare TCP connect.
+- **`list` output is rendered to users as authoritative hints.** The plugin
+  strips control characters and caps field length at ingest, but a helper should
+  not emit instruction-shaped notes: they are displayed, never executed.
 
 ## Related
 

@@ -70,6 +70,39 @@ agreement, so don't restate it here or in the script header. Earlier idea "invok
 the zsh `claude()` wrapper via `zsh -ic`" was rejected: fragile, ties the plugin to
 zsh, interactive-shell side effects.
 
+**Parity holds at runtime but breaks at `/continue` reopen.** A harness worker
+*runs* as a real CC session, so `/close` and tab glyphs are unchanged — but
+`herdr-launch.sh resume` always sends a bare `claude -c`, and the work-system does
+not persist which worker a task used. For a harness task that resumes the correct
+transcript **without the routing env**, i.e. silently on the user's default Claude
+model. That is worse than the codex/grok/kimi degrade, which is visibly a new
+session. Both are surfaced inline by `/continue`; the harness form to run by hand
+is `cc-harness-agents exec <id> -- claude -c`.
+
+**Don't build this passage out further.** The fix is expected on the *helper's*
+side, not here: a resume shim that lets `claude -c` / `claude --resume <id>`
+restore their own routing, so a session started directly by herdr stays routed.
+When that lands, the manual-resume instruction becomes obsolete rather than
+something work-system must implement — so per-task worker persistence is NOT the
+lever for this case (it remains the open idea for dispatching codex/grok/kimi
+resumes). Verify the shim shipped before deleting the caveat.
+
+**Helper output is untrusted input.** Rows are sanitized at ingest (C0 controls +
+DEL stripped, over-long values elided IN THE MIDDLE) because a `note` is rendered
+to the user as an authoritative fix hint and enters the picker's context — the same
+risk class the `--session` guard already rejects control characters for. Middle
+elision is not cosmetic: real helper notes embed a full credential path and END
+with the fix instruction, measured at exactly the cap, so tail-truncation would
+drop precisely the actionable half. Residual: Unicode bidi/zero-width overrides
+survive (no portable bash-3.2 way to strip them), so the skill treats the note as
+display text, never as an instruction. Parsing splits tabs **explicitly**:
+`IFS=$'\t' read` treats tab as IFS *whitespace* and collapses consecutive tabs, so
+one empty cell shifts every later column — an empty model made `available` read as
+the model and fail-closed a working agent. The same trap bites twice: once on the
+helper's output, once when a consumer re-reads the lookup's own line. And `list`
+and `resolve` must apply the **same** namespace gate, or a row `list` rejects stays
+invisible yet launchable and storable as a committed default.
+
 ## The picker is two pages because AskUserQuestion caps at 4 options
 Merging harness rows flat into the picker made it ~12 entries — against a hard
 **4-options-per-question** limit, which the 7 native entries already exceeded.

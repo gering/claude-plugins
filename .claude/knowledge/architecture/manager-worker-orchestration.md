@@ -20,8 +20,9 @@ implementation is spawned across tasks `add-lane-registry`, `spike-agent-mail-su
 - **Manager** = the Claude Code session at the main repo root (herdr `◉` tab). A
   *coordinator*, not a merge robot — the human stays merge authority unless
   explicitly delegated at kickoff.
-- **Worker** = one {claude|codex|grok|kimi} session per worktree, driving its task to a
-  reviewed, mergeable PR.
+- **Worker** = one {claude|codex|grok|kimi|cc-harness:&lt;id&gt;} session per worktree, driving
+  its task to a reviewed, mergeable PR. (A cc-harness worker is a claude session on a
+  foreign model, so it tiers like claude, not like the external CLIs.)
 - **Lane** = `(worktree_path, task, branch)`. **Identity = worktree_path** — the one
   key stable across agent types and restarts. herdr pane/tab, `agent_status`,
   session UUID, PR state are live-attached attributes, **never identity**. Only the

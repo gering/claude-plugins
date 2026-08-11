@@ -102,8 +102,14 @@ class Env:
         # just re-execs the remaining argv so a resolved launch can be run.
         self.harness_bin = bindir / "cc-harness-agents"
         if harness_agents is not None:
+            # `printf`, never `echo "…\t…"`: escape expansion by `echo` is not
+            # POSIX-guaranteed, so on a host whose /bin/sh is bash without
+            # xpg_echo (RHEL/Fedora/Amazon Linux) the row would arrive as ONE
+            # literal field and every harness assertion below would fail — while
+            # CI (ubuntu/dash) stayed green. The kimi stub already uses printf.
             rows = "".join(
-                '  echo "%s\\t%s\\t%s\\t%s"\n' % (n, m, a, note)
+                "  printf '%%s\\t%%s\\t%%s\\t%%s\\n' '%s' '%s' '%s' '%s'\n"
+                % (n, m, a, note)
                 for (n, m, a, note) in harness_agents
             )
             (self.harness_bin).write_text(
@@ -137,6 +143,15 @@ class Env:
         self.env["GROK_AUTH_FILE"] = str(self.grok_auth)
         self.env["KIMI_CREDENTIALS_FILE"] = str(self.kimi_creds)
         self.env["WORK_SYSTEM_AGENT_PROJECT_STATE"] = str(self.project_state)
+        # Always pin the harness seam, exactly like the auth/state overrides
+        # above. Without this the "no helper" cases keep the host PATH, so a
+        # contributor who actually HAS cc-harness-agents installed (i.e. the very
+        # audience for this feature) would run those assertions against their
+        # real helper. `harness_agents=None` points at a path guaranteed absent.
+        self.env["WORK_SYSTEM_CC_HARNESS_AGENTS"] = (
+            str(self.harness_bin) if harness_agents is not None
+            else str(root / "no-such-cc-harness-agents")
+        )
 
     def run(self, *args, project_state=True):
         env = dict(self.env)
@@ -553,22 +568,26 @@ check("harness kind is claude (what the helper execs into)",
       r.get("herdr_kind") == "claude")
 check("harness argv[0] is NOT the kind (why agent-start is impossible)",
       r["argv"][0] != "claude" and "claude" in r["argv"])
+# argv[0] is HARNESS_BIN — here the test seam's path, in production the bare
+# `cc-harness-agents` name resolved from PATH (same shape as every other worker,
+# which the registry also invokes by bare name).
+HB = str(e.harness_bin)
 check("resolve harness argv shape",
       r["argv"] == [
-          "cc-harness-agents", "exec", "grok", "--",
+          HB, "exec", "grok", "--",
           "claude", "-n", "close-herdr", "/work-system:continue",
       ])
 check("resolve harness has no --model (helper owns it)",
       "--model" not in r["argv"])
 check("resolve harness argv_shell is set",
-      "argv_shell" in r and "cc-harness-agents" in r["argv_shell"])
+      "argv_shell" in r and "exec grok -- claude" in r["argv_shell"])
 check("resolve available harness -> exit 0",
       e.run("resolve", "cc-harness:grok").returncode == 0)
 
 # Never-seen agent resolves the same way — no plugin-side allow-list.
 r = kv(e.run("resolve", "cc-harness:never-seen").stdout)
 check("never-seen harness argv uses bare id",
-      r["argv"][:4] == ["cc-harness-agents", "exec", "never-seen", "--"])
+      r["argv"][:4] == [HB, "exec", "never-seen", "--"])
 check("never-seen still lands on claude + qualified continue",
       r["argv"][-2:] == ["claude", "/work-system:continue"])
 
@@ -577,7 +596,7 @@ res = e.run("resolve", "cc-harness:kimi")
 check("unavailable harness -> exit 3", res.returncode == 3)
 rr = kv(res.stdout)
 check("unavailable harness still prints argv",
-      rr["argv"][:4] == ["cc-harness-agents", "exec", "kimi", "--"])
+      rr["argv"][:4] == [HB, "exec", "kimi", "--"])
 check("unavailable harness available=no", rr.get("available") == "no")
 check("unavailable harness note is the fix hint",
       "kimi-login" in rr.get("note", ""))
@@ -631,6 +650,58 @@ check("harness available=unknown → treated as no",
       by["cc-harness:grok"]["available"] is False)
 check("resolve unknown-avail harness -> exit 3",
       e.run("resolve", "cc-harness:grok").returncode == 3)
+e.close()
+
+# `list` and `resolve` must agree on which rows EXIST. A helper row that forgot
+# the namespace is rejected by the list builder; resolve must reject it too —
+# otherwise it is invisible in list/--json/the picker yet still launchable AND
+# storable as a committed repo default, breaking "whatever list prints is what
+# you can choose".
+e = Env(harness_agents=[("grok", "grok-4.5", "yes", "-")])
+rows = json.loads(e.run("list", "--json").stdout)
+check("non-namespaced helper row not listed",
+      all(not r["name"].startswith("cc-harness") and r["cli"] != "cc-harness"
+          for r in rows))
+check("non-namespaced row does not resolve",
+      e.run("resolve", "cc-harness:grok").returncode == 2)
+check("non-namespaced row rejected as project default",
+      e.run("default", "set", "cc-harness:grok").returncode == 2)
+e.close()
+
+# An EMPTY middle cell must not shift the remaining columns. `IFS=$'\t' read`
+# collapses consecutive tabs (tab is IFS whitespace), which silently turned an
+# empty model into model="yes"/avail="-" — fail-closing a working agent.
+e = Env(harness_agents=[("cc-harness:x", "", "yes", "-")])
+by = {r["name"]: r for r in json.loads(e.run("list", "--json").stdout)}
+check("empty model cell does not shift columns",
+      by["cc-harness:x"]["model"] == "" and by["cc-harness:x"]["available"] is True)
+check("resolve with empty model stays available",
+      e.run("resolve", "cc-harness:x").returncode == 0)
+e.close()
+
+# The mirror case: an empty `available` cell must read as NOT available, not
+# borrow the note's text. This is what makes harness_map_avail's fail-closed
+# rule actually hold.
+e = Env(harness_agents=[("cc-harness:y", "m", "", "yes")])
+by = {r["name"]: r for r in json.loads(e.run("list", "--json").stdout)}
+check("empty available cell → unavailable (note must not shift in)",
+      by["cc-harness:y"]["available"] is False)
+e.close()
+
+# Helper fields are untrusted: control characters (ANSI escapes, embedded
+# newlines that could forge extra key=value lines in resolve's output) must be
+# stripped before the text reaches the picker or a resolve consumer.
+e = Env(harness_agents=[
+    ("cc-harness:z", "m", "no", "run: \033[31mfix\033[0m\\nname=cc-harness:evil"),
+])
+by = {r["name"]: r for r in json.loads(e.run("list", "--json").stdout)}
+note = by["cc-harness:z"]["note"]
+check("helper note keeps its readable text", "run:" in note and "fix" in note)
+check("helper note has no control characters",
+      not any(ord(c) < 32 or ord(c) == 127 for c in note))
+res = e.run("resolve", "cc-harness:z")
+check("sanitized note cannot forge extra resolve keys",
+      len([ln for ln in res.stdout.splitlines() if ln.startswith("name=")]) == 1)
 e.close()
 
 

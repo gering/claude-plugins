@@ -39,8 +39,11 @@ truth; this entry captures the durable design and one non-obvious gotcha.
   `-m` form — `codex -m <model> "<bootstrap prompt>"` /
   `grok -m <model> "<bootstrap prompt>"`, and kimi (1.11.0) a two-phase
   `sh -c 'kimi -m "$1" -p "$2" || …; exec kimi -c --auto' …` — it has no positional
-  launch prompt (see [[kickoff-agent-selection]]). `emit_argv` is the SoT; never
-  reconstruct an argv from this list.
+  launch prompt (see [[kickoff-agent-selection]]). A cc-harness worker (1.12.0,
+  only when the optional PATH helper lists it) wraps the claude form:
+  `cc-harness-agents exec <id> -- claude [-n <session>] /work-system:continue` —
+  no `--model` (the helper env-sets it, then `exec`s, so the pane still roots at
+  claude). `emit_argv` is the SoT; never reconstruct an argv from this list.
   herdr-launch stays CLI-agnostic — it just execs the resolved `argv=` words. The
   `-- argv` form sidesteps the interactive shell entirely, so there is no keystroke
   race against shell startup (see the gotcha below) and no readiness handshake to

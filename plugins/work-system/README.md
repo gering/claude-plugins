@@ -214,18 +214,25 @@ Helper absent → one `command -v`, no aggregate entry, no change. Setup + contr
 
 **Non-Claude workers degrade honestly.** codex/grok/kimi have no work-system
 skills, so a launched worker gets a bootstrap prompt (read `TASK.md`, commit, open
-a PR) instead of `/continue`. A `cc-harness:…` worker is still a full CC session
-(the helper only routes the model), so it does **not** degrade — lifecycle is
-unchanged. Everything git/PR-derived (`/status`, `/list`, the `[ws]` statusline,
-`/close`'s tab teardown) works for any worker; only claude-session concepts
-differ. `/continue`'s reopen **always sends `claude -c`** — the work-system
-doesn't persist which worker a task used (per-task agent memory is a later idea),
-so it can't dispatch per CLI. That resumes a claude worker (including a
-cc-harness one); for a codex/grok/kimi task it's a *new* Claude session, so you
-resume the real worker yourself in the tab (`codex resume --last` / `grok -c` /
-`kimi -c`) — `/continue` surfaces this caveat inline. Since codex and grok read
-`AGENTS.md`, dropping a short `AGENTS.md` note into the worktree is an optional
-way to give them standing task guidance.
+a PR) instead of `/continue`. A `cc-harness:…` worker *runs* as a full CC session —
+skills, lenses and `/close` all work, because the helper only routes the model.
+Everything git/PR-derived (`/status`, `/list`, the `[ws]` statusline, `/close`'s
+tab teardown) works for any worker; only claude-session concepts differ.
+
+**The one place every non-claude worker degrades is `/continue`'s reopen**, which
+**always sends `claude -c`** — the work-system doesn't persist which worker a task
+used (per-task agent memory is a later idea), so it can't dispatch per CLI:
+
+- **codex/grok/kimi** → a *new* Claude session, not your worker. Resume it
+  yourself in the tab: `codex resume --last` / `grok -c` / `kimi -c`.
+- **cc-harness** → `claude -c` resumes the right transcript but **without the
+  gateway routing**, so the session silently continues on your default Claude
+  model instead of the foreign one. Resume it properly with
+  `cc-harness-agents exec <id> -- claude -c`.
+
+`/continue` surfaces both caveats inline. Since codex and grok read `AGENTS.md`,
+dropping a short `AGENTS.md` note into the worktree is an optional way to give
+them standing task guidance.
 
 **kimi launches in two phases.** It has no positional launch prompt, and its
 one-shot `-p` flag can't be combined with the autonomous `--auto`/`-y` modes — so
@@ -271,7 +278,8 @@ Inside herdr, `/kickoff` doesn't just create the worktree and print manual
 instructions — it opens a new herdr **tab** in the *same* workspace, with the
 worktree as its cwd, and starts the task there for you. `/adopt` does exactly the
 same once it has created the worktree from an existing branch — same helper, same
-tab, same worker selection (`--opus`/`--sol`/`--grok`/`--kimi`/`--pick`, or the repo default);
+tab, same worker selection (`--opus`/`--sol`/`--grok`/`--kimi`/`--pick`, a
+[cc-harness agent](#worker-agent-selection), or the repo default);
 its tab label comes from the *resolved* task name, so it's sensible even when `/adopt`
 keeps the original branch name rather than renaming it to `task/<name>`:
 
