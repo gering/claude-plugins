@@ -193,35 +193,47 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-launch.sh" launch "$LABEL" "$WORKTREE" "$HERDR_WORKSPACE_ID" "$SELECTOR"
     ```
 
-    The helper resolves `SELECTOR` through the registry and spawns the worker as
-    **argv** (`herdr agent start … -- <resolved worker argv>`) — execing the binary
-    directly instead of typing into a fresh shell, which structurally avoids the
-    shell-startup keystroke race — then moves the agent into its own background tab.
-    It is the **single source of truth** for the launch (resolution, robust JSON
-    parsing, graceful fallback, exit codes); do not re-implement the herdr commands
-    or the resolution inline. Branch on its result:
+    The helper resolves `SELECTOR` through the registry, feature-detects which
+    `agent start` contract this herdr speaks, and opens the worker's own background
+    tab — on herdr 0.7.5+ by creating the tab first and starting the worker in its
+    root pane, on older herdr by spawning the agent and moving it. Either way the
+    worker never has to survive a shell-startup keystroke race. It is the **single
+    source of truth** for the launch (resolution, transport, robust JSON parsing,
+    rollback, exit codes); do not re-implement the herdr commands or the resolution
+    inline. Branch on its result **in this order**:
+    - **exit 0 with `blocked=unverified` (check this FIRST)** → a tab exists and
+      something may be running in it, but the launch could not be confirmed (the
+      worker never became detectable, herdr returned an error the helper cannot
+      classify, the pane id did not match, or a rollback could not be verified).
+      Report `pane=`/`tab=`/`agent=` and tell the user to **switch to that tab and
+      look** before doing anything else. Do **not** re-run the launch, do **not**
+      print the manual worker command, and do **not** save a project default — all
+      three would risk a second worker on the same worktree. Relay the helper's
+      stderr, which says what could not be confirmed.
     - **exit 0 with `moved=yes`** → the task is running in its own background tab
       (`tab=<id>`) with worker `agent=<cli:model>`. Report success (template below).
-    - **exit 0 with `moved=no`** → the worker started but the tab move failed, so it
-      is running as a split in *this* session's tab — tell the user it's here, not in
-      a new tab. The helper's stderr for this call carries herdr's own error
-      (code/message) ahead of its own generic line — **relay that stderr text to the
-      user**, not just "the move failed." (This call never sends `--workspace`, so
+    - **exit 0 with `moved=no`** (legacy herdr only) → the worker started but the tab
+      move failed, so it is running as a split in *this* session's tab — tell the user
+      it's here, not in a new tab. The helper's stderr for this call carries herdr's own
+      error (code/message) ahead of its own generic line — **relay that stderr text to
+      the user**, not just "the move failed." (This call never sends `--workspace`, so
       unlike the failure below there is no stale-workspace hint to expect here.)
-    - **After a successful launch (either `moved=` value), if `OFFER_DEFAULT=yes`**
-      (the picker path, user chose to save): `bash "$REG" default set "<agent>"`
-      (the `agent=` value) to write the repo's committed default. Mention it, and
-      that it's an uncommitted change to `.claude/work-system-agent` to commit when
-      ready. Skip on any non-zero launch (don't persist a default that didn't run).
+    - **After a confirmed launch (a `moved=` line, never on `blocked=unverified`), if
+      `OFFER_DEFAULT=yes`** (the picker path, user chose to save):
+      `bash "$REG" default set "<agent>"` (the `agent=` value) to write the repo's
+      committed default. Mention it, and that it's an uncommitted change to
+      `.claude/work-system-agent` to commit when ready. Skip on any non-zero launch
+      (don't persist a default that didn't run).
     - **exit 2** → unknown/invalid selector. Tell the user and re-offer the picker.
     - **exit 3** → the chosen agent is unavailable (stdout `unavailable=<name>` +
       `note=<hint>`). Report it verbatim (e.g. "codex not ready — run: codex login")
       and re-offer the picker or another selector. Nothing was spawned.
     - **other non-zero exit** → the helper could not automate (herdr/python3 missing,
-      broken socket, or no pane id). **Relay the helper's stderr to the user first**
-      — on a broken-socket/no-pane-id failure it carries herdr's own error
-      (code/message, and a stale-workspace hint when applicable), the actual reason
-      this happened, not just the generic guard text. Then show the manual block (b).
+      an unrecognizable `agent start` contract, a broken socket, or no pane id) — and
+      whatever it did create it has already rolled back. **Relay the helper's stderr to
+      the user first** — it carries herdr's own error (code/message, and a
+      stale-workspace hint when applicable), the actual reason this happened, not just
+      the generic guard text. Then show the manual block (b).
 
     Success report (fill `Tab` from the helper's `tab=` line, `Agent` from `agent=`):
     ```

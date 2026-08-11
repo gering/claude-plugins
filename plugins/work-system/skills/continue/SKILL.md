@@ -19,8 +19,10 @@ user_invocable: true
   progress; keep working here. (Steps 1–7 under "In-session resume".)
 - **From the main session with a `<task>` argument** → *reopen*: open the task's
   herdr tab at its worktree and resume its Claude session there (`claude -c`), then
-  focus it — recovering a task tab that a bare `/exit` closed (kickoff tabs run
-  Claude as the root pane, so `/exit` closes them). ("Reopen mode" below.)
+  focus it — recovering a task tab that a bare `/exit` closed (on legacy herdr the
+  worker IS the tab's root pane, so `/exit` closes the tab; on herdr 0.7.5+ it runs
+  inside a shell pane, so `/exit` leaves a bare shell there instead). ("Reopen mode"
+  below.)
 
 **Pick the mode first.** Resolve names through `task-status.sh` so a `task/`-prefixed
 or aliased argument is normalized the SAME way worktree directories are named (they use

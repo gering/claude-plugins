@@ -47,8 +47,12 @@
 #                         shell (not as the root pane), a later /exit drops back to
 #                         the shell and the TAB SURVIVES — this is the /exit
 #                         hardening. Used to recover a task tab that a bare /exit
-#                         closed (kickoff tabs are root-pane Claude, so /exit closes
-#                         them). `claude -c` continues the most-recent session for
+#                         closed — which is what happens to a LEGACY kickoff tab,
+#                         where the worker is the tab's root pane. A modern kickoff
+#                         tab already runs its worker inside a shell pane, so there
+#                         /exit leaves a bare shell and this mode simply reuses (and
+#                         re-`claude -c`s) that tab.
+#                         `claude -c` continues the most-recent session for
 #                         the worktree cwd; since each worktree hosts exactly one
 #                         task, the cwd already identifies the session unambiguously
 #                         — no session id needs stashing at kickoff.

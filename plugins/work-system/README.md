@@ -256,16 +256,30 @@ keeps the original branch name rather than renaming it to `task/<name>`:
   names the herdr agent (and, for a claude worker, the `-n` session); the task's
   branch — `task/<name>` from `/kickoff`, or the original branch `/adopt` kept — is
   unchanged, so the resume flow still resolves the task.
-- The chosen worker is launched directly as argv (`herdr agent start … --
-  <resolved worker command>`), so the real CLI process is what herdr's agent-state
-  detection sees. A claude worker gets `claude --model <m> -n "<label>" "/work-system:continue"`
-  and loads the task context automatically; a codex/grok/kimi worker gets a bootstrap
-  prompt (read `TASK.md`, drive the task to a PR) since they have no work-system skills.
-  A kimi worker's pane roots at a short `sh -c` wrapper that `exec`s into kimi, so
-  what herdr ends up watching is the real kimi process.
+- The real CLI process is what herdr's agent-state detection ends up watching. A
+  claude worker gets `claude --model <m> -n "<label>" "/work-system:continue"` and
+  loads the task context automatically; a codex/grok/kimi worker gets a bootstrap
+  prompt (read `TASK.md`, drive the task to a PR) since they have no work-system
+  skills. A kimi worker runs behind a short `sh -c` wrapper that `exec`s into kimi.
+- **How** the worker reaches herdr depends on the herdr version, which the launcher
+  feature-detects from `herdr agent start --help` (never from a version number —
+  the change landed mid-0.7.x). On **0.7.5+ / 0.8** `agent start` needs an
+  already-open pane, so the task's tab is created first and the worker started in
+  its root pane (`agent start <label> --kind <cli> --pane <id> -- <args>`), with
+  herdr's `agent_pane_busy` — the shell still running its rc files — retried within
+  a bounded window. On **0.7.0–0.7.4** the old `agent start --workspace --cwd -- …`
+  plus `pane move --new-tab` sequence is kept unchanged. If neither contract is
+  recognizable, nothing is created and you get the manual command instead.
+- If a launch can't be **confirmed** (the worker never became detectable, an
+  unclassifiable herdr error, a pane-id mismatch), the tab is left in place and the
+  skill tells you to look at it rather than launching a second worker onto the same
+  worktree. Failures that provably started nothing roll their tab back instead, so a
+  retry loop can't leave a trail of blank tabs.
 - The new tab opens in the background (`--no-focus`), so the session you launched
   from (`/kickoff` or `/adopt`, in the main repo) stays in front; switch to the tab
-  when you're ready to work there.
+  when you're ready to work there. On 0.7.5+ the worker lives inside that tab's
+  shell, so `/exit` returns you to a shell rather than closing the tab — `/close`'s
+  marker + `SessionEnd` hook handle teardown.
 
 ### `/close` tears down the task's tab
 
@@ -281,25 +295,30 @@ and decides self-close vs. a different-tab close by pane id. Two entry points:
   than leaving a silent orphan.
 - **From inside the worktree tab**: Claude cannot close its own tab, only exit
   cleanly. So `/close` focuses the main tab and arms a **detached `/exit`** that
-  fires once the turn ends — Claude exits cleanly, its tab auto-closes, and
-  you land back in the main session, hands-free. (The injector polls until the
+  fires once the turn ends — Claude exits cleanly, the armed marker + `SessionEnd`
+  hook close its tab, and you land back in the main session, hands-free. (The injector polls until the
   prompt is idle before delivering the exit; injecting into a busy TUI is
   unreliable.) If herdr injection isn't available it instead asks you to press
   **Ctrl+D**. Because a self-close fires *after* the turn and can't be confirmed
   in-turn, `/close` always prints the tab id as a fallback — if the tab lingers,
   close it by hand.
 
-For the self-close path a `SessionEnd` hook ships with the plugin as a backup: it
-closes the tab on a clean exit, but only when `/close` wrote a short-lived per-pane
-marker file (under `$HOME/.cache`), so it never fires on an ordinary session exit.
+A `SessionEnd` hook ships with the plugin for that path: it closes the tab on a
+clean exit, but only when `/close` wrote a short-lived per-pane marker file (under
+`$HOME/.cache`), so it never fires on an ordinary session exit. On herdr 0.7.5+ the
+hook is the *primary* mechanism, not a backup — `agent start` needs an existing
+pane, so a kickoff worker runs **inside** a shell pane and its exit drops back to
+that shell instead of ending the tab.
 All of this lives in the tested `scripts/herdr-teardown.sh`; see
 `skills/close/SKILL.md` step 12 for the flow.
 
 ### `/work-system:continue <task>` reopens a closed task tab
 
-A kickoff tab runs Claude as its **root pane**, so a bare `/exit` (even just to
-restart Claude Code) ends that pane and herdr closes the whole tab — the worktree
-and the resumable session survive, but you lose your place. Run
+A bare `/exit` (even just to restart Claude Code) costs you your place: on herdr
+0.7.0–0.7.4 the kickoff worker is the tab's **root pane**, so the exit closes the
+whole tab; on 0.7.5+ it runs inside a shell pane, so the exit leaves a bare shell
+sitting in the worktree. Either way the worktree and the resumable session survive.
+Run
 `/work-system:continue <task>` **from the main session** to get it back (use the
 plugin-qualified form — a Claude Code built-in `/continue` shadows the bare skill
 name): it reopens a herdr tab

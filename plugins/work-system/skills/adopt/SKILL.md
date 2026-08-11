@@ -174,14 +174,17 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     ```
 
     This is the **same helper and call `/kickoff` uses** — the single source of truth
-    for selector resolution, argv-launch, tab-move, and exit codes. **Branch on its
-    result exactly as `skills/kickoff/SKILL.md` step 13a describes** (exit 0 `moved=yes`
-    → new background tab; `moved=no` → running as a split in *this* tab, relay the
-    helper's stderr; the `OFFER_DEFAULT=yes` → `bash "$REG" default set "<agent>"`
-    persistence after a successful launch; exit 2 unknown selector → re-offer the
-    picker; exit 3 unavailable agent → report `unavailable=`/`note=` verbatim, re-offer;
-    other non-zero → relay stderr, then the manual block). Do not re-implement that
-    branching here — following one copy keeps adopt and kickoff from drifting.
+    for selector resolution, the herdr launch transport, rollback, and exit codes.
+    **Branch on its result exactly as `skills/kickoff/SKILL.md` step 13a describes,
+    in that order** (exit 0 `blocked=unverified` FIRST → a tab exists but the launch is
+    unconfirmed: send the user to inspect it, and do not relaunch, print the manual
+    command, or save a default; then `moved=yes` → new background tab; `moved=no` →
+    running as a split in *this* tab, relay the helper's stderr; the
+    `OFFER_DEFAULT=yes` → `bash "$REG" default set "<agent>"` persistence only after a
+    confirmed launch; exit 2 unknown selector → re-offer the picker; exit 3 unavailable
+    agent → report `unavailable=`/`note=` verbatim, re-offer; other non-zero → relay
+    stderr, then the manual block). Do not re-implement that branching here — following
+    one copy keeps adopt and kickoff from drifting.
 
     Success report (adopt keeps the *adopted* branch name — use `<current-branch-name>`,
     which is `task/<task-name>` only if step 8 renamed it):
