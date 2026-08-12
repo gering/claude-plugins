@@ -103,8 +103,31 @@ if (!FINDING_NONCE) {
 // is deliberately LENS-FREE and must stay that way — do NOT re-add a lens list
 // there (test_lens_sync.py fails on it, and a broad "cover everything" line
 // would contradict the per-cluster "review ONLY these" instruction at run time).
+// `reach` is deliberately a ONE-lens cluster, split out of `breakage` in 0.9.0.
+// The reason is LENS CROWD-OUT, measured — not runtime, which the split barely
+// moves (be precise here; the first draft of this comment got it wrong):
+//   old: one 3-lens call    374s → 4 findings, THREE of them cross-file-trace
+//   new: breakage (2 lens)  313s → 4 findings the combined call missed entirely
+//        reach   (1 lens)   126s → 4 findings, ~the combined call's cross-file set
+// So the combined call was not splitting its attention evenly — one lens
+// consumed it and `correctness`/`removed-behavior` barely reported. Splitting
+// recovered four diff-local findings (three confirmed real against this repo).
+// What the split does NOT buy: throughput. The longest single call drops only
+// 374s → 313s (16%), and TOTAL work rises to 439s. `cross-file-trace` is the
+// most exploration-heavy lens, but it is not the sole cost — the remaining
+// two-lens cluster still runs 313s, so this alone does not clear the 600s wall.
+// Two further effects, neither reachable by lowering effort:
+//   1. A timeout costs ONE lens instead of three — `correctness` and
+//      `removed-behavior` no longer die alongside it. That was the family-critical
+//      failure: grok is the only third-family voice, so one rc=124 removed the
+//      whole cluster's third opinion.
+//   2. `reach` carries no MANDATORY lens, so the gate may prune it away
+//      ENTIRELY on a diff with no cross-file surface — where the old layout
+//      still spawned the expensive call because `correctness` held the cluster open.
+// Cost when the gate keeps it: one extra call per live backend.
 const LENS_CLUSTERS = {
-  breakage: ['correctness', 'removed-behavior', 'cross-file-trace'], // what breaks?
+  breakage: ['correctness', 'removed-behavior'],                     // what breaks?
+  reach: ['cross-file-trace'],                                       // what else does this touch? (exploration-heavy — see above)
   threat: ['security', 'adversarial'],                               // what's exploitable / which assumption fails?
   design: ['reuse', 'simplification', 'efficiency', 'altitude'],     // is this good, maintainable code?
   consistency: ['style', 'conventions'],                             // does it fit the codebase?
@@ -148,8 +171,8 @@ for (const l of CANDIDATE_LENSES) {
 // that get the applicability verify + their own report section; all other
 // lenses (incl. the methodological two) are factual defects.
 const lensKind = (lens) => (LENS_CLUSTERS.design.includes(lens) ? 'design' : 'defect')
-// Methodological lenses (the non-topical members of the breakage cluster) assert
-// REPO-WIDE facts. Externals may now read project files (0.6.0), but a
+// Methodological lenses (the non-topical members of the fact-asserting clusters
+// `breakage` + `reach`) assert REPO-WIDE facts. Externals may now read project files (0.6.0), but a
 // cross-family methodological consensus is still verified (needsVerify below)
 // UNLESS a Claude voice tagged the same lens — correlated hallucination on a
 // reuse/stale-caller claim remains real. test_lens_sync.py pins these names to
@@ -167,10 +190,15 @@ const METHODOLOGICAL_LENSES = ['removed-behavior', 'cross-file-trace']
 // SPAWN, so a doc-only diff still pays 2 clusters × live voices.
 // KNOWN LIMIT (be precise — an earlier version of this comment overstated it):
 // the floor guarantees CLUSTER SPAWN, not full lens coverage. Within `breakage`
-// the gate may still prune `removed-behavior` / `cross-file-trace`, leaving that
-// unit running with lenses:['correctness'] for every voice. Those pruned lenses
-// are forced into the report's gated-out column, so the loss is disclosed rather
-// than silent — but "breakage ran" does not mean "deletions were reviewed".
+// the gate may still prune `removed-behavior`, leaving that unit running with
+// lenses:['correctness'] for every voice. Those pruned lenses are forced into the
+// report's gated-out column, so the loss is disclosed rather than silent — but
+// "breakage ran" does not mean "deletions were reviewed". Since 0.9.0 the same
+// applies MORE sharply to `reach`: holding no mandatory lens, a pruned
+// `cross-file-trace` means that cluster spawns for nobody. That is the intended
+// saving on a diff with no cross-file surface, but it is a real coverage
+// decision made by a haiku gate — read the gated-out column, do not assume
+// cross-file was looked at.
 // Deliberately NOT derived from LENS_CLUSTERS.threat: which lenses are
 // non-negotiable is a judgement call, not a consequence of cluster membership —
 // adding a lens to `threat` must not silently make it mandatory. The subset
@@ -394,7 +422,7 @@ if (gate && gateRun !== null) {
 // ============================================================================
 phase('Fan-out')
 // Claude fan-out granularity ladder: `--quick` (future flag surface) = one broad
-// pass, default = one finder per CLUSTER (≤4 agents — lenses in a cluster share
+// pass, default = one finder per CLUSTER (≤5 agents — lenses in a cluster share
 // a mental mode, so one agent covers them without splitting context), `--max` =
 // one finder per LENS (≤11 agents — the depth profile). Design lenses run at the
 // SAME effort as defect lenses (xhigh under --max): depth applies to design
@@ -444,7 +472,7 @@ const claudeThunks = finderUnits.map((u) => () =>
 // self-tagging from a broad prompt). Both backends read files + research since
 // 0.6.0, so neither needs a diff-only brief variant.
 // Cost: `live-backends × units` calls, each re-sending the fenced diff and
-// paying CLI startup — ≤2×4 by default, ≤2×11 under --max (the explicitly
+// paying CLI startup — ≤2×5 by default, ≤2×11 under --max (the explicitly
 // ordered ceiling). Logged below; never silently capped.
 const shQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
 // Single LINE by construction: this string is embedded in a command the transport

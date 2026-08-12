@@ -776,7 +776,7 @@ subcmd_run() {
   # Both CLIs accept the prompt out-of-band, so the adapter now normalizes every
   # input form to ONE file and hands the PATH (never the content) to the backend:
   #   codex — `[PROMPT]` omitted or `-` reads the instructions from stdin
-  #   grok  — `--prompt-file <PATH>` (>= 0.2.112; falls back to --single below)
+  #   grok  — `--prompt-file <PATH>` (present on 0.2.112; preflighted, no fallback)
   # The content is therefore never read into a shell variable either, so a large
   # diff no longer costs a full in-memory copy.
   #
@@ -1011,8 +1011,25 @@ _grok_has_prompt_file() {
   # early-exiting `grep -q` SIGPIPEs the CLI and the pipeline reports failure
   # even on a match. Its OWN function so the argv tests can stub it — otherwise
   # they would need a real grok on PATH to exercise run_grok.
-  local help
-  help="$(grok --help 2>/dev/null || true)"
+  # BOUND the probe. This runs outside with_timeout, so an unbounded `grok --help`
+  # (a wedged CLI, a stale leader socket, a blocked FS) would hang the whole review
+  # before any review work started. Same rule and same bound as the readiness
+  # probe: `-k` is what actually enforces it, since a CLI that ignores SIGTERM or
+  # forks a stdout-inheriting child would keep `$(...)` blocking past the deadline.
+  local to=""
+  if command -v timeout >/dev/null; then to="timeout"
+  elif command -v gtimeout >/dev/null; then to="gtimeout"
+  fi
+  local help=""
+  if [[ -n "$to" ]]; then
+    help="$("$to" -k 3 "$PROBE_TIMEOUT" grok --help 2>/dev/null </dev/null || true)"
+  else
+    # No way to bound it. Do NOT run it uncapped — but do not fail the voice
+    # either: assume the capability and let the real call report the truth. A
+    # missing flag then surfaces as that call's error, which is strictly better
+    # than hanging here or refusing a CLI that may well support it.
+    return 0
+  fi
   case "$help" in *--prompt-file*) return 0 ;; *) return 1 ;; esac
 }
 

@@ -9,8 +9,8 @@ and since 0.7.0 the external voices receive it through the adapter's
 What still hand-mirrors the set, and cannot be derived at runtime:
 
   - swarm-review.js's METHODOLOGICAL_LENSES — the hand-maintained verify-gating
-    subset of the breakage cluster; a methodological lens missing here stops
-    being verified on a cross-family external consensus;
+    subset of the fact-asserting clusters (breakage + reach); a methodological
+    lens missing here stops being verified on a cross-family external consensus;
   - pr-post.py's DESIGN_LENS_TAGS — the publish path's design-tag guard.
 
 Plus the structural checks that keep the single-source path intact (the
@@ -52,7 +52,12 @@ for line in cluster_block.splitlines():
     km = re.match(r"\s*([a-z]+):\s*\[(.*?)\]", line)
     if km:
         clusters[km.group(1)] = re.findall(r"'([a-z][a-z-]*)'", km.group(2))
-check("workflow: 4 clusters parsed", len(clusters) == 4)
+# A count, not a name list: the names are asserted where they carry meaning
+# (FACT_CLUSTERS below, DESIGN_LENS_TAGS further down), so repeating them here
+# would add a mirror instead of a check. This guards the PARSE — a regex that
+# stopped matching would otherwise leave every downstream set comparison
+# trivially passing against empty data.
+check(f"workflow: 5 clusters parsed (got {len(clusters)})", len(clusters) == 5)
 check(
     "workflow: lens names unique",
     len(cluster_lenses) == len(set(cluster_lenses)) and cluster_lenses,
@@ -171,6 +176,21 @@ sk = re.search(
     skill,
 )
 check("skill: EXTERNALS_OVERSIZE guard + shared cap default found", sk)
+# Sharing the env knob means sharing its CONTRACT. The adapter refuses a
+# non-positive-integer SWARM_MAX_PROMPT_BYTES; without the same guard in the
+# skill, `abc` expands to 0 in its arithmetic, the threshold goes negative, and
+# EVERY diff counts as oversize — dropping all external voices SILENTLY, which is
+# the one failure mode the oversize path exists to make explicit. Found by the
+# review this split's own first run produced; pinned so it cannot regress.
+check(
+    "skill: validates SWARM_MAX_PROMPT_BYTES like the adapter does",
+    re.search(r"case \"\$SWARM_CAP\" in\s*\n\s*''\|\*\[!0-9\]\*\|0\)[^\n]*SWARM_CFG_ERR", skill),
+)
+check(
+    "adapter: rejects a non-positive-integer SWARM_MAX_PROMPT_BYTES",
+    re.search(r'max_bytes" =~ \^\[0-9\]\+\$ && "\$max_bytes" != 0', sh),
+)
+
 if mb and sk:
     max_bytes = int(mb.group(1))
     skill_default, headroom = int(sk.group(1)), int(sk.group(2))
@@ -215,15 +235,19 @@ if mb and sk:
         max_bytes - threshold >= worst,
     )
 
-# METHODOLOGICAL_LENSES: the verify-gating list of breakage-cluster lenses that
-# assert repo-wide facts (everything in `breakage` EXCEPT the diff-local topical
-# `correctness`). A COMPLETENESS check, not just a subset: a new methodological
-# lens added to `breakage` but forgotten here would silently stop being verified
-# on a cross-family external consensus (the correlated-hallucination hole the
-# constant exists to close), and green CI would give false assurance. Coupling it
-# to `breakage - {correctness}` forces a conscious test edit either way — add a
-# methodological lens and it must appear here; add a topical one and it must be
-# named in the exclusion below.
+# METHODOLOGICAL_LENSES: the verify-gating list of lenses that assert repo-wide
+# facts — everything in the FACT-ASSERTING clusters except the diff-local topical
+# `correctness`. A COMPLETENESS check, not just a subset: a new methodological
+# lens added to one of those clusters but forgotten here would silently stop
+# being verified on a cross-family external consensus (the correlated-
+# hallucination hole the constant exists to close), and green CI would give false
+# assurance. Coupling it to the clusters forces a conscious test edit either way —
+# add a methodological lens and it must appear here; add a topical one and it must
+# be named in the exclusion below.
+# `reach` joined `breakage` here in 0.9.0: splitting `cross-file-trace` into its
+# own cluster changed WHERE the lens lives, not WHAT it is — it still asserts
+# repo-wide facts and must still be verified. Listing the clusters (rather than
+# hardcoding the lens names) keeps that property tied to meaning, not to layout.
 # MANDATORY_LENSES: the gate floor. Deliberately an explicit list (which lenses
 # are non-negotiable is a judgement call, not a consequence of cluster
 # membership), which makes it a MIRROR — a lens renamed in LENS_CLUSTERS leaves a
@@ -238,14 +262,19 @@ check(
     mandatory <= set(cluster_lenses),
 )
 
+FACT_CLUSTERS = ("breakage", "reach")
 TOPICAL_BREAKAGE = {"correctness"}
 mm = re.search(r"const METHODOLOGICAL_LENSES = \[([^\]]*)\]", js)
 check("workflow: METHODOLOGICAL_LENSES found", mm)
 methodological = set(re.findall(r"'([a-z][a-z-]*)'", mm.group(1) if mm else ""))
 check("METHODOLOGICAL_LENSES non-empty", bool(methodological))
+fact_lenses = set()
+for _c in FACT_CLUSTERS:
+    check(f"LENS_CLUSTERS has a '{_c}' cluster", _c in clusters)
+    fact_lenses |= set(clusters.get(_c, []))
 check(
-    "METHODOLOGICAL_LENSES == breakage cluster minus topical lenses",
-    methodological == set(clusters.get("breakage", [])) - TOPICAL_BREAKAGE,
+    "METHODOLOGICAL_LENSES == fact-asserting clusters minus topical lenses",
+    methodological == fact_lenses - TOPICAL_BREAKAGE,
 )
 
 # pr-post.py DESIGN_LENS_TAGS mirror: the publish path prefixes design rows with

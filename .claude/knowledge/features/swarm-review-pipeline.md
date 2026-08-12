@@ -1,9 +1,9 @@
 ---
 title: "Swarm Review Pipeline (/swarm:review)"
 createdAt: 2026-07-08
-updatedAt: 2026-07-27
+updatedAt: 2026-08-12
 createdFrom: "PR #24"
-updatedFrom: "swarm-per-lens-externals"
+updatedFrom: "fix-swarm-timeout-ceiling"
 pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
@@ -19,7 +19,7 @@ lenses ∥ codex ∥ grok-4.5 (see [swarm-backend-adapter](swarm-backend-adapter
 A fourth, `grok-composer-2.5-fast`, was removed in swarm 0.4.3 — the grok CLI
 dropped the model.
 
-## Lens set: 11 lenses in 4 clusters (swarm 0.5.0)
+## Lens set: 11 lenses in 5 clusters (0.5.0; `reach` split off 0.9.0)
 
 Grown from 5 topical lenses by importing `/code-review`'s other two
 decomposition axes — methodological (HOW to look) and design quality — all
@@ -29,13 +29,35 @@ truth** — every voice's fan-out units come from it, Claude and externals alike
 
 | cluster | lenses | guiding question |
 |---|---|---|
-| `breakage` | correctness, removed-behavior, cross-file-trace | what breaks? |
+| `breakage` | correctness, removed-behavior | what breaks? |
+| `reach` | cross-file-trace | what else does this touch? |
 | `threat` | security, adversarial | what's exploitable / which assumption fails? |
 | `design` | reuse, simplification, efficiency, altitude | is this good, maintainable code? |
 | `consistency` | style, conventions | does it fit the codebase? |
 
+- **`reach` is a deliberate ONE-lens cluster** (0.9.0), split out of `breakage`
+  on measurement. The reason is **lens crowd-out**, NOT runtime — the split was
+  proposed as a speed fix and the measurement corrected that:
+
+  | run | duration | findings |
+  |---|---|---|
+  | old: one 3-lens `breakage` call | 374 s | 4 — **three of them `cross-file-trace`** |
+  | new: `breakage` (correctness, removed-behavior) | 313 s | 4 — *none* of which the combined call reported |
+  | new: `reach` (cross-file-trace) | 126 s | 4 — ≈ the combined call's cross-file set |
+
+  One lens was consuming the call's attention while the diff-local lenses barely
+  reported; splitting recovered four findings (three confirmed real against this
+  repo, incl. a silent config-validation gap). **What it does not buy: speed.**
+  The longest single call drops only 374 → 313 s (16%) and TOTAL work rises to
+  439 s, so `cross-file-trace` is the most exploration-heavy lens but not the
+  sole cost — this alone does not clear the 600 s wall. Two further effects,
+  neither reachable by lowering effort: a timeout now costs ONE lens instead of
+  three (`correctness`/`removed-behavior` survive it), and — carrying no
+  MANDATORY lens — the gate may prune the whole call on a diff with no
+  cross-file surface, where the old layout kept it alive because `correctness`
+  held the cluster open. Cost when kept: one extra call per live backend.
 - **The cluster is the fan-out unit for EVERY voice** since 0.7.0 — Claude
-  finders (≤4) *and* codex/grok (one CLI call per gated cluster each);
+  finders (≤5) *and* codex/grok (one CLI call per gated cluster each);
   `--max` splits all of them to one call per lens (≤11 units → ≤22 external
   calls) — the granularity ladder is `--quick` (future) =
   one broad pass → default = per-cluster → `--max` = per-lens. The **gate
@@ -264,7 +286,7 @@ filled* — `gh pr diff <n>` (bare `--pr` resolves the current branch's PR via
 Externals no longer run ONE broad multi-lens review each: codex and grok fan out
 over the **same gated clusters** as the Claude finders (`unitsFor()` builds the
 units once; `externalUnits` reuses `finderUnits` whenever a gate ran, so the two
-sides cannot drift). Cost is `live-backends × units` — ≤2×4 default, ≤2×11 under
+sides cannot drift). Cost is `live-backends × units` — ≤2×5 default, ≤2×11 under
 `--max` — logged at fan-out, never silently capped.
 
 Decisions worth keeping:

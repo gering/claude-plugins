@@ -71,14 +71,23 @@ Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok-4.5)
    Design findings get an **applicability** prompt instead (is the reuse target
    real? is the simpler form behavior-identical?) — same three states.
 
-**11 lenses in 4 clusters** (the cluster is the fan-out unit for *every* voice):
+**11 lenses in 5 clusters** (the cluster is the fan-out unit for *every* voice):
 
 | Cluster | Lenses | Guiding question |
 |---------|--------|------------------|
-| `breakage` | correctness, removed-behavior, cross-file-trace | what breaks? |
+| `breakage` | correctness, removed-behavior | what breaks? |
+| `reach` | cross-file-trace | what else does this touch? |
 | `threat` | security, adversarial | what's exploitable / which assumption fails? |
 | `design` | reuse, simplification, efficiency, altitude | is this good, maintainable code? |
 | `consistency` | style, conventions | does it fit the codebase? |
+
+`reach` is a one-lens cluster on purpose — because of measured **lens
+crowd-out**, not speed. In a combined three-lens `breakage` call, 3 of 4 findings
+came from `cross-file-trace` alone; split apart, the remaining two lenses
+produced 4 findings the combined call had missed. Isolation also means a timeout
+there costs one lens rather than three, and the gate can prune the whole call on
+a diff with no cross-file surface. It does **not** make the review faster: the
+longest single call drops 374 s → 313 s, and total work rises.
 
 Design-lens findings carry `kind: "design"` and render in their own report
 section, so suggestions never dilute the defect ranking.

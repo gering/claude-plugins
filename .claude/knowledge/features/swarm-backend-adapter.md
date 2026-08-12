@@ -311,10 +311,34 @@ time.
   reproducibly dies and codex never has: it is the slow voice on the expensive
   cluster.
 - **Consequence for any fix:** chunking the *diff* addresses the one variable
-  measurement rules out. Splitting by *lens* (pulling `cross-file-trace` out of
-  `breakage` into its own call) targets the variable that actually dominates,
-  and bounds a timeout's cost to one lens instead of three. `grok --max-turns N`
-  is the untried direct cap on the tool loop; the adapter does not use it yet.
+  measurement rules out. Splitting by *lens* was shipped in 0.9.0 as the `reach`
+  cluster — but measure what it actually bought before repeating the reasoning:
+  it bounds a timeout's cost to one lens instead of three and fixes real lens
+  crowd-out, yet the longest call only fell 374 s → 313 s (see
+  [[swarm-review-pipeline]] § lens set). **The two-lens `breakage` cluster still
+  costs 313 s**, so `cross-file-trace` is the priciest lens but nowhere near the
+  whole bill — no single lens split clears the 600 s wall on its own.
+- **Still the largest untried lever for RUNTIME: effort.** 374 s → 161 s (2.3x)
+  for the identical 4 findings. It does not isolate failures the way the split
+  does, but for pure headroom under the wall nothing else measured comes close.
+- **`grok --max-turns N` was measured and REJECTED — do not reach for it.** It
+  caps the tool loop, but the useful range is a cliff, not a dial:
+
+  | `--max-turns` | duration | findings |
+  |---|---|---|
+  | 10 | 10 s | **0** |
+  | 20 | 279 s | 4 |
+  | (unset) | 374 s | 4 |
+
+  At 20 it saves 25%; at 10 it returns nothing at all. Worse, the truncated run
+  exits **rc=0 with an empty findings array** — so the adapter and the whole
+  pipeline read it as "reviewed cleanly, found nothing" rather than as a
+  failure. A timeout at least lands in `backendErrors`; this silently deletes a
+  voice's coverage while the report still counts it as a voice that ran. The
+  safe N is also diff-dependent (what needs 20 here may need 30 elsewhere), so
+  any fixed value eventually lands on the wrong side of that cliff. If this is
+  ever revisited, it MUST be paired with an empty-findings-under-turn-cap check
+  that converts the truncation into a loud backend error.
 
 `agents.sh run --telemetry <file> --unit <name>` records this per call
 (duration, effective effort/model, prompt bytes, backend rc, `timed_out`, and
