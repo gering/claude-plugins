@@ -204,6 +204,7 @@ class Env:
         self.env["WORK_SYSTEM_HERDR_BUSY_TRIES"] = "3"
         self.env["WORK_SYSTEM_HERDR_READY_TRIES"] = "3"
         self.env["WORK_SYSTEM_HERDR_DETECT_TRIES"] = "3"
+        self.env["WORK_SYSTEM_HERDR_IDLE_STREAK"] = "2"
         self.env["WORK_SYSTEM_HERDR_ALIVE_TRIES"] = "2"
         self.env["WORK_SYSTEM_HERDR_SEED_TOKEN"] = SEED_TOKEN
         if api is not None:
@@ -628,6 +629,21 @@ check("failed create: stale-workspace hint IS offered here (--workspace was sent
 check("failed create: no tab close attempted", "tab close" not in [n for n, _ in e.calls()])
 e.close()
 
+# --- a tab created but never identified must not read as "rolled back" ----- #
+# `tab create` succeeded, its id did not parse. Claiming a clean rollback would
+# leave a blank background tab open while the caller tells the user everything was
+# undone — and the user then launches a second worker on the same worktree.
+e = Env(modern_cases(**{
+    "tab create": (jsonlib.dumps({"result": {"root_pane": {"pane_id": "w1:p7"}}}), "", 0),
+    "agent start": ("", NO_PANE_ERR, 1),
+}), log_argv=True, api="modern")
+r = e.run("launch", "t", str(e.worktree), "w1")
+check("unidentified tab: not reported as a clean failure",
+      r.returncode == 0 and r.stdout.startswith("blocked=unverified\n"))
+check("unidentified tab: says the tab could not be closed",
+      "did not return its id" in r.stderr)
+e.close()
+
 # --- a rollback that cannot be confirmed downgrades to unverified ---------- #
 e = Env(modern_cases(**{
     "agent start": ("", NO_PANE_ERR, 1),
@@ -664,24 +680,28 @@ check("wrapper: stdout is the stable contract",
 check("wrapper: exactly one pane run", len(runs) == 1)
 if runs:
     # `pane run <PANE> <COMMAND>` — the whole wrapper must arrive as ONE word,
-    # not re-split or re-quoted by the launcher.
+    # not re-split, re-quoted or prefixed by the launcher.
     check("wrapper: the command is a single argv word", len(runs[0]) == 4)
     cmd = runs[0][3]
-    check("wrapper: this launch's seed token rides as a plain env assignment",
-          cmd.startswith(f"WORK_SYSTEM_SEED_TOKEN={SEED_TOKEN} "))
-    check("wrapper: the registry's argv_shell follows it verbatim",
-          cmd.split(" ", 1)[1].startswith("sh -c ")
-          and "exec kimi -c --auto" in cmd)
+    check("wrapper: the registry's argv_shell is sent verbatim",
+          cmd.startswith("sh -c ") and "exec kimi -c --auto" in cmd)
     check("wrapper: no agent start on this path",
           "agent start" not in [n for n, _ in e.calls()])
 check("wrapper: waited for the shell prompt before typing",
       len(e.call_args("pane process-info")) >= 1)
 check("wrapper: the tab was not rolled back",
       "tab close" not in [n for n, _ in e.calls()])
+# The supervisor must never take its signal from terminal TEXT: a pane echoes the
+# command it was given and the worker prints repository content into it.
+check("wrapper: the pane's text is never read", "pane read" not in [n for n, _ in e.calls()])
 e.close()
 
 # --- detection never sees the worker -> unverified, no retry, tab kept ----- #
-e, r = kimi_run(wrapper_cases(**{"pane get": (pane_get(), "", 0)}))
+# ready first (the pre-run prompt wait), then busy — the worker is running, herdr
+# just never recognizes it.
+e, r = kimi_run(wrapper_cases(**{"pane get": (pane_get(), "", 0),
+                                "pane process-info": [(SHELL_READY, "", 0),
+                                                      (SHELL_BUSY, "", 0)]}))
 check("wrapper timeout: exit 0 with blocked=unverified",
       r.returncode == 0 and r.stdout.startswith("blocked=unverified\n"))
 check("wrapper timeout: bounded polling", len(e.call_args("pane get")) == 3)
@@ -700,71 +720,50 @@ check("wrapper wrong kind: stops immediately", len(e.call_args("pane get")) == 1
 check("wrapper wrong kind: no rollback", "tab close" not in [n for n, _ in e.calls()])
 e.close()
 
-# --- the seed-failure marker is DEFINITIVE -> roll the tab back ------------ #
-# The marker only counts when it carries THIS launch's seed token.
+# --- an IDLE pane with no worker is a definitive seed failure -------------- #
+# Process state, not text. And not the busy→ready transition either: measured live,
+# a wrapper that fails on startup is gone before the first poll, so its running
+# phase is never observable. The steady state is: a pane back at its own shell
+# prompt, with no agent, for IDLE_STREAK consecutive polls ⇒ nothing is running.
 e, r = kimi_run(wrapper_cases(**{
     "pane get": (pane_get(), "", 0),
-    "pane read": (f"$ sh -c ...\n[work-system] {SEED_MARKER}:{SEED_TOKEN}: kimi seed "
-                  "exited 1 - TASK.md was NOT started and no session was opened.\n$ ",
-                  "", 0),
+    "pane process-info": (SHELL_READY, "", 0),
 }))
-check("wrapper seed failure: exit 1", r.returncode == 1)
-check("wrapper seed failure: names the marker", SEED_MARKER in r.stderr)
-check("wrapper seed failure: says TASK.md was not started",
-      "TASK.md was not started" in r.stderr)
-check("wrapper seed failure: tab closed exactly once",
-      len(e.call_args("tab close")) == 1)
-check("wrapper seed failure: no stdout", r.stdout == "")
+check("idle pane: exit 1", r.returncode == 1)
+check("idle pane: says the seed failed and TASK.md was not started",
+      "seed phase failed" in r.stderr and "TASK.md was not started" in r.stderr)
+check("idle pane: tab rolled back exactly once", len(e.call_args("tab close")) == 1)
+check("idle pane: no stdout", r.stdout == "")
 e.close()
 
-# --- a TOKENLESS marker in the pane must NOT tear the tab down ------------- #
-# The pane's text is worker-controlled: the seed reads repository files, and in a
-# work-system repo those files (TASK.md, CHANGELOG, these tests) legitimately name
-# the marker constant. Only the per-launch token makes a match trustworthy.
+# --- a BUSY pane is the wrapper running: never a failure ------------------- #
+# The streak must reset on anything that is not evidence of idleness, or a slow
+# worker gets torn down while it is starting.
 e, r = kimi_run(wrapper_cases(**{
-    "pane read": (f"$ cat TASK.md\n… the wrapper prints {SEED_MARKER} on a bad seed …\n",
-                  "", 0),
+    "pane get": (pane_get(), "", 0),
+    "pane process-info": [(SHELL_READY, "", 0), (SHELL_BUSY, "", 0)],
 }))
-check("foreign marker text: the launch still succeeds", r.returncode == 0)
-check("foreign marker text: the tab was NOT rolled back",
+check("busy pane: never rolled back", "tab close" not in [n for n, _ in e.calls()])
+check("busy pane: reported unverified, not failed",
+      r.returncode == 0 and r.stdout.startswith("blocked=unverified\n"))
+e.close()
+
+# --- an UNREADABLE pane state is not evidence of idleness either ----------- #
+e, r = kimi_run(wrapper_cases(**{
+    "pane get": (pane_get(), "", 0),
+    "pane process-info": [(SHELL_READY, "", 0), ("not json", "", 0)],
+}))
+check("unreadable pane state: never rolled back",
       "tab close" not in [n for n, _ in e.calls()])
 e.close()
 
-# --- a marker carrying SOMEONE ELSE'S token is ignored too ----------------- #
-e, r = kimi_run(wrapper_cases(**{
-    "pane read": (f"[work-system] {SEED_MARKER}:0000000000000000: kimi seed exited 1\n",
-                  "", 0),
-}))
-check("stale token: the launch still succeeds", r.returncode == 0)
-check("stale token: the tab was NOT rolled back",
-      "tab close" not in [n for n, _ in e.calls()])
-e.close()
-
-# --- marker BEFORE kind: a dead seed must not read as a live worker -------- #
-# herdr detects the wrapper's CLI within seconds of the seed starting, so the same
-# poll can see both signals. The marker has to win, or a worker that announced its
-# own death gets reported as a successful launch.
+# --- a detected worker wins over a pane that looks idle -------------------- #
 e, r = kimi_run(wrapper_cases(**{
     "pane get": (pane_get("kimi"), "", 0),
-    "pane read": (f"[work-system] {SEED_MARKER}:{SEED_TOKEN}: kimi seed exited 1\n", "", 0),
+    "pane process-info": (SHELL_READY, "", 0),
 }))
-check("marker wins over a simultaneous kind match", r.returncode == 1)
-check("marker wins: no success line on stdout", r.stdout == "")
-e.close()
-
-# --- the ECHOED command must not read as a seed failure -------------------- #
-# A pane shows the command it was given. The wrapper therefore assembles its marker
-# at runtime, and this pins the consequence: a pane whose only content is that
-# command must still be treated as "starting", never as a failed seed.
-e, r = kimi_run(wrapper_cases(**{
-    "pane read": ("$ sh -c 'if kimi -m \"$1\" -p \"$2\"; then exec kimi -c --auto; "
-                  'else rc=$?; m=WORKER_SEED; echo; echo "[work-system] ${m}_FAILED: '
-                  "kimi seed exited $rc - TASK.md was NOT started and no session was "
-                  "opened.\"; exit $rc; fi' kimi-worker kimi-code/k3-256k '...'\n", "", 0),
-}))
-check("echoed command: still a normal launch, not a seed failure", r.returncode == 0)
-check("echoed command: the tab was NOT rolled back",
-      "tab close" not in [n for n, _ in e.calls()])
+check("detected worker wins: exit 0", r.returncode == 0)
+check("detected worker wins: reported as a launch", "moved=yes" in r.stdout)
 e.close()
 
 # --- the shell never reaches a prompt -> nothing typed, tab rolled back ---- #
@@ -785,7 +784,7 @@ e.close()
 e, r = kimi_run(wrapper_cases(**{"pane process-info": ("not json at all", "", 0)}))
 check("wrapper readiness unknown: still launches", r.returncode == 0)
 check("wrapper readiness unknown: the whole bounded window was spent",
-      len(e.call_args("pane process-info")) == 3)
+      len(e.call_args("pane process-info")) >= 3)
 check("wrapper readiness unknown: the command was still sent",
       len(e.call_args("pane run")) == 1)
 e.close()

@@ -224,8 +224,12 @@ If that seed **fails** (expired auth, an unconfigured model), phase 2 is not
 reached at all: the wrapper prints a machine-readable marker, says TASK.md was not
 started, and exits with the seed's own code. An empty `kimi -c --auto` session
 would look like a healthy worker to both you and herdr's detection, which is worse
-than no tab. `/kickoff` then reports the launch as failed and removes the tab it
-had created, relaying the pane's last lines so you still see kimi's own error.
+than no tab. What `/kickoff` can do about it depends on the herdr version. On **0.7.5+** the
+wrapper runs inside a shell pane, so the launcher sees that pane fall back to its
+prompt without a worker ever appearing, reports the launch as failed and removes
+the tab it had created. On **0.7.0–0.7.4** the wrapper *is* the tab's root process,
+so herdr closes the tab itself the moment the seed exits; the launcher only
+confirms the pane is gone and tells you to run the worker by hand to see its error.
 
 **What that costs you, stated plainly.** Both kimi phases run *without
 tool-approval prompts* — the seed by construction (`-p` cannot be combined with

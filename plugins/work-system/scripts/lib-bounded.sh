@@ -8,6 +8,13 @@
 # stderr into the captured output, the other didn't. A sibling-file dependency is
 # already the norm between these scripts (herdr-launch.sh shells out to
 # herdr-teardown.sh, agent-registry.sh), so one definition beats two.
+#
+# NOT yet migrated: herdr-agent.sh's `_ha_bounded` and ws-statusline.sh's own
+# `run_bounded`. Both lack the SIGTERM->SIGKILL escalation and the 124
+# normalization below, so they are worth moving here — but they sit on unrelated
+# code paths (the lane registry and the status line), and this file was extracted
+# during a launch-path fix. Named explicitly so the consolidation is a known
+# follow-up rather than an oversight.
 
 # run_bounded <seconds> <cmd...> — run cmd with a hard time bound, so an external
 # probe or a wedged server can never hang the caller. Prints cmd's stdout; returns
