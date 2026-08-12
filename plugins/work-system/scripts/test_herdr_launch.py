@@ -57,10 +57,15 @@ AGENT_STARTED = jsonlib.dumps({"result": {"agent": {
     "agent": "claude", "pane_id": "w1:p7", "interactive_ready": True}}})
 LEGACY_STARTED = jsonlib.dumps({"result": {"agent": {"pane_id": "w1:p5"}}})
 LEGACY_MOVED = jsonlib.dumps({"result": {"move_result": {"created_tab": {"tab_id": "w1:t9"}}}})
+# Readiness is read from WHICH processes hold the foreground, not from a process
+# group id: only the shell itself → ready, anything else → busy (see the extractor).
 SHELL_READY = jsonlib.dumps({"result": {"process_info": {
-    "foreground_process_group_id": 4242, "shell_pid": 4242}}})
+    "shell_pid": 4242, "foreground_process_group_id": 4242,
+    "foreground_processes": [{"pid": 4242, "argv0": "zsh"}]}}})
 SHELL_BUSY = jsonlib.dumps({"result": {"process_info": {
-    "foreground_process_group_id": 4243, "shell_pid": 4242}}})
+    "shell_pid": 4242, "foreground_process_group_id": 4242,
+    "foreground_processes": [{"pid": 4243, "argv0": "sh"},
+                             {"pid": 4242, "argv0": "zsh"}]}}})
 BUSY_ERR = jsonlib.dumps({"error": {
     "code": "agent_pane_busy", "message": "pane w1:p7 is not at a shell prompt"}})
 NO_PANE_ERR = jsonlib.dumps({"error": {
@@ -203,6 +208,7 @@ class Env:
         self.env["WORK_SYSTEM_HERDR_IDLE_STREAK"] = "2"
         # the wall-clock half of the idle gate; the streak is what these assert
         self.env["WORK_SYSTEM_HERDR_IDLE_MIN_SECONDS"] = "0"
+        self.env["WORK_SYSTEM_HERDR_UNKNOWN_TRIES"] = "2"
         self.env["WORK_SYSTEM_HERDR_ALIVE_TRIES"] = "2"
         if api is not None:
             self.env["WORK_SYSTEM_HERDR_API"] = api
@@ -730,6 +736,25 @@ check("idle pane: says the seed failed and TASK.md was not started",
       "seed phase failed" in r.stderr and "TASK.md was not started" in r.stderr)
 check("idle pane: tab rolled back exactly once", len(e.call_args("tab close")) == 1)
 check("idle pane: no stdout", r.stdout == "")
+e.close()
+
+# --- a running child WITHOUT its own process group still reads busy --------- #
+# Readiness must not rest on `foreground_process_group_id == shell_pid`: that
+# equality only means "idle" when job control is on. A shell started with `set +m`
+# leaves its children in the shell's own group, so the pgid test would call a
+# running wrapper idle — and the detection loop would tear its tab down.
+NO_JOB_CONTROL = jsonlib.dumps({"result": {"process_info": {
+    "shell_pid": 4242, "foreground_process_group_id": 4242,
+    "foreground_processes": [{"pid": 4242, "argv0": "sh"},
+                             {"pid": 4299, "argv0": "kimi"}]}}})
+e, r = kimi_run(wrapper_cases(**{
+    "pane get": (pane_get(), "", 0),
+    "pane process-info": [(SHELL_READY, "", 0), (NO_JOB_CONTROL, "", 0)],
+}))
+check("no job control: a running child is not idleness",
+      "tab close" not in [n for n, _ in e.calls()])
+check("no job control: reported unverified, not failed",
+      r.returncode == 0 and r.stdout.startswith("blocked=unverified\n"))
 e.close()
 
 # --- a BUSY pane is the wrapper running: never a failure ------------------- #

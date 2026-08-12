@@ -138,7 +138,7 @@ decisions from the fix:
   a future help text stops naming its flags).
 - **The registry declares the transport; the launcher never infers it.**
   `agent-registry.sh resolve` emits `herdr_mode=agent-start|pane-run` +
-  `herdr_kind=<canonical cli>` (+ `herdr_marker=` for wrappers). `agent-start` means
+  `herdr_kind=<canonical cli>`. `agent-start` means
   argv[0] IS herdr's canonical executable for that kind, so the launcher drops
   exactly that word and passes the rest to `--kind` unchanged — a *check*, not a
   transformation, which is what keeps argument order and boundaries (codex/grok's

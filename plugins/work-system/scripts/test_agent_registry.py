@@ -185,9 +185,8 @@ check("grok argv shape", r["argv"][:3] == ["grok", "-m", "grok-4.5"])
 # (interactive + autonomous, inheriting the seed's session history).
 SEED_MARKER = "WORKER_SEED_FAILED"
 KIMI_SCRIPT = (
-    'if kimi -m "$1" -p "$2"; then exec kimi -c --auto; else rc=$?; '
-    f'm={SEED_MARKER[: -len("_FAILED")]}; echo; '
-    'echo "[work-system] ${m}_FAILED: kimi seed exited $rc - '
+    'if kimi -m "$1" -p "$2"; then exec kimi -c --auto; else rc=$?; echo; '
+    f'echo "[work-system] {SEED_MARKER}: kimi seed exited $rc - '
     'TASK.md was NOT started and no session was opened."; exit $rc; fi'
 )
 
@@ -221,21 +220,19 @@ check("--auto is only reachable from the SUCCESS branch (never in -p's value slo
       "--auto" not in script.split("then", 1)[0])
 check("no bare -p/--prompt argv word (it stays bound inside the script)",
       "-p" not in r["argv"] and "--prompt" not in r["argv"])
-# A failed seed must be unambiguous: a machine-readable marker (herdr-launch.sh
-# greps the pane for it), an explicit "not started", no phase 2, and no wait for a
-# keypress nobody is there to press.
+# A failed seed must be unambiguous: a stable marker, an explicit "not started", no
+# phase 2, and no wait for a keypress nobody is there to press. The marker is
+# human-facing only — see the note further down and herdr-launch.sh.
 # The literal token must NOT be in the script text: a pane echoes the command it
 # was given, so a launcher grepping that pane for the marker would "detect" a seed
 # failure the moment it typed the command — killing a healthy launch (found live).
 # The script assembles the token at runtime instead; the executed-output assertions
 # further down prove it still reaches the screen intact.
-check("the marker literal is NOT in the typed command", SEED_MARKER not in script)
-check("the marker is assembled at runtime", "${m}_FAILED" in script)
 # The marker is for the human reading the tab, not a machine signal — the launcher
 # detects a dead wrapper from process state (see herdr-launch.sh), so nothing here
-# needs to be greppable or salted.
-check("the marker carries no launcher-side token plumbing",
-      "SEED_TOKEN" not in script)
+# needs to be greppable, salted, or assembled at runtime to dodge a grep.
+check("the marker is a plain literal, with no launcher-side plumbing",
+      SEED_MARKER in script and "SEED_TOKEN" not in script and "${m}_" not in script)
 check("seed failure states TASK.md was not started", "TASK.md was NOT started" in script)
 check("seed failure does not wait for input", "read " not in script)
 check("phase 2 is gated behind the seed's success",

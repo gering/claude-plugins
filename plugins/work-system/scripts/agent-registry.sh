@@ -31,7 +31,7 @@
 #              the work-system continue skill resumes TASK.md deterministically)
 #   codex   -> codex -m <model> <bootstrap-prompt>
 #   grok    -> grok  -m <model> <bootstrap-prompt>
-#   kimi    -> sh -c '<seed-or-fail>; exec kimi -c --auto' \
+#   kimi    -> sh -c 'if <seed>; then exec kimi -c --auto; else <marker+exit>; fi' \
 #                    kimi-worker <model> <bootstrap-prompt>          (seed+continue)
 #   The bootstrap prompt (codex/grok/kimi have no work-system skills) tells the
 #   agent to read TASK.md and drive the task to a PR. `supports=` metadata records
@@ -134,10 +134,7 @@ BOOTSTRAP_PROMPT='Read TASK.md in this worktree and continue the task. Commit on
 # handed to the very process being supervised, and a rendered snapshot wraps. The
 # launcher now uses process STATE instead (the pane returning to its shell prompt
 # without the worker being detected), so nothing here needs to be greppable.
-# The token is still assembled at runtime (`m=WORKER_SEED` … `${m}_FAILED`), which
-# costs nothing and keeps the literal out of the echoed command line.
 SEED_FAIL_MARKER='WORKER_SEED_FAILED'
-SEED_MARKER_HEAD="${SEED_FAIL_MARKER%_FAILED}"
 
 # kimi's two-phase launch script (see the header). Defined once here so the shape
 # has exactly one home; emit_argv passes it as the `sh -c` word.
@@ -160,7 +157,7 @@ SEED_MARKER_HEAD="${SEED_FAIL_MARKER%_FAILED}"
 # Kept ASCII-only and free of backslash escapes so `shell_quote` renders it as a
 # plain single-quoted word in `argv_shell=` — a `$'…'` form would be bash/zsh-only
 # and near-unreadable in the copy-paste block.
-KIMI_LAUNCH_SCRIPT='if kimi -m "$1" -p "$2"; then exec kimi -c --auto; else rc=$?; m='"$SEED_MARKER_HEAD"'; echo; echo "[work-system] ${m}_FAILED: kimi seed exited $rc - TASK.md was NOT started and no session was opened."; exit $rc; fi'
+KIMI_LAUNCH_SCRIPT='if kimi -m "$1" -p "$2"; then exec kimi -c --auto; else rc=$?; echo; echo "[work-system] '"$SEED_FAIL_MARKER"': kimi seed exited $rc - TASK.md was NOT started and no session was opened."; exit $rc; fi'
 
 # ---------- registry ----------
 # `flag|cli|model|supports|herdr_mode|herdr_kind`. flag `-` = no shorthand
@@ -465,7 +462,6 @@ subcmd_resolve() {
   # cannot interpret the mode must fail closed rather than guess from the name.
   printf 'herdr_mode=%s\n' "$mode"
   printf 'herdr_kind=%s\n' "$kind"
-  # Only wrappers can fail their seed phase, so only they carry the marker.
   [ -n "$note" ] && printf 'note=%s\n' "$note"
   emit_argv "$cli" "$model" "$session"
 

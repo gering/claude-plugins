@@ -263,6 +263,7 @@ BUSY_SECONDS="${WORK_SYSTEM_HERDR_BUSY_SECONDS:-45}"
 # wrapper in seconds. Raise it on a slow host.
 IDLE_STREAK="${WORK_SYSTEM_HERDR_IDLE_STREAK:-8}"
 IDLE_MIN_SECONDS="${WORK_SYSTEM_HERDR_IDLE_MIN_SECONDS:-3}"
+UNKNOWN_TRIES="${WORK_SYSTEM_HERDR_UNKNOWN_TRIES:-8}"   # unreadable answers before degrading
 # Legacy path only: how long to let a wrapper worker prove it did not die on the
 # spot before its tab is reported as running (see the pane_alive check there).
 WRAPPER_ALIVE_TRIES="${WORK_SYSTEM_HERDR_ALIVE_TRIES:-6}"
@@ -282,12 +283,18 @@ try:
     print(json.load(sys.stdin)["result"]["pane"].get("agent") or "")
 except Exception:
     pass'
-#   modern launch (pane-run): is the pane back at its own shell prompt, i.e. safe
-#   to type a command into? True when the foreground process group IS the shell —
-#   during rc-file startup (direnv, sops, ssh-add …) a child holds it instead, and
-#   text sent then can be eaten. `unknown` when the answer cannot be read at all
-#   (older herdr without process-info), which the caller degrades on rather than
-#   blocking a launch forever.
+#   modern launch (pane-run) + resume: is the pane back at its own shell prompt,
+#   i.e. safe to type a command into? Answered from WHICH PROCESSES hold the
+#   foreground: only the shell itself → ready; anything else (rc-file startup
+#   running direnv/sops/ssh-add, or a wrapper we launched) → busy. Deliberately not
+#   `foreground_process_group_id == shell_pid`: that equality is only meaningful
+#   with job control, and a shell started with `set +m` would report every running
+#   child as "idle" — which on the detection path means tearing down a healthy
+#   worker. Comparing pids answers the same question without that assumption.
+#   `unknown` covers everything unreadable (older herdr without process-info, a
+#   renamed or re-typed field): the caller degrades on it rather than blocking a
+#   launch forever, and `busy` — a HARD state that fails a launch — is only ever
+#   printed from a fully parsed answer.
 #   `busy` is only ever printed on a POSITIVELY parsed answer — both ids present
 #   and different. A missing/renamed field is schema drift, not a busy shell, and
 #   must read as `unknown` (→ the caller waits out its window and proceeds); mapping
@@ -296,17 +303,16 @@ except Exception:
 extract_shell_ready='import sys, json
 try:
     pi = json.load(sys.stdin)["result"]["process_info"]
-    # Coerce strictly: `busy` is a HARD state (it fails the launch and rolls the tab
-    # back), so it may only ever come from two ids we actually parsed as integers.
-    # A field that is absent, renamed, or re-serialized (a pid as a string, a
-    # negative pgid) is drift and must land on the unknown-means-proceed path.
-    def pid(v):
-        return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
-    fg, shell = pid(pi.get("foreground_process_group_id")), pid(pi.get("shell_pid"))
-    if fg is None or shell is None:
+    shell = pi.get("shell_pid")
+    fg = pi.get("foreground_processes")
+    if not isinstance(shell, int) or isinstance(shell, bool) or not isinstance(fg, list) or not fg:
         print("unknown")
     else:
-        print("ready" if fg == shell else "busy")
+        pids = [q.get("pid") for q in fg if isinstance(q, dict)]
+        if any(not isinstance(x, int) or isinstance(x, bool) for x in pids) or len(pids) != len(fg):
+            print("unknown")
+        else:
+            print("ready" if all(x == shell for x in pids) else "busy")
 except Exception:
     print("unknown")'
 extract_moved_tab='import sys, json
@@ -562,6 +568,14 @@ pane_state() {
 # came back to its prompt without herdr ever detecting the expected worker is a
 # definitive failure. The printed marker remains — for the HUMAN reading the tab.
 
+# pane_shell_state <pane> → ready | busy | unknown. ONE sample of "is the pane at
+# its own shell prompt". `ready` = the shell itself holds the foreground, `busy` =
+# a child does (the wrapper is running), `unknown` = herdr cannot answer.
+pane_shell_state() {
+  run_bounded 10 herdr pane process-info --pane "$1" 2>/dev/null \
+    | python3 -c "$extract_shell_ready" 2>/dev/null || echo unknown
+}
+
 # wait_shell_ready <pane> → ready | busy | unknown. Bounded wait for the pane to be
 # back at ITS OWN shell prompt before typing into it (the `pane run` path has no
 # herdr-side readiness check the way `agent start` does).
@@ -574,19 +588,22 @@ pane_state() {
 # spent does the caller proceed on it, having at least waited out the documented
 # rc-file window. `busy` (a readable answer that says a child holds the foreground)
 # stays a hard failure: we know it is not safe to type.
-# pane_shell_state <pane> → ready | busy | unknown. ONE sample of "is the pane at
-# its own shell prompt". `ready` = the shell itself holds the foreground, `busy` =
-# a child does (the wrapper is running), `unknown` = herdr cannot answer.
-pane_shell_state() {
-  run_bounded 10 herdr pane process-info --pane "$1" 2>/dev/null \
-    | python3 -c "$extract_shell_ready" 2>/dev/null || echo unknown
-}
-
 wait_shell_ready() {
-  local p="$1" i=0 st=unknown last=unknown deadline=$(( SECONDS + READY_SECONDS ))
+  local p="$1" i=0 st=unknown last=unknown unknowns=0 deadline=$(( SECONDS + READY_SECONDS ))
   while [ "$i" -lt "$READY_TRIES" ] && [ "$SECONDS" -lt "$deadline" ]; do
     st="$(pane_shell_state "$p")"
     [ "$st" = ready ] && { printf 'ready\n'; return 0; }
+    if [ "$st" = unknown ]; then
+      unknowns=$((unknowns + 1))
+      # A herdr that cannot answer at all will not start answering: waiting out the
+      # full window would add its whole length to EVERY launch and resume on such a
+      # host. Give it a few polls in case the answer is merely transient, then
+      # degrade — the wait only exists to cover a seconds-long rc window, so
+      # spending far longer than that to learn nothing is the wrong trade.
+      [ "$unknowns" -ge "$UNKNOWN_TRIES" ] && { printf 'unknown\n'; return 0; }
+    else
+      unknowns=0
+    fi
     last="$st"
     i=$((i + 1))
     sleep "$RETRY_DELAY" 2>/dev/null || true
@@ -816,13 +833,13 @@ EOF_RESOLVE
       while : ; do
         start_rc=0
         start_err="$(mktemp)"
-        if [ "${#native_argv[@]}" -gt 0 ]; then
-          start_json="$(herdr agent start "$label" --kind "$herdr_kind" --pane "$pane" \
-            --timeout "$START_TIMEOUT_MS" -- "${native_argv[@]}" 2>"$start_err")" || start_rc=$?
-        else
-          start_json="$(herdr agent start "$label" --kind "$herdr_kind" --pane "$pane" \
-            --timeout "$START_TIMEOUT_MS" 2>"$start_err")" || start_rc=$?
-        fi
+        # Built once. The `--` and its arguments are appended only when there ARE
+        # any, because a bash 3.2 `"${empty[@]}"` is an unbound-variable error under
+        # `set -u` — which is the whole reason this used to be written out twice.
+        start_cmd=(herdr agent start "$label" --kind "$herdr_kind" --pane "$pane"
+                   --timeout "$START_TIMEOUT_MS")
+        [ "${#native_argv[@]}" -gt 0 ] && start_cmd+=(-- "${native_argv[@]}")
+        start_json="$("${start_cmd[@]}" 2>"$start_err")" || start_rc=$?
         start_blob="$(cat "$start_err")"
         rm -f "$start_err"
         [ "$start_rc" = 0 ] && break
@@ -1053,14 +1070,16 @@ EOF_RESOLVE
     # milliseconds ago and its login shell may still be sourcing rc files, which can
     # eat the leading keystrokes of a typed command. Wait for it to reach its own
     # prompt (bounded; an unreadable answer degrades to proceeding, as there).
-    if [ "$(wait_shell_ready "$pane")" = busy ]; then
-      echo "pane $pane never reached its shell prompt — not typing 'claude -c' into it; the tab is open, run it there by hand" >&2
-      printf 'pane=%s\ntab=%s\nmoved=yes\nreused=no\nresumed=no\nfocused=no\n' "$pane" "$tab"
-      exit 0
-    fi
+    # `busy` means we must not type — but the tab still exists and the user is
+    # switching to it, so this falls through to the shared focus block below
+    # exactly like the send-failed path does. Only `resumed` differs.
     resumed=yes
+    if [ "$(wait_shell_ready "$pane")" = busy ]; then
+      resumed=no
+      echo "pane $pane never reached its shell prompt — not typing 'claude -c' into it; the tab is open, run it there by hand" >&2
+    fi
     run_err="$(mktemp)"
-    if ! herdr pane run "$pane" "cd $(printf '%q' "$worktree") && claude -c" >/dev/null 2>"$run_err"; then
+    if [ "$resumed" = yes ] && ! herdr pane run "$pane" "cd $(printf '%q' "$worktree") && claude -c" >/dev/null 2>"$run_err"; then
       resumed=no
       diag="$(herdr_diag "$(cat "$run_err")" "$workspace" 0)"
       [ -n "$diag" ] && printf '%s\n' "$diag" >&2
