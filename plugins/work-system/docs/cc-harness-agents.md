@@ -7,9 +7,9 @@ When the helper is absent, behaviour is unchanged (one `command -v`).
 
 This page is the **plugin-side contract**. The helper itself is machine-local
 (gateway URL, credentials, model ceilings) and is *not* shipped with the plugin.
-A reference implementation lives in the paired dotfiles change that extracts the
-helper as a PATH binary; anything that implements the two subcommands below is
-enough for auto-detect.
+Anything on the PATH that implements the two subcommands below is enough for
+auto-detect — the plugin neither knows nor cares which project the binary comes
+from, so it can be relocated without touching anything here.
 
 ## Why a PATH helper (and not a shell function)
 
@@ -103,8 +103,10 @@ Resume a harness worker by hand in the tab:
 cc-harness-agents exec <id> -- claude -c
 ```
 
-Closing this properly needs per-task worker persistence (a deliberate later idea),
-not a change to the helper contract.
+This is expected to be fixed **on the helper's side**, by a resume shim that lets
+`claude -c` / `claude --resume <id>` restore their own routing — at which point the
+manual form above becomes unnecessary and this section can go. It is not something
+the plugin needs to implement, and it needs no change to the contract below.
 
 ## Setup sketch (reference)
 
