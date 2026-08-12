@@ -118,10 +118,14 @@ KIMI_CREDENTIALS_FILE="${KIMI_CREDENTIALS_FILE:-$HOME/.kimi-code/credentials/kim
 # argv word; the launch helper passes it verbatim.
 BOOTSTRAP_PROMPT='Read TASK.md in this worktree and continue the task. Commit on the current branch as you go, and open a PR when the work is complete.'
 
-# The ASCII marker a wrapper worker prints when its seed phase fails. It is for
-# the HUMAN who opens the tab: it names the failure unambiguously and states that
-# TASK.md was never started, where the pre-1.11.1 shape left an empty session that
-# looked healthy.
+# The ASCII marker a wrapper worker prints when its seed phase fails. It names the
+# failure unambiguously and states that TASK.md was never started, where the
+# pre-1.11.1 shape left an empty session that looked healthy. WHO reads it depends
+# on the path: on legacy herdr and on a manual `argv_shell=` paste it is the human
+# looking at the tab; on the modern path the launcher detects the dead wrapper and
+# rolls that tab back, so there the marker is what the seed's own error sits next
+# to while it is still on screen — the launch failure itself is reported by the
+# launcher, which tells the user to run the worker by hand to see it.
 #
 # It is deliberately NOT a machine signal. herdr-launch.sh used to grep the pane
 # for it; three review rounds showed terminal text cannot carry a supervisor's

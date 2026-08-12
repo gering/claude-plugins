@@ -19,8 +19,8 @@ Covers:
   * the modern tab-create → agent-start path for claude/codex/grok, incl. exact
     kind/pane, argv boundaries, no duplicated executable and no `pane move`;
   * the modern pane-run path for wrapper workers (kimi): one-command delivery,
-    bounded expected-kind detection, the seed-failure marker, wrong-kind and
-    timeout → blocked=unverified with no retry;
+    bounded expected-kind detection, the idle-pane death signal (process state, not
+    terminal text), wrong-kind and timeout → blocked=unverified with no retry;
   * rollback — exactly-once tab close on definitive failures, no rollback on
     ambiguous ones, and an unconfirmed rollback downgrading to unverified.
 """
@@ -65,10 +65,6 @@ BUSY_ERR = jsonlib.dumps({"error": {
     "code": "agent_pane_busy", "message": "pane w1:p7 is not at a shell prompt"}})
 NO_PANE_ERR = jsonlib.dumps({"error": {
     "code": "agent_pane_not_found", "message": "agent target pane w1:p7 not found"}})
-# The launcher mints a random per-launch seed token; pinning it lets a stubbed pane
-# echo the exact marker line a real wrapper would print.
-SEED_TOKEN = "deadbeefcafe0001"
-SEED_MARKER = "WORKER_SEED_FAILED"
 
 
 def pane_get(agent=None):
@@ -205,8 +201,9 @@ class Env:
         self.env["WORK_SYSTEM_HERDR_READY_TRIES"] = "3"
         self.env["WORK_SYSTEM_HERDR_DETECT_TRIES"] = "3"
         self.env["WORK_SYSTEM_HERDR_IDLE_STREAK"] = "2"
+        # the wall-clock half of the idle gate; the streak is what these assert
+        self.env["WORK_SYSTEM_HERDR_IDLE_MIN_SECONDS"] = "0"
         self.env["WORK_SYSTEM_HERDR_ALIVE_TRIES"] = "2"
-        self.env["WORK_SYSTEM_HERDR_SEED_TOKEN"] = SEED_TOKEN
         if api is not None:
             self.env["WORK_SYSTEM_HERDR_API"] = api
         else:
@@ -272,7 +269,6 @@ def wrapper_cases(**over):
     cases = modern_cases(**{
         "pane process-info": (SHELL_READY, "", 0),
         "pane run": ('{"result":{"type":"ok"}}', "", 0),
-        "pane read": ("$ ", "", 0),
         "pane get": [(pane_get(), "", 0), (pane_get("kimi"), "", 0)],
     })
     cases.pop("agent start")
@@ -837,6 +833,7 @@ check("legacy wrapper unverifiable: exit 0 with blocked=unverified",
       r.returncode == 0 and r.stdout.startswith("blocked=unverified\n"))
 check("legacy wrapper unverifiable: never claims the seed failed",
       "seed phase failed" not in r.stderr)
+e.close()
 
 # A NATIVE legacy launch must not pay for that check at all — its contract is
 # meant to stay byte-identical, and its argv cannot self-terminate on a bad seed.

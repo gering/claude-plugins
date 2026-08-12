@@ -181,46 +181,51 @@ decisions from the fix:
   "the verified worker is in its dedicated tab", and changing the key would break
   every caller for a cosmetic gain.
 
-### Gotcha: a pane's text is worker-controlled — a fixed marker is forgeable
+### Gotcha: a supervisor cannot take its signal from terminal text
 
-The wrapper's seed-failure marker is greppable out of the pane (`pane read --source
-visible`; the default `recent` returns nothing once a pane settles). It took **two**
-independent fixes to make that grep trustworthy, and the second only landed because
-a review asked "who else can write this text?":
+Deciding "did this worker die?" from what the pane SHOWS was attempted three times
+and failed three times. Each fix looked complete and closed exactly one channel:
 
-1. The literal must not appear in the command the launcher TYPES. A pane echoes its
-   command line, so a script containing the token made a **healthy** `--kimi` launch
-   roll itself back after 2s (found live). The wrapper assembles it instead
-   (`m=WORKER_SEED` … `${m}_FAILED`).
-2. The literal must not appear in anything the worker READS. The kimi seed's whole
-   job is reading repository files — and in a work-system repo, TASK.md, the
-   CHANGELOG and the tests all legitimately name the marker. So the launcher mints a
-   random **per-launch token**, passes it as a `WORK_SYSTEM_SEED_TOKEN=…` prefix on
-   the `pane run` command (argv_shell itself stays untouched — no re-quoting), and
-   greps for `<marker>:<token>`. A host that cannot mint one degrades to *no* marker
-   detection rather than to a forgeable constant: losing a signal is safe, trusting
-   a fake one is not.
+1. The literal must not appear in the command the launcher TYPES — a pane echoes
+   its command line, so the token inside the wrapper script matched itself and
+   rolled a **healthy** launch back after 2s (found live). Fixed by assembling it
+   at runtime (`m=WORKER_SEED` … `${m}_FAILED`).
+2. It must not appear in anything the worker READS — the kimi seed's whole job is
+   reading repository files, and in a work-system repo TASK.md, the CHANGELOG and
+   the tests all legitimately name the marker. Fixed with a per-launch nonce.
+3. But the nonce has to REACH the wrapper, and the only channel is the environment
+   of the process being supervised — so the worker can print its own death
+   certificate. And a rendered `pane read` snapshot is width-wrapped, so in a
+   narrow pane the match silently misses anyway. Forgeable *and* unreliable.
 
-Generalizes: a supervisor that greps a terminal for a control signal must own that
-signal end to end — it may not appear in what the supervisor types in, nor in
-anything the supervised process can read and echo. Fixing only the first channel
-looks complete and isn't.
+The signal that works is process STATE, which output cannot fake — but not the
+obvious form of it. "The pane left its prompt (wrapper running) and came back
+(wrapper died)" is unusable: measured live, a seed that fails on startup — the case
+this exists to catch — is gone before the first 0.5s poll, and every sample reads
+`ready`. What is observable is the steady state: a `sh -c` wrapper puts a child in
+the foreground, so while it runs the pane is busy or its worker is detected. A pane
+sitting at its OWN shell prompt, no agent, for N consecutive polls (and past a
+wall-clock floor, so a `sleep` that ignores fractional seconds cannot collapse the
+budget) means nothing is running there — whether the seed died or the keystrokes
+never landed. Measured: a dead wrapper fails in ~5s with its tab rolled back, a
+healthy one is confirmed in ~2s; the floor sits between those two numbers on
+purpose. The wrapper still PRINTS its marker — for whoever reads the tab, not for
+the launcher.
 
-**What the marker window honestly covers.** herdr detects the wrapper's CLI within
-seconds of the seed starting, so the marker is checked BEFORE the kind match (both
-can be true in one poll, and a worker that announced its own death must not read as
-a live one). It catches a seed that dies before the launch is confirmed — the common
-failure (expired auth, an unconfigured model), exactly when a clean "it didn't
-start" beats a tab to inspect. It cannot catch a seed that fails minutes later: the
-seed phase IS the task work, so waiting for it is not a launch-time option. A launch
-reported here was real when reported; a later death is an ordinary worker crash.
+Generalizes twice over: a supervisor that greps a terminal must own that signal end
+to end (it may not appear in what it types in, nor in anything the supervised
+process can read and echo — closing only the first channel looks complete and
+isn't); and when you switch to process state, verify WHICH state transition is
+actually observable at your polling rate before trusting it.
 
-**Legacy has the same hazard with a different shape.** There the wrapper is the
-tab's ROOT process, so an instantly-failing seed takes the pane and the tab with it —
-and the legacy path would still print `moved=yes` for a tab herdr had already
-closed. It now confirms the pane is alive first (a liveness check, no text grepping
-at all — the pane is gone, which is unforgeable). Native legacy launches skip the
-check entirely: their argv cannot self-terminate on a bad seed, and that contract is
+**Legacy has the same question with a cleaner answer.** There the wrapper is the
+tab's ROOT process, so an instantly-failing seed takes the pane and the tab with
+it — and the legacy path would still print `moved=yes` for a tab herdr had already
+closed. It now checks pane liveness through the pane LIST, tri-state: `gone` is
+definitive, an unreadable herdr is `blocked=unverified` (never death — declaring a
+live worker dead sends the caller to its manual block and invites a SECOND
+unattended worker onto the worktree). Native legacy launches skip the check
+entirely: their argv cannot self-terminate on a bad seed, and that contract is
 meant to stay byte-identical.
 
 ## `/adopt` auto-launch: reference kickoff's prose, don't duplicate it

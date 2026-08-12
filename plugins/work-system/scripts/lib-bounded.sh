@@ -3,9 +3,11 @@
 #
 # SOURCE this file (`. "<dir>/lib-bounded.sh"`); it defines a function and runs
 # nothing. Both agent-registry.sh (CLI availability probes) and herdr-launch.sh
-# (the herdr capability probe + its polling reads) need the same primitive, and
-# they shipped a copy each until the copies drifted — one merged the child's
-# stderr into the captured output, the other didn't. A sibling-file dependency is
+# (the herdr capability probe + its polling reads) need the same primitive.
+# agent-registry.sh had it first; herdr-launch.sh grew a copy when it gained a
+# bounded probe, and within a single change the two had already drifted — one
+# merged the child's stderr into the captured output, the other didn't. That is
+# how fast this particular duplication rots. A sibling-file dependency is
 # already the norm between these scripts (herdr-launch.sh shells out to
 # herdr-teardown.sh, agent-registry.sh), so one definition beats two.
 #

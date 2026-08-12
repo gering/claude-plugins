@@ -249,6 +249,11 @@ RETRY_DELAY="${WORK_SYSTEM_HERDR_RETRY_DELAY:-0.5}"              # seconds betwe
 READY_SECONDS="${WORK_SYSTEM_HERDR_READY_SECONDS:-45}"
 DETECT_SECONDS="${WORK_SYSTEM_HERDR_DETECT_SECONDS:-45}"
 ALIVE_SECONDS="${WORK_SYSTEM_HERDR_ALIVE_SECONDS:-20}"
+# The busy-retry budget is wall clock for a reason: `agent start` may REJECT
+# instantly (a precondition check) or only after consuming its own --timeout, so a
+# try count alone means either ~10s — under the 10-20s rc startup this file
+# documents — or ~600s of silence. The deadline makes both behave the same.
+BUSY_SECONDS="${WORK_SYSTEM_HERDR_BUSY_SECONDS:-45}"
 # Consecutive "pane is at its own shell prompt, no worker detected" samples that
 # mean nothing is running there. The bound is a real trade-off, measured live: too
 # SHORT and a healthy wrapper is torn down in the gap between `pane run` returning
@@ -257,6 +262,7 @@ ALIVE_SECONDS="${WORK_SYSTEM_HERDR_ALIVE_SECONDS:-20}"
 # (a healthy kimi was detected in ~2s, busy throughout) and still reports a dead
 # wrapper in seconds. Raise it on a slow host.
 IDLE_STREAK="${WORK_SYSTEM_HERDR_IDLE_STREAK:-8}"
+IDLE_MIN_SECONDS="${WORK_SYSTEM_HERDR_IDLE_MIN_SECONDS:-3}"
 # Legacy path only: how long to let a wrapper worker prove it did not die on the
 # spot before its tab is reported as running (see the pane_alive check there).
 WRAPPER_ALIVE_TRIES="${WORK_SYSTEM_HERDR_ALIVE_TRIES:-6}"
@@ -290,7 +296,13 @@ except Exception:
 extract_shell_ready='import sys, json
 try:
     pi = json.load(sys.stdin)["result"]["process_info"]
-    fg, shell = pi.get("foreground_process_group_id"), pi.get("shell_pid")
+    # Coerce strictly: `busy` is a HARD state (it fails the launch and rolls the tab
+    # back), so it may only ever come from two ids we actually parsed as integers.
+    # A field that is absent, renamed, or re-serialized (a pid as a string, a
+    # negative pgid) is drift and must land on the unknown-means-proceed path.
+    def pid(v):
+        return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
+    fg, shell = pid(pi.get("foreground_process_group_id")), pid(pi.get("shell_pid"))
     if fg is None or shell is None:
         print("unknown")
     else:
@@ -800,6 +812,7 @@ EOF_RESOLVE
     if [ "$herdr_mode" = agent-start ]; then
       # ---- native worker: hand the argv TAIL to --kind, unchanged ----
       attempt=0
+      busy_deadline=$(( SECONDS + BUSY_SECONDS ))
       while : ; do
         start_rc=0
         start_err="$(mktemp)"
@@ -818,7 +831,7 @@ EOF_RESOLVE
         # Retry ONLY the "shell not ready yet" rejection, bounded. Everything else
         # falls straight through — a retry loop over an unrelated error is how a
         # launcher ends up starting two workers.
-        if [ "$class" = busy ] && [ "$attempt" -lt "$BUSY_TRIES" ]; then
+        if [ "$class" = busy ] && [ "$attempt" -lt "$BUSY_TRIES" ] && [ "$SECONDS" -lt "$busy_deadline" ]; then
           attempt=$((attempt + 1))
           sleep "$RETRY_DELAY" 2>/dev/null || true
           continue
@@ -829,7 +842,7 @@ EOF_RESOLVE
         diag="$(herdr_diag "$start_blob" "$workspace" 0)"
         [ -n "$diag" ] && printf '%s\n' "$diag" >&2
         if [ "$class" = busy ]; then
-          fail_definitive "pane $pane never reached an interactive shell prompt (herdr kept reporting agent_pane_busy over $BUSY_TRIES retries) — nothing was started"
+          fail_definitive "pane $pane never reached an interactive shell prompt (herdr kept reporting agent_pane_busy for ${BUSY_SECONDS}s / $BUSY_TRIES retries) — nothing was started"
         fi
         if [ "$class" = definitive ]; then
           fail_definitive "herdr agent start --kind $herdr_kind was rejected before starting anything in pane $pane"
@@ -907,6 +920,11 @@ EOF_RESOLVE
     i=0
     idle_streak=0
     detect_deadline=$(( SECONDS + DETECT_SECONDS ))
+    # The streak reasons in seconds ("a wrapper takes this long to reach the
+    # foreground"), so it is gated on elapsed time too — a `sleep` that silently
+    # rejects the fractional delay would otherwise collapse the whole budget into
+    # milliseconds and tear down a healthy worker that had not started yet.
+    idle_earliest=$(( SECONDS + IDLE_MIN_SECONDS ))
     while [ "$i" -lt "$DETECT_TRIES" ] && [ "$SECONDS" -lt "$detect_deadline" ]; do
       detected="$(pane_agent_kind "$pane")"
       if [ "$detected" = "$herdr_kind" ]; then
@@ -921,7 +939,7 @@ EOF_RESOLVE
       case "$(pane_shell_state "$pane")" in
         ready)
           idle_streak=$((idle_streak + 1))
-          if [ "$idle_streak" -ge "$IDLE_STREAK" ]; then
+          if [ "$idle_streak" -ge "$IDLE_STREAK" ] && [ "$SECONDS" -ge "$idle_earliest" ]; then
             fail_definitive "nothing is running in pane $pane — it has been back at its shell prompt for $IDLE_STREAK polls with no worker detected, so the $agent_name seed phase failed and TASK.md was not started (run the worker by hand to see its error)"
           fi
           ;;
@@ -1001,6 +1019,11 @@ EOF_RESOLVE
     # last-resort fallback.
     if [ -z "$pane" ]; then
       if [ -n "$tab" ]; then
+        # Deliberately NOT rollback_tab here. That helper confirms the close by
+        # polling herdr-teardown, but it swallows herdr's own error — and surfacing
+        # exactly that error on this path was itself the outcome of an earlier
+        # review. This branch already ends in the caller's manual block, so the
+        # diagnostic is worth more than the confirmation.
         close_err="$(mktemp)"
         if ! herdr tab close "$tab" >/dev/null 2>"$close_err"; then
           close_diag="$(herdr_diag "$(cat "$close_err")" "$workspace" 0)"
@@ -1026,6 +1049,15 @@ EOF_RESOLVE
     # the caller never claims a resume that didn't happen: the tab + shell exist, but
     # the user must run it by hand. (Catches a failed send, not `claude -c` erroring
     # later on a cwd with no prior session — the caller's wording stays tentative.)
+    # The same just-created-pane race the launch path guards: this pane was made
+    # milliseconds ago and its login shell may still be sourcing rc files, which can
+    # eat the leading keystrokes of a typed command. Wait for it to reach its own
+    # prompt (bounded; an unreadable answer degrades to proceeding, as there).
+    if [ "$(wait_shell_ready "$pane")" = busy ]; then
+      echo "pane $pane never reached its shell prompt — not typing 'claude -c' into it; the tab is open, run it there by hand" >&2
+      printf 'pane=%s\ntab=%s\nmoved=yes\nreused=no\nresumed=no\nfocused=no\n' "$pane" "$tab"
+      exit 0
+    fi
     resumed=yes
     run_err="$(mktemp)"
     if ! herdr pane run "$pane" "cd $(printf '%q' "$worktree") && claude -c" >/dev/null 2>"$run_err"; then
