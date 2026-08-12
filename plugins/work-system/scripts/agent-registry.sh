@@ -53,7 +53,10 @@
 #                           exact pane. `herdr_marker=` is the ASCII token such a
 #                           wrapper prints when its seed phase fails, so the
 #                           launcher can tell a definitive failure from "still
-#                           starting" instead of guessing.
+#                           starting" instead of guessing; `herdr_marker_env=`
+#                           names the variable the launcher passes its per-launch
+#                           token in (the pane's text is worker-controlled, so an
+#                           unsalted marker would be forgeable).
 # The pair is generic on purpose: a future dynamically-registered wrapper (e.g. a
 # cc-harness agent that ends up as an interactive `claude`) declares
 # `pane-run` + `herdr_kind=claude` without any launcher change. An entry whose
@@ -67,9 +70,11 @@
 #   answer — so `-p` alone cannot be a worker. It does run tools unattended, and
 #   `kimi -c` inherits its full session history, so: phase 1 seeds+works the task
 #   one-shot, phase 2 `exec`s into the interactive autonomous session with that
-#   history. The `exec` matters — it re-roots the herdr pane at kimi, and `;` (not
-#   `&&`) keeps phase 2 alive if the seed fails, leaving a usable tab instead of a
-#   dead one. Values travel as "$1"/"$2" positionals, never interpolated into the
+#   history. The `exec` matters — it re-roots the herdr pane at kimi. Phase 2 is
+#   reached ONLY on a successful seed: a failed one prints the machine-readable
+#   marker and exits with the seed's own code, because an empty `kimi -c --auto`
+#   session that never read TASK.md is indistinguishable from a healthy worker (see
+#   KIMI_LAUNCH_SCRIPT). Values travel as "$1"/"$2" positionals, never interpolated into the
 #   script text: `-p` swallows the next token as its value, so an argv built by
 #   concatenation is one reordering away from silently eating a flag.
 #
@@ -139,6 +144,12 @@ BOOTSTRAP_PROMPT='Read TASK.md in this worktree and continue the task. Commit on
 #      paste) prints `:none`, which no launcher is waiting for.
 SEED_FAIL_MARKER='WORKER_SEED_FAILED'
 SEED_MARKER_HEAD="${SEED_FAIL_MARKER%_FAILED}"
+# The environment variable the launcher passes that token in. Emitted as
+# `herdr_marker_env=` so the NAME lives in one place: it is one half of a contract
+# whose other half is the wrapper script below, and a rename that touched only this
+# file would leave the wrapper printing `:none` while the launcher greps for a
+# nonce — silently disabling seed-failure rollback, with every test still green.
+SEED_TOKEN_ENV='WORK_SYSTEM_SEED_TOKEN'
 
 # kimi's two-phase launch script (see the header). Defined once here so the shape
 # has exactly one home; emit_argv passes it as the `sh -c` word.
@@ -156,12 +167,13 @@ SEED_MARKER_HEAD="${SEED_FAIL_MARKER%_FAILED}"
 # tab's ROOT process: a failed seed now ends that process, so herdr closes the tab.
 # Accepted deliberately — a closed tab is honest, whereas the empty session it
 # replaces was actively misleading. On modern herdr the wrapper runs inside a shell
-# pane, so the marker and the error stay on screen and the launcher rolls the tab
-# back itself.
+# pane, so the marker and the error land on screen — and since the launcher then
+# rolls that tab back, it copies the pane's visible tail into its own diagnostic
+# first, or the rollback would take the only explanation with it.
 # Kept ASCII-only and free of backslash escapes so `shell_quote` renders it as a
 # plain single-quoted word in `argv_shell=` — a `$'…'` form would be bash/zsh-only
 # and near-unreadable in the copy-paste block.
-KIMI_LAUNCH_SCRIPT='if kimi -m "$1" -p "$2"; then exec kimi -c --auto; else rc=$?; m='"$SEED_MARKER_HEAD"'; echo; echo "[work-system] ${m}_FAILED:${WORK_SYSTEM_SEED_TOKEN:-none}: kimi seed exited $rc - TASK.md was NOT started and no session was opened."; exit $rc; fi'
+KIMI_LAUNCH_SCRIPT='if kimi -m "$1" -p "$2"; then exec kimi -c --auto; else rc=$?; m='"$SEED_MARKER_HEAD"'; echo; echo "[work-system] ${m}_FAILED:${'"$SEED_TOKEN_ENV"':-none}: kimi seed exited $rc - TASK.md was NOT started and no session was opened."; exit $rc; fi'
 
 # ---------- registry ----------
 # `flag|cli|model|supports|herdr_mode|herdr_kind`. flag `-` = no shorthand
@@ -467,7 +479,9 @@ subcmd_resolve() {
   printf 'herdr_mode=%s\n' "$mode"
   printf 'herdr_kind=%s\n' "$kind"
   # Only wrappers can fail their seed phase, so only they carry the marker.
-  [ "$mode" = pane-run ] && printf 'herdr_marker=%s\n' "$SEED_FAIL_MARKER"
+  # A wrapper's seed-failure marker AND the env var its token arrives in — both
+  # halves of that contract come from here, so a consumer never hardcodes either.
+  [ "$mode" = pane-run ] && printf 'herdr_marker=%s\nherdr_marker_env=%s\n' "$SEED_FAIL_MARKER" "$SEED_TOKEN_ENV"
   [ -n "$note" ] && printf 'note=%s\n' "$note"
   emit_argv "$cli" "$model" "$session"
 

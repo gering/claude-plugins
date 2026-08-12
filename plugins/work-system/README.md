@@ -214,12 +214,18 @@ task guidance.
 
 **kimi launches in two phases.** It has no positional launch prompt, and its
 one-shot `-p` flag can't be combined with the autonomous `--auto`/`-y` modes — so
-the worker is `sh -c 'kimi -m "$1" -p "$2" || <report+wait>; exec kimi -c --auto' …`:
-the `-p` seed
-works the task through once (it runs tools unattended), then `exec` hands over to
-the interactive autonomous session, which inherits the seed's full history. So
-unlike the other workers, a kimi tab has already made progress by the time you
-switch to it.
+the worker is `sh -c 'if kimi -m "$1" -p "$2"; then exec kimi -c --auto; else
+<marker + exit>; fi' …`: the `-p` seed works the task through once (it runs tools
+unattended), then `exec` hands over to the interactive autonomous session, which
+inherits the seed's full history. So unlike the other workers, a kimi tab has
+already made progress by the time you switch to it.
+
+If that seed **fails** (expired auth, an unconfigured model), phase 2 is not
+reached at all: the wrapper prints a machine-readable marker, says TASK.md was not
+started, and exits with the seed's own code. An empty `kimi -c --auto` session
+would look like a healthy worker to both you and herdr's detection, which is worse
+than no tab. `/kickoff` then reports the launch as failed and removes the tab it
+had created, relaying the pane's last lines so you still see kimi's own error.
 
 **What that costs you, stated plainly.** Both kimi phases run *without
 tool-approval prompts* — the seed by construction (`-p` cannot be combined with

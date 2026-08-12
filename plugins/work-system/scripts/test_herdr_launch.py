@@ -810,8 +810,7 @@ e.close()
 # once takes the pane — and the tab — with it. Reporting moved=yes then points the
 # user at a tab that no longer exists.
 e = Env({"agent start": (LEGACY_STARTED, "", 0), "pane move": (LEGACY_MOVED, "", 0),
-         "pane get": ("", jsonlib.dumps(
-             {"error": {"code": "pane_not_found", "message": "no such pane"}}), 1)},
+         "pane list": (PANE_LIST_GONE, "", 0)},   # populated, but w1:p5 is not in it
         log_argv=True, api="legacy")
 r = e.run("launch", "t", str(e.worktree), "w1", "--kimi", "sess1")
 check("legacy wrapper died: exit 1", r.returncode == 1)
@@ -821,11 +820,24 @@ e.close()
 
 # ...and a wrapper that IS alive keeps the unchanged legacy success contract.
 e = Env({"agent start": (LEGACY_STARTED, "", 0), "pane move": (LEGACY_MOVED, "", 0),
-         "pane get": (pane_get("kimi"), "", 0)}, log_argv=True, api="legacy")
+         "pane list": (jsonlib.dumps({"result": {"panes": [
+             {"pane_id": "w1:p5", "tab_id": "w1:t9", "cwd": "/nowhere"}]}}), "", 0)},
+        log_argv=True, api="legacy")
 r = e.run("launch", "t", str(e.worktree), "w1", "--kimi", "sess1")
 check("legacy wrapper alive: stdout contract unchanged",
       r.stdout == "pane=w1:p5\ntab=w1:t9\nmoved=yes\nagent=kimi:kimi-code/k3-256k\n")
 e.close()
+
+# An UNREADABLE herdr is not evidence of death. Calling it one would send the
+# caller down its manual path and invite a SECOND unattended worker onto the same
+# worktree — the exact hazard blocked=unverified exists to prevent.
+e = Env({"agent start": (LEGACY_STARTED, "", 0), "pane move": (LEGACY_MOVED, "", 0),
+         "pane list": ("", "socket closed", 1)}, log_argv=True, api="legacy")
+r = e.run("launch", "t", str(e.worktree), "w1", "--kimi", "sess1")
+check("legacy wrapper unverifiable: exit 0 with blocked=unverified",
+      r.returncode == 0 and r.stdout.startswith("blocked=unverified\n"))
+check("legacy wrapper unverifiable: never claims the seed failed",
+      "seed phase failed" not in r.stderr)
 
 # A NATIVE legacy launch must not pay for that check at all — its contract is
 # meant to stay byte-identical, and its argv cannot self-terminate on a bad seed.
