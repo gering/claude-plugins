@@ -181,17 +181,47 @@ decisions from the fix:
   "the verified worker is in its dedicated tab", and changing the key would break
   every caller for a cosmetic gain.
 
-### Gotcha: a pane echoes the command you typed into it
+### Gotcha: a pane's text is worker-controlled — a fixed marker is forgeable
 
-The wrapper's seed-failure marker (`WORKER_SEED_FAILED`, greppable via `pane read
---source visible`) originally appeared as a literal inside the wrapper script. Live
-result: a **healthy** `--kimi` launch was rolled back after 2s, because the pane
-displays the command line it was given — so the launcher grepped its own typed
-command and "found" a failure. The wrapper now assembles the token at runtime
-(`m=WORKER_SEED` … `${m}_FAILED`), so the literal exists only in the printed output.
-Generalizes: any marker a supervisor greps out of a terminal must not appear in the
-text that supervisor types INTO that terminal. (`pane read`'s default `--source
-recent` also returns nothing once a pane settles — `visible` is the usable snapshot.)
+The wrapper's seed-failure marker is greppable out of the pane (`pane read --source
+visible`; the default `recent` returns nothing once a pane settles). It took **two**
+independent fixes to make that grep trustworthy, and the second only landed because
+a review asked "who else can write this text?":
+
+1. The literal must not appear in the command the launcher TYPES. A pane echoes its
+   command line, so a script containing the token made a **healthy** `--kimi` launch
+   roll itself back after 2s (found live). The wrapper assembles it instead
+   (`m=WORKER_SEED` … `${m}_FAILED`).
+2. The literal must not appear in anything the worker READS. The kimi seed's whole
+   job is reading repository files — and in a work-system repo, TASK.md, the
+   CHANGELOG and the tests all legitimately name the marker. So the launcher mints a
+   random **per-launch token**, passes it as a `WORK_SYSTEM_SEED_TOKEN=…` prefix on
+   the `pane run` command (argv_shell itself stays untouched — no re-quoting), and
+   greps for `<marker>:<token>`. A host that cannot mint one degrades to *no* marker
+   detection rather than to a forgeable constant: losing a signal is safe, trusting
+   a fake one is not.
+
+Generalizes: a supervisor that greps a terminal for a control signal must own that
+signal end to end — it may not appear in what the supervisor types in, nor in
+anything the supervised process can read and echo. Fixing only the first channel
+looks complete and isn't.
+
+**What the marker window honestly covers.** herdr detects the wrapper's CLI within
+seconds of the seed starting, so the marker is checked BEFORE the kind match (both
+can be true in one poll, and a worker that announced its own death must not read as
+a live one). It catches a seed that dies before the launch is confirmed — the common
+failure (expired auth, an unconfigured model), exactly when a clean "it didn't
+start" beats a tab to inspect. It cannot catch a seed that fails minutes later: the
+seed phase IS the task work, so waiting for it is not a launch-time option. A launch
+reported here was real when reported; a later death is an ordinary worker crash.
+
+**Legacy has the same hazard with a different shape.** There the wrapper is the
+tab's ROOT process, so an instantly-failing seed takes the pane and the tab with it —
+and the legacy path would still print `moved=yes` for a tab herdr had already
+closed. It now confirms the pane is alive first (a liveness check, no text grepping
+at all — the pane is gone, which is unforgeable). Native legacy launches skip the
+check entirely: their argv cannot self-terminate on a bad seed, and that contract is
+meant to stay byte-identical.
 
 ## `/adopt` auto-launch: reference kickoff's prose, don't duplicate it
 
@@ -221,8 +251,10 @@ optional `[agent-selector]` arg for it). Two durable decisions:
 A LEGACY kickoff tab runs Claude as its **root pane** (argv-exec above), so a clean
 `/exit` — even one only meant to restart Claude Code — ends the pane and herdr closes
 the whole tab; the worktree and resumable session persist, but the tab is gone. (On
-0.7.5+ the worker is started INTO a shell pane, so `/exit` leaves a bare shell in the
-tab instead — `resume` then simply reuses and re-`claude -c`s that tab.)
+0.7.5+ the worker is started INTO a shell pane, so `/exit` leaves a bare shell in
+the tab instead — `resume` then finds that tab still open and only *focuses* it
+(`reused=yes`, `resumed=` empty); the `claude -c` is the caller's to run, since a
+cwd match cannot tell a live Claude from a surviving shell.)
 `/continue <task>` **from the main session** recovers it via `herdr-launch.sh
 resume`, which — unlike `launch` — uses `herdr tab create` + `pane run "claude -c"`
 so Claude runs **inside a shell pane**. Two durable decisions:

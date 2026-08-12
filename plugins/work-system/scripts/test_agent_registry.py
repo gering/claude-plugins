@@ -187,7 +187,8 @@ SEED_MARKER = "WORKER_SEED_FAILED"
 KIMI_SCRIPT = (
     'if kimi -m "$1" -p "$2"; then exec kimi -c --auto; else rc=$?; '
     f'm={SEED_MARKER[: -len("_FAILED")]}; echo; '
-    'echo "[work-system] ${m}_FAILED: kimi seed exited $rc - '
+    'echo "[work-system] ${m}_FAILED:${WORK_SYSTEM_SEED_TOKEN:-none}: '
+    'kimi seed exited $rc - '
     'TASK.md was NOT started and no session was opened."; exit $rc; fi'
 )
 
@@ -231,6 +232,10 @@ check("no bare -p/--prompt argv word (it stays bound inside the script)",
 # further down prove it still reaches the screen intact.
 check("the marker literal is NOT in the typed command", SEED_MARKER not in script)
 check("the marker is assembled at runtime", "${m}_FAILED" in script)
+# ...and it carries the launcher's per-launch token, so the printed line cannot be
+# forged by any repository file the seed happens to read and echo.
+check("the marker line carries the per-launch seed token",
+      "${WORK_SYSTEM_SEED_TOKEN:-none}" in script)
 check("seed failure states TASK.md was not started", "TASK.md was NOT started" in script)
 check("seed failure does not wait for input", "read " not in script)
 check("phase 2 is gated behind the seed's success",

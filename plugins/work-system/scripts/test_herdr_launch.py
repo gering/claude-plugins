@@ -65,6 +65,10 @@ BUSY_ERR = jsonlib.dumps({"error": {
     "code": "agent_pane_busy", "message": "pane w1:p7 is not at a shell prompt"}})
 NO_PANE_ERR = jsonlib.dumps({"error": {
     "code": "agent_pane_not_found", "message": "agent target pane w1:p7 not found"}})
+# The launcher mints a random per-launch seed token; pinning it lets a stubbed pane
+# echo the exact marker line a real wrapper would print.
+SEED_TOKEN = "deadbeefcafe0001"
+SEED_MARKER = "WORKER_SEED_FAILED"
 
 
 def pane_get(agent=None):
@@ -200,6 +204,8 @@ class Env:
         self.env["WORK_SYSTEM_HERDR_BUSY_TRIES"] = "3"
         self.env["WORK_SYSTEM_HERDR_READY_TRIES"] = "3"
         self.env["WORK_SYSTEM_HERDR_DETECT_TRIES"] = "3"
+        self.env["WORK_SYSTEM_HERDR_ALIVE_TRIES"] = "2"
+        self.env["WORK_SYSTEM_HERDR_SEED_TOKEN"] = SEED_TOKEN
         if api is not None:
             self.env["WORK_SYSTEM_HERDR_API"] = api
         else:
@@ -409,6 +415,18 @@ check("detect legacy: agent start carries --workspace",
       any("--workspace" in a for a in e.call_args("agent start")))
 check("detect legacy: stdout contract unchanged",
       r.stdout == "pane=w1:p5\ntab=w1:t9\nmoved=yes\nagent=claude\n")
+e.close()
+
+# --- a FAILED probe is not an "unrecognizable contract" -------------------- #
+# We learned nothing about the API, so the diagnostic must name the probe, not
+# accuse herdr of an unknown contract. Both still fail closed.
+e = Env(modern_cases(**{"agent start": ("", "socket closed", 1)}),
+        log_argv=True, api=None)
+r = e.run("launch", "t", str(e.worktree), "w1")
+check("probe failed: exit 1", r.returncode == 1)
+check("probe failed: diagnostic names the probe, not a missing contract",
+      "could not probe" in r.stderr and "--kind/--pane" not in r.stderr)
+check("probe failed: nothing was created", "tab create" not in [n for n, _ in e.calls()])
 e.close()
 
 # --- unrecognizable help -> fail BEFORE any mutation ----------------------- #
@@ -649,8 +667,11 @@ if runs:
     # not re-split or re-quoted by the launcher.
     check("wrapper: the command is a single argv word", len(runs[0]) == 4)
     cmd = runs[0][3]
-    check("wrapper: the registry's argv_shell is sent verbatim",
-          cmd.startswith("sh -c ") and "exec kimi -c --auto" in cmd)
+    check("wrapper: this launch's seed token rides as a plain env assignment",
+          cmd.startswith(f"WORK_SYSTEM_SEED_TOKEN={SEED_TOKEN} "))
+    check("wrapper: the registry's argv_shell follows it verbatim",
+          cmd.split(" ", 1)[1].startswith("sh -c ")
+          and "exec kimi -c --auto" in cmd)
     check("wrapper: no agent start on this path",
           "agent start" not in [n for n, _ in e.calls()])
 check("wrapper: waited for the shell prompt before typing",
@@ -680,18 +701,55 @@ check("wrapper wrong kind: no rollback", "tab close" not in [n for n, _ in e.cal
 e.close()
 
 # --- the seed-failure marker is DEFINITIVE -> roll the tab back ------------ #
+# The marker only counts when it carries THIS launch's seed token.
 e, r = kimi_run(wrapper_cases(**{
     "pane get": (pane_get(), "", 0),
-    "pane read": ("$ sh -c ...\n[work-system] WORKER_SEED_FAILED: kimi seed exited 1 - "
-                  "TASK.md was NOT started and no session was opened.\n$ ", "", 0),
+    "pane read": (f"$ sh -c ...\n[work-system] {SEED_MARKER}:{SEED_TOKEN}: kimi seed "
+                  "exited 1 - TASK.md was NOT started and no session was opened.\n$ ",
+                  "", 0),
 }))
 check("wrapper seed failure: exit 1", r.returncode == 1)
-check("wrapper seed failure: names the marker", "WORKER_SEED_FAILED" in r.stderr)
+check("wrapper seed failure: names the marker", SEED_MARKER in r.stderr)
 check("wrapper seed failure: says TASK.md was not started",
       "TASK.md was not started" in r.stderr)
 check("wrapper seed failure: tab closed exactly once",
       len(e.call_args("tab close")) == 1)
 check("wrapper seed failure: no stdout", r.stdout == "")
+e.close()
+
+# --- a TOKENLESS marker in the pane must NOT tear the tab down ------------- #
+# The pane's text is worker-controlled: the seed reads repository files, and in a
+# work-system repo those files (TASK.md, CHANGELOG, these tests) legitimately name
+# the marker constant. Only the per-launch token makes a match trustworthy.
+e, r = kimi_run(wrapper_cases(**{
+    "pane read": (f"$ cat TASK.md\n… the wrapper prints {SEED_MARKER} on a bad seed …\n",
+                  "", 0),
+}))
+check("foreign marker text: the launch still succeeds", r.returncode == 0)
+check("foreign marker text: the tab was NOT rolled back",
+      "tab close" not in [n for n, _ in e.calls()])
+e.close()
+
+# --- a marker carrying SOMEONE ELSE'S token is ignored too ----------------- #
+e, r = kimi_run(wrapper_cases(**{
+    "pane read": (f"[work-system] {SEED_MARKER}:0000000000000000: kimi seed exited 1\n",
+                  "", 0),
+}))
+check("stale token: the launch still succeeds", r.returncode == 0)
+check("stale token: the tab was NOT rolled back",
+      "tab close" not in [n for n, _ in e.calls()])
+e.close()
+
+# --- marker BEFORE kind: a dead seed must not read as a live worker -------- #
+# herdr detects the wrapper's CLI within seconds of the seed starting, so the same
+# poll can see both signals. The marker has to win, or a worker that announced its
+# own death gets reported as a successful launch.
+e, r = kimi_run(wrapper_cases(**{
+    "pane get": (pane_get("kimi"), "", 0),
+    "pane read": (f"[work-system] {SEED_MARKER}:{SEED_TOKEN}: kimi seed exited 1\n", "", 0),
+}))
+check("marker wins over a simultaneous kind match", r.returncode == 1)
+check("marker wins: no success line on stdout", r.stdout == "")
 e.close()
 
 # --- the ECHOED command must not read as a seed failure -------------------- #
@@ -719,11 +777,17 @@ check("wrapper shell busy: tab closed exactly once",
 check("wrapper shell busy: bounded wait", len(e.call_args("pane process-info")) == 3)
 e.close()
 
-# --- an unreadable readiness answer degrades to "proceed", not to a block -- #
+# --- an unreadable readiness answer waits out the window, then proceeds ---- #
+# "Cannot verify" is not "ready": returning on the first unreadable answer would
+# type into a pane created milliseconds ago and hand back the rc-file keystroke
+# race this wait exists to close. It spends the whole bounded window instead, and
+# only then degrades to proceeding (detection still gates success).
 e, r = kimi_run(wrapper_cases(**{"pane process-info": ("not json at all", "", 0)}))
 check("wrapper readiness unknown: still launches", r.returncode == 0)
-check("wrapper readiness unknown: asked once, then proceeded",
-      len(e.call_args("pane process-info")) == 1)
+check("wrapper readiness unknown: the whole bounded window was spent",
+      len(e.call_args("pane process-info")) == 3)
+check("wrapper readiness unknown: the command was still sent",
+      len(e.call_args("pane run")) == 1)
 e.close()
 
 # --- pane run itself is rejected -> definitive, tab rolled back ------------ #
@@ -735,6 +799,69 @@ check("wrapper run rejected: tab closed exactly once",
       len(e.call_args("tab close")) == 1)
 check("wrapper run rejected: never polled for detection",
       "pane get" not in [n for n, _ in e.calls()])
+e.close()
+
+
+# ========================================================================== #
+# legacy path + a wrapper worker: never report a tab that already died
+# ========================================================================== #
+
+# On legacy herdr the wrapper IS the tab's root process, so a seed that exits at
+# once takes the pane — and the tab — with it. Reporting moved=yes then points the
+# user at a tab that no longer exists.
+e = Env({"agent start": (LEGACY_STARTED, "", 0), "pane move": (LEGACY_MOVED, "", 0),
+         "pane get": ("", jsonlib.dumps(
+             {"error": {"code": "pane_not_found", "message": "no such pane"}}), 1)},
+        log_argv=True, api="legacy")
+r = e.run("launch", "t", str(e.worktree), "w1", "--kimi", "sess1")
+check("legacy wrapper died: exit 1", r.returncode == 1)
+check("legacy wrapper died: no moved=yes for a dead tab", "moved=yes" not in r.stdout)
+check("legacy wrapper died: says the seed failed", "seed phase failed" in r.stderr)
+e.close()
+
+# ...and a wrapper that IS alive keeps the unchanged legacy success contract.
+e = Env({"agent start": (LEGACY_STARTED, "", 0), "pane move": (LEGACY_MOVED, "", 0),
+         "pane get": (pane_get("kimi"), "", 0)}, log_argv=True, api="legacy")
+r = e.run("launch", "t", str(e.worktree), "w1", "--kimi", "sess1")
+check("legacy wrapper alive: stdout contract unchanged",
+      r.stdout == "pane=w1:p5\ntab=w1:t9\nmoved=yes\nagent=kimi:kimi-code/k3-256k\n")
+e.close()
+
+# A NATIVE legacy launch must not pay for that check at all — its contract is
+# meant to stay byte-identical, and its argv cannot self-terminate on a bad seed.
+e = Env({"agent start": (LEGACY_STARTED, "", 0), "pane move": (LEGACY_MOVED, "", 0)},
+        log_argv=True, api="legacy")
+r = e.run("launch", "t", str(e.worktree), "w1", "--codex", "sess1")
+check("legacy native: no liveness probe added",
+      "pane get" not in [n for n, _ in e.calls()])
+check("legacy native: stdout contract unchanged",
+      r.stdout == "pane=w1:p5\ntab=w1:t9\nmoved=yes\nagent=codex:gpt-5.6-terra\n")
+e.close()
+
+
+# ========================================================================== #
+# defensive parsing + sibling-script resolution
+# ========================================================================== #
+
+# A `tab` field of the WRONG SHAPE must cost only that lookup, never the whole
+# parse — an unguarded `.get` on a string would throw the pane id away with it.
+e = Env(modern_cases(**{"tab create": (jsonlib.dumps(
+    {"result": {"root_pane": {"pane_id": "w1:p7"}, "tab": "w1:t7"}}), "", 0)}),
+    api="modern")
+r = e.run("launch", "t", str(e.worktree), "w1")
+check("scalar tab field: still launches", r.returncode == 0)
+check("scalar tab field: both ids survive",
+      kv(r.stdout).get("pane") == "w1:p7" and kv(r.stdout).get("tab") == "w1:t7")
+e.close()
+
+# Invoked by BARE NAME (no slash in $0), sibling helpers must still resolve — a
+# `${0%/*}`-derived path would silently disable rollback and report `unverified`
+# for a tab it never tried to close.
+e = Env(modern_cases(**{"agent start": ("", NO_PANE_ERR, 1)}), log_argv=True, api="modern")
+r = subprocess.run(["bash", SCRIPT.name, "launch", "t", str(e.worktree), "w1"],
+                   env=e.env, cwd=str(HERE), capture_output=True, text=True, timeout=30)
+check("bare-name invocation: rollback still ran", len(e.call_args("tab close")) == 1)
+check("bare-name invocation: reported as a clean failure", r.returncode == 1)
 e.close()
 
 

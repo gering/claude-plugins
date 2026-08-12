@@ -83,6 +83,12 @@
 #             3 resolved but the entry's CLI is unavailable
 set -euo pipefail
 
+# Where this script (and its sibling helpers) actually live. `${0%/*}` is NOT a
+# safe substitute: invoked as a bare name (`bash agent-registry.sh`, or via PATH)
+# it has no slash, so `${0%/*}` yields the FILENAME and every sibling path built
+# from it silently misses.
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)"
+
 HOME="${HOME:-$(cd ~ 2>/dev/null && pwd || echo /nonexistent)}"
 # The ONLY persisted state: the per-repo committed `default` agent. No global
 # state, no shipped fallback — if a repo has no default, /kickoff shows the
@@ -119,12 +125,18 @@ BOOTSTRAP_PROMPT='Read TASK.md in this worktree and continue the task. Commit on
 # instead of an ambiguous "maybe still starting" timeout. Emitted to callers as
 # `herdr_marker=` for every pane-run entry — never hardcode it in a consumer.
 #
-# The wrapper ASSEMBLES the token at runtime (`m=WORKER_SEED` … `${m}_FAILED`) so
-# the whole literal never appears in the command line itself. Found live: a pane
-# echoes the command it was given, so a script containing the literal token made
-# the launcher "detect" a seed failure the instant it typed the command — killing
-# a perfectly healthy launch. Splitting it keeps the printed output greppable while
-# the typed command is not.
+# Two properties make the printed marker safe to grep out of a pane, and BOTH are
+# needed — the pane's text is worker-controlled, so a bare well-known constant is
+# forgeable by anything the worker echoes:
+#   1. The wrapper ASSEMBLES the token at runtime (`m=WORKER_SEED` … `${m}_FAILED`)
+#      so the literal never appears in the command line the pane echoes back.
+#      Found live: a script containing the literal made the launcher "detect" a
+#      seed failure the instant it typed the command, killing a healthy launch.
+#   2. The printed line carries a PER-LAUNCH token from $WORK_SYSTEM_SEED_TOKEN,
+#      which the launcher mints and greps for as `<marker>:<token>`. Without it,
+#      any file the seed reads and echoes — this repo's own TASK.md, CHANGELOG and
+#      tests all name the marker — would tear down a healthy tab. Unset (a manual
+#      paste) prints `:none`, which no launcher is waiting for.
 SEED_FAIL_MARKER='WORKER_SEED_FAILED'
 SEED_MARKER_HEAD="${SEED_FAIL_MARKER%_FAILED}"
 
@@ -149,7 +161,7 @@ SEED_MARKER_HEAD="${SEED_FAIL_MARKER%_FAILED}"
 # Kept ASCII-only and free of backslash escapes so `shell_quote` renders it as a
 # plain single-quoted word in `argv_shell=` — a `$'…'` form would be bash/zsh-only
 # and near-unreadable in the copy-paste block.
-KIMI_LAUNCH_SCRIPT='if kimi -m "$1" -p "$2"; then exec kimi -c --auto; else rc=$?; m='"$SEED_MARKER_HEAD"'; echo; echo "[work-system] ${m}_FAILED: kimi seed exited $rc - TASK.md was NOT started and no session was opened."; exit $rc; fi'
+KIMI_LAUNCH_SCRIPT='if kimi -m "$1" -p "$2"; then exec kimi -c --auto; else rc=$?; m='"$SEED_MARKER_HEAD"'; echo; echo "[work-system] ${m}_FAILED:${WORK_SYSTEM_SEED_TOKEN:-none}: kimi seed exited $rc - TASK.md was NOT started and no session was opened."; exit $rc; fi'
 
 # ---------- registry ----------
 # `flag|cli|model|supports|herdr_mode|herdr_kind`. flag `-` = no shorthand
@@ -189,39 +201,36 @@ usage() {
 # Emit one `flag|cli|model|supports|herdr_mode|herdr_kind` record per line.
 registry_rows() { printf '%s\n' "$REGISTRY"; }
 
-# Re-emit a record with a FIXED field count, so every row_for_* returns the same
-# shape even if a row were ever short a trailing field (a short row must not shift
-# the transport metadata into `supports`). One definition, used by all three.
-emit_row() { printf '%s|%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5" "$6"; }
-
-# Print the whole record for a canonical name (cli:model), or nothing.
-row_for_name() {
-  local want="$1" flag cli model supports mode kind
+# find_row <how> <want> — the ONE reader over the registry table. `how` picks what
+# `want` is matched against: `name` (canonical cli:model), `flag` (shorthand, `-`
+# rows skipped), or `cli` (first row of that CLI = its default model). Prints the
+# matched record with a FIXED field count — so a row that were ever short a
+# trailing field cannot shift the transport metadata into `supports` — or fails (1).
+#
+# Deliberately one function, not three near-identical loops: the `read -r` field
+# list appears EXACTLY once, so adding a registry column can't be applied to two
+# readers and forgotten in the third (which would make a bare `--agent codex`
+# resolve a mangled row while `--codex` still worked — a bug that reads as
+# agent-specific when it is really reader-specific).
+find_row() {
+  local how="$1" want="$2" flag cli model supports mode kind
   while IFS='|' read -r flag cli model supports mode kind; do
     [ -n "$cli" ] || continue
-    [ "$cli:$model" = "$want" ] && { emit_row "$flag" "$cli" "$model" "$supports" "$mode" "$kind"; return 0; }
+    case "$how" in
+      name) [ "$cli:$model" = "$want" ] || continue ;;
+      flag) [ "$flag" = "-" ] && continue; [ "$flag" = "$want" ] || continue ;;
+      cli)  [ "$cli" = "$want" ] || continue ;;
+      *)    return 1 ;;
+    esac
+    printf '%s|%s|%s|%s|%s|%s\n' "$flag" "$cli" "$model" "$supports" "$mode" "$kind"
+    return 0
   done < <(registry_rows)
   return 1
 }
 
-# Print the record whose shorthand flag matches, or nothing.
-row_for_flag() {
-  local want="$1" flag cli model supports mode kind
-  while IFS='|' read -r flag cli model supports mode kind; do
-    [ "$flag" = "-" ] && continue
-    [ "$flag" = "$want" ] && { emit_row "$flag" "$cli" "$model" "$supports" "$mode" "$kind"; return 0; }
-  done < <(registry_rows)
-  return 1
-}
-
-# Print the default (first) record for a bare CLI name, or nothing.
-row_for_cli_default() {
-  local want="$1" flag cli model supports mode kind
-  while IFS='|' read -r flag cli model supports mode kind; do
-    [ "$cli" = "$want" ] && { emit_row "$flag" "$cli" "$model" "$supports" "$mode" "$kind"; return 0; }
-  done < <(registry_rows)
-  return 1
-}
+row_for_name()        { find_row name "$1"; }
+row_for_flag()        { find_row flag "$1"; }
+row_for_cli_default() { find_row cli  "$1"; }
 
 # Resolve any selector to a registry record. Order: shorthand flag, canonical
 # cli:model name, bare CLI (its default model). Prints the record or fails (1).
@@ -263,46 +272,15 @@ row_for_selector() {
 #           live), so a bare substring would also fire on the alias appearing as
 #           a VALUE (a `default_model`/metadata field) while `models` is empty.
 
-# run_bounded <seconds> <cmd...> — run cmd with a hard time bound so an external
-# probe can never hang `list`/the picker. Prints cmd's stdout; returns cmd's exit
-# code, or non-zero if it hit the bound. Uses timeout/gtimeout when present; else
-# self-bounds with a detached killer that escalates SIGTERM -> SIGKILL, so a
-# process that ignores SIGTERM still can't block the caller. The killer's fds go
-# to /dev/null: this runs inside a command substitution, and a background job
-# holding the captured pipe would make $(...) block until it exits.
-run_bounded() {
-  local secs="$1"; shift
-  local rc=0
-  # `-k 1`: GNU timeout only SIGTERMs at the deadline then waits — a child that
-  # ignores SIGTERM would run forever on the COMMON path (any host with timeout/
-  # gtimeout). --kill-after escalates to SIGKILL, matching the self-watchdog below.
-  if command -v timeout >/dev/null 2>&1; then
-    timeout  -k 1 "$secs" "$@" || rc=$?
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout -k 1 "$secs" "$@" || rc=$?
-  else
-    # No timeout binary — self-bound. cmd stdout -> a temp file, NOT this
-    # function's stdout: if the killer has to SIGKILL the cmd, an orphaned
-    # grandchild (e.g. a `sleep` the cmd spawned) inherits the cmd's fds — and if
-    # that were the command-substitution pipe, the capturing $(...) would block
-    # until the orphan dies. Writing to $tmp means the only thing on our stdout is
-    # the final `cat`, so $() returns as soon as we do. The killer escalates
-    # SIGTERM -> SIGKILL so a process ignoring SIGTERM still can't hang the caller.
-    local tmp; tmp="$(mktemp)"
-    "$@" >"$tmp" &
-    local pid=$!
-    ( sleep "$secs"; kill "$pid" 2>/dev/null; sleep 2; kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 &
-    local killer=$!
-    if wait "$pid" 2>/dev/null; then rc=0; else rc=$?; fi
-    kill "$killer" 2>/dev/null || true
-    cat "$tmp"; rm -f "$tmp"
-  fi
-  # Normalize a bounded kill to ONE "timed out" code (124): GNU timeout reports
-  # 124 (SIGTERM) or 137 (needed SIGKILL); the watchdog's `wait` yields 137/143.
-  # Callers use 124 to treat a slow probe as inconclusive, distinct from a real
-  # non-zero exit (e.g. genuine auth failure).
-  case "$rc" in 137|143) rc=124 ;; esac
-  return "$rc"
+# `run_bounded <seconds> <cmd...>` — the shared time bound for every probe below,
+# so an external CLI can never hang `list`/the picker. Defined once in
+# lib-bounded.sh (herdr-launch.sh sources the same file): two private copies had
+# already drifted apart, and a sibling-script dependency is the norm here anyway.
+_LIB_BOUNDED="$SCRIPT_DIR/lib-bounded.sh"
+# shellcheck source=lib-bounded.sh
+. "$_LIB_BOUNDED" 2>/dev/null || {
+  echo "agent-registry.sh: cannot source $_LIB_BOUNDED (it ships alongside this script)" >&2
+  exit 1
 }
 
 # Print `grok models` RAW output on stdout; RETURN 0 iff the fetch succeeded,

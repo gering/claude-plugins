@@ -50,8 +50,10 @@
 #                         closed — which is what happens to a LEGACY kickoff tab,
 #                         where the worker is the tab's root pane. A modern kickoff
 #                         tab already runs its worker inside a shell pane, so there
-#                         /exit leaves a bare shell and this mode simply reuses (and
-#                         re-`claude -c`s) that tab.
+#                         /exit leaves a bare shell and this mode FINDS that tab
+#                         still open: it focuses it and starts nothing (reused=yes,
+#                         resumed= empty) — running `claude -c` in it is then the
+#                         caller's call, not this helper's.
 #                         `claude -c` continues the most-recent session for
 #                         the worktree cwd; since each worktree hosts exactly one
 #                         task, the cwd already identifies the session unambiguously
@@ -115,6 +117,14 @@
 # the manual instructions instead. Diagnostics always go to stderr.
 set -eu
 
+# Where this script (and its sibling helpers: lib-bounded.sh, herdr-tab-glyph.sh,
+# agent-registry.sh, herdr-teardown.sh) actually live. `${0%/*}` is NOT a safe
+# substitute: invoked as a bare name (`bash herdr-launch.sh`, or via PATH) `$0`
+# has no slash, so `${0%/*}` yields the FILENAME — every sibling path built from
+# it then misses, and the guards that check `[ -f … ]` degrade SILENTLY (rollback
+# would report `unverified` for a tab it never even tried to close).
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)"
+
 mode="${1:-}"
 case "$mode" in
   launch|resume) shift ;;
@@ -161,39 +171,23 @@ trap 'rm -f "${start_err:-}" "${move_err:-}" "${create_err:-}" "${run_err:-}" "$
 # <name>`) and the Claude session name are stable identities: a glyph there would
 # freeze at its launch-time value (nothing refreshes them) and clutter /resume.
 tab_label="$label"
-glyph_helper="${0%/*}/herdr-tab-glyph.sh"
+glyph_helper="$SCRIPT_DIR/herdr-tab-glyph.sh"
 if [ -f "$glyph_helper" ]; then
   stamped="$(bash "$glyph_helper" prefix "$label" "$worktree" 2>/dev/null || true)"
   [ -n "$stamped" ] && tab_label="$stamped"
 fi
 
-# bounded_run <seconds> <cmd...> — run cmd under a hard time bound, so a wedged
-# herdr can never hang a launch. Prints cmd's stdout; returns cmd's exit code, or
-# 124 if the bound killed it. Uses timeout/gtimeout when present, else a detached
-# killer that escalates SIGTERM → SIGKILL (a process ignoring SIGTERM must not
-# block us either). The killer's fds go to /dev/null: this runs inside a command
-# substitution, and a background job holding the captured pipe would make $(…)
-# block until it exits. agent-registry.sh carries the same primitive for its CLI
-# probes; kept local here so the launcher has no cross-script runtime dependency.
-bounded_run() {
-  local secs="$1"; shift
-  local rc=0
-  if command -v timeout >/dev/null 2>&1; then
-    timeout  -k 1 "$secs" "$@" || rc=$?
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout -k 1 "$secs" "$@" || rc=$?
-  else
-    local tmp; tmp="$(mktemp)"
-    "$@" >"$tmp" 2>&1 &
-    local pid=$!
-    ( sleep "$secs"; kill "$pid" 2>/dev/null; sleep 2; kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 &
-    local killer=$!
-    if wait "$pid" 2>/dev/null; then rc=0; else rc=$?; fi
-    kill "$killer" 2>/dev/null || true
-    cat "$tmp"; rm -f "$tmp"
-  fi
-  case "$rc" in 137|143) rc=124 ;; esac
-  return "$rc"
+# `run_bounded <seconds> <cmd...>` — the shared time bound (lib-bounded.sh, also
+# sourced by agent-registry.sh). It wraps the capability probe and every POLLING
+# read below, so a herdr that stops answering turns into a bounded diagnostic
+# instead of an indefinite hang inside a loop. It does NOT wrap the mutating calls
+# (`tab create`, `agent start`, `pane run`, `pane move`): `agent start` carries
+# herdr's own `--timeout`, and client-side killing a half-applied mutation would
+# trade a hang for unknown server state — those keep their pre-existing behavior.
+# shellcheck source=lib-bounded.sh
+. "$SCRIPT_DIR/lib-bounded.sh" 2>/dev/null || {
+  echo "herdr-launch.sh: cannot source $SCRIPT_DIR/lib-bounded.sh (it ships alongside this script)" >&2
+  exit 1
 }
 
 # ---- launch API detection --------------------------------------------------
@@ -201,16 +195,23 @@ bounded_run() {
 # process is started to find out) and NEVER from a version string: 0.7.x spans
 # BOTH contracts (the change landed in 0.7.5), so a version compare would route
 # half of that range to the wrong path.
-#   modern  --kind AND --pane offered  → tab create first, start into that pane
-#   legacy  --workspace AND --cwd      → herdr places the agent, then pane move
-#   unknown neither                    → fail BEFORE creating or starting anything
+#   modern       --kind AND --pane offered  → tab create first, start into that pane
+#   legacy       --workspace AND --cwd      → herdr places the agent, then pane move
+#   unknown      help read fine, names neither → this herdr speaks something else
+#   probe-failed the probe itself failed/timed out/returned nothing → we learned
+#                NOTHING about the contract. Kept distinct from `unknown` so the
+#                diagnostic names the real cause (a wedged socket, a missing
+#                binary) instead of accusing herdr of an unrecognizable API. Both
+#                still fail closed — guessing a contract could create a stray tab.
 # $WORK_SYSTEM_HERDR_API forces the answer (tests, and an escape hatch if a future
 # herdr's help text stops naming its flags).
 detect_launch_api() {
   [ -n "${WORK_SYSTEM_HERDR_API:-}" ] && { printf '%s\n' "$WORK_SYSTEM_HERDR_API"; return 0; }
-  local help
-  help="$(bounded_run 10 herdr agent start --help 2>&1 || true)"
-  if printf '%s' "$help" | grep -q -- '--kind' && printf '%s' "$help" | grep -q -- '--pane'; then
+  local help rc=0
+  help="$(run_bounded 10 herdr agent start --help 2>&1)" || rc=$?
+  if [ "$rc" != 0 ] || [ -z "$help" ]; then
+    printf 'probe-failed\n'
+  elif printf '%s' "$help" | grep -q -- '--kind' && printf '%s' "$help" | grep -q -- '--pane'; then
     printf 'modern\n'
   elif printf '%s' "$help" | grep -q -- '--workspace' && printf '%s' "$help" | grep -q -- '--cwd'; then
     printf 'legacy\n'
@@ -225,6 +226,9 @@ BUSY_TRIES="${WORK_SYSTEM_HERDR_BUSY_TRIES:-20}"                 # agent_pane_bu
 READY_TRIES="${WORK_SYSTEM_HERDR_READY_TRIES:-20}"               # shell-prompt wait (pane-run)
 DETECT_TRIES="${WORK_SYSTEM_HERDR_DETECT_TRIES:-60}"             # wrapper detection polls
 RETRY_DELAY="${WORK_SYSTEM_HERDR_RETRY_DELAY:-0.5}"              # seconds between polls
+# Legacy path only: how long to let a wrapper worker prove it did not die on the
+# spot before its tab is reported as running (see the pane_alive check there).
+WRAPPER_ALIVE_TRIES="${WORK_SYSTEM_HERDR_ALIVE_TRIES:-6}"
 
 # JSON extractors. null / missing / malformed all yield empty, and a stray
 # traceback can never reach the user's terminal.
@@ -270,12 +274,22 @@ except Exception:
 #   are `wN:pM`/`wN:tM` and never contain `|`. A partial response therefore still
 #   surrenders whatever id IS there, which is what lets the caller clean up a tab
 #   that came back without a usable pane instead of orphaning it.
+#   Each id is resolved through its own isinstance-checked chain: a field that is
+#   present but the WRONG SHAPE (e.g. `"tab": "w1:t9"` instead of an object) must
+#   cost only that one lookup, never the whole parse — an unguarded `.get` on a
+#   string raises, the bare `except` prints `"|"`, and a perfectly usable pane id
+#   would be thrown away with it, turning schema drift into a failed launch.
 extract_root_pane_tab='import sys, json
+def pick(v, key):
+    if isinstance(v, dict):
+        return v.get(key) or ""
+    return v or "" if isinstance(v, str) else ""
 try:
     r = json.load(sys.stdin)["result"]
-    root = r.get("root_pane") or {}
-    pane = root.get("pane_id") or (r.get("pane") or {}).get("pane_id") or r.get("pane_id") or ""
-    tab = (r.get("tab") or {}).get("tab_id") or r.get("tab_id") or root.get("tab_id") or ""
+    pane = (pick(r.get("root_pane"), "pane_id") or pick(r.get("pane"), "pane_id")
+            or pick(r, "pane_id"))
+    tab = (pick(r.get("tab"), "tab_id") or pick(r, "tab_id")
+           or pick(r.get("root_pane"), "tab_id"))
     print(pane + "|" + tab)
 except Exception:
     print("|")'
@@ -404,7 +418,7 @@ classify_start_failure() {
 rollback_tab() {
   local t="${1:-}" td state
   [ -n "$t" ] || { printf 'closed\n'; return 0; }
-  td="${0%/*}/herdr-teardown.sh"
+  td="$SCRIPT_DIR/herdr-teardown.sh"
   [ -f "$td" ] || { printf 'unverified\n'; return 0; }
   state="$(bash "$td" close-tab "$t" "$workspace" 2>/dev/null || echo unverified)"
   case "$state" in closed) printf 'closed\n' ;; *) printf 'unverified\n' ;; esac
@@ -434,33 +448,62 @@ fail_definitive() {
 
 # pane_agent_kind <pane> — what herdr currently detects in that pane ("" = nothing).
 pane_agent_kind() {
-  herdr pane get "$1" 2>/dev/null | python3 -c "$extract_pane_agent" 2>/dev/null || true
+  run_bounded 10 herdr pane get "$1" 2>/dev/null | python3 -c "$extract_pane_agent" 2>/dev/null || true
+}
+
+# pane_alive <pane> — does the pane still exist? Used on the LEGACY path, where a
+# wrapper worker IS the tab's root process: if its seed dies, the pane (and with it
+# the tab) is gone, and reporting `moved=yes` would point the user at a tab that no
+# longer exists. Non-zero when herdr cannot see the pane; also non-zero when herdr
+# cannot be reached at all, so the caller must treat "not alive" as inconclusive
+# unless it has another reason to believe the pane died.
+pane_alive() {
+  run_bounded 10 herdr pane get "$1" >/dev/null 2>&1
 }
 
 # pane_has_marker <pane> <token> — is the wrapper's seed-failure marker on screen?
 # `--source visible` is the snapshot that actually holds a settled pane's text; the
 # default `recent` returns nothing once output has stopped (verified live).
+#
+# <token> MUST carry this launch's random seed token (`<marker>:<nonce>`), never a
+# bare well-known constant. The pane's contents are worker-controlled: the seed
+# reads and echoes repository files, and in a work-system repo those files (TASK.md,
+# CHANGELOG, these very tests) legitimately NAME the marker — a substring match on
+# the constant alone would tear down a healthy worker's tab the moment it printed
+# one of them. The nonce is minted per launch and known only to the wrapper the
+# launcher itself started.
 pane_has_marker() {
-  herdr pane read "$1" --source visible --lines 200 --format text 2>/dev/null \
+  run_bounded 10 herdr pane read "$1" --source visible --lines 200 --format text 2>/dev/null \
     | grep -qF -- "$2"
 }
 
 # wait_shell_ready <pane> → ready | busy | unknown. Bounded wait for the pane to be
 # back at ITS OWN shell prompt before typing into it (the `pane run` path has no
-# herdr-side readiness check the way `agent start` does). `unknown` means herdr
-# cannot answer at all (no process-info) — the caller degrades and proceeds rather
-# than blocking a launch forever, since the detection step still gates success.
+# herdr-side readiness check the way `agent start` does).
+#
+# `unknown` (herdr cannot answer — no `pane process-info`, an error, a renamed
+# field) means CANNOT VERIFY, not READY: returning on it immediately would type
+# into a pane created milliseconds ago and hand the rc-file keystroke race back
+# exactly the window this function exists to close. So an unknown answer keeps
+# polling — it may become readable — and only after the whole bounded window is
+# spent does the caller proceed on it, having at least waited out the documented
+# rc-file window. `busy` (a readable answer that says a child holds the foreground)
+# stays a hard failure: we know it is not safe to type.
 wait_shell_ready() {
-  local p="$1" i=0 st=unknown
+  local p="$1" i=0 st=unknown last=unknown
   while [ "$i" -lt "$READY_TRIES" ]; do
-    st="$(herdr pane process-info --pane "$p" 2>/dev/null | python3 -c "$extract_shell_ready" 2>/dev/null || echo unknown)"
-    case "$st" in
-      ready|unknown) printf '%s\n' "$st"; return 0 ;;
-    esac
+    st="$(run_bounded 10 herdr pane process-info --pane "$p" 2>/dev/null | python3 -c "$extract_shell_ready" 2>/dev/null || echo unknown)"
+    [ "$st" = ready ] && { printf 'ready\n'; return 0; }
+    last="$st"
     i=$((i + 1))
     sleep "$RETRY_DELAY" 2>/dev/null || true
   done
-  printf 'busy\n'
+  # Window spent: an unreadable pane degrades to "proceed" (detection still gates
+  # success), a readably-busy one does not.
+  case "$last" in
+    unknown) printf 'unknown\n' ;;
+    *)       printf 'busy\n' ;;
+  esac
 }
 
 case "$mode" in
@@ -488,7 +531,7 @@ case "$mode" in
       # Plugin-qualified: a CC built-in/alias `/continue` shadows the skill.
       worker_argv=(claude -n "$session" "/work-system:continue")
     else
-      registry="${0%/*}/agent-registry.sh"
+      registry="$SCRIPT_DIR/agent-registry.sh"
       [ -f "$registry" ] || { echo "agent-registry.sh not found next to herdr-launch.sh" >&2; exit 1; }
       rc=0
       # Keep resolve's stderr (it distinguishes its exit-2 causes: unknown
@@ -528,6 +571,14 @@ EOF_RESOLVE
     api="$(detect_launch_api)"
     case "$api" in
       modern|legacy) : ;;
+      probe-failed)
+        # We never got an answer, so we know nothing about the contract. Say THAT,
+        # instead of accusing herdr of an unrecognizable API — the cause here is a
+        # wedged/unreachable socket or a probe that outran its bound.
+        echo "could not probe 'herdr agent start --help' (no output, an error, or it outran its 10s bound) — herdr may be unreachable or wedged" >&2
+        echo "nothing was created and no worker was started — start it by hand, or retry once herdr responds" >&2
+        exit 1
+        ;;
       *)
         echo "cannot identify this herdr's 'agent start' contract: its --help offers neither --kind/--pane (0.7.5+) nor --workspace/--cwd (0.7.0-0.7.4)" >&2
         echo "nothing was created and no worker was started — start it by hand" >&2
@@ -564,6 +615,24 @@ EOF_RESOLVE
       if move_json="$(herdr pane move "$pane" --new-tab --label "$tab_label" --no-focus 2>"$move_err")"; then
         tab="$(printf '%s' "$move_json" | python3 -c "$extract_moved_tab" 2>/dev/null || true)"
         rm -f "$move_err"
+        # A WRAPPER worker (herdr_mode=pane-run) is this tab's ROOT process here, so
+        # a seed that exits immediately — bad auth, an unconfigured model — ends the
+        # pane and herdr closes the tab we are about to report as running. Give it a
+        # bounded moment and check the pane is still there, so we never print
+        # `moved=yes` for a tab that is already gone. Native workers keep the
+        # unchanged fast path: their argv doesn't self-terminate on a bad seed, and
+        # this legacy contract is meant to stay byte-identical for them.
+        if [ "$herdr_mode" = pane-run ]; then
+          i=0
+          while [ "$i" -lt "$WRAPPER_ALIVE_TRIES" ]; do
+            sleep "$RETRY_DELAY" 2>/dev/null || true
+            i=$((i + 1))
+          done
+          if ! pane_alive "$pane"; then
+            echo "the $agent_name worker exited immediately in pane $pane, so herdr closed its tab — the seed phase failed and TASK.md was not started (run the worker by hand to see its error)" >&2
+            exit 1
+          fi
+        fi
         printf 'pane=%s\ntab=%s\nmoved=yes\nagent=%s\n' "$pane" "$tab" "$agent_name"
       else
         diag="$(herdr_diag "$(cat "$move_err")" "$workspace" 0)"
@@ -694,9 +763,27 @@ EOF_RESOLVE
     if [ "$ready" = busy ]; then
       fail_definitive "pane $pane never reached its shell prompt within the readiness window — nothing was typed into it"
     fi
+    # Mint this launch's seed token and hand it to the wrapper as an environment
+    # assignment PREFIXED to the command (a plain `KEY=value cmd …`, so argv_shell
+    # itself is still passed through untouched — no re-quoting). The wrapper prints
+    # it as part of its failure marker, and only `<marker>:<token>` is what
+    # pane_has_marker greps for. Without the token the grep would match the marker
+    # constant wherever it appears in the pane — including in repository files the
+    # seed reads and echoes. A host that cannot mint one degrades to NO marker
+    # detection (the launch then relies on the detection window alone) rather than
+    # to a forgeable constant: losing a signal is safe, trusting a fake one is not.
+    # ($WORK_SYSTEM_HERDR_SEED_TOKEN pins it for tests — a stubbed pane can only
+    # echo a marker the test already knows. Never set it in real use.)
+    seed_token="${WORK_SYSTEM_HERDR_SEED_TOKEN:-$(python3 -c 'import secrets; print(secrets.token_hex(8))' 2>/dev/null || true)}"
+    seed_marker_match=""
+    run_cmd="$argv_shell"
+    if [ -n "$herdr_marker" ] && [ -n "$seed_token" ]; then
+      seed_marker_match="$herdr_marker:$seed_token"
+      run_cmd="WORK_SYSTEM_SEED_TOKEN=$seed_token $argv_shell"
+    fi
     run_rc=0
     run_err="$(mktemp)"
-    herdr pane run "$pane" "$argv_shell" >/dev/null 2>"$run_err" || run_rc=$?
+    herdr pane run "$pane" "$run_cmd" >/dev/null 2>"$run_err" || run_rc=$?
     run_blob="$(cat "$run_err")"
     rm -f "$run_err"
     if [ "$run_rc" != 0 ]; then
@@ -713,17 +800,30 @@ EOF_RESOLVE
     # Bounded detection. Success is ONLY herdr recognizing the expected worker in
     # this exact pane; a timeout, a different kind, or an unreadable state is
     # reported as unverified — never as success, and never as a reason to start a
-    # second one. The wrapper's seed-failure marker is the one signal that IS
-    # definitive: it proves the worker exited without starting the task.
+    # second one.
+    #
+    # The seed-failure marker is checked FIRST in every iteration, because both
+    # signals can be true at once and they mean opposite things: herdr detects the
+    # wrapper's CLI within seconds of the seed starting, so an iteration that finds
+    # the marker will usually also find the kind. Checking the kind first would let
+    # a worker that already announced its own death be reported as a launch.
+    #
+    # What this window can and cannot catch, stated honestly: it catches a seed that
+    # dies BEFORE the launch is confirmed — the common failure (expired auth, an
+    # unconfigured model), which is exactly when the user needs a clean "it didn't
+    # start" instead of a tab to inspect. It cannot catch a seed that fails minutes
+    # later: the seed phase IS the task work, so waiting for it to finish is not a
+    # launch-time option. A launch reported here was real when reported; a worker
+    # that dies afterwards is an ordinary worker crash, not a bad launch.
     i=0
     while [ "$i" -lt "$DETECT_TRIES" ]; do
+      if [ -n "$seed_marker_match" ] && pane_has_marker "$pane" "$seed_marker_match"; then
+        fail_definitive "the $agent_name worker's seed phase failed in pane $pane (marker: $herdr_marker) — TASK.md was not started"
+      fi
       detected="$(pane_agent_kind "$pane")"
       if [ "$detected" = "$herdr_kind" ]; then
         printf 'pane=%s\ntab=%s\nmoved=yes\nagent=%s\n' "$pane" "$tab" "$agent_name"
         exit 0
-      fi
-      if [ -n "$herdr_marker" ] && pane_has_marker "$pane" "$herdr_marker"; then
-        fail_definitive "the $agent_name worker's seed phase failed in pane $pane (marker: $herdr_marker) — TASK.md was not started"
       fi
       if [ -n "$detected" ]; then
         echo "herdr detects '$detected' in pane $pane, not the expected '$herdr_kind' — cannot confirm the launch" >&2
@@ -753,7 +853,7 @@ EOF_RESOLVE
     #                 list, or an unreadable-cwd pane): FAIL CLOSED — do not risk a
     #                 duplicate. Emit blocked=unverified so the caller cues the user to
     #                 check herdr for an existing tab. (Also covers a missing helper.)
-    teardown="${0%/*}/herdr-teardown.sh"
+    teardown="$SCRIPT_DIR/herdr-teardown.sh"
     state=unverified
     [ -f "$teardown" ] && state="$(bash "$teardown" worktree-tab-state "" "$worktree" 2>/dev/null || echo unverified)"
     case "$state" in
