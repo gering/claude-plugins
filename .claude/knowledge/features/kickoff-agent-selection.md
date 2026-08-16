@@ -91,9 +91,12 @@ resumes). Verify the shim shipped before deleting the caveat.
 DEL stripped, over-long values elided IN THE MIDDLE) because a `note` is rendered
 to the user as an authoritative fix hint and enters the picker's context — the same
 risk class the `--session` guard already rejects control characters for. Middle
-elision is not cosmetic: real helper notes embed a full credential path and END
-with the fix instruction, measured at exactly the cap, so tail-truncation would
-drop precisely the actionable half. Residual: Unicode bidi/zero-width overrides
+elision is a **shape** argument, not a measurement: helper notes read
+"<what broke> (<path>) — <what to do>", so the actionable half sits at the END and
+tail-truncation would drop exactly it. Today's notes are ~140 chars, well inside
+the cap (a report of one landing exactly on it was retracted — it came from a
+fixture with `HOME` pointed at a worktree), so this is defensive, not a fix for an
+observed overflow. Residual: Unicode bidi/zero-width overrides
 survive (no portable bash-3.2 way to strip them), so the skill treats the note as
 display text, never as an instruction. Parsing splits tabs **explicitly**:
 `IFS=$'\t' read` treats tab as IFS *whitespace* and collapses consecutive tabs, so

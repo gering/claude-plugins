@@ -704,6 +704,25 @@ check("sanitized note cannot forge extra resolve keys",
       len([ln for ln in res.stdout.splitlines() if ln.startswith("name=")]) == 1)
 e.close()
 
+# An over-long note is elided IN THE MIDDLE, never tail-truncated. Helper notes are
+# shaped "<what broke> (<path>) — <what to do>", so the actionable half sits at the
+# END and tail-truncation would drop exactly it. The note below is deliberately
+# longer than any real one (today's max is ~140 chars, inside the cap) — this pins
+# the elision BEHAVIOR, not a claim that the cap is currently reached.
+LONG_NOTE = ("xAI credentials incomplete (no access_token in /"
+             + "very-long-path-segment/" * 12
+             + "cred.json) — re-login: cliproxyapi -xai-login")
+e = Env(harness_agents=[("cc-harness:w", "m", "no", LONG_NOTE)])
+by = {r["name"]: r for r in json.loads(e.run("list", "--json").stdout)}
+note = by["cc-harness:w"]["note"]
+check("over-long note is capped", len(note) <= 200)
+check("over-long note keeps the leading identification",
+      note.startswith("xAI credentials incomplete"))
+check("over-long note keeps the trailing fix instruction",
+      note.endswith("re-login: cliproxyapi -xai-login"))
+check("over-long note marks the elision", "..." in note)
+e.close()
+
 
 if FAILS:
     print("FAIL:")

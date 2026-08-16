@@ -273,13 +273,16 @@ harness_split_row() {
 # could forge extra key=value lines). Byte-safe for UTF-8: every stripped byte is
 # < 0x80 and can never be part of a multi-byte sequence.
 #
-# Over-long values are ELIDED IN THE MIDDLE, never tail-truncated. Real helper
-# notes embed a full credential path and end with the fix instruction
-# ("… (no access_token in /very/long/path) — re-login: cliproxyapi -xai-login");
-# measured at exactly the cap with a realistic worktree path. Cutting the tail
-# would drop precisely the actionable half and leave the user with "something is
-# broken" and no next step. Keeping head + tail loses only the middle of a path,
-# which is the least load-bearing part.
+# Over-long values are ELIDED IN THE MIDDLE, never tail-truncated. Helper notes
+# are shaped "<what broke> (<path>) — <what to do>", so the ACTIONABLE half sits
+# at the END: tail-truncation would leave the user knowing something is broken
+# and not what to do, while head+tail loses only the middle of a path — the least
+# load-bearing part. This is defensive, not a fix for an observed overflow: the
+# current helper's longest note measures ~140 chars, comfortably inside the cap.
+# (An earlier report of a note landing exactly on the cap was retracted — it came
+# from a fixture with HOME pointed at a worktree; real notes derive the path from
+# $HOME.) The shape argument holds regardless of today's lengths, which is why
+# the elision stays.
 #
 # RESIDUAL, deliberately not handled here: Unicode bidi/zero-width overrides
 # (U+200B–200F, U+202A–202E, U+2066–2069) survive — stripping them portably needs
