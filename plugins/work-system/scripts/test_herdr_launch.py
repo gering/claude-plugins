@@ -1,17 +1,28 @@
 #!/usr/bin/env python3
-"""Tests for herdr-launch.sh's error-diagnostics path (herdr_diag) — run
-standalone (`python3 test_herdr_launch.py`) or via check-structure.py's
-"plugin tests" check.
+"""Tests for herdr-launch.sh — run standalone (`python3 test_herdr_launch.py`) or
+via check-structure.py's "plugin tests" check.
 
-A fake `herdr` binary on PATH returns canned JSON/text on stderr for each
-subcommand, so these tests exercise the REAL herdr-launch.sh end to end (not
-herdr_diag in isolation) against the exact integration surface skills call.
-Covers: the JSON error-schema extraction, the ws_relevant-gated + clause-
-bounded stale-workspace hint (the real w9 incident, the "unrelated clause"
-false-positive a loose AND-of-substrings would trip, case-insensitivity, and
-an ERE-metachar workspace id), the double control-byte strip (pre- AND
-post-JSON-decode, plus $ws itself), the tab-close cleanup diagnostic, and that
-the stdout key=value contract is untouched by any of this on the success path.
+A fake `herdr` binary on PATH returns canned JSON/text per subcommand (and can
+return a DIFFERENT canned response per call, so a detection poll can change its
+answer), so these tests exercise the REAL herdr-launch.sh end to end against the
+exact integration surface skills call.
+
+Covers:
+  * error diagnostics — the JSON error-schema extraction, the ws_relevant-gated +
+    clause-bounded stale-workspace hint (the real w9 incident, the "unrelated
+    clause" false positive a loose AND-of-substrings would trip,
+    case-insensitivity, an ERE-metachar workspace id), the double control-byte
+    strip, and the tab-close cleanup diagnostic;
+  * launch API capability detection — modern (--kind/--pane), legacy
+    (--workspace/--cwd), and an unrecognizable help that must mutate NOTHING;
+  * the legacy path's unchanged sequence and stdout contract;
+  * the modern tab-create → agent-start path for claude/codex/grok, incl. exact
+    kind/pane, argv boundaries, no duplicated executable and no `pane move`;
+  * the modern pane-run path for wrapper workers (kimi): one-command delivery,
+    bounded expected-kind detection, the idle-pane death signal (process state, not
+    terminal text), wrong-kind and timeout → blocked=unverified with no retry;
+  * rollback — exactly-once tab close on definitive failures, no rollback on
+    ambiguous ones, and an unconfirmed rollback downgrading to unverified.
 """
 import json as jsonlib
 import os
@@ -25,6 +36,58 @@ SCRIPT = HERE / "herdr-launch.sh"
 
 FAILS = []
 
+# --- canned herdr responses ------------------------------------------------ #
+MODERN_HELP = (
+    "Start a supported interactive agent in an existing pane\n\n"
+    "Usage: herdr agent start <NAME> --kind <KIND> --pane <ID> [-- [AGENT_ARG]...]\n"
+    "      --kind <KIND>\n      --pane <ID>\n      --timeout <MS>\n"
+)
+LEGACY_HELP = (
+    "Start an agent\n\n"
+    "Usage: herdr agent start <NAME> [OPTIONS] [-- [AGENT_ARG]...]\n"
+    "      --workspace <WORKSPACE_ID>\n      --cwd <PATH>\n      --no-focus\n"
+)
+UNKNOWN_HELP = "Usage: herdr agent start <NAME>\n      --wat <WAT>\n"
+
+TAB_CREATED = jsonlib.dumps({"result": {
+    "root_pane": {"pane_id": "w1:p7", "tab_id": "w1:t7"},
+    "tab": {"tab_id": "w1:t7", "label": "t"},
+}})
+AGENT_STARTED = jsonlib.dumps({"result": {"agent": {
+    "agent": "claude", "pane_id": "w1:p7", "interactive_ready": True}}})
+LEGACY_STARTED = jsonlib.dumps({"result": {"agent": {"pane_id": "w1:p5"}}})
+LEGACY_MOVED = jsonlib.dumps({"result": {"move_result": {"created_tab": {"tab_id": "w1:t9"}}}})
+# Readiness is read from WHICH processes hold the foreground, not from a process
+# group id: only the shell itself → ready, anything else → busy (see the extractor).
+SHELL_READY = jsonlib.dumps({"result": {"process_info": {
+    "shell_pid": 4242, "foreground_process_group_id": 4242,
+    "foreground_processes": [{"pid": 4242, "argv0": "zsh"}]}}})
+SHELL_BUSY = jsonlib.dumps({"result": {"process_info": {
+    "shell_pid": 4242, "foreground_process_group_id": 4242,
+    "foreground_processes": [{"pid": 4243, "argv0": "sh"},
+                             {"pid": 4242, "argv0": "zsh"}]}}})
+BUSY_ERR = jsonlib.dumps({"error": {
+    "code": "agent_pane_busy", "message": "pane w1:p7 is not at a shell prompt"}})
+NO_PANE_ERR = jsonlib.dumps({"error": {
+    "code": "agent_pane_not_found", "message": "agent target pane w1:p7 not found"}})
+
+
+def pane_get(agent=None):
+    p = {"pane_id": "w1:p7", "tab_id": "w1:t7", "agent_status": "unknown"}
+    if agent:
+        p["agent"] = agent
+        p["agent_status"] = "idle"
+    return jsonlib.dumps({"result": {"pane": p}})
+
+
+# `pane list` for herdr-teardown.sh's close-tab verification: a populated list
+# that does NOT contain w1:t7 reads as "gone" → the close is CONFIRMED.
+PANE_LIST_GONE = jsonlib.dumps({"result": {"panes": [
+    {"pane_id": "w1:p1", "tab_id": "w1:t1", "cwd": "/nowhere"}]}})
+# ...and one that still holds it reads as "still-open" → rollback unconfirmed.
+PANE_LIST_STILL = jsonlib.dumps({"result": {"panes": [
+    {"pane_id": "w1:p7", "tab_id": "w1:t7", "cwd": "/nowhere"}]}})
+
 
 def check(name, cond):
     if not cond:
@@ -35,26 +98,62 @@ def shquote(s):
     return "'" + s.replace("'", "'\\''") + "'"
 
 
-def herdr_stub(cases):
-    """Build a fake `herdr` script from {"<argv1> <argv2>": (stdout, stderr, exit)}.
+def herdr_stub(cases, help_text=None):
+    """Build a fake `herdr` from {"<argv1> <argv2>": (stdout, stderr, exit)}.
+
+    A case value may instead be a LIST of such triples: the Nth call to that
+    subcommand gets the Nth entry and the last one repeats — which is how a
+    detection poll (`pane get` returning a shell, then the worker) or a bounded
+    busy-retry is modelled.
+
+    `help_text` answers `agent start --help` before anything else, so capability
+    detection can be exercised for real instead of only via the env override.
 
     When $HERDR_ARGV_LOG is set, every call appends a `=== <subcmd>` header line
     followed by each received arg on its own line — so a test can assert the exact
     argv herdr-launch.sh execs (e.g. the worker argv after `agent start … --`)."""
-    lines = [
-        "#!/usr/bin/env bash",
+    lines = ["#!/usr/bin/env bash"]
+    if help_text is not None:
+        lines += [
+            'if [ "$1 $2" = "agent start" ] && [ "$3" = "--help" ]; then',
+            f"  printf '%s' {shquote(help_text)}",
+            "  exit 0",
+            "fi",
+        ]
+    lines += [
         'if [ -n "${HERDR_ARGV_LOG:-}" ]; then',
         '  { printf \'=== %s\\n\' "$1 $2"; printf \'%s\\n\' "$@"; } >> "$HERDR_ARGV_LOG"',
         "fi",
         'case "$1 $2" in',
     ]
-    for key, (out, err, rc) in cases.items():
+    for key, value in cases.items():
+        seq = value if isinstance(value, list) else [value]
         lines.append(f'  "{key}")')
-        if out:
-            lines.append(f"    printf '%s' {shquote(out)}")
-        if err:
-            lines.append(f"    printf '%s' {shquote(err)} >&2")
-        lines.append(f"    exit {rc}")
+        if len(seq) == 1:
+            out, err, rc = seq[0]
+            if out:
+                lines.append(f"    printf '%s' {shquote(out)}")
+            if err:
+                lines.append(f"    printf '%s' {shquote(err)} >&2")
+            lines.append(f"    exit {rc}")
+        else:
+            slug = key.replace(" ", "_")
+            lines += [
+                f'    n=$(cat "$HERDR_STUB_STATE/{slug}" 2>/dev/null || echo 0)',
+                "    n=$((n + 1))",
+                f'    printf %s "$n" > "$HERDR_STUB_STATE/{slug}"',
+                "    case $n in",
+            ]
+            for i, (out, err, rc) in enumerate(seq, start=1):
+                pat = f"{i})" if i < len(seq) else "*)"
+                lines.append(f"      {pat}")
+                if out:
+                    lines.append(f"        printf '%s' {shquote(out)}")
+                if err:
+                    lines.append(f"        printf '%s' {shquote(err)} >&2")
+                lines.append(f"        exit {rc}")
+                lines.append("        ;;")
+            lines.append("    esac")
         lines.append("    ;;")
     lines.append('  *) echo "unhandled herdr stub call: $*" >&2; exit 9 ;;')
     lines.append("esac")
@@ -63,20 +162,58 @@ def herdr_stub(cases):
 
 class Env:
     """A throwaway PATH with a fake `herdr` stub, plus a worktree dir for
-    herdr-launch.sh to target."""
+    herdr-launch.sh to target.
 
-    def __init__(self, cases, log_argv=False):
+    `api` pins $WORK_SYSTEM_HERDR_API so a test states which contract it is
+    exercising; pass api=None to let the script probe `agent start --help` for
+    real (then give the stub a `help_text`)."""
+
+    def __init__(self, cases, log_argv=False, api="legacy", help_text=None):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
         self.worktree = root / "wt"
         self.worktree.mkdir()
+        state = root / "state"
+        state.mkdir()
         bindir = root / "bin"
         bindir.mkdir()
         herdr = bindir / "herdr"
-        herdr.write_text(herdr_stub(cases))
+        herdr.write_text(herdr_stub(cases, help_text))
         herdr.chmod(0o755)
+        # Stub the worker CLIs too, so a launch test never depends on which agents
+        # happen to be installed and authenticated on the machine running it — the
+        # registry's live probes would otherwise make these tests skip on CI and go
+        # flaky locally (a slow `grok models` alone changes the outcome).
+        for name, body in (
+            ("codex", 'if [ "$1" = "login" ]; then exit 0; fi\nexit 0\n'),
+            ("grok", 'if [ "$1" = "models" ]; then echo "grok-4.5"; fi\nexit 0\n'),
+            ("kimi", 'if [ "$1" = "provider" ]; then '
+                     "echo '{\"models\": {\"kimi-code/k3-256k\": {}}}'; fi\nexit 0\n"),
+        ):
+            stub = bindir / name
+            stub.write_text("#!/bin/sh\n" + body)
+            stub.chmod(0o755)
+        auth = root / "auth.json"
+        auth.write_text("{}\n")
         self.env = dict(os.environ)
         self.env["PATH"] = f"{bindir}:{self.env['PATH']}"
+        self.env["GROK_AUTH_FILE"] = str(auth)
+        self.env["KIMI_CREDENTIALS_FILE"] = str(auth)
+        self.env["HERDR_STUB_STATE"] = str(state)
+        # Keep every bounded wait fast and deterministic.
+        self.env["WORK_SYSTEM_HERDR_RETRY_DELAY"] = "0"
+        self.env["WORK_SYSTEM_HERDR_BUSY_TRIES"] = "3"
+        self.env["WORK_SYSTEM_HERDR_READY_TRIES"] = "3"
+        self.env["WORK_SYSTEM_HERDR_DETECT_TRIES"] = "3"
+        self.env["WORK_SYSTEM_HERDR_IDLE_STREAK"] = "2"
+        # the wall-clock half of the idle gate; the streak is what these assert
+        self.env["WORK_SYSTEM_HERDR_IDLE_MIN_SECONDS"] = "0"
+        self.env["WORK_SYSTEM_HERDR_UNKNOWN_TRIES"] = "2"
+        self.env["WORK_SYSTEM_HERDR_ALIVE_TRIES"] = "2"
+        if api is not None:
+            self.env["WORK_SYSTEM_HERDR_API"] = api
+        else:
+            self.env.pop("WORK_SYSTEM_HERDR_API", None)
         self.argv_log = root / "argv.log" if log_argv else None
         if self.argv_log is not None:
             self.env["HERDR_ARGV_LOG"] = str(self.argv_log)
@@ -87,15 +224,67 @@ class Env:
             return []
         return self.argv_log.read_text().splitlines()
 
+    def calls(self):
+        """The recorded log as [(subcmd, [arg, ...]), ...], in call order."""
+        out, cur = [], None
+        for ln in self.logged_argv():
+            if ln.startswith("=== "):
+                cur = (ln[4:], [])
+                out.append(cur)
+            elif cur is not None:
+                cur[1].append(ln)
+        return out
+
+    def call_args(self, subcmd):
+        """Every recorded arg list for one subcommand, in order."""
+        return [args for name, args in self.calls() if name == subcmd]
+
     def run(self, *args):
         return subprocess.run(
             ["bash", str(SCRIPT), *args],
-            env=self.env, capture_output=True, text=True, timeout=20,
+            env=self.env, capture_output=True, text=True, timeout=30,
         )
 
     def close(self):
         self.tmp.cleanup()
 
+
+def kv(out):
+    """Parse the launcher's key=value stdout into a dict."""
+    d = {}
+    for line in out.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            d[k] = v
+    return d
+
+
+# A complete modern-path stub; individual tests override single keys.
+def modern_cases(**over):
+    cases = {
+        "tab create": (TAB_CREATED, "", 0),
+        "agent start": (AGENT_STARTED, "", 0),
+        "pane list": (PANE_LIST_GONE, "", 0),
+        "tab close": ('{"result":{"type":"ok"}}', "", 0),
+    }
+    cases.update(over)
+    return cases
+
+
+def wrapper_cases(**over):
+    cases = modern_cases(**{
+        "pane process-info": (SHELL_READY, "", 0),
+        "pane run": ('{"result":{"type":"ok"}}', "", 0),
+        "pane get": [(pane_get(), "", 0), (pane_get("kimi"), "", 0)],
+    })
+    cases.pop("agent start")
+    cases.update(over)
+    return cases
+
+
+# ========================================================================== #
+# error diagnostics (legacy path — unchanged behaviour)
+# ========================================================================== #
 
 # --- the real incident: agent_placement_not_found names the workspace ------ #
 e = Env({"agent start": ("", jsonlib.dumps(
@@ -137,7 +326,7 @@ e.close()
 
 # --- ws_relevant=0 (pane move) never gets the hint, even with the trigger code #
 e = Env({
-    "agent start": (jsonlib.dumps({"result": {"agent": {"pane_id": "w1:p5"}}}), "", 0),
+    "agent start": (LEGACY_STARTED, "", 0),
     "pane move": ("", jsonlib.dumps(
         {"error": {"code": "agent_placement_not_found", "message": "pane target gone"}}), 1),
 })
@@ -182,15 +371,91 @@ check("tab-close cleanup: create diag also surfaced",
       "herdr tab create did not return a pane id" in r.stderr)
 e.close()
 
+# --- resume still parses a flat result.tab_id (pre-0.8 shape) -------------- #
+# The create extractor is shared with the modern launch now; its fallbacks must
+# keep working for the older response shape.
+e = Env({
+    "pane list": (jsonlib.dumps(
+        {"result": {"panes": [{"tab_id": "w1:t1", "cwd": "/nowhere"}]}}), "", 0),
+    "tab create": (jsonlib.dumps(
+        {"result": {"tab_id": "w1:t9", "root_pane": {"pane_id": "w1:p9"}}}), "", 0),
+    "pane run": ("", "", 0),
+    "tab focus": ("", "", 0),
+})
+r = e.run("resume", "t", str(e.worktree), "w1")
+check("resume: flat tab_id fallback still parses",
+      kv(r.stdout).get("tab") == "w1:t9" and kv(r.stdout).get("pane") == "w1:p9")
+check("resume: reports a fresh resume", kv(r.stdout).get("resumed") == "yes")
+e.close()
+
+
+# ========================================================================== #
+# launch API capability detection
+# ========================================================================== #
+
+# --- modern help -> tab create first, agent start --kind, no pane move ----- #
+e = Env(modern_cases(), log_argv=True, api=None, help_text=MODERN_HELP)
+r = e.run("launch", "t", str(e.worktree), "w1")
+names = [n for n, _ in e.calls()]
+check("detect modern: exit 0", r.returncode == 0)
+check("detect modern: tab create precedes agent start",
+      "tab create" in names and "agent start" in names
+      and names.index("tab create") < names.index("agent start"))
+check("detect modern: no pane move", "pane move" not in names)
+check("detect modern: agent start carries --kind",
+      any("--kind" in a for a in e.call_args("agent start")))
+e.close()
+
+# --- legacy help -> the untouched agent start --workspace + pane move ------ #
+e = Env({"agent start": (LEGACY_STARTED, "", 0), "pane move": (LEGACY_MOVED, "", 0)},
+        log_argv=True, api=None, help_text=LEGACY_HELP)
+r = e.run("launch", "t", str(e.worktree), "w1")
+names = [n for n, _ in e.calls()]
+check("detect legacy: exit 0", r.returncode == 0)
+check("detect legacy: no tab create", "tab create" not in names)
+check("detect legacy: pane move used", "pane move" in names)
+check("detect legacy: agent start carries --workspace",
+      any("--workspace" in a for a in e.call_args("agent start")))
+check("detect legacy: stdout contract unchanged",
+      r.stdout == "pane=w1:p5\ntab=w1:t9\nmoved=yes\nagent=claude\n")
+e.close()
+
+# --- a FAILED probe is not an "unrecognizable contract" -------------------- #
+# We learned nothing about the API, so the diagnostic must name the probe, not
+# accuse herdr of an unknown contract. Both still fail closed.
+e = Env(modern_cases(**{"agent start": ("", "socket closed", 1)}),
+        log_argv=True, api=None)
+r = e.run("launch", "t", str(e.worktree), "w1")
+check("probe failed: exit 1", r.returncode == 1)
+check("probe failed: diagnostic names the probe, not a missing contract",
+      "could not probe" in r.stderr and "--kind/--pane" not in r.stderr)
+check("probe failed: nothing was created", "tab create" not in [n for n, _ in e.calls()])
+e.close()
+
+# --- unrecognizable help -> fail BEFORE any mutation ----------------------- #
+e = Env(modern_cases(), log_argv=True, api=None, help_text=UNKNOWN_HELP)
+r = e.run("launch", "t", str(e.worktree), "w1")
+names = [n for n, _ in e.calls()]
+check("detect unknown: exit 1", r.returncode == 1)
+check("detect unknown: nothing on stdout", r.stdout == "")
+check("detect unknown: diagnostic names both contracts",
+      "--kind/--pane" in r.stderr and "--workspace/--cwd" in r.stderr)
+check("detect unknown: NOTHING was created or started",
+      "tab create" not in names and "agent start" not in names
+      and "pane run" not in names)
+e.close()
+
+
+# ========================================================================== #
+# legacy path (herdr 0.7.0-0.7.4) — output contract must not drift
+# ========================================================================== #
+
 # --- legacy no-selector launch: worker argv is the plugin-qualified skill --- #
 # Guards the shadowing fix: an empty selector takes the legacy path, whose worker
 # argv MUST be `claude -n <session> /work-system:continue` — the qualified form as
 # ONE argv token (a bare `/continue` would be shadowed by a CC built-in/alias).
-e = Env({
-    "agent start": (jsonlib.dumps({"result": {"agent": {"pane_id": "w1:p5"}}}), "", 0),
-    "pane move": (jsonlib.dumps(
-        {"result": {"move_result": {"created_tab": {"tab_id": "w1:t9"}}}}), "", 0),
-}, log_argv=True)
+e = Env({"agent start": (LEGACY_STARTED, "", 0), "pane move": (LEGACY_MOVED, "", 0)},
+        log_argv=True)
 r = e.run("launch", "t", str(e.worktree), "w1", "", "sess1")  # "" selector = legacy path
 argv = e.logged_argv()
 check("legacy: exit 0", r.returncode == 0)
@@ -205,11 +470,7 @@ if "/work-system:continue" in argv:
 e.close()
 
 # --- success path: stdout contract untouched by any of the above ----------- #
-e = Env({
-    "agent start": (jsonlib.dumps({"result": {"agent": {"pane_id": "w1:p5"}}}), "", 0),
-    "pane move": (jsonlib.dumps(
-        {"result": {"move_result": {"created_tab": {"tab_id": "w1:t9"}}}}), "", 0),
-})
+e = Env({"agent start": (LEGACY_STARTED, "", 0), "pane move": (LEGACY_MOVED, "", 0)})
 r = e.run("launch", "t", str(e.worktree), "w1")
 check("success: exit 0", r.returncode == 0)
 check("success: stdout contract unchanged",
@@ -218,9 +479,428 @@ check("success: no stderr diagnostics", r.stderr == "")
 e.close()
 
 
+# ========================================================================== #
+# modern path — native workers (herdr_mode=agent-start)
+# ========================================================================== #
+
+# --- claude (no selector), codex and grok all start through --kind --------- #
+for selector, kind, expect_head, expect_len in (
+    ("", "claude", ["-n", "sess1", "/work-system:continue"], 3),
+    # codex/grok take `-m <model> <bootstrap-prompt>`; the prompt must survive as
+    # exactly ONE word, which is what the length assertion pins down.
+    ("--codex", "codex", ["-m", "gpt-5.6-terra"], 3),
+    ("--grok", "grok", ["-m", "grok-4.5"], 3),
+):
+    started = jsonlib.dumps({"result": {"agent": {"agent": kind, "pane_id": "w1:p7"}}})
+    e = Env(modern_cases(**{"agent start": (started, "", 0)}),
+            log_argv=True, api="modern")
+    r = e.run("launch", "t", str(e.worktree), "w1", selector, "sess1")
+    label = selector or "claude(default)"
+    starts = e.call_args("agent start")
+    check(f"modern {label}: exit 0", r.returncode == 0)
+    check(f"modern {label}: stdout is the stable contract",
+          r.stdout == f"pane=w1:p7\ntab=w1:t7\nmoved=yes\nagent={kv(r.stdout).get('agent')}\n")
+    check(f"modern {label}: moved=yes (dedicated tab, no physical move)",
+          kv(r.stdout).get("moved") == "yes")
+    check(f"modern {label}: exactly one agent start", len(starts) == 1)
+    if starts:
+        a = starts[0]
+        check(f"modern {label}: --kind is exactly the declared kind",
+              a[a.index("--kind") + 1] == kind)
+        check(f"modern {label}: --pane is the tab's root pane",
+              a[a.index("--pane") + 1] == "w1:p7")
+        tail = a[a.index("--") + 1:] if "--" in a else []
+        check(f"modern {label}: the executable word is NOT repeated after --",
+              kind not in tail)
+        check(f"modern {label}: native args keep order and boundaries",
+              tail[:len(expect_head)] == expect_head and len(tail) == expect_len)
+    check(f"modern {label}: no pane move", "pane move" not in [n for n, _ in e.calls()])
+    check(f"modern {label}: tab created with --no-focus",
+          any("--no-focus" in c for c in e.call_args("tab create")))
+    e.close()
+
+# --- tab create receives the glyph-stamped label and the worktree cwd ------ #
+e = Env(modern_cases(), log_argv=True, api="modern")
+r = e.run("launch", "mylabel", str(e.worktree), "w1")
+create = e.call_args("tab create")[0]
+check("modern: tab create targets the worktree",
+      create[create.index("--cwd") + 1] == str(e.worktree))
+check("modern: tab create passes the workspace",
+      create[create.index("--workspace") + 1] == "w1")
+check("modern: agent name stays plain (no glyph)",
+      e.call_args("agent start")[0][2] == "mylabel")
+e.close()
+
+# --- agent_pane_busy is retried, bounded, and ONLY that error -------------- #
+e = Env(modern_cases(**{"agent start": [
+    ("", BUSY_ERR, 1), ("", BUSY_ERR, 1), (AGENT_STARTED, "", 0)]}),
+    log_argv=True, api="modern")
+r = e.run("launch", "t", str(e.worktree), "w1")
+check("busy retry: eventually succeeds", r.returncode == 0 and "moved=yes" in r.stdout)
+check("busy retry: retried exactly until it took", len(e.call_args("agent start")) == 3)
+check("busy retry: the tab was not rolled back", "tab close" not in [n for n, _ in e.calls()])
+e.close()
+
+# --- busy forever -> definitive: nothing started, tab rolled back ---------- #
+e = Env(modern_cases(**{"agent start": ("", BUSY_ERR, 1)}), log_argv=True, api="modern")
+r = e.run("launch", "t", str(e.worktree), "w1")
+closes = e.call_args("tab close")
+check("busy forever: exit 1", r.returncode == 1)
+check("busy forever: bounded (tries+1 attempts, no infinite loop)",
+      len(e.call_args("agent start")) == 4)
+check("busy forever: tab closed exactly once", len(closes) == 1)
+check("busy forever: the closed tab is the one we created",
+      closes and closes[0][2] == "w1:t7")
+check("busy forever: no stdout (caller shows the manual block)", r.stdout == "")
+e.close()
+
+# --- a pre-start rejection is definitive -> rollback, exit 1 --------------- #
+e = Env(modern_cases(**{"agent start": ("", NO_PANE_ERR, 1)}), log_argv=True, api="modern")
+r = e.run("launch", "t", str(e.worktree), "w1")
+check("definitive start failure: exit 1", r.returncode == 1)
+check("definitive start failure: herdr's own error is relayed",
+      "agent_pane_not_found" in r.stderr)
+check("definitive start failure: tab closed exactly once",
+      len(e.call_args("tab close")) == 1)
+check("definitive start failure: no stale-workspace hint (no --workspace sent)",
+      "is not a valid workspace" not in r.stderr)
+e.close()
+
+# --- a usage error (exit 2, plain text) is definitive too ------------------ #
+e = Env(modern_cases(**{"agent start": ("", "unsupported interactive agent kind: nope", 2)}),
+        log_argv=True, api="modern")
+r = e.run("launch", "t", str(e.worktree), "w1")
+check("usage error: exit 1", r.returncode == 1)
+check("usage error: tab closed exactly once", len(e.call_args("tab close")) == 1)
+check("usage error: the raw text is relayed", "unsupported interactive agent kind" in r.stderr)
+e.close()
+
+# --- an UNRECOGNIZED error is ambiguous: never rolled back, never retried -- #
+weird = jsonlib.dumps({"error": {"code": "agent_start_timeout", "message": "gave up waiting"}})
+e = Env(modern_cases(**{"agent start": ("", weird, 1)}), log_argv=True, api="modern")
+r = e.run("launch", "t", str(e.worktree), "w1")
+d = kv(r.stdout)
+check("ambiguous start: exit 0", r.returncode == 0)
+check("ambiguous start: blocked=unverified is the FIRST key",
+      r.stdout.startswith("blocked=unverified\n"))
+check("ambiguous start: pane/tab/agent reported for inspection",
+      d.get("pane") == "w1:p7" and d.get("tab") == "w1:t7" and d.get("agent") == "claude")
+check("ambiguous start: no moved= key (callers must branch on blocked first)",
+      "moved" not in d)
+check("ambiguous start: the tab is LEFT ALONE", "tab close" not in [n for n, _ in e.calls()])
+check("ambiguous start: tried exactly once (no retry)",
+      len(e.call_args("agent start")) == 1)
+e.close()
+
+# --- pane-id mismatch on a "successful" start is unverified, not rollback -- #
+mismatch = jsonlib.dumps({"result": {"agent": {"pane_id": "w1:pOTHER"}}})
+e = Env(modern_cases(**{"agent start": (mismatch, "", 0)}), log_argv=True, api="modern")
+r = e.run("launch", "t", str(e.worktree), "w1")
+check("pane mismatch: blocked=unverified", r.stdout.startswith("blocked=unverified\n"))
+check("pane mismatch: exit 0", r.returncode == 0)
+check("pane mismatch: names both panes", "w1:pOTHER" in r.stderr and "w1:p7" in r.stderr)
+check("pane mismatch: tab left alone (something may be running)",
+      "tab close" not in [n for n, _ in e.calls()])
+e.close()
+
+# --- a start response with NO pane id is the same mismatch case ------------ #
+e = Env(modern_cases(**{"agent start": ('{"result":{"agent":{}}}', "", 0)}), api="modern")
+r = e.run("launch", "t", str(e.worktree), "w1")
+check("missing pane id: blocked=unverified", r.stdout.startswith("blocked=unverified\n"))
+e.close()
+
+# --- partial tab create: a pane-less response must not orphan its tab ------ #
+e = Env(modern_cases(**{"tab create": (jsonlib.dumps({"result": {"tab": {"tab_id": "w1:t7"}}}), "", 0)}),
+        log_argv=True, api="modern")
+r = e.run("launch", "t", str(e.worktree), "w1")
+check("partial create: exit 1", r.returncode == 1)
+check("partial create: nothing was started", "agent start" not in [n for n, _ in e.calls()])
+check("partial create: the orphan tab is closed exactly once",
+      len(e.call_args("tab close")) == 1)
+e.close()
+
+# --- an unusable tab create (no ids at all) closes nothing ----------------- #
+e = Env(modern_cases(**{"tab create": ("", jsonlib.dumps(
+    {"error": {"code": "workspace_not_found", "message": "workspace w9 not found"}}), 1)}),
+    log_argv=True, api="modern")
+r = e.run("launch", "t", str(e.worktree), "w9")
+check("failed create: exit 1", r.returncode == 1)
+check("failed create: herdr's error is relayed", "workspace_not_found" in r.stderr)
+check("failed create: stale-workspace hint IS offered here (--workspace was sent)",
+      "HERDR_WORKSPACE_ID=w9 is not a valid workspace" in r.stderr)
+check("failed create: no tab close attempted", "tab close" not in [n for n, _ in e.calls()])
+e.close()
+
+# --- a tab created but never identified must not read as "rolled back" ----- #
+# `tab create` succeeded, its id did not parse. Claiming a clean rollback would
+# leave a blank background tab open while the caller tells the user everything was
+# undone — and the user then launches a second worker on the same worktree.
+e = Env(modern_cases(**{
+    "tab create": (jsonlib.dumps({"result": {"root_pane": {"pane_id": "w1:p7"}}}), "", 0),
+    "agent start": ("", NO_PANE_ERR, 1),
+}), log_argv=True, api="modern")
+r = e.run("launch", "t", str(e.worktree), "w1")
+check("unidentified tab: not reported as a clean failure",
+      r.returncode == 0 and r.stdout.startswith("blocked=unverified\n"))
+check("unidentified tab: says the tab could not be closed",
+      "did not return its id" in r.stderr)
+e.close()
+
+# --- a rollback that cannot be confirmed downgrades to unverified ---------- #
+e = Env(modern_cases(**{
+    "agent start": ("", NO_PANE_ERR, 1),
+    "pane list": (PANE_LIST_STILL, "", 0),   # tab still there after the close
+}), log_argv=True, api="modern")
+r = e.run("launch", "t", str(e.worktree), "w1")
+check("unconfirmed rollback: exit 0 with blocked=unverified",
+      r.returncode == 0 and r.stdout.startswith("blocked=unverified\n"))
+check("unconfirmed rollback: says the tab could not be confirmed closed",
+      "could not confirm" in r.stderr)
+check("unconfirmed rollback: still closed only once", len(e.call_args("tab close")) == 1)
+e.close()
+
+
+# ========================================================================== #
+# modern path — wrapper workers (herdr_mode=pane-run)
+# ========================================================================== #
+
+def kimi_run(cases, log_argv=True):
+    """Run a --kimi launch against a wrapper stub; returns (env, result)."""
+    env = Env(cases, log_argv=log_argv, api="modern")
+    res = env.run("launch", "t", str(env.worktree), "w1", "--kimi", "sess1")
+    check("wrapper: the stubbed kimi resolves (not an availability skip)",
+          res.returncode != 3)
+    return env, res
+
+
+# --- happy path: one pane run, then detection of the expected kind --------- #
+e, r = kimi_run(wrapper_cases())
+runs = e.call_args("pane run")
+check("wrapper: exit 0", r.returncode == 0)
+check("wrapper: stdout is the stable contract",
+      kv(r.stdout).get("moved") == "yes" and kv(r.stdout).get("pane") == "w1:p7")
+check("wrapper: exactly one pane run", len(runs) == 1)
+if runs:
+    # `pane run <PANE> <COMMAND>` — the whole wrapper must arrive as ONE word,
+    # not re-split, re-quoted or prefixed by the launcher.
+    check("wrapper: the command is a single argv word", len(runs[0]) == 4)
+    cmd = runs[0][3]
+    check("wrapper: the registry's argv_shell is sent verbatim",
+          cmd.startswith("sh -c ") and "exec kimi -c --auto" in cmd)
+    check("wrapper: no agent start on this path",
+          "agent start" not in [n for n, _ in e.calls()])
+check("wrapper: waited for the shell prompt before typing",
+      len(e.call_args("pane process-info")) >= 1)
+check("wrapper: the tab was not rolled back",
+      "tab close" not in [n for n, _ in e.calls()])
+# The supervisor must never take its signal from terminal TEXT: a pane echoes the
+# command it was given and the worker prints repository content into it.
+check("wrapper: the pane's text is never read", "pane read" not in [n for n, _ in e.calls()])
+e.close()
+
+# --- detection never sees the worker -> unverified, no retry, tab kept ----- #
+# ready first (the pre-run prompt wait), then busy — the worker is running, herdr
+# just never recognizes it.
+e, r = kimi_run(wrapper_cases(**{"pane get": (pane_get(), "", 0),
+                                "pane process-info": [(SHELL_READY, "", 0),
+                                                      (SHELL_BUSY, "", 0)]}))
+check("wrapper timeout: exit 0 with blocked=unverified",
+      r.returncode == 0 and r.stdout.startswith("blocked=unverified\n"))
+check("wrapper timeout: bounded polling", len(e.call_args("pane get")) == 3)
+check("wrapper timeout: the command was sent exactly once (no second start)",
+      len(e.call_args("pane run")) == 1)
+check("wrapper timeout: the tab is left for inspection",
+      "tab close" not in [n for n, _ in e.calls()])
+e.close()
+
+# --- a DIFFERENT kind is detected -> unverified, not success --------------- #
+e, r = kimi_run(wrapper_cases(**{"pane get": (pane_get("claude"), "", 0)}))
+check("wrapper wrong kind: blocked=unverified", r.stdout.startswith("blocked=unverified\n"))
+check("wrapper wrong kind: names what was detected",
+      "'claude'" in r.stderr and "'kimi'" in r.stderr)
+check("wrapper wrong kind: stops immediately", len(e.call_args("pane get")) == 1)
+check("wrapper wrong kind: no rollback", "tab close" not in [n for n, _ in e.calls()])
+e.close()
+
+# --- an IDLE pane with no worker is a definitive seed failure -------------- #
+# Process state, not text. And not the busy→ready transition either: measured live,
+# a wrapper that fails on startup is gone before the first poll, so its running
+# phase is never observable. The steady state is: a pane back at its own shell
+# prompt, with no agent, for IDLE_STREAK consecutive polls ⇒ nothing is running.
+e, r = kimi_run(wrapper_cases(**{
+    "pane get": (pane_get(), "", 0),
+    "pane process-info": (SHELL_READY, "", 0),
+}))
+check("idle pane: exit 1", r.returncode == 1)
+check("idle pane: says the seed failed and TASK.md was not started",
+      "seed phase failed" in r.stderr and "TASK.md was not started" in r.stderr)
+check("idle pane: tab rolled back exactly once", len(e.call_args("tab close")) == 1)
+check("idle pane: no stdout", r.stdout == "")
+e.close()
+
+# --- a running child WITHOUT its own process group still reads busy --------- #
+# Readiness must not rest on `foreground_process_group_id == shell_pid`: that
+# equality only means "idle" when job control is on. A shell started with `set +m`
+# leaves its children in the shell's own group, so the pgid test would call a
+# running wrapper idle — and the detection loop would tear its tab down.
+NO_JOB_CONTROL = jsonlib.dumps({"result": {"process_info": {
+    "shell_pid": 4242, "foreground_process_group_id": 4242,
+    "foreground_processes": [{"pid": 4242, "argv0": "sh"},
+                             {"pid": 4299, "argv0": "kimi"}]}}})
+e, r = kimi_run(wrapper_cases(**{
+    "pane get": (pane_get(), "", 0),
+    "pane process-info": [(SHELL_READY, "", 0), (NO_JOB_CONTROL, "", 0)],
+}))
+check("no job control: a running child is not idleness",
+      "tab close" not in [n for n, _ in e.calls()])
+check("no job control: reported unverified, not failed",
+      r.returncode == 0 and r.stdout.startswith("blocked=unverified\n"))
+e.close()
+
+# --- a BUSY pane is the wrapper running: never a failure ------------------- #
+# The streak must reset on anything that is not evidence of idleness, or a slow
+# worker gets torn down while it is starting.
+e, r = kimi_run(wrapper_cases(**{
+    "pane get": (pane_get(), "", 0),
+    "pane process-info": [(SHELL_READY, "", 0), (SHELL_BUSY, "", 0)],
+}))
+check("busy pane: never rolled back", "tab close" not in [n for n, _ in e.calls()])
+check("busy pane: reported unverified, not failed",
+      r.returncode == 0 and r.stdout.startswith("blocked=unverified\n"))
+e.close()
+
+# --- an UNREADABLE pane state is not evidence of idleness either ----------- #
+e, r = kimi_run(wrapper_cases(**{
+    "pane get": (pane_get(), "", 0),
+    "pane process-info": [(SHELL_READY, "", 0), ("not json", "", 0)],
+}))
+check("unreadable pane state: never rolled back",
+      "tab close" not in [n for n, _ in e.calls()])
+e.close()
+
+# --- a detected worker wins over a pane that looks idle -------------------- #
+e, r = kimi_run(wrapper_cases(**{
+    "pane get": (pane_get("kimi"), "", 0),
+    "pane process-info": (SHELL_READY, "", 0),
+}))
+check("detected worker wins: exit 0", r.returncode == 0)
+check("detected worker wins: reported as a launch", "moved=yes" in r.stdout)
+e.close()
+
+# --- the shell never reaches a prompt -> nothing typed, tab rolled back ---- #
+e, r = kimi_run(wrapper_cases(**{"pane process-info": (SHELL_BUSY, "", 0)}))
+check("wrapper shell busy: exit 1", r.returncode == 1)
+check("wrapper shell busy: nothing was typed into the pane",
+      "pane run" not in [n for n, _ in e.calls()])
+check("wrapper shell busy: tab closed exactly once",
+      len(e.call_args("tab close")) == 1)
+check("wrapper shell busy: bounded wait", len(e.call_args("pane process-info")) == 3)
+e.close()
+
+# --- an unreadable readiness answer waits out the window, then proceeds ---- #
+# "Cannot verify" is not "ready": returning on the first unreadable answer would
+# type into a pane created milliseconds ago and hand back the rc-file keystroke
+# race this wait exists to close. It spends the whole bounded window instead, and
+# only then degrades to proceeding (detection still gates success).
+e, r = kimi_run(wrapper_cases(**{"pane process-info": ("not json at all", "", 0)}))
+check("wrapper readiness unknown: still launches", r.returncode == 0)
+check("wrapper readiness unknown: the whole bounded window was spent",
+      len(e.call_args("pane process-info")) >= 3)
+check("wrapper readiness unknown: the command was still sent",
+      len(e.call_args("pane run")) == 1)
+e.close()
+
+# --- pane run itself is rejected -> definitive, tab rolled back ------------ #
+e, r = kimi_run(wrapper_cases(**{
+    "pane run": ("", jsonlib.dumps(
+        {"error": {"code": "pane_not_found", "message": "pane w1:p7 not found"}}), 1)}))
+check("wrapper run rejected: exit 1", r.returncode == 1)
+check("wrapper run rejected: tab closed exactly once",
+      len(e.call_args("tab close")) == 1)
+check("wrapper run rejected: never polled for detection",
+      "pane get" not in [n for n, _ in e.calls()])
+e.close()
+
+
+# ========================================================================== #
+# legacy path + a wrapper worker: never report a tab that already died
+# ========================================================================== #
+
+# On legacy herdr the wrapper IS the tab's root process, so a seed that exits at
+# once takes the pane — and the tab — with it. Reporting moved=yes then points the
+# user at a tab that no longer exists.
+e = Env({"agent start": (LEGACY_STARTED, "", 0), "pane move": (LEGACY_MOVED, "", 0),
+         "pane list": (PANE_LIST_GONE, "", 0)},   # populated, but w1:p5 is not in it
+        log_argv=True, api="legacy")
+r = e.run("launch", "t", str(e.worktree), "w1", "--kimi", "sess1")
+check("legacy wrapper died: exit 1", r.returncode == 1)
+check("legacy wrapper died: no moved=yes for a dead tab", "moved=yes" not in r.stdout)
+check("legacy wrapper died: says the seed failed", "seed phase failed" in r.stderr)
+e.close()
+
+# ...and a wrapper that IS alive keeps the unchanged legacy success contract.
+e = Env({"agent start": (LEGACY_STARTED, "", 0), "pane move": (LEGACY_MOVED, "", 0),
+         "pane list": (jsonlib.dumps({"result": {"panes": [
+             {"pane_id": "w1:p5", "tab_id": "w1:t9", "cwd": "/nowhere"}]}}), "", 0)},
+        log_argv=True, api="legacy")
+r = e.run("launch", "t", str(e.worktree), "w1", "--kimi", "sess1")
+check("legacy wrapper alive: stdout contract unchanged",
+      r.stdout == "pane=w1:p5\ntab=w1:t9\nmoved=yes\nagent=kimi:kimi-code/k3-256k\n")
+e.close()
+
+# An UNREADABLE herdr is not evidence of death. Calling it one would send the
+# caller down its manual path and invite a SECOND unattended worker onto the same
+# worktree — the exact hazard blocked=unverified exists to prevent.
+e = Env({"agent start": (LEGACY_STARTED, "", 0), "pane move": (LEGACY_MOVED, "", 0),
+         "pane list": ("", "socket closed", 1)}, log_argv=True, api="legacy")
+r = e.run("launch", "t", str(e.worktree), "w1", "--kimi", "sess1")
+check("legacy wrapper unverifiable: exit 0 with blocked=unverified",
+      r.returncode == 0 and r.stdout.startswith("blocked=unverified\n"))
+check("legacy wrapper unverifiable: never claims the seed failed",
+      "seed phase failed" not in r.stderr)
+e.close()
+
+# A NATIVE legacy launch must not pay for that check at all — its contract is
+# meant to stay byte-identical, and its argv cannot self-terminate on a bad seed.
+e = Env({"agent start": (LEGACY_STARTED, "", 0), "pane move": (LEGACY_MOVED, "", 0)},
+        log_argv=True, api="legacy")
+r = e.run("launch", "t", str(e.worktree), "w1", "--codex", "sess1")
+check("legacy native: no liveness probe added",
+      "pane get" not in [n for n, _ in e.calls()])
+check("legacy native: stdout contract unchanged",
+      r.stdout == "pane=w1:p5\ntab=w1:t9\nmoved=yes\nagent=codex:gpt-5.6-terra\n")
+e.close()
+
+
+# ========================================================================== #
+# defensive parsing + sibling-script resolution
+# ========================================================================== #
+
+# A `tab` field of the WRONG SHAPE must cost only that lookup, never the whole
+# parse — an unguarded `.get` on a string would throw the pane id away with it.
+e = Env(modern_cases(**{"tab create": (jsonlib.dumps(
+    {"result": {"root_pane": {"pane_id": "w1:p7"}, "tab": "w1:t7"}}), "", 0)}),
+    api="modern")
+r = e.run("launch", "t", str(e.worktree), "w1")
+check("scalar tab field: still launches", r.returncode == 0)
+check("scalar tab field: both ids survive",
+      kv(r.stdout).get("pane") == "w1:p7" and kv(r.stdout).get("tab") == "w1:t7")
+e.close()
+
+# Invoked by BARE NAME (no slash in $0), sibling helpers must still resolve — a
+# `${0%/*}`-derived path would silently disable rollback and report `unverified`
+# for a tab it never tried to close.
+e = Env(modern_cases(**{"agent start": ("", NO_PANE_ERR, 1)}), log_argv=True, api="modern")
+r = subprocess.run(["bash", SCRIPT.name, "launch", "t", str(e.worktree), "w1"],
+                   env=e.env, cwd=str(HERE), capture_output=True, text=True, timeout=30)
+check("bare-name invocation: rollback still ran", len(e.call_args("tab close")) == 1)
+check("bare-name invocation: reported as a clean failure", r.returncode == 1)
+e.close()
+
+
 if FAILS:
     print("FAIL:")
     for f in FAILS:
         print("  -", f)
     sys.exit(1)
-print("herdr-launch.sh (herdr_diag): all tests passed")
+print("herdr-launch.sh: all tests passed")

@@ -1,10 +1,10 @@
 ---
 title: "herdr /close Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-07-12
+updatedAt: 2026-08-11
 createdFrom: "PR #18"
-updatedFrom: "session: 2026-07-12"
-pluginVersion: 1.8.2
+updatedFrom: "session: 2026-08-11 (herdr 0.7.5+ shell-pane lifecycle)"
+pluginVersion: 1.11.1
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -77,13 +77,19 @@ cleanly from another process:
   **is** the clean exit. (`send-text "/exit"` alone opens the slash-command menu;
   the separate `Return` runs it.)
 
-## Gotcha: clean exit auto-closes the tab; inject onto idle, not mid-turn
+## Gotcha: whether a clean exit closes the tab depends on the herdr version
 
-- When Claude is the tab's **root pane** (kickoff launches it via `agent start --
-  claude`), a clean `/exit` ends the pane's only process, so herdr **auto-closes the
-  tab**. The `SessionEnd` hook's `herdr tab close` is therefore a *backup* — it does
-  the real work only for sessions where Claude is *not* the root pane (e.g. launched
-  inside a shell pane), where exiting drops back to the shell and the tab survives.
+- **Only when Claude is the tab's root pane** does a clean `/exit` end the pane's
+  only process and make herdr auto-close the tab. That held while `/kickoff` used the
+  legacy `agent start --workspace --cwd -- <argv>` placement (herdr ≤0.7.4).
+- **herdr 0.7.5+ inverted it.** `agent start` now requires an already-open pane, so a
+  kickoff worker runs *inside* a shell pane: `/exit` drops back to that shell and the
+  tab survives. The `SessionEnd` hook's `herdr tab close` — armed by `/close`'s
+  per-pane marker — became the **primary** teardown there, not a backup. Never write
+  (or reason) as if the exit alone closed the tab; both paths rely on the marker.
+- What did **not** change: a modern kickoff worker is still a *registered* agent
+  (started via `agent start`), so `agent_status` keeps populating and the idle-poller
+  below is unaffected. Only the "who closes the tab" half moved.
 - **Self-close injects onto an idle prompt, never mid-turn.** `/close` is itself a
   turn; injecting `/exit` while Claude is busy is unreliable. The helper's `self-exit`
   arms a **detached** injector (`nohup … & disown`) that **polls the pane's

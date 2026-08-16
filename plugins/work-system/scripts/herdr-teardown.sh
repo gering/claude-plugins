@@ -50,11 +50,15 @@
 #                               (verified live): `herdr pane run <pane> "/exit"`
 #                               does nothing to Claude's TUI (it targets a shell),
 #                               and `send-keys ctrl+d` does not exit either — only
-#                               this text+Return pair triggers a clean exit. When
-#                               Claude is the tab's root pane (kickoff launches it
-#                               via `agent start -- claude`), that clean exit also
-#                               auto-closes the tab, so the SessionEnd hook is a
-#                               safety net, not the primary close.
+#                               this text+Return pair triggers a clean exit. Whether
+#                               that also closes the TAB depends on the herdr the
+#                               worker was launched under: on legacy herdr the worker
+#                               is the tab's root pane, so the exit closes the tab
+#                               too; on 0.7.5+ `agent start` needs an existing pane,
+#                               so the worker runs INSIDE a shell and the exit only
+#                               drops back to that shell. The armed marker +
+#                               SessionEnd hook is therefore the primary close, not a
+#                               safety net — never assume the exit alone did it.
 #   self-exit <pane-id> [workspace]
 #                               Scenario B self-close: detach an injector that
 #                               waits for this session to go idle (turn ended),

@@ -338,15 +338,18 @@ Rules:
        an **idle** prompt, the state in which it exits cleanly (verified live), never
        mid-turn. (`herdr pane run "/exit"` does nothing to Claude's TUI and `ctrl+d`
        doesn't exit either — only `send-text "/exit"` + `Return` onto an idle prompt
-       works, which is what the injector does.) Claude's clean exit **auto-closes**
-       its (root-pane) tab; the marker + `SessionEnd` hook from step 2 are the backup
-       for sessions whose tab does not auto-close (e.g. Claude launched inside a
-       shell pane).
+       works, which is what the injector does.) What closes the **tab** is the marker
+       + `SessionEnd` hook from step 2 — do not assume the exit alone does it. On
+       herdr 0.7.5+ `/kickoff` starts the worker **inside a shell pane** (herdr's
+       `agent start` requires an existing pane), so a clean exit drops back to that
+       shell and the tab stays open; only on legacy herdr, where the worker was the
+       tab's root process, does the exit also auto-close the tab. The hook covers
+       both, which is why step 2 is not optional.
        - **B-hook (fallback):** if `self-exit` can't run (`herdr` injection
          unavailable / non-zero exit), do **not** inject — tell the user: "Cleanup
          done, main tab focused — press **Ctrl+D** (or type `/exit`) to close this
-         finished tab (`$WT_TAB`)." The same auto-close + hook tear it down on that
-         manual clean exit. Never defer a tab-close to a SIGHUP/idle kill — that
+         finished tab (`$WT_TAB`)." The armed marker + hook tear it down on that
+         manual clean exit (and on legacy herdr the root-pane exit does too). Never defer a tab-close to a SIGHUP/idle kill — that
          risks a corrupt transcript / broken `--resume`. (This line already names the
          tab, so item 5 does **not** apply to the B-hook path.)
     5. **After B-inject, name the tab (verification fallback).** A self-close fires

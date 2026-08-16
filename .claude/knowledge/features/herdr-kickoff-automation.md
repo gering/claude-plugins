@@ -1,10 +1,10 @@
 ---
 title: "herdr /kickoff + /continue-reopen Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-07-23
+updatedAt: 2026-08-11
 createdFrom: "PR #17"
-updatedFrom: "session: 2026-07-23 (adopt auto-launch reuses launch)"
-pluginVersion: 1.9.3
+updatedFrom: "session: 2026-08-11 (herdr 0.7.5+ dual launch contract)"
+pluginVersion: 1.11.1
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -28,7 +28,9 @@ truth; this entry captures the durable design and one non-obvious gotcha.
   work-system 1.9.3 by `/adopt` (see the adopt note below) — per the project's
   helper-script convention and the "prose skill logic drifts" memory. The skill only
   derives the label and branches on the helper's `moved=yes|no` / exit code.
-- **Spawn the worker as argv, never type it into a shell.** The launch is
+- **Spawn the worker as argv, never type it into a shell** (the LEGACY contract —
+  herdr ≤0.7.4; see "herdr 0.7.5 changed the launch contract" below for what the
+  modern path does instead). The launch is
   `herdr agent start "<label>" … -- <worker argv>`, which execs the worker binary
   directly. As of work-system 1.9.0 the worker argv is **resolved from the chosen
   agent** by `agent-registry.sh` (`emit_argv`), not hardcoded: a claude worker is
@@ -43,12 +45,12 @@ truth; this entry captures the durable design and one non-obvious gotcha.
   `-- argv` form sidesteps the interactive shell entirely, so there is no keystroke
   race against shell startup (see the gotcha below) and no readiness handshake to
   maintain.
-- **`agent start` splits the caller's tab → move it out.** `herdr agent start`
-  (without `--tab`) lands the agent as a split pane in the *invoking* tab, so a
+- **`agent start` splits the caller's tab → move it out** (LEGACY only). `herdr agent
+  start` (without `--tab`) lands the agent as a split pane in the *invoking* tab, so a
   second step `herdr pane move "<pane>" --new-tab --label "<label>"` relocates it
   into its own background tab — one tab per task. The pane id comes from the start
   call's `result.agent.pane_id` (parsed with `python3`; `herdr pane move` does **not**
-  accept an agent name as target — verified).
+  accept an agent name as target — verified). On 0.7.5+ there is no move at all.
 - **One short `LABEL` for agent name + session.** `agent start "<label>"` (immediate,
   deterministic sidebar label) and `claude -n "<label>"` use one short,
   sidebar-friendly name (filler words like `automate`/`in` dropped). The `task/<name>`
@@ -117,6 +119,115 @@ truth; this entry captures the durable design and one non-obvious gotcha.
   in all of this — every case above, plus the stdout contract, as regression
   coverage the first round shipped without.
 
+## herdr 0.7.5 changed the launch contract (work-system 1.11.1)
+
+herdr 0.7.5 (still current in 0.8.0) redefined `agent start`: it no longer places
+the agent, it **starts one in an already-open pane at an interactive shell prompt**
+— `agent start <NAME> --kind <KIND> --pane <ID> [--timeout <MS>] [-- <args>]`.
+Placement moved to a preceding `tab create --workspace … --cwd … --label …
+--no-focus`. work-system 1.11.0 still sent the old flags, so a real launch died with
+`herdr error: unknown option: --workspace` → "did not return a pane id". Durable
+decisions from the fix:
+
+- **Feature-detect the contract, never version-compare.** `detect_launch_api()` reads
+  `herdr agent start --help` (bounded, read-only — no process is started to find out):
+  `--kind` AND `--pane` → modern; else `--workspace` AND `--cwd` → legacy; else
+  **stop before creating or starting anything**. A version compare would be wrong by
+  construction: 0.7.x spans BOTH contracts, so half that range routes to the wrong
+  path. `$WORK_SYSTEM_HERDR_API` overrides it (hermetic tests, and an escape hatch if
+  a future help text stops naming its flags).
+- **The registry declares the transport; the launcher never infers it.**
+  `agent-registry.sh resolve` emits `herdr_mode=agent-start|pane-run` +
+  `herdr_kind=<canonical cli>`. `agent-start` means
+  argv[0] IS herdr's canonical executable for that kind, so the launcher drops
+  exactly that word and passes the rest to `--kind` unchanged — a *check*, not a
+  transformation, which is what keeps argument order and boundaries (codex/grok's
+  one-word bootstrap prompt, claude's one-word `/work-system:continue`) intact.
+  `pane-run` is for wrappers that cannot be projected onto a native kind — kimi's
+  two-phase `sh -c` seed+continue — sent as the registry's `argv_shell=` in ONE
+  `pane run` command (no `eval`, no re-quoting). Unknown mode → fail closed BEFORE
+  `tab create`. The pair is deliberately generic so a dynamically-registered wrapper
+  (cc-harness, PR #52) is `pane-run` + `herdr_kind=claude` with no launcher change.
+- **`agent_pane_busy` is the real-world failure, and the ONLY retried one.** Right
+  after `tab create` the pane's login shell is still running its rc files (direnv,
+  sops, ssh-add — measured at ~4s here), and herdr rejects the start with that code.
+  It is retried within a bounded window; every other error is retried zero times,
+  because a retry loop over an unclassified error is how a launcher starts two
+  workers. Exit code 2 (clap usage text: "unsupported interactive agent kind",
+  "missing required --pane", "unknown option: …") and no-such-pane codes are
+  *definitive* — herdr never touched the pane.
+- **Roll back only what provably started nothing; never kill a maybe-worker.**
+  Definitive failures close the created tab exactly once through
+  `herdr-teardown.sh close-tab` (the existing close-then-verify SoT — it deliberately
+  does not re-issue the close, since a recycled tab id would kill an unrelated live
+  tab). Ambiguous outcomes — readiness timeout, an unclassifiable herdr error, a
+  returned pane id that isn't the requested one, a wrapper detected as the wrong kind
+  — leave the tab alone and return the new fail-closed `blocked=unverified` result
+  (exit 0, `blocked` FIRST). An *unconfirmed* rollback downgrades to the same result:
+  a tab that may still exist must not be reported as a clean failure. Callers branch
+  on `blocked` before `moved`, and on it must not relaunch, print the manual worker
+  command, or persist a project default — mirroring the `resume` guard's shape.
+- **Wrapper readiness is herdr's own detection, not a timer.** After `pane run` the
+  launcher polls `pane get` until `result.pane.agent` equals the declared kind in
+  that exact pane. Verified live: herdr reports `agent=kimi` within ~5s of a
+  `kimi -p` seed (so the two-phase wrapper is detectable during phase 1, long before
+  `exec kimi -c --auto`), and `interactive_ready` is only set for agents started via
+  `agent start` — so it can't be the wrapper's signal. Before typing, a bounded wait
+  compares `pane process-info`'s `foreground_process_group_id` to `shell_pid`: equal
+  = the shell itself is in the foreground, i.e. safe to type into (the `pane run`
+  path has no herdr-side readiness check the way `agent start` does). An unreadable
+  answer degrades to "proceed" rather than blocking a launch forever.
+- **`moved=yes` is kept on the modern path** even though nothing moves — it means
+  "the verified worker is in its dedicated tab", and changing the key would break
+  every caller for a cosmetic gain.
+
+### Gotcha: a supervisor cannot take its signal from terminal text
+
+Deciding "did this worker die?" from what the pane SHOWS was attempted three times
+and failed three times. Each fix looked complete and closed exactly one channel:
+
+1. The literal must not appear in the command the launcher TYPES — a pane echoes
+   its command line, so the token inside the wrapper script matched itself and
+   rolled a **healthy** launch back after 2s (found live). Fixed by assembling it
+   at runtime (`m=WORKER_SEED` … `${m}_FAILED`).
+2. It must not appear in anything the worker READS — the kimi seed's whole job is
+   reading repository files, and in a work-system repo TASK.md, the CHANGELOG and
+   the tests all legitimately name the marker. Fixed with a per-launch nonce.
+3. But the nonce has to REACH the wrapper, and the only channel is the environment
+   of the process being supervised — so the worker can print its own death
+   certificate. And a rendered `pane read` snapshot is width-wrapped, so in a
+   narrow pane the match silently misses anyway. Forgeable *and* unreliable.
+
+The signal that works is process STATE, which output cannot fake — but not the
+obvious form of it. "The pane left its prompt (wrapper running) and came back
+(wrapper died)" is unusable: measured live, a seed that fails on startup — the case
+this exists to catch — is gone before the first 0.5s poll, and every sample reads
+`ready`. What is observable is the steady state: a `sh -c` wrapper puts a child in
+the foreground, so while it runs the pane is busy or its worker is detected. A pane
+sitting at its OWN shell prompt, no agent, for N consecutive polls (and past a
+wall-clock floor, so a `sleep` that ignores fractional seconds cannot collapse the
+budget) means nothing is running there — whether the seed died or the keystrokes
+never landed. Measured: a dead wrapper fails in ~5s with its tab rolled back, a
+healthy one is confirmed in ~2s; the floor sits between those two numbers on
+purpose. The wrapper still PRINTS its marker — for whoever reads the tab, not for
+the launcher.
+
+Generalizes twice over: a supervisor that greps a terminal must own that signal end
+to end (it may not appear in what it types in, nor in anything the supervised
+process can read and echo — closing only the first channel looks complete and
+isn't); and when you switch to process state, verify WHICH state transition is
+actually observable at your polling rate before trusting it.
+
+**Legacy has the same question with a cleaner answer.** There the wrapper is the
+tab's ROOT process, so an instantly-failing seed takes the pane and the tab with
+it — and the legacy path would still print `moved=yes` for a tab herdr had already
+closed. It now checks pane liveness through the pane LIST, tri-state: `gone` is
+definitive, an unreadable herdr is `blocked=unverified` (never death — declaring a
+live worker dead sends the caller to its manual block and invites a SECOND
+unattended worker onto the worktree). Native legacy launches skip the check
+entirely: their argv cannot self-terminate on a bad seed, and that contract is
+meant to stay byte-identical.
+
 ## `/adopt` auto-launch: reference kickoff's prose, don't duplicate it
 
 work-system 1.9.3 gave `/adopt` the same in-herdr tab launch as `/kickoff`: after it
@@ -142,9 +253,13 @@ optional `[agent-selector]` arg for it). Two durable decisions:
 
 ## `resume` mode: reopen a task tab a `/exit` closed
 
-A kickoff tab runs Claude as its **root pane** (argv-exec above), so a clean `/exit`
-— even one only meant to restart Claude Code — ends the pane and herdr closes the
-whole tab; the worktree and resumable session persist, but the tab is gone.
+A LEGACY kickoff tab runs Claude as its **root pane** (argv-exec above), so a clean
+`/exit` — even one only meant to restart Claude Code — ends the pane and herdr closes
+the whole tab; the worktree and resumable session persist, but the tab is gone. (On
+0.7.5+ the worker is started INTO a shell pane, so `/exit` leaves a bare shell in
+the tab instead — `resume` then finds that tab still open and only *focuses* it
+(`reused=yes`, `resumed=` empty); the `claude -c` is the caller's to run, since a
+cwd match cannot tell a live Claude from a surviving shell.)
 `/continue <task>` **from the main session** recovers it via `herdr-launch.sh
 resume`, which — unlike `launch` — uses `herdr tab create` + `pane run "claude -c"`
 so Claude runs **inside a shell pane**. Two durable decisions:
@@ -156,10 +271,13 @@ so Claude runs **inside a shell pane**. Two durable decisions:
   prevention: argv-exec's race-freedom is verified (the gotcha below), and `/close`'s
   teardown (self-exit poller on `agent_status`, SessionEnd hook keyed to
   Claude-as-root-pane) is built around the root-pane model — changing it risks that
-  machinery with no way to live-verify here. So kickoff tabs still die on `/exit`;
-  reopen is the one-command recovery, and reopened tabs are hardened. A race-free
-  *prevention* (`agent start … -- bash -lc 'claude …; exec "$SHELL" -i'`) is possible
-  but deferred pending live herdr agent-detection verification.
+  machinery with no way to live-verify here. So legacy kickoff tabs still die on
+  `/exit`; reopen is the one-command recovery, and reopened tabs are hardened.
+  **herdr 0.7.5+ settled this by force:** `agent start` requires an existing pane, so
+  a modern kickoff worker is *already* a shell-pane process and its tab survives
+  `/exit`. Live-verified consequence: it is still a **registered agent** (started via
+  `agent start`), so `agent_status` keeps working and `/close`'s poller is unaffected
+  — the marker + SessionEnd hook, not the exit itself, closes the tab.
 - **`claude -c`, no session-id stash.** Resume runs `claude -c` (most-recent session
   for the cwd). Each worktree hosts exactly one task, so its cwd is a 1:1 proxy for
   the session — `-c` is already unambiguous, and stashing a session id at kickoff
@@ -284,6 +402,14 @@ The `resume` mode knowingly takes the other path (`pane run "claude -c"`, which
 this exact sequence was verified live by hand. The race is a low-probability cost on
 a manual recovery action, accepted for the tab-survival payoff — not the automated,
 frequently-run kickoff, where argv-exec's certainty wins.
+
+**On herdr 0.7.5+ the argv escape hatch is gone** — `agent start` needs a pane, so
+every launch goes through one. The race is handled rather than avoided: for native
+workers herdr owns it (it refuses with `agent_pane_busy` until the pane is at a
+prompt, which the launcher retries), and for `pane run` wrappers the launcher gates
+on `process-info` showing the shell itself in the foreground before typing. Same
+guarantee, different owner — which is *why* the busy retry is not optional
+book-keeping but the modern equivalent of argv-exec's race-freedom.
 
 Related: [skill-composition](../architecture/skill-composition.md) (kickoff softly
 drives `/continue` across a process boundary) ·
