@@ -289,6 +289,15 @@ case "$SWARM_CAP" in
   ''|*[!0-9]*|0) echo "SWARM_CFG_ERR=Invalid SWARM_MAX_PROMPT_BYTES='$SWARM_CAP' — must be a positive integer (bytes)"; rm -rf "$TMPD"; exit 0 ;;
 esac
 if [ "$(wc -c < "$PROMPT")" -gt "$(( SWARM_CAP - 4096 ))" ]; then echo "EXTERNALS_OVERSIZE=1"; else echo "EXTERNALS_OVERSIZE=0"; fi
+# SWARM_TIMEOUT travels to the workflow so BOTH timeouts derive from one value.
+# Validate it here for the same reason as the cap above: the adapter refuses a
+# malformed value, and a skill that passed one through would only move the error
+# to every individual call.
+SWARM_TO="${SWARM_TIMEOUT:-600}"
+case "$SWARM_TO" in
+  ''|*[!0-9]*) echo "SWARM_CFG_ERR=Invalid SWARM_TIMEOUT='$SWARM_TO' — must be a non-negative integer (seconds; 0 disables)"; rm -rf "$TMPD"; exit 0 ;;
+esac
+echo "SWARM_TIMEOUT_S=$SWARM_TO"
 echo "JAIL=$JAIL"
 echo "LIVE_JSON=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json | tr -d '\n')"
 ```
@@ -343,13 +352,15 @@ Workflow({
     diffFile: "<DIFF>",
     externalPromptFile: "<PROMPT>",
     telemetryFile: "<TELEMETRY>",
+    timeoutSeconds: <SWARM_TIMEOUT_S>,
     findingNonce: "<FINDING_NONCE>",
     externalVoices: [<the live voices from step 1>]
   }
 })
 ```
 
-Fill `<DIFF>`/`<PROMPT>`/`<TELEMETRY>`/`<FINDING_NONCE>` from the echoed values. Add `max: true` to `args` when
+Fill `<DIFF>`/`<PROMPT>`/`<TELEMETRY>`/`<FINDING_NONCE>`/`<SWARM_TIMEOUT_S>` from the
+echo'd values (`timeoutSeconds` is a bare number, not a string). Add `max: true` to `args` when
 `--max` was given (step 1 stripped it) — the deepest-effort profile. Add
 `claude: false` to `args`
 for an **external-only control run** (codex + grok-4.5, no Claude finder
@@ -443,6 +454,24 @@ Lenses:  <gate.run joined>  —  gated-out: <gate.skip lenses>
 ```
 
 Then, when present:
+- **Family coverage** — if `balance.familiesLost` is non-empty, print this
+  IMMEDIATELY under the `Bilanz:` line, before anything else in this list:
+
+  ```
+  ⚠️  Konsens-Basis reduziert: <familiesPresent.length> von <familiesExpected.length> Modellfamilien
+      (ausgefallen: <familiesLost joined>) — „Konsens" heißt in diesem Lauf
+      Übereinstimmung von <familiesPresent joined>.
+  ```
+
+  If `balance.consensusReachable` is false, add: **kein Finding kann in diesem
+  Lauf Konsens erreichen — alle laufen als Solo durch den Verifier.**
+
+  Why it belongs *here* and not only under backend errors: consensus is defined
+  as ≥2 agreeing families, so a lost family changes what every `CONSENSUS` and
+  every solo in the table above MEANS — a finding that would have been
+  corroborated is instead routed through the adversarial verifier. The numbers
+  look identical to a healthy run; only this line distinguishes them. Never omit
+  it, and never soften it into "one backend had an issue".
 - **Fence degraded** — if `fenceDegraded` (or `balance.fenceDegraded`) is true,
   print a prominent warning line: **⚠️ the second-hop finding-fence was OFF this
   run** (no valid `findingNonce` reached the workflow), so merge/verify ran with

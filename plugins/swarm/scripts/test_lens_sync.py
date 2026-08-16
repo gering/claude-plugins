@@ -176,6 +176,44 @@ sk = re.search(
     skill,
 )
 check("skill: EXTERNALS_OVERSIZE guard + shared cap default found", sk)
+# The two timeouts must derive from ONE value, with the adapter's cap strictly
+# below the Bash window. If they tie (both 600 s, the pre-0.9 state), the outer
+# kill can win and the run loses rc=124 — no "timed out after Ns", no telemetry
+# timeout flag, just a dead command. That lost diagnosis is what made
+# SWARM_TIMEOUT look useless in the first place.
+check(
+    "workflow: sets SWARM_TIMEOUT on the transport command",
+    re.search(r"cmd: `SWARM_TIMEOUT=\$\{EFFECTIVE_TIMEOUT_S\} bash ", js),
+)
+check(
+    "workflow: the Bash window is derived, not a second hard-coded literal",
+    re.search(r"Bash tool \(timeout \$\{BASH_TIMEOUT_MS\}\)", js)
+    and not re.search(r"Bash tool \(timeout 600000\)", js),
+)
+check(
+    "workflow: the adapter cap keeps a margin below the Bash window",
+    re.search(r"MAX_INNER_S = BASH_TIMEOUT_MS / 1000 - TIMEOUT_MARGIN_S", js),
+)
+
+# Family coverage must be computed in the WORKFLOW and rendered by the skill.
+# Consensus means ">=2 agreeing families", so a lost family changes what every
+# verdict means while the numbers look unchanged — the presenter cannot re-derive
+# that from backendErrors (a backend with one dead cluster and one live one has
+# NOT lost its family), and a run that degrades silently is the bug this whole
+# area exists to prevent.
+check(
+    "workflow: computes familiesLost",
+    re.search(r"const familiesLost = familiesExpected\.filter", js),
+)
+check(
+    "workflow: exposes family coverage in balance",
+    all(k in js for k in ("familiesExpected,", "familiesPresent,", "familiesLost,", "consensusReachable,")),
+)
+check(
+    "skill: renders the reduced-consensus warning",
+    "balance.familiesLost" in skill and "Konsens-Basis reduziert" in skill,
+)
+
 # Sharing the env knob means sharing its CONTRACT. The adapter refuses a
 # non-positive-integer SWARM_MAX_PROMPT_BYTES; without the same guard in the
 # skill, `abc` expands to 0 in its arithmetic, the threshold goes negative, and
