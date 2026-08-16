@@ -59,9 +59,14 @@ cc-harness:sol	gpt-5.6-sol	no	run: cliproxyapi -codex-login
 
 Set the routing environment for `<name>`, then **`exec "$@"`** so the calling
 process *becomes* the target (typically `claude`) — no lingering wrapper in the
-process tree. That is load-bearing: herdr's agent-state detection and
-work-system's `/close` teardown both key on the pane's root process being
-`claude`.
+process tree. That is load-bearing, and since work-system 1.11.1 it is load-bearing
+**at launch time**, not just later: a harness entry declares
+`herdr_mode=pane-run` + `herdr_kind=claude`, so the launcher sends the command into
+a pane and then polls until herdr detects `claude` *in that exact pane*. A helper
+that forks instead of `exec`ing leaves the wrapper as the pane's root process, that
+poll never succeeds, and the launch reports `blocked=unverified` — the tab exists
+but the worker is never confirmed. herdr's agent-state detection and `/close`
+teardown key on the same fact afterwards.
 
 - `<name>` accepts either form: `grok` or `cc-harness:grok`.
 - No `--model` on the `claude` side — the helper sets `ANTHROPIC_MODEL` (and the
