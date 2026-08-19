@@ -166,12 +166,37 @@ coordinate that separately, do not duplicate transport work here.
   `--output-last-message <file>` (stdout carries the agent transcript,
   stderr the progress log); grok prints a response **envelope** on stdout —
   the validated object is its `.structuredOutput` field.
-- **The adapter pins `-m grok-4.5`** — the schema-capable model, and since
-  swarm 0.4.3 the *only* grok model it supports. grok 0.2.101 renamed it from
-  `grok-build` (same upstream pin-rename class as codex's `gpt-5.6-terra`;
-  verified drop-in: identical envelope/`structuredOutput` shape). Any other `--model` is preflight-rejected with a usage error —
-  only grok-4.5 enforces `--json-schema`, and an unlisted model fails late with
-  `structuredOutput: null` after burning a full review.
+- **The grok model is DISCOVERED, not pinned** (0.9.2). The adapter selects the
+  newest canonical id the CLI lists whose `--json-schema` enforcement is
+  *verified*; `GROK_DEFAULT_MODEL` is only the fallback floor. Ported from
+  `~/dotfiles`' `cc-harness-agents`, which tracks the same provider, with one
+  gate substituted: that helper withholds an upgrade until a model's context
+  window is known, the adapter until its SCHEMA ENFORCEMENT is known — a model
+  that merely accepts the flag and returns `structuredOutput: null` fails late,
+  after a full review is paid for.
+  - `GROK_CANONICAL_RE` accepts only **bare version ids, major ≥ 4**. A provider
+    catalog mixes canonical releases with non-substitutes: dated snapshots,
+    reasoning/non-reasoning splits, multi-agent, build, composer, image/video.
+    Major ≥ 4 keeps a catalog that regresses to `grok-3*` from pulling the
+    ensemble backwards.
+  - Version order is **component-wise**, so `grok-4.20` beats `grok-4.6` — as a
+    decimal fraction it would lose, but the provider means the 20th minor
+    release and already ships 4.20-derived ids.
+  - `GROK_SCHEMA_VERIFIED` is the hard gate and the upgrade ritual: a newer
+    canonical model is **named on stderr, never selected**, so adopting it is a
+    one-line edit after a hand check. Verified 2026-08-16 on CLI 1.0.3:
+    grok-4.5 and grok-4.6 both return an envelope whose `.structuredOutput`
+    carries the schema's `findings`.
+  - Readiness asks "is ANY verified model on offer", matching what the run would
+    actually select. The old "is THIS id listed" form is what let the 1.0.3
+    marker change drop grok from every review.
+- **`grok models` output format has changed twice — parse it defensively.**
+  0.2.101 renamed `grok-build` → `grok-4.5`; **1.0.3 changed the bullet marker**
+  so only the DEFAULT keeps `*` and the rest use `-`. The `*`-only matcher then
+  reported "this CLI does not offer grok-4.5" for a CLI that offered it, and
+  grok — the third model family — vanished from every review, silently and with
+  no timeout involved. `test_grok_models.py` pins both formats against the
+  shipped awk program.
 - **Effort ladders**: grok is `low|medium|high` since 0.2.101 (the `max` tier
   is gone) → the adapter maps `xhigh`/`max`→`high`; codex has no `max` tier →
   map `max`→`xhigh` (`-c model_reasoning_effort=…`). Both mappings degrade a

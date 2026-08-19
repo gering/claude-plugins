@@ -40,10 +40,13 @@
 #            Auth: `codex login status`. Effort has no "max" tier -> max→xhigh.
 #   grok   — headless `--prompt-file` with inline --json-schema; the validated
 #            object is `.structuredOutput` of a response envelope. Needs an
-#            explicit model (-m): grok-4.5 is the sole schema-capable model and
-#            accepts --effort (ladder is low|medium|high — no max tier, so the
-#            adapter maps xhigh/max down to high, mirroring codex's missing
-#            max). Read+web via STRICT `--tools` allowlist
+#            explicit model (-m). The model is DISCOVERED, not hard-pinned: the
+#            newest canonical id the CLI lists (bare version ids, major >= 4)
+#            whose --json-schema enforcement is verified in
+#            GROK_SCHEMA_VERIFIED; a newer unverified model is reported, never
+#            silently chosen. GROK_DEFAULT_MODEL is only the fallback floor.
+#            Effort ladder is low|medium|high (no max tier, so the adapter maps
+#            xhigh/max down to high, mirroring codex's missing max). Read+web via STRICT `--tools` allowlist
 #            (read_file,list_dir,grep,web_search,web_fetch) + `--cwd <repo>`;
 #            no write/shell tools. Readiness is model-aware: auth (non-empty
 #            ~/.grok/auth.json — there is no status command) AND grok-4.5 listed
@@ -72,7 +75,40 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_SCHEMA="$SCRIPT_DIR/schema/finding.schema.json"
 CODEX_DEFAULT_MODEL="gpt-5.6-terra"
-GROK_DEFAULT_MODEL="grok-4.5"
+# The FLOOR, not the choice: discovery below may raise it to a newer canonical
+# model the CLI actually offers. Kept as the fallback for every path where
+# discovery cannot run (no model list, offline, unparseable output).
+GROK_DEFAULT_MODEL="grok-4.6"
+
+# --- canonical grok model discovery -------------------------------------------
+#
+# Ported from the cc-harness-agents helper in ~/dotfiles (which tracks the same
+# provider), with ONE substituted gate: that helper withholds an upgrade until a
+# model's context window is known, because its proxy catalog carries no
+# context_length. The adapter does not care about the window — it cares that the
+# model ENFORCES `--json-schema`, because the whole ensemble is built on schema
+# JSON. A model that merely accepts the flag and returns `structuredOutput: null`
+# fails LATE, after burning a full review.
+#
+# GROK_CANONICAL_RE — anchored, accepts ONLY bare version ids. A provider catalog
+# mixes canonical releases with variants that are not drop-in substitutes for a
+# review: dated snapshots, reasoning/non-reasoning splits, multi-agent, build,
+# composer and image/video ids. Against the live xAI catalog this accepts
+# grok-4.3/4.5/4.6 and rejects grok-3-mini, grok-4.20-0309-reasoning,
+# grok-4.20-multi-agent-0309, grok-build-0.1, grok-composer-2.5-fast and the
+# grok-imagine-* family. Major >= 4 is deliberate: grok-3* is a generation this
+# adapter never used, so a catalog that regresses to it cannot pull us backwards.
+GROK_CANONICAL_RE='^grok-([4-9]|[1-9][0-9]+)(\.[0-9]+)?$'
+
+# GROK_SCHEMA_VERIFIED — the hard gate. A discovered model is only SELECTED when
+# its schema enforcement has been confirmed by hand against the real CLI. The
+# model list says nothing about it, and guessing is what this table exists to
+# prevent: an unverified newer model is REPORTED (stderr), never silently chosen,
+# so adopting it is a one-line edit here after a check, not an accident.
+# Verified 2026-08-16 against grok CLI 1.0.3 — both return an envelope whose
+# `.structuredOutput` carries the schema's `findings` array:
+GROK_SCHEMA_VERIFIED="grok-4.5
+grok-4.6"
 # Default HOME so `$HOME` expansions below (auth file, sandbox deny paths) don't
 # abort the whole script under `set -u` when HOME is unset.
 HOME="${HOME:-$(cd ~ 2>/dev/null && pwd || echo /nonexistent)}"
@@ -585,15 +621,26 @@ grok_model_fetch() {
     return 0
   fi
   # One model id PER BULLET LINE: the id is the FIRST grok-shaped token after the
-  # `*` marker (documented form "  * grok-4.5 (default)"). Take only the first —
-  # scanning the whole line would also pick up a grok-4.5 mentioned in trailing
-  # PROSE on another model's line ("* grok-5 (successor to grok-4.5)"), reporting
-  # a retired model as still offered. Match the id SUBSTRING, not the raw field,
-  # so glued-on punctuation ("grok-4.5," / "grok-4.5." / backticks) doesn't ride
-  # along and break the exact-match below; the pattern ends on alphanumerics, so
-  # a trailing separator is never captured. No id-shaped token → empty → degrade.
+  # bullet marker. Take only the first — scanning the whole line would also pick
+  # up a grok-4.5 mentioned in trailing PROSE on another model's line
+  # ("* grok-5 (successor to grok-4.5)"), reporting a retired model as still
+  # offered. Match the id SUBSTRING, not the raw field, so glued-on punctuation
+  # ("grok-4.5," / "grok-4.5." / backticks) doesn't ride along and break the
+  # exact-match below; the pattern ends on alphanumerics, so a trailing separator
+  # is never captured. No id-shaped token → empty → degrade.
+  #
+  # ACCEPT BOTH BULLET MARKERS. Up to grok 0.2.x every listed model carried `*`;
+  # 1.0.3 marks only the DEFAULT with `*` and lists the rest with `-`:
+  #     * grok-4.6 (default)
+  #     - grok-4.5
+  # A `*`-only matcher therefore saw a list that did not contain the pinned
+  # grok-4.5 and reported "this CLI does not offer grok-4.5", dropping grok from
+  # EVERY review — the third model family silently gone, which is precisely the
+  # failure this plugin's timeout work exists to make impossible. Anchoring on
+  # the marker at all is what makes this brittle; accepting both is the minimal
+  # fix that keeps the anti-prose guard (a bullet line per model) intact.
   _grok_models="$(printf '%s\n' "$raw" | awk '
-    /^[[:space:]]*\*/ {
+    /^[[:space:]]*[*-][[:space:]]/ {
       for (i = 1; i <= NF; i++)
         if (match($i, /grok-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*/)) {
           print substr($i, RSTART, RLENGTH)
@@ -605,25 +652,113 @@ grok_model_fetch() {
   fi
 }
 
-grok_model_offered() {
-  # Three-state, collapsed to an exit code: 0 = the CLI lists grok-4.5, 1 = it
-  # lists models but NOT grok-4.5 (an honest "gone"), 0 = the list is empty /
-  # unparseable / not probed (probe unusable — offline, no timeout binary, or a
-  # future CLI renaming the subcommand). The empty case deliberately trusts auth
-  # instead of failing closed: silently dropping grok from every fan-out is
-  # worse than letting run_grok surface its explicit "unknown model id" error.
-  grok_model_fetch
-  local list="$_grok_models"
-  # Substring match on newline-fenced text, NOT `grep -qxF`: an early-exiting
-  # `grep -q` can SIGPIPE the writer, and pipefail would then report failure
-  # even on a hit.
-  case "$list" in
-    "") return 0 ;;
-    *) case $'\n'"$list"$'\n' in
-         *$'\n'"$GROK_DEFAULT_MODEL"$'\n'*) return 0 ;;
-         *) return 1 ;;
-       esac ;;
+_grok_schema_verified() {
+  # Is $1 in GROK_SCHEMA_VERIFIED? Newline-fenced substring match, not `grep -q`:
+  # an early-exiting grep can SIGPIPE the writer and pipefail would then report
+  # failure even on a hit (same reason as grok_model_offered below).
+  case $'\n'"$GROK_SCHEMA_VERIFIED"$'\n' in
+    *$'\n'"$1"$'\n'*) return 0 ;;
+    *) return 1 ;;
   esac
+}
+
+_grok_version_newer() {
+  # Is $1 strictly newer than $2? Both are canonical ids sharing the `grok-`
+  # prefix, which is all GROK_CANONICAL_RE lets through.
+  #
+  # COMPONENT-WISE and numeric, so grok-4.20 is newer than grok-4.6 — read as a
+  # decimal fraction it would be older, but the provider means "the 20th minor
+  # release", and the live catalog already ships 4.20-derived ids.
+  local a="${1##*-}" b="${2##*-}"
+  local a_major="${a%%.*}" b_major="${b%%.*}"
+  local a_minor="0" b_minor="0"
+  case "$a" in *.*) a_minor="${a#*.}" ;; esac
+  case "$b" in *.*) b_minor="${b#*.}" ;; esac
+  # A non-numeric component would make `-gt` a hard `set -e` failure rather than
+  # a false, so refuse the comparison — the caller reads that as "not newer" and
+  # keeps what it had.
+  case "$a_major$a_minor$b_major$b_minor" in *[!0-9]*) return 1 ;; esac
+  if [[ "$a_major" -ne "$b_major" ]]; then
+    [[ "$a_major" -gt "$b_major" ]]
+    return
+  fi
+  [[ "$a_minor" -gt "$b_minor" ]]
+}
+
+_grok_highest_canonical() {
+  # Highest listed id accepted by GROK_CANONICAL_RE, or "" if none is.
+  # $1 = "verified" restricts the scan to schema-verified models.
+  local mode="${1:-any}" best="" id
+  while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    [[ "$id" =~ $GROK_CANONICAL_RE ]] || continue
+    if [[ "$mode" == "verified" ]] && ! _grok_schema_verified "$id"; then continue; fi
+    if [[ -z "$best" ]] || _grok_version_newer "$id" "$best"; then best="$id"; fi
+  done <<<"$_grok_models"
+  printf '%s' "$best"
+}
+
+GROK_SELECTED_MODEL=""
+GROK_SELECT_NOTE=""
+grok_select_model() {
+  # Resolve the model to run: an explicit --model wins, else the newest
+  # schema-verified canonical id the CLI lists, else the pin. Sets
+  # GROK_SELECTED_MODEL and, when the user should know something,
+  # GROK_SELECT_NOTE. Memoized via GROK_SELECTED_MODEL — grok_model_fetch is a
+  # network call.
+  local override="${1:-}"
+  [[ -n "$GROK_SELECTED_MODEL" ]] && return 0
+  if [[ -n "$override" ]]; then
+    # An override bypasses DISCOVERY but NOT the schema gate: running an
+    # unverified model is the "fails late with structuredOutput: null after
+    # burning a full review" case the gate exists to prevent.
+    GROK_SELECTED_MODEL="$override"
+    return 0
+  fi
+  grok_model_fetch
+  if [[ -z "$_grok_models" ]]; then
+    # No usable list (offline, no timeout binary, format changed). Keep the pin
+    # rather than fail: grok_model_fetch already reported the degrade, and
+    # dropping grok entirely is worse than running the known-good model.
+    GROK_SELECTED_MODEL="$GROK_DEFAULT_MODEL"
+    return 0
+  fi
+  local top verified
+  top="$(_grok_highest_canonical)"
+  verified="$(_grok_highest_canonical verified)"
+  if [[ -z "$verified" ]]; then
+    # The CLI lists canonical models but none we have verified. Keep the pin and
+    # say so — run_grok's own preflight decides whether that is fatal.
+    GROK_SELECTED_MODEL="$GROK_DEFAULT_MODEL"
+    [[ -n "$top" ]] && GROK_SELECT_NOTE="grok lists $top but no schema-verified model — keeping $GROK_DEFAULT_MODEL"
+    return 0
+  fi
+  GROK_SELECTED_MODEL="$verified"
+  # A newer canonical model exists that we have NOT verified: report it, never
+  # select it. This is the upgrade prompt — confirm schema enforcement by hand,
+  # then add one line to GROK_SCHEMA_VERIFIED.
+  if [[ -n "$top" && "$top" != "$verified" ]] && _grok_version_newer "$top" "$verified"; then
+    GROK_SELECT_NOTE="grok offers a newer model ($top) that is not schema-verified — using $verified; verify --json-schema on $top, then add it to GROK_SCHEMA_VERIFIED"
+  fi
+  return 0
+}
+
+grok_model_offered() {
+  # Three-state, collapsed to an exit code: 0 = the CLI offers a schema-verified
+  # canonical model, 1 = it lists models but none we can use (an honest "gone"),
+  # 0 = the list is empty / unparseable / not probed (probe unusable — offline,
+  # no timeout binary, or a future CLI renaming the subcommand). The empty case
+  # deliberately trusts auth instead of failing closed: silently dropping grok
+  # from every fan-out is worse than letting run_grok surface its explicit
+  # "unknown model id" error.
+  #
+  # Since discovery this asks "is ANY verified model on offer?", not "is THE
+  # pinned id on offer?" — the pin is a floor, and readiness must agree with what
+  # grok_select_model would actually run, or the probe rejects a CLI the review
+  # would have used (exactly how the 1.0.3 marker change dropped grok entirely).
+  grok_model_fetch
+  [[ -z "$_grok_models" ]] && return 0
+  [[ -n "$(_grok_highest_canonical verified)" ]]
 }
 
 ready_check() {
@@ -1043,17 +1178,26 @@ run_grok() {
   # higher adapter tiers down so a stale caller degrades instead of erroring,
   # mirroring codex's max→xhigh mapping.
   case "$effort" in xhigh|max) effort="high" ;; esac
-  local grok_model="${model:-$GROK_DEFAULT_MODEL}"
+  # Discovery resolves the model; the pin is only the fallback inside it.
+  grok_select_model "$model"
+  local grok_model="$GROK_SELECTED_MODEL"
   # Effective values, same reason as run_codex.
   TELEMETRY_EFFORT="$effort"; TELEMETRY_MODEL="$grok_model"
 
-  # Preflight-reject any non-default model: only grok-4.5 enforces --json-schema
-  # (and accepts --effort). Another model would silently return
-  # structuredOutput:null and fail late with no schema output — so reject up
-  # front with a usage error rather than burn a review on it.
-  if [[ "$grok_model" != "$GROK_DEFAULT_MODEL" ]]; then
-    echo "grok model '$grok_model' does not enforce --json-schema — the adapter requires schema output; use $GROK_DEFAULT_MODEL (the only supported grok model)" >&2
+  # Preflight-reject any model whose schema enforcement is unverified. The gate
+  # is now the VERIFIED TABLE rather than one hard-coded id: a model that merely
+  # accepts --json-schema and returns structuredOutput:null fails late, after
+  # burning a full review, so reject up front with a usage error.
+  if ! _grok_schema_verified "$grok_model"; then
+    echo "grok model '$grok_model' is not schema-verified — the adapter requires enforced --json-schema output. Verified: $(printf '%s' "$GROK_SCHEMA_VERIFIED" | tr '\n' ' ')" >&2
     exit 2
+  fi
+  # Surface a discovery note (a newer unverified model on offer, or no verified
+  # model at all) exactly once, on stderr. The transport discards adapter stderr,
+  # so this is a local-run aid — the upgrade prompt lives here, not in the report.
+  if [[ -n "$GROK_SELECT_NOTE" ]]; then
+    echo "note: $GROK_SELECT_NOTE" >&2
+    GROK_SELECT_NOTE=""
   fi
 
   _grok_has_prompt_file \
