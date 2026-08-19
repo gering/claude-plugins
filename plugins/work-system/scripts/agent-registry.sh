@@ -239,30 +239,42 @@ harness_on_path() { command -v "$HARNESS_BIN" >/dev/null 2>&1; }
 # Run `cc-harness-agents list` bounded. Prints its stdout; returns its exit
 # code (0 = ok, 3 = capability absent, 124 = timed out, other = fail). Callers
 # treat non-zero as "no harness rows" (silent degrade).
+# Everything the helper prints is held in shell memory and rendered through the
+# picker, so the SIZE needs a bound too — run_bounded caps only runtime. Truncated
+# in-shell rather than via `head -c`: a pipe would SIGPIPE the helper and turn a
+# successful-but-chatty run into an apparent failure, i.e. a silent no-op.
+HARNESS_MAX_BYTES=65536
 harness_list_raw() {
   harness_on_path || return 1
-  run_bounded 10 "$HARNESS_BIN" list 2>/dev/null
+  local out rc=0
+  out="$(run_bounded 10 "$HARNESS_BIN" list 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  printf '%s' "${out:0:$HARNESS_MAX_BYTES}"
 }
 
-# Split ONE helper TSV line into HR_NAME/HR_MODEL/HR_AVAIL/HR_NOTE.
+# harness_split <line> <var>... — split LINE on TABs into the named variables in
+# order; the LAST variable absorbs whatever remains (so a trailing note may itself
+# contain tabs). Used for BOTH the helper's 4-column raw rows and this file's
+# 5-column canonical rows, so the rule lives once.
 #
 # NOT `IFS=$'\t' read`: tab is an IFS *whitespace* character, so bash collapses
 # consecutive tabs into one delimiter and an EMPTY cell silently shifts every
 # later column — `name<TAB><TAB>yes<TAB>-` (empty model) parses as model="yes",
 # avail="-", which fail-closes a working agent to unavailable with a nonsense
 # model; the mirror case (empty avail, note "yes") would mark an unavailable
-# agent available, defeating harness_map_avail. Splitting explicitly keeps every
-# position meaningful. A short field list simply leaves the tail empty.
-harness_split_row() {
-  local rest="$1" f
-  HR_NAME=""; HR_MODEL=""; HR_AVAIL=""; HR_NOTE=""
-  for f in HR_NAME HR_MODEL HR_AVAIL; do
+# agent available, defeating harness_map_avail. A short field list simply leaves
+# the tail empty.
+harness_split() {
+  local rest="$1"; shift
+  local v
+  while [ "$#" -gt 1 ]; do
+    v="$1"; shift
     case "$rest" in
-      *$'\t'*) printf -v "$f" '%s' "${rest%%$'\t'*}"; rest="${rest#*$'\t'}" ;;
-      *)       printf -v "$f" '%s' "$rest"; rest="" ;;
+      *$'\t'*) printf -v "$v" '%s' "${rest%%$'\t'*}"; rest="${rest#*$'\t'}" ;;
+      *)       printf -v "$v" '%s' "$rest"; rest="" ;;
     esac
   done
-  HR_NOTE="$rest"
+  printf -v "$1" '%s' "$rest"
 }
 
 # Neutralize an untrusted helper field before it reaches a terminal, the picker
@@ -291,7 +303,10 @@ harness_split_row() {
 HARNESS_FIELD_MAX=200
 harness_sanitize() {
   local s head tail keep
-  s="$(printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177')"
+  # Parameter expansion, not `printf | tr`: this runs per field per row, and the
+  # fork pair cost more than the work. `[[:cntrl:]]` covers C0 + DEL and leaves
+  # UTF-8 multi-byte sequences intact (verified on bash 3.2).
+  s="${1//[[:cntrl:]]/}"
   [ "${#s}" -le "$HARNESS_FIELD_MAX" ] && { printf '%s' "$s"; return 0; }
   # 3 chars go to the ellipsis; split the rest head-heavy so the leading
   # identification survives, but always keep a tail long enough to carry a
@@ -319,48 +334,60 @@ harness_map_note() {
 # as a committed repo default — breaking the invariant that whatever `list`
 # prints is exactly what can be chosen.
 harness_row_in_ns() {
-  case "$1" in "$HARNESS_NS":*) return 0 ;; *) return 1 ;; esac
+  case "$1" in
+    # The bare prefix with NO id is not an agent: it used to list, resolve, and
+    # store as a committed default while emitting an EMPTY argv word, which
+    # herdr-launch cannot tell from a dropped one — so the failure surfaced at
+    # launch instead of at selection. Require at least one char after the ns.
+    "$HARNESS_NS":?*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
-# Look up one harness agent by selector (`cc-harness:grok`). Prints
-# `name\tmodel\tavailable\tnote` (sanitized + mapped) on hit; returns 1 if the
-# helper is absent, list fails, or the name is not listed.
-harness_lookup() {
-  local want="$1" full raw hrc=0 line
-  full="$HARNESS_NS:${want#"$HARNESS_NS":}"
-  raw="$(harness_list_raw)" || hrc=$?
-  [ "$hrc" -eq 0 ] || return 1
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    harness_split_row "$line"
-    harness_row_in_ns "$HR_NAME" || continue
-    # ONE canonical comparison. Earlier revisions also matched a bare id and a
-    # namespace-stripped form, which let a row `list` had rejected still resolve.
-    [ "$HR_NAME" = "$full" ] || continue
-    printf '%s\t%s\t%s\t%s\n' \
-      "$(harness_sanitize "$HR_NAME")" "$(harness_sanitize "$HR_MODEL")" \
-      "$(harness_map_avail "$HR_AVAIL")" "$(harness_map_note "$HR_NOTE")"
-    return 0
-  done <<<"$raw"
-  return 1
-}
-
-# Append harness rows to the list builder as name\tcli\tmodel\tavail\tnote.
-# Silent on helper-absent / exit-3 / timeout — today's behaviour is unchanged.
-harness_append_list_rows() {
+# THE one normalization pipeline: raw helper rows -> canonical
+# `name\tcli\tmodel\tavail\tnote`, sanitized and namespace-gated. Both `list`
+# and `resolve` consume THIS, never the raw output, so the name shown in the
+# picker is byte-for-byte the selector that resolves.
+#
+# Two separate pipelines drifted apart twice before this was unified: `list`
+# sanitized while the lookup matched RAW (a name carrying a control byte was
+# listed and pickable but exited 2 on resolve), and `list` dropped empty names
+# while the lookup accepted them. Agreement has to be structural, not a
+# convention two functions promise to keep.
+harness_rows() {
   local raw hrc=0 line
   raw="$(harness_list_raw)" || hrc=$?
   [ "$hrc" -eq 0 ] || return 0
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    harness_split_row "$line"
-    [ -n "$HR_NAME" ] || continue
-    # Same namespace gate as harness_lookup — see harness_row_in_ns.
+    harness_split "$line" HR_NAME HR_MODEL HR_AVAIL HR_NOTE
+    # Sanitize BEFORE gating and printing: the canonical name IS the sanitized
+    # one, so a later match cannot disagree with what was displayed.
+    HR_NAME="$(harness_sanitize "$HR_NAME")"
     harness_row_in_ns "$HR_NAME" || continue
     printf '%s\t%s\t%s\t%s\t%s\n' \
-      "$(harness_sanitize "$HR_NAME")" "$HARNESS_NS" "$(harness_sanitize "$HR_MODEL")" \
+      "$HR_NAME" "$HARNESS_NS" "$(harness_sanitize "$HR_MODEL")" \
       "$(harness_map_avail "$HR_AVAIL")" "$(harness_map_note "$HR_NOTE")"
   done <<<"$raw"
+}
+
+# Append harness rows to the list builder. Silent on helper-absent / exit-3 /
+# timeout — today's behaviour is unchanged.
+harness_append_list_rows() { harness_rows; }
+
+# Filter harness_rows down to ONE agent; prints that canonical row (5 fields) or
+# returns 1. Matching the FIRST field of an already-canonical row is what makes
+# "listed" and "resolvable" the same predicate by construction.
+harness_lookup() {
+  local want="$1" full line name
+  full="$HARNESS_NS:${want#"$HARNESS_NS":}"
+  while IFS= read -r line; do
+    name="${line%%$'\t'*}"
+    [ "$name" = "$full" ] || continue
+    printf '%s\n' "$line"
+    return 0
+  done < <(harness_rows)
+  return 1
 }
 
 # find_row <how> <want> — the ONE reader over the registry table. `how` picks what
@@ -401,23 +428,24 @@ row_for_name() {
   case "$1" in
     "$HARNESS_NS":*)
       local hline
-      # EXISTENCE CHECK ONLY — the values are deliberately discarded.
-      #
-      # This record must NEVER reach emit_argv: its `model` field is the helper's
-      # DISPLAY model (grok-4.5), while emit_argv's cc-harness arm reads that slot
-      # as the bare agent ID (grok) for the helper's `exec <name>`. Routing a
-      # harness selector through the native arm would build
-      # `cc-harness-agents exec grok-4.5 -- claude …`, which the helper rejects as
-      # an unknown agent. row_for_selector returns 1 for `cc-harness:*` precisely
-      # to keep that from happening; subcmd_resolve has its own harness arm.
-      # Only validate_name / `default get` call this — both use the exit code.
-      # Split with harness_split_row, NOT `IFS=$'\t' read`: the lookup's own output
-      # can carry an empty cell, and a collapsing read would shift the columns.
+      # harness_lookup is the gate: it returns 1 for anything `list` would not
+      # show, so a row rejected there can never become a committed default.
       IFS= read -r hline < <(harness_lookup "$1") || return 1
-      harness_split_row "$hline"
+      # EXISTENCE CHECK ONLY — both callers (validate_name, `default get`) use
+      # the exit code and discard stdout.
+      #
+      # The record still carries the BARE agent id in the model slot, not the
+      # display model: emit_argv's cc-harness arm reads that slot as the helper's
+      # `exec <name>` argument. Earlier this held the display model, so if a later
+      # refactor ever routed a harness selector through the native arm it would
+      # have built `cc-harness-agents exec grok-4.5 -- claude …` — rejected as an
+      # unknown agent. row_for_selector returns 1 for `cc-harness:*` so that path
+      # is unreachable today; carrying the right value means the guard is a
+      # second line of defence rather than the only one.
+      harness_split "$hline" HR_NAME HR_CLI HR_MODEL HR_AVAIL HR_NOTE
       # flag `-` = no shorthand (dynamic entries are name/--agent only).
       printf -- '-|%s|%s|%s|%s|%s\n' \
-        "$HARNESS_NS" "$HR_MODEL" "$HARNESS_SUPPORTS" \
+        "$HARNESS_NS" "${HR_NAME#"$HARNESS_NS":}" "$HARNESS_SUPPORTS" \
         "$HARNESS_HERDR_MODE" "$HARNESS_HERDR_KIND"
       return 0
       ;;
@@ -628,6 +656,27 @@ emit_argv() {
   printf 'argv_shell=%s\n' "${shell_cmd% }"
 }
 
+# Emit one resolved entry's key=value record, then its argv. ONE definition —
+# the harness arm and the native arm differ only in where the values come from,
+# and a second copy is where a later field lands in one path and not the other.
+# $1=name $2=cli $3=model $4=available $5=supports $6=herdr_mode $7=herdr_kind
+# $8=note $9=argv-model (the emit_argv slot: the bare agent id for cc-harness,
+# the model slug for everyone else) ${10}=session
+emit_record() {
+  printf 'name=%s\n' "$1"
+  printf 'cli=%s\n' "$2"
+  printf 'model=%s\n' "$3"
+  printf 'available=%s\n' "$4"
+  printf 'supports=%s\n' "$5"
+  # Modern-herdr transport (see the header). Always emitted — a consumer that
+  # cannot interpret the mode must fail closed rather than guess from the name.
+  printf 'herdr_mode=%s\n' "$6"
+  printf 'herdr_kind=%s\n' "$7"
+  [ -n "$8" ] && printf 'note=%s\n' "$8"
+  emit_argv "$2" "$9" "${10}"
+  [ "$4" = yes ] || exit 3
+}
+
 subcmd_resolve() {
   local selector="" session=""
   while [ $# -gt 0 ]; do
@@ -656,7 +705,7 @@ subcmd_resolve() {
   case "$selector" in
     "$HARNESS_NS":*)
       local hline bare
-      # harness_split_row, not `IFS=$'\t' read` — see row_for_name.
+      # harness_split, not `IFS=$'\t' read` — see row_for_name.
       if ! IFS= read -r hline < <(harness_lookup "$selector"); then
         # One shared line, arm-specific hint only — so the two paths can't drift
         # into reporting the same condition with different wording.
@@ -668,19 +717,13 @@ subcmd_resolve() {
         fi
         exit 2
       fi
-      harness_split_row "$hline"
+      harness_split "$hline" HR_NAME HR_CLI HR_MODEL HR_AVAIL HR_NOTE
       bare="${HR_NAME#"$HARNESS_NS":}"
-      printf 'name=%s\n' "$HR_NAME"
-      printf 'cli=%s\n' "$HARNESS_NS"
-      printf 'model=%s\n' "$HR_MODEL"
-      printf 'available=%s\n' "$HR_AVAIL"
-      printf 'supports=%s\n' "$HARNESS_SUPPORTS"
-      printf 'herdr_mode=%s\n' "$HARNESS_HERDR_MODE"
-      printf 'herdr_kind=%s\n' "$HARNESS_HERDR_KIND"
-      [ -n "$HR_NOTE" ] && printf 'note=%s\n' "$HR_NOTE"
-      # emit_argv takes the bare agent id in the model slot for this cli.
-      emit_argv "$HARNESS_NS" "$bare" "$session"
-      [ "$HR_AVAIL" = yes ] || exit 3
+      # `$bare` (not $HR_MODEL) is the emit_argv slot: this cli's argv needs the
+      # helper's agent id, while `model=` still reports the display model.
+      emit_record "$HR_NAME" "$HARNESS_NS" "$HR_MODEL" "$HR_AVAIL" \
+        "$HARNESS_SUPPORTS" "$HARNESS_HERDR_MODE" "$HARNESS_HERDR_KIND" \
+        "$HR_NOTE" "$bare" "$session"
       return 0
       ;;
   esac
@@ -699,19 +742,8 @@ subcmd_resolve() {
   local avail note
   IFS=$'\t' read -r avail note < <(entry_status "$cli" "$model")
 
-  printf 'name=%s\n' "$cli:$model"
-  printf 'cli=%s\n' "$cli"
-  printf 'model=%s\n' "$model"
-  printf 'available=%s\n' "$avail"
-  printf 'supports=%s\n' "$supports"
-  # Modern-herdr transport (see the header). Always emitted — a consumer that
-  # cannot interpret the mode must fail closed rather than guess from the name.
-  printf 'herdr_mode=%s\n' "$mode"
-  printf 'herdr_kind=%s\n' "$kind"
-  [ -n "$note" ] && printf 'note=%s\n' "$note"
-  emit_argv "$cli" "$model" "$session"
-
-  [ "$avail" = yes ] || exit 3
+  emit_record "$cli:$model" "$cli" "$model" "$avail" "$supports" \
+    "$mode" "$kind" "$note" "$model" "$session"
 }
 
 subcmd_list() {
@@ -738,9 +770,9 @@ subcmd_list() {
   # has no newline, and the human table's `while read` drops it — silently, and
   # only in the table, since the --json path parses it fine. That is the picker's
   # input, so a dropped row is an agent the user can never choose.
-  local harness_rows
-  harness_rows="$(harness_append_list_rows)"
-  [ -n "$harness_rows" ] && rows+="$harness_rows"$'\n'
+  local hrows
+  hrows="$(harness_append_list_rows)"
+  [ -n "$hrows" ] && rows+="$hrows"$'\n'
 
   if [ -n "$as_json" ]; then
     command -v python3 >/dev/null 2>&1 || { echo "python3 required for --json" >&2; exit 1; }
@@ -761,15 +793,31 @@ print()
   fi
 
   # Human table. Use column when present; else a plain TSV still renders.
-  # `|| [ -n "$name" ]` is the ONE guard against dropping a final line that lacks
-  # a trailing newline (`read` returns non-zero there even though it filled the
-  # variables). The newline-terminated accumulation above should make it
-  # unreachable — it keeps the table correct anyway if a future change to how
-  # `rows` is assembled stops terminating it, which already cost a silently
-  # unselectable agent once.
+  # Human table — DISPLAY ONLY. The picker classifies from `list --json` (see
+  # skills/kickoff/SKILL.md step 12), because this output is padded through
+  # `column -t` and note cells contain spaces.
+  #
+  # Split with harness_split, not `IFS=$'\t' read`: a harness row may carry an
+  # empty model, and the collapsing read shifted every later column — MODEL
+  # rendering as the availability value, which reads as "unavailable" for an
+  # agent that is fine. The ingest was fixed for this first; the display loop is
+  # the same trap one layer later.
+  #
+  # `|| [ -n "$line" ]` keeps a final line lacking a trailing newline (`read`
+  # returns non-zero there even though it filled the variable). The
+  # newline-terminated accumulation above should make it unreachable — it keeps
+  # the table correct anyway if a future change stops terminating `rows`, which
+  # already cost a silently unselectable agent once.
   { printf 'NAME\tCLI\tMODEL\tAVAILABLE\tNOTE\n'
-    printf '%s' "$rows" | while IFS=$'\t' read -r name cli model avail note || [ -n "$name" ]; do
-      printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$cli" "$model" "$avail" "${note:--}"
+    printf '%s' "$rows" | while IFS= read -r line || [ -n "$line" ]; do
+      [ -n "$line" ] || continue
+      harness_split "$line" _n _c _m _a _note
+      # Placeholder EVERY empty cell, not just the note: `column -t -s $'\t'`
+      # treats consecutive separators as ONE, so an empty model would collapse in
+      # the renderer even though the split above kept it — the same column shift,
+      # one layer further out (MODEL showing the availability value).
+      printf '%s\t%s\t%s\t%s\t%s\n' \
+        "${_n:--}" "${_c:--}" "${_m:--}" "${_a:--}" "${_note:--}"
     done
   } | { command -v column >/dev/null 2>&1 && column -t -s $'\t' || cat; }
 }

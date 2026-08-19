@@ -2,7 +2,9 @@
 title: "Manager/Worker Orchestration (design)"
 createdAt: 2026-07-18
 createdFrom: "session: design-manager-worker-orchestration 2026-07-18"
-pluginVersion: 1.8.1
+updatedAt: 2026-08-19
+updatedFrom: "session: 2026-08-19 (task/offer-cc-harness-agents-at-kickoff)"
+pluginVersion: 1.12.0
 prime: false
 ---
 

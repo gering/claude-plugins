@@ -102,9 +102,21 @@ display text, never as an instruction. Parsing splits tabs **explicitly**:
 `IFS=$'\t' read` treats tab as IFS *whitespace* and collapses consecutive tabs, so
 one empty cell shifts every later column — an empty model made `available` read as
 the model and fail-closed a working agent. The same trap bites twice: once on the
-helper's output, once when a consumer re-reads the lookup's own line. And `list`
-and `resolve` must apply the **same** namespace gate, or a row `list` rejects stays
-invisible yet launchable and storable as a committed default.
+helper's output, once when a consumer re-reads the lookup's own line — and a third
+time in the **renderer**: `column -t -s $'\t'` folds consecutive separators too, so
+an empty cell still collapsed on screen after the split was fixed. Every empty cell
+is placeholdered before `column` sees it.
+
+**Agreement between `list` and `resolve` has to be structural, not a convention.**
+Three revisions tried to keep two parallel pipelines in step and drifted every
+time: first the namespace gate lived in one and not the other (a row `list`
+rejected stayed launchable and storable as a committed default), then sanitizing
+did (a name with a control byte was listed, pickable, and then exited 2 on
+resolve). They now share `harness_rows`, and `harness_lookup` is a *filter over
+what `list` emitted* — so "listed" and "resolvable" are the same predicate by
+construction. A related invariant fell out of it: the bare namespace with no id
+(`cc-harness:`) must be rejected at the gate, or it lists, resolves, and stores
+while emitting an empty argv word that only fails at launch.
 
 ## The picker is two pages because AskUserQuestion caps at 4 options
 Merging harness rows flat into the picker made it ~12 entries — against a hard

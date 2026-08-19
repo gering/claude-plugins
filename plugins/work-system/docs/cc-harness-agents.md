@@ -164,6 +164,16 @@ consumer.
 - Gateway liveness should be a *plausibility* check that withholds the token
   from a bare socket listener (e.g. an unauthenticated request must be
   refused), not a bare TCP connect.
+- **Detection executes the helper.** `command -v cc-harness-agents` succeeding is
+  enough for `/kickoff` to *run* `list` — before any picker or confirmation, on
+  every `--pick` or default-less kickoff. That is the price of auto-detection, and
+  it is the same posture as the other workers (`codex login status`, `grok models`
+  and `kimi provider list` are probed the same way). Installing this helper, or
+  letting an untrusted directory sit early on your `PATH`, is granting
+  user-equivalent code execution — an attacker who can place a binary there does
+  not need this plugin to run it. No opt-in flag guards this, deliberately: a flag
+  would defeat auto-detect while adding no boundary an attacker with PATH write
+  does not already have.
 - **`list` output is rendered to users as authoritative hints.** The plugin
   strips control characters and caps field length at ingest, but a helper should
   not emit instruction-shaped notes: they are displayed, never executed.

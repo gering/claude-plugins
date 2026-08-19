@@ -160,8 +160,15 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
       through `column -t` and its `note` cells contain spaces, so splitting it on
       whitespace can misfile a row (a harness row read as native drops the aggregate
       and makes every harness agent unreachable). The human table is for display only.
-      The harness set is empty whenever the helper is off PATH — then the picker is
-      exactly the single page it has always been.
+      **If `--json` fails** (it exits 1 when `python3` is missing — the plain `list`
+      path has no such dependency), fall back to `bash "$REG" list` and split the
+      padded table on whitespace, taking the **`CLI` column** as the class. Say that
+      you fell back; do not abort the picker over a missing `python3`.
+      The harness set is empty whenever the helper is off PATH — then there is no
+      page 2 and no aggregate option. **The page-1 rule below still applies**: it
+      groups by CLI to fit the 4-option cap, which the 7 shipped entries exceeded
+      even before this feature. So "no harness agents" does not mean "byte-identical
+      to the old picker" — say that plainly rather than implying nothing changed.
 
       **An AskUserQuestion holds at most 4 options.** With the shipped registry alone
       (7 entries over 4 CLIs) a one-option-per-row page cannot fit, so page 1 is built
@@ -174,11 +181,16 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
       2. Fill the remaining slots with the **native** entries, **one option per CLI**
          (not per model): label the CLI's default/most-likely model and name the
          alternates in the description (e.g. "claude — opus (also: fable, sonnet)").
-         Order: CLIs with an available entry first, then CLIs that are entirely
-         unavailable (carry their `note`, e.g. "unavailable — run: grok login").
-      3. **If the CLIs still exceed the free slots, do not silently truncate.** Keep
-         the ones with available entries, and state in the question text which CLIs
-         were left out plus that `--agent <cli[:model]>` reaches any entry directly.
+      3. **Order the CLIs by this fixed rule** — with 4 shipped CLIs and a reserved
+         aggregate slot the set does not fit, so *which* CLI drops out must not be
+         improvisation that differs run to run:
+         a. CLIs with at least one available entry, **in `REGISTRY` order**
+            (claude, codex, grok, kimi — the registry is the tiebreak, nothing else);
+         b. then entirely-unavailable CLIs, same order, carrying their `note`.
+         **`claude` is never the one dropped** — it is the only worker with the full
+         lifecycle, so it always takes a slot.
+      4. **Never silently truncate.** Name every CLI that did not fit in the question
+         text, with the hint that `--agent <cli[:model]>` reaches any entry directly.
 
       In the **same** call add a second question, "Save this as the project default?"
       (Yes / No).
@@ -193,8 +205,10 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
       **Page 2 — a second AskUserQuestion, only on the aggregate path.** One option per
       *harness* row (label = the `name` `cc-harness:<id>`, description = the `model`
       plus the `note` for unavailable ones), available first, unavailable marked not
-      hidden. The same 4-option cap applies: if the helper lists more, show the
-      available ones and name the rest with the `--agent cc-harness:<id>` hint. Add the
+      hidden. The same 4-option cap applies and needs the same explicit rule: show
+      **available rows first, in the helper's own listing order**, fill at most 4
+      slots, and name every row that did not fit in the question text with the
+      `--agent cc-harness:<id>` hint. Never drop a row silently. Add the
       same "Save this as the project default?" question. `SELECTOR` = the picked
       `name`; `OFFER_DEFAULT` comes from **page 2's** answer.
 

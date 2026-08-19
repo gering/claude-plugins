@@ -723,6 +723,58 @@ check("over-long note keeps the trailing fix instruction",
 check("over-long note marks the elision", "..." in note)
 e.close()
 
+# --- list/resolve agreement is structural, not a convention ---------------- #
+# Both go through harness_rows, so anything `list` shows must resolve. Two
+# earlier revisions kept separate pipelines and drifted: list sanitized while the
+# lookup matched RAW (a name with a control byte was listed but exited 2), and
+# list dropped empty names while the lookup accepted them.
+e = Env(harness_agents=[("cc-harness:gr\033ok", "grok-4.5", "yes", "-")])
+rows = [r for r in json.loads(e.run("list", "--json").stdout) if r["cli"] == "cc-harness"]
+check("control byte stripped from the listed name",
+      len(rows) == 1 and rows[0]["name"] == "cc-harness:grok")
+check("the name `list` showed is the name that resolves",
+      e.run("resolve", rows[0]["name"]).returncode == 0)
+e.close()
+
+# An over-long name is elided for display — and the elided form must still be the
+# working selector, or the picker offers something unlaunchable.
+LONG = "cc-harness:" + "n" * 260
+e = Env(harness_agents=[(LONG, "m", "yes", "-")])
+rows = [r for r in json.loads(e.run("list", "--json").stdout) if r["cli"] == "cc-harness"]
+check("over-long name is capped in the listing",
+      len(rows) == 1 and len(rows[0]["name"]) <= 200)
+check("the capped name still resolves",
+      e.run("resolve", rows[0]["name"]).returncode == 0)
+e.close()
+
+# The bare namespace with no id is not an agent: it must not list, resolve, or be
+# storable — it used to emit an EMPTY argv word that only failed at launch.
+e = Env(harness_agents=[("cc-harness:", "m", "yes", "-")])
+check("empty-id row is not listed",
+      not [r for r in json.loads(e.run("list", "--json").stdout) if r["cli"] == "cc-harness"])
+check("empty-id row does not resolve", e.run("resolve", "cc-harness:").returncode == 2)
+check("empty-id row is not storable as a default",
+      e.run("default", "set", "cc-harness:").returncode == 2)
+e.close()
+
+# The HUMAN table must survive an empty cell too. The split was fixed at ingest
+# first, but `column -t -s TAB` treats consecutive separators as one, so an empty
+# model still collapsed in the renderer — MODEL showing the availability value,
+# i.e. a working agent reading as unavailable.
+e = Env(harness_agents=[("cc-harness:x", "", "yes", "-"),
+                        ("cc-harness:y", "m", "", "note-text")])
+table = [ln.split() for ln in e.run("list").stdout.splitlines()
+         if ln.startswith("cc-harness:")]
+by_name = {r[0]: r for r in table}
+check("empty model does not shift the table's columns",
+      by_name["cc-harness:x"][1] == "cc-harness" and by_name["cc-harness:x"][3] == "yes")
+check("empty availability reads as unavailable, not as the note",
+      by_name["cc-harness:y"][3] == "no")
+check("table and --json agree on availability", all(
+    (r["available"] is True) == (by_name[r["name"]][3] == "yes")
+    for r in json.loads(e.run("list", "--json").stdout) if r["cli"] == "cc-harness"))
+e.close()
+
 
 if FAILS:
     print("FAIL:")

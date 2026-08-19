@@ -1,10 +1,10 @@
 ---
 title: "herdr /kickoff + /continue-reopen Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-08-11
+updatedAt: 2026-08-19
 createdFrom: "PR #17"
-updatedFrom: "session: 2026-08-11 (herdr 0.7.5+ dual launch contract)"
-pluginVersion: 1.11.1
+updatedFrom: "session: 2026-08-19 (task/offer-cc-harness-agents-at-kickoff)"
+pluginVersion: 1.12.0
 prime: false
 reindexedAt: 2026-07-12
 ---
