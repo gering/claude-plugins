@@ -246,10 +246,32 @@ harness_on_path() { command -v "$HARNESS_BIN" >/dev/null 2>&1; }
 HARNESS_MAX_BYTES=65536
 harness_list_raw() {
   harness_on_path || return 1
-  local out rc=0
-  out="$(run_bounded 10 "$HARNESS_BIN" list 2>/dev/null)" || rc=$?
-  [ "$rc" -eq 0 ] || return "$rc"
-  printf '%s' "${out:0:$HARNESS_MAX_BYTES}"
+  local tmp rc
+  tmp="$(mktemp)" || return 1
+  # Bound at READ time. Capturing first and truncating after (`${out:0:N}`) still
+  # buffers the helper's ENTIRE stdout in shell memory, so a multi-GB writer that
+  # finishes inside the time bound OOMs the session before one byte is discarded.
+  # `head -c` closes the pipe at the limit instead. It also counts BYTES; the
+  # substring form counted characters, which is a different limit in a UTF-8
+  # locale. errexit/pipefail are lifted for the pipeline so PIPESTATUS can be
+  # read; 141 is head closing the pipe (SIGPIPE) on a truncated-but-fine run and
+  # must not read as a helper failure.
+  set +e +o pipefail
+  run_bounded 10 "$HARNESS_BIN" list 2>/dev/null | head -c "$HARNESS_MAX_BYTES" >"$tmp"
+  rc=${PIPESTATUS[0]}
+  set -e -o pipefail
+  case "$rc" in
+    0|141) ;;
+    *) rm -f "$tmp"; return "$rc" ;;
+  esac
+  # A byte cut can land mid-row, so drop a trailing partial line rather than
+  # letting harness_rows parse half a record as a real one.
+  if [ -s "$tmp" ] && [ "$(tail -c 1 "$tmp" | od -An -c | tr -d ' ')" != "\\n" ]; then
+    sed '$d' "$tmp"
+  else
+    cat "$tmp"
+  fi
+  rm -f "$tmp"
 }
 
 # harness_split <line> <var>... — split LINE on TABs into the named variables in
@@ -301,20 +323,20 @@ harness_split() {
 # a multibyte-aware tool this bash-3.2 path cannot assume. The consuming skill
 # therefore treats the note as untrusted display text, never as an instruction.
 HARNESS_FIELD_MAX=200
+# Result lands in HS_OUT, not on stdout: every call site is per-field per-row, and
+# `$(harness_sanitize …)` forks a subshell each time — which is the cost the
+# parameter-expansion rewrite was supposed to remove, so returning through stdout
+# would have kept the fork it claimed to delete.
 harness_sanitize() {
   local s head tail keep
-  # Parameter expansion, not `printf | tr`: this runs per field per row, and the
-  # fork pair cost more than the work. `[[:cntrl:]]` covers C0 + DEL and leaves
-  # UTF-8 multi-byte sequences intact (verified on bash 3.2).
+  # Parameter expansion, not `printf | tr`: `[[:cntrl:]]` covers C0 + DEL and
+  # leaves UTF-8 multi-byte sequences intact (verified on bash 3.2).
   s="${1//[[:cntrl:]]/}"
-  [ "${#s}" -le "$HARNESS_FIELD_MAX" ] && { printf '%s' "$s"; return 0; }
-  # 3 chars go to the ellipsis; split the rest head-heavy so the leading
-  # identification survives, but always keep a tail long enough to carry a
-  # trailing instruction.
+  if [ "${#s}" -le "$HARNESS_FIELD_MAX" ]; then HS_OUT="$s"; return 0; fi
   keep=$(( HARNESS_FIELD_MAX - 3 ))
   tail=$(( keep / 2 ))
   head=$(( keep - tail ))
-  printf '%s...%s' "${s:0:head}" "${s: -tail}"
+  HS_OUT="${s:0:head}...${s: -tail}"
 }
 
 # Map a helper available cell to yes|no. Only the literal "yes" is available;
@@ -324,8 +346,9 @@ harness_map_avail() {
 }
 
 # Normalize helper note: a lone "-" means empty (the helper's "nothing to say").
+# Same HS_OUT contract as harness_sanitize (see there).
 harness_map_note() {
-  case "$1" in -|"") printf '' ;; *) harness_sanitize "$1" ;; esac
+  case "$1" in -|"") HS_OUT="" ;; *) harness_sanitize "$1" ;; esac
 }
 
 # True iff a helper row's name carries the required namespace. ONE definition,
@@ -355,25 +378,36 @@ harness_row_in_ns() {
 # while the lookup accepted them. Agreement has to be structural, not a
 # convention two functions promise to keep.
 harness_rows() {
-  local raw hrc=0 line
+  local raw hrc=0 line seen=$'\n'
   raw="$(harness_list_raw)" || hrc=$?
   [ "$hrc" -eq 0 ] || return 0
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     harness_split "$line" HR_NAME HR_MODEL HR_AVAIL HR_NOTE
-    # Sanitize BEFORE gating and printing: the canonical name IS the sanitized
-    # one, so a later match cannot disagree with what was displayed.
-    HR_NAME="$(harness_sanitize "$HR_NAME")"
+    # THE NAME IS A KEY, NOT A LABEL — it is handed straight back to the helper
+    # as `exec <id>`. So it must survive verbatim: sanitizing it (as an earlier
+    # revision did) made `list` and `resolve` agree with each OTHER while
+    # disagreeing with the HELPER, which knows only the real id — the launch then
+    # failed after herdr had already opened the tab. Reject any name sanitizing
+    # would alter instead, exactly like the empty-id guard: an unrepresentable id
+    # is not a usable selector, and dropping it at list time is the honest
+    # failure. Non-injectivity dies with it — two ids can no longer collapse into
+    # one label that routes to whichever came first.
+    harness_sanitize "$HR_NAME"
+    [ "$HS_OUT" = "$HR_NAME" ] || continue
     harness_row_in_ns "$HR_NAME" || continue
+    # Exact duplicates from the helper would still shadow each other; keep the
+    # first and drop the rest so one visible row means one reachable agent.
+    case "$seen" in *$'\n'"$HR_NAME"$'\n'*) continue ;; esac
+    seen="$seen$HR_NAME"$'\n'
+    # model/note are DISPLAY ONLY — never keys — so they are scrubbed, not gated.
+    harness_sanitize "$HR_MODEL"; local dmodel="$HS_OUT"
+    harness_map_note "$HR_NOTE"; local dnote="$HS_OUT"
     printf '%s\t%s\t%s\t%s\t%s\n' \
-      "$HR_NAME" "$HARNESS_NS" "$(harness_sanitize "$HR_MODEL")" \
-      "$(harness_map_avail "$HR_AVAIL")" "$(harness_map_note "$HR_NOTE")"
+      "$HR_NAME" "$HARNESS_NS" "$dmodel" \
+      "$(harness_map_avail "$HR_AVAIL")" "$dnote"
   done <<<"$raw"
 }
-
-# Append harness rows to the list builder. Silent on helper-absent / exit-3 /
-# timeout — today's behaviour is unchanged.
-harness_append_list_rows() { harness_rows; }
 
 # Filter harness_rows down to ONE agent; prints that canonical row (5 fields) or
 # returns 1. Matching the FIRST field of an already-canonical row is what makes
@@ -427,26 +461,14 @@ row_for_name() {
   find_row name "$1" && return 0
   case "$1" in
     "$HARNESS_NS":*)
-      local hline
-      # harness_lookup is the gate: it returns 1 for anything `list` would not
-      # show, so a row rejected there can never become a committed default.
-      IFS= read -r hline < <(harness_lookup "$1") || return 1
-      # EXISTENCE CHECK ONLY — both callers (validate_name, `default get`) use
-      # the exit code and discard stdout.
-      #
-      # The record still carries the BARE agent id in the model slot, not the
-      # display model: emit_argv's cc-harness arm reads that slot as the helper's
-      # `exec <name>` argument. Earlier this held the display model, so if a later
-      # refactor ever routed a harness selector through the native arm it would
-      # have built `cc-harness-agents exec grok-4.5 -- claude …` — rejected as an
-      # unknown agent. row_for_selector returns 1 for `cc-harness:*` so that path
-      # is unreachable today; carrying the right value means the guard is a
-      # second line of defence rather than the only one.
-      harness_split "$hline" HR_NAME HR_CLI HR_MODEL HR_AVAIL HR_NOTE
-      # flag `-` = no shorthand (dynamic entries are name/--agent only).
-      printf -- '-|%s|%s|%s|%s|%s\n' \
-        "$HARNESS_NS" "${HR_NAME#"$HARNESS_NS":}" "$HARNESS_SUPPORTS" \
-        "$HARNESS_HERDR_MODE" "$HARNESS_HERDR_KIND"
+      # EXISTENCE CHECK ONLY, and deliberately output-free. Both callers
+      # (validate_name, `default get`) branch on the exit code and discard stdout,
+      # and row_for_selector returns 1 for `cc-harness:*` so no record of ours can
+      # reach emit_argv. An earlier revision fabricated a pipe record here whose
+      # model slot meant something different from every other record's — a trap
+      # kept harmless only by a comment. Emitting nothing removes the trap instead
+      # of documenting it.
+      harness_lookup "$1" >/dev/null || return 1
       return 0
       ;;
   esac
@@ -747,9 +769,15 @@ subcmd_resolve() {
 }
 
 subcmd_list() {
-  local as_json=""
+  local as_json="" as_tsv=""
   case "${1:-}" in
     --json) as_json=1 ;;
+    # Machine-readable without python3. `--json` is the picker's first choice but
+    # exits 1 when python3 is missing, and the fallback must NOT be "split the
+    # column -t table on whitespace" — that is the ambiguous parse the JSON path
+    # exists to avoid (helper names and notes may contain spaces). The rows are
+    # already unpadded TSV internally; this just prints them.
+    --tsv)  as_tsv=1 ;;
     "") ;;
     *) echo "Unknown flag: $1" >&2; exit 2 ;;
   esac
@@ -771,7 +799,7 @@ subcmd_list() {
   # only in the table, since the --json path parses it fine. That is the picker's
   # input, so a dropped row is an agent the user can never choose.
   local hrows
-  hrows="$(harness_append_list_rows)"
+  hrows="$(harness_rows)"
   [ -n "$hrows" ] && rows+="$hrows"$'\n'
 
   if [ -n "$as_json" ]; then
@@ -779,7 +807,10 @@ subcmd_list() {
     printf '%s' "$rows" | python3 -c '
 import json, sys
 out = []
-for line in sys.stdin:
+# Read BYTES and decode leniently: harness_sanitize strips control characters
+# but not invalid UTF-8, and a text-mode read raises on the first bad byte —
+# killing the ENTIRE listing, native rows included, over one bad helper cell.
+for line in sys.stdin.buffer.read().decode("utf-8", "replace").splitlines():
     line = line.rstrip("\n")
     if not line:
         continue
@@ -789,6 +820,11 @@ for line in sys.stdin:
 json.dump(out, sys.stdout, indent=2)
 print()
 '
+    return
+  fi
+
+  if [ -n "$as_tsv" ]; then
+    printf '%s' "$rows"
     return
   fi
 
@@ -855,6 +891,12 @@ subcmd_default() {
       # so a stale/removed/garbage (or attacker-supplied) name must NOT route the
       # launch: an unknown name is treated as "no default" → the caller shows the
       # picker, rather than failing every kickoff on a bogus committed value.
+      # A `cc-harness:<id>` default is validated against the LIVE helper (native
+      # names check the in-file REGISTRY), so this can cost a bounded subprocess
+      # and, if the helper is transiently down, reports "no default" — which the
+      # caller turns into the picker rather than a wrong launch. That is the
+      # intended fail-closed direction, but it is neither free nor silent: say so
+      # where a reader would otherwise assume a pure file read.
       local v; v="$(_kv_get "$PROJECT_STATE" default)"
       if [ -n "$v" ] && row_for_name "$v" >/dev/null 2>&1; then printf '%s\n' "$v"; fi
       ;;

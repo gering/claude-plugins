@@ -107,6 +107,18 @@ time in the **renderer**: `column -t -s $'\t'` folds consecutive separators too,
 an empty cell still collapsed on screen after the split was fixed. Every empty cell
 is placeholdered before `column` sees it.
 
+**The name is a KEY, not a label — and that is where the last regress lived.**
+Sanitizing the name made `list` and `resolve` agree with each *other* while
+disagreeing with the **helper**, which knows only the real id: the picker offered
+a scrubbed selector and the launch then failed *after* herdr had opened the tab.
+Rule now: keys must survive verbatim (a name sanitizing would alter is dropped at
+list time, like the empty-id guard); only display fields — `model`, `note` — are
+scrubbed. Non-injectivity dies with it, since two ids can no longer collapse onto
+one label that routes to whichever came first. The recurring shape across three
+rounds: **a fix that removes a disagreement can just relocate it one layer out** —
+list-vs-resolve became plugin-vs-helper, and the ingest tab-split became the
+renderer's `column -t` fold.
+
 **Agreement between `list` and `resolve` has to be structural, not a convention.**
 Three revisions tried to keep two parallel pipelines in step and drifted every
 time: first the namespace gate lived in one and not the other (a row `list`

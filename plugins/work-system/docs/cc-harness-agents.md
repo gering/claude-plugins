@@ -3,7 +3,10 @@
 When a `cc-harness-agents` helper is on `PATH`, `/kickoff` offers its foreign
 agents as workers — a foreign model running *inside* the Claude Code harness
 (full skills, lenses, `/continue`, `/close`), routed through a local gateway.
-When the helper is absent, behaviour is unchanged (one `command -v`).
+Without the helper there are no harness rows and no aggregate picker entry — one
+`command -v` is the whole cost. That is not the same as "byte-identical to the old
+picker": the page-1 grouping rule applies to everyone, because the shipped entries
+already exceeded `AskUserQuestion`'s 4-option cap before this feature existed.
 
 This page is the **plugin-side contract**. The helper itself is machine-local
 (gateway URL, credentials, model ceilings) and is *not* shipped with the plugin.
@@ -37,7 +40,13 @@ cc-harness:grok	grok-4.5	yes	-
 cc-harness:sol	gpt-5.6-sol	no	run: cliproxyapi -codex-login
 ```
 
-- `name` is already namespaced (`cc-harness:<id>`).
+- `name` is already namespaced (`cc-harness:<id>`) and is a **key, not a label**:
+  the plugin hands it straight back as `exec <id>`, so it must be representable
+  verbatim. A name containing control characters, or longer than 200 characters,
+  is **dropped from the listing** rather than shown in a cleaned-up form — a
+  scrubbed name would resolve in the picker and then fail at the helper, after
+  herdr had already opened the tab. Exact duplicates are deduped (first wins).
+  `model` and `note` are display-only and *are* scrubbed.
 - `available` is `yes` | `no` | `unknown`. The plugin treats only the literal
   `yes` as available; everything else is fail-closed for launch.
 - `note` is `-` (or empty) when there is nothing to say; otherwise a short fix
@@ -83,7 +92,7 @@ teardown key on the same fact afterwards.
 
 | surface | behaviour |
 |---------|-----------|
-| `agent-registry.sh list` | if `command -v cc-harness-agents` succeeds, run `list` (bounded) and merge rows as `cli=cc-harness`; helper absent or exit 3 → no change |
+| `agent-registry.sh list` | if `command -v cc-harness-agents` succeeds, run `list` (bounded in **time and output size**) and merge rows as `cli=cc-harness`; helper absent or exit 3 → no rows. `--json` and `--tsv` are the machine-readable views; the plain table is display-only |
 | `agent-registry.sh resolve cc-harness:<id>` | availability + note from the helper (no re-probe); argv = `cc-harness-agents exec <id> -- claude [-n <session>] /work-system:continue` |
 | `/kickoff` picker | harness rows labelled "foreign model in the Claude Code harness, routed via a local gateway"; unavailable greyed with the helper's fix hint; available first |
 | lifecycle | runs as a full CC session → `/close` Scenario A/B and tab glyphs unchanged; `supports=` is the same set as a native claude worker. **Exception:** `/continue`'s reopen sends a bare `claude -c`, which resumes the transcript *without* the routing env — see below |

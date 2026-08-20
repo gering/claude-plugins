@@ -723,28 +723,49 @@ check("over-long note keeps the trailing fix instruction",
 check("over-long note marks the elision", "..." in note)
 e.close()
 
-# --- list/resolve agreement is structural, not a convention ---------------- #
-# Both go through harness_rows, so anything `list` shows must resolve. Two
-# earlier revisions kept separate pipelines and drifted: list sanitized while the
-# lookup matched RAW (a name with a control byte was listed but exited 2), and
-# list dropped empty names while the lookup accepted them.
-e = Env(harness_agents=[("cc-harness:gr\033ok", "grok-4.5", "yes", "-")])
+# --- keys are exact; only display fields are scrubbed ---------------------- #
+# The name is handed back to the helper as `exec <id>`, so it must survive
+# verbatim. Sanitizing it would make list and resolve agree with each OTHER while
+# disagreeing with the HELPER (which knows only the real id) — the launch then
+# fails after herdr already opened the tab. A name sanitizing would alter is
+# rejected at list time instead, like the empty-id guard.
+e = Env(harness_agents=[("cc-harness:gr\033ok", "grok-4.5", "yes", "-"),
+                        ("cc-harness:clean", "m", "yes", "-")])
 rows = [r for r in json.loads(e.run("list", "--json").stdout) if r["cli"] == "cc-harness"]
-check("control byte stripped from the listed name",
-      len(rows) == 1 and rows[0]["name"] == "cc-harness:grok")
-check("the name `list` showed is the name that resolves",
-      e.run("resolve", rows[0]["name"]).returncode == 0)
+check("a name needing sanitizing is dropped, not shown mangled",
+      [r["name"] for r in rows] == ["cc-harness:clean"])
+check("the dropped name does not resolve either",
+      e.run("resolve", "cc-harness:grok").returncode == 2)
+check("clean rows in the same listing are unaffected",
+      e.run("resolve", "cc-harness:clean").returncode == 0)
 e.close()
 
-# An over-long name is elided for display — and the elided form must still be the
-# working selector, or the picker offers something unlaunchable.
-LONG = "cc-harness:" + "n" * 260
-e = Env(harness_agents=[(LONG, "m", "yes", "-")])
+# Over-long names are elided for DISPLAY only, so they are keys that cannot
+# survive verbatim → dropped, not offered as an unlaunchable selector.
+e = Env(harness_agents=[("cc-harness:" + "n" * 260, "m", "yes", "-")])
+check("over-long name is dropped",
+      not [r for r in json.loads(e.run("list", "--json").stdout)
+           if r["cli"] == "cc-harness"])
+e.close()
+
+# Display fields still get scrubbed — they are never keys.
+e = Env(harness_agents=[("cc-harness:ok", "gr\033ok-4.5", "no", "run: \033[31mfix\033[0m")])
 rows = [r for r in json.loads(e.run("list", "--json").stdout) if r["cli"] == "cc-harness"]
-check("over-long name is capped in the listing",
-      len(rows) == 1 and len(rows[0]["name"]) <= 200)
-check("the capped name still resolves",
-      e.run("resolve", rows[0]["name"]).returncode == 0)
+check("model/note are sanitized even though the name is not",
+      len(rows) == 1
+      and not any(ord(c) < 32 for c in rows[0]["model"] + rows[0]["note"]))
+check("a row with a clean name but dirty display fields still resolves",
+      e.run("resolve", "cc-harness:ok").returncode == 3)  # available=no
+e.close()
+
+# Sanitizing is not injective, so two ids could collapse onto one label and route
+# to whichever came first. With exact keys that cannot happen; exact duplicates
+# from the helper are deduped so one visible row means one reachable agent.
+e = Env(harness_agents=[("cc-harness:dup", "first-model", "yes", "-"),
+                        ("cc-harness:dup", "second-model", "yes", "-")])
+rows = [r for r in json.loads(e.run("list", "--json").stdout) if r["cli"] == "cc-harness"]
+check("duplicate names are deduped to one row", len(rows) == 1)
+check("the surviving duplicate is the first", rows[0]["model"] == "first-model")
 e.close()
 
 # The bare namespace with no id is not an agent: it must not list, resolve, or be
@@ -773,6 +794,48 @@ check("empty availability reads as unavailable, not as the note",
 check("table and --json agree on availability", all(
     (r["available"] is True) == (by_name[r["name"]][3] == "yes")
     for r in json.loads(e.run("list", "--json").stdout) if r["cli"] == "cc-harness"))
+e.close()
+
+# --- `list --tsv`: machine-readable without python3 ------------------------ #
+# The picker prefers --json, which exits 1 when python3 is missing. Its fallback
+# must not be "whitespace-split the column -t table": helper names and notes may
+# contain spaces, so that parse can misfile a harness row as native and drop the
+# aggregate entirely. --tsv prints the rows unpadded, which is unambiguous.
+e = Env(harness_agents=[("cc-harness:grok fast", "grok-4.5", "yes", "note with spaces")])
+tsv = [ln.split("\t") for ln in e.run("list", "--tsv").stdout.splitlines()
+       if ln.startswith("cc-harness:")]
+check("--tsv keeps a space-bearing name in one field",
+      len(tsv) == 1 and tsv[0][0] == "cc-harness:grok fast")
+check("--tsv puts the class in its own field", tsv[0][1] == "cc-harness")
+check("--tsv keeps a space-bearing note in one field", tsv[0][4] == "note with spaces")
+check("--tsv row has exactly 5 fields", len(tsv[0]) == 5)
+# The same row is genuinely ambiguous in the padded table — this is why the
+# fallback needed a real format rather than a parsing rule.
+table_row = [ln for ln in e.run("list").stdout.splitlines()
+             if ln.startswith("cc-harness:grok fast")][0]
+check("the padded table is ambiguous for the same row (why --tsv exists)",
+      table_row.split()[1] == "fast")
+e.close()
+
+# Invalid UTF-8 from the helper must not abort the whole listing — including the
+# native rows, which have nothing to do with the bad byte.
+e = Env(harness_agents=[("cc-harness:ok", "m", "yes", "-")])
+e.harness_bin.write_text(
+    "#!/bin/sh\n"
+    'if [ "$1" = "list" ]; then\n'
+    "  printf 'cc-harness:ok\\tm\\tyes\\t-\\n'\n"
+    "  printf 'cc-harness:bad\\t\\xff\\xfe\\tyes\\t-\\n'\n"
+    "  exit 0\n"
+    "fi\nexit 2\n"
+)
+e.harness_bin.chmod(0o755)
+res = e.run("list", "--json")
+check("invalid UTF-8 does not abort --json", res.returncode == 0)
+rows = json.loads(res.stdout) if res.returncode == 0 else []
+check("native rows survive a bad helper byte",
+      any(r["name"] == "claude:fable" for r in rows))
+check("the clean harness row survives too",
+      any(r["name"] == "cc-harness:ok" for r in rows))
 e.close()
 
 

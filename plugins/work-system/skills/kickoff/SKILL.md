@@ -160,10 +160,14 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
       through `column -t` and its `note` cells contain spaces, so splitting it on
       whitespace can misfile a row (a harness row read as native drops the aggregate
       and makes every harness agent unreachable). The human table is for display only.
-      **If `--json` fails** (it exits 1 when `python3` is missing — the plain `list`
-      path has no such dependency), fall back to `bash "$REG" list` and split the
-      padded table on whitespace, taking the **`CLI` column** as the class. Say that
-      you fell back; do not abort the picker over a missing `python3`.
+      **If `--json` fails** (it exits 1 when `python3` is missing), fall back to
+      `bash "$REG" list --tsv`, which prints the same rows tab-separated with no
+      python3 dependency: split each line on **TAB** and take field 2 as the class.
+      Do **not** fall back to whitespace-splitting the padded `list` table — helper
+      names and notes may contain spaces, so that parse can read a harness row as
+      native and drop the aggregate entirely, which is the failure the JSON path
+      exists to avoid. Say that you fell back; never abort the picker over a
+      missing `python3`.
       The harness set is empty whenever the helper is off PATH — then there is no
       page 2 and no aggregate option. **The page-1 rule below still applies**: it
       groups by CLI to fit the 4-option cap, which the 7 shipped entries exceeded
@@ -174,10 +178,15 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
       (7 entries over 4 CLIs) a one-option-per-row page cannot fit, so page 1 is built
       by this **fixed, ordered rule** — not by improvisation:
 
-      1. **If the harness set is non-empty, slot 4 is reserved** for one aggregate
-         option labelled `cc-harness agents ▸`, described "foreign model inside the
-         Claude Code harness, routed via a local gateway — full CC session
-         (`<N>` available)". Reserve it first; it is never the option that gets cut.
+      1. **If the harness set contains at least one `available` row, slot 4 is
+         reserved** for one aggregate option labelled `cc-harness agents ▸`,
+         described "foreign model inside the Claude Code harness, routed via a local
+         gateway — full CC session (`<N>` available)". Reserve it first; it is never
+         the option that gets cut. **Availability is the gate, not mere presence** —
+         a set of only-unavailable harness agents must not evict an available native
+         CLI from the page. When every harness row is unavailable, skip the aggregate
+         and mention them in the question text instead
+         (`--agent cc-harness:<id>` still reaches them).
       2. Fill the remaining slots with the **native** entries, **one option per CLI**
          (not per model): label the CLI's default/most-likely model and name the
          alternates in the description (e.g. "claude — opus (also: fable, sonnet)").
