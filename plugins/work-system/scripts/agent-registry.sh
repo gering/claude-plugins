@@ -7,8 +7,12 @@
 # launch helper never hardcode a CLI list or an alias `if` chain.
 #
 # Subcommands:
-#   list [--json]                 Probe every entry -> human table or JSON array
-#                                 (columns: name, cli, model, available, note)
+#   list [--json|--tsv]           Probe every entry -> human table (display only),
+#                                 JSON array, or raw TSV. Columns are the same
+#                                 five everywhere: name, cli, model, available,
+#                                 note. `--tsv` is the machine-readable view with
+#                                 NO python3 dependency and is what /kickoff's
+#                                 picker parses; `--json` adds typed booleans.
 #   resolve <selector> [--session <name>]
 #                                 Map a selector to launch argv + metadata.
 #                                 Selectors: a shorthand flag (--fable, --opus,
@@ -230,6 +234,14 @@ usage() {
 registry_rows() { printf '%s\n' "$REGISTRY"; }
 
 # ---------- optional cc-harness-agents helper ----------
+# COST NOTE: each invocation of this script that touches harness rows runs the
+# helper once, and a single /kickoff invokes the script two to three times
+# (picker view, then resolve, plus `default get` on the no-flag path) — so the
+# bounded probe runs that often, with no reuse across processes. A cross-process
+# cache was judged not worth the invalidation complexity; the row cap and the
+# 10s bound keep each call cheap. A single picker view that returns everything
+# at once would remove most of it — see tasks/move-picker-assembly-into-registry.md.
+#
 # Discovery is a cheap `command -v`. The helper owns availability (gateway +
 # per-provider creds) and the routing env; we never re-probe those here.
 # Names are already namespaced by the helper (`cc-harness:grok`) and do NOT
@@ -351,8 +363,10 @@ harness_sanitize() {
 
 # Map a helper available cell to yes|no. Only the literal "yes" is available;
 # "no", "unknown", empty, and anything else → no (fail closed for launch).
+# HS_OUT contract like harness_sanitize — a `$( )` call site would fork per row,
+# which is the cost that convention was introduced to remove.
 harness_map_avail() {
-  case "$1" in yes) printf 'yes' ;; *) printf 'no' ;; esac
+  case "$1" in yes) HS_OUT=yes ;; *) HS_OUT=no ;; esac
 }
 
 # Normalize helper note: a lone "-" means empty (the helper's "nothing to say").
@@ -382,6 +396,11 @@ harness_map_note() {
 # Real ids look like `grok`, `kimi`, `sol`, `gpt-5.6-terra`; this admits those and
 # little else. `[:alnum:]` is ASCII-only under LC_ALL=C, which is the point.
 harness_id_ok() {
+  # LC_ALL=C is load-bearing, not hygiene: `[A-Za-z0-9…]` is a COLLATION range,
+  # so under a UTF-8 locale it admits characters the rule means to exclude
+  # (verified: `grök` passes under de_DE.UTF-8, is rejected under C). Assigning
+  # LC_ALL makes bash re-run setlocale immediately; `local` restores it on return.
+  local LC_ALL=C
   case "$1" in
     -*) return 1 ;;                        # never the helper's option position
     *[!A-Za-z0-9._+/@-]*) return 1 ;;      # ASCII identifier charset only
@@ -407,8 +426,13 @@ harness_row_in_ns() {
 # listed and pickable but exited 2 on resolve), and `list` dropped empty names
 # while the lookup accepted them. Agreement has to be structural, not a
 # convention two functions promise to keep.
+# Rows admitted per listing. The byte cap alone still let ~2600 rows through,
+# and normalization is per-row work that runs AFTER run_bounded has returned —
+# measured at ~8s per call on a 4000-row helper, hit two to three times per
+# /kickoff with no timeout and no diagnostic. A real helper lists a handful.
+HARNESS_MAX_ROWS=50
 harness_rows() {
-  local raw hrc=0 line seen=$'\n'
+  local raw hrc=0 line seen=$'\n' kept=0
   raw="$(harness_list_raw)" || hrc=$?
   # An empty harness set has SEVERAL causes and this function cannot tell them
   # apart to its caller (it returns rows, not status). Callers must therefore not
@@ -418,7 +442,18 @@ harness_rows() {
   # anything else = crashed), and say so on stderr so a wedged gateway is not
   # reported to the user as "no helper installed".
   if [ "$hrc" -ne 0 ]; then
-    [ "$hrc" -ne 1 ] && echo "cc-harness-agents on PATH but \`list\` failed (exit $hrc) — no harness agents offered" >&2
+    # Two different things, and only one deserves a warning:
+    #   1 = helper not on PATH        — the normal absent case
+    #   3 = capability absent         — helper installed, no gateway token. A
+    #       KNOWN, documented state ("not configured here"), so the contract in
+    #       docs/cc-harness-agents.md promises a silent no-op. Warning here made
+    #       every /kickoff on an unconfigured machine look broken.
+    #   else (124 timeout, crash)     — a malfunction the user cannot otherwise
+    #       see; that is what the stderr line is for.
+    case "$hrc" in
+      1|3) ;;
+      *) echo "cc-harness-agents on PATH but \`list\` failed (exit $hrc) — no harness agents offered" >&2 ;;
+    esac
     return 0
   fi
   while IFS= read -r line; do
@@ -440,12 +475,17 @@ harness_rows() {
     # first and drop the rest so one visible row means one reachable agent.
     case "$seen" in *$'\n'"$HR_NAME"$'\n'*) continue ;; esac
     seen="$seen$HR_NAME"$'\n'
+    kept=$(( kept + 1 ))
+    if [ "$kept" -gt "$HARNESS_MAX_ROWS" ]; then
+      echo "cc-harness-agents listed more than $HARNESS_MAX_ROWS agents — ignoring the rest" >&2
+      return 0
+    fi
     # model/note are DISPLAY ONLY — never keys — so they are scrubbed, not gated.
     harness_sanitize "$HR_MODEL"; local dmodel="$HS_OUT"
     harness_map_note "$HR_NOTE"; local dnote="$HS_OUT"
+    harness_map_avail "$HR_AVAIL"; local davail="$HS_OUT"
     printf '%s\t%s\t%s\t%s\t%s\n' \
-      "$HR_NAME" "$HARNESS_NS" "$dmodel" \
-      "$(harness_map_avail "$HR_AVAIL")" "$dnote"
+      "$HR_NAME" "$HARNESS_NS" "$dmodel" "$davail" "$dnote"
   done <<<"$raw"
 }
 
@@ -672,6 +712,16 @@ shell_quote() {
   esac
 }
 
+# Append the shared claude launch tail to `words`: the optional `-n <session>`
+# and the plugin-qualified continue. Both claude-rooted arms (native and the
+# cc-harness wrapper) end this way; `/work-system:continue` is qualified because
+# a CC built-in/alias `/continue` shadows the skill, so the bare form would run
+# CC's own resume instead of the work-system flow.
+claude_tail() {
+  [ -n "$session" ] && words+=(-n "$session")
+  words+=(/work-system:continue)
+}
+
 emit_argv() {
   # Print `argv=<word>` lines for a resolved entry, then ONE `argv_shell=` line
   # with the same words shell-quoted. $1=cli $2=model $3=session.
@@ -680,10 +730,7 @@ emit_argv() {
   case "$cli" in
     claude)
       words=(claude --model "$model")
-      [ -n "$session" ] && words+=(-n "$session")
-      # Plugin-qualified: a CC built-in/alias `/continue` shadows the skill, so
-      # the bare form would run CC's own resume, not the work-system flow.
-      words+=(/work-system:continue)
+      claude_tail
       ;;
     codex) words=(codex -m "$model" "$BOOTSTRAP_PROMPT") ;;
     grok)  words=(grok  -m "$model" "$BOOTSTRAP_PROMPT") ;;
@@ -700,8 +747,7 @@ emit_argv() {
       # `exec`s into claude, which is why the entry declares herdr_kind=claude
       # (via pane-run: argv[0] is the helper, so agent-start cannot express it).
       words=("$HARNESS_BIN" exec "$model" -- claude)
-      [ -n "$session" ] && words+=(-n "$session")
-      words+=(/work-system:continue)
+      claude_tail
       ;;
   esac
   # Guard the expansion: under `set -u` a bash 3.2 `"${words[@]}"` on an EMPTY
@@ -798,11 +844,11 @@ subcmd_resolve() {
 
   local record
   record="$(row_for_selector "$selector")" || {
-    unknown_selector "$selector"
-    # Derive the flag list from REGISTRY rather than restating it — a new entry
-    # must not need a second edit here to appear in the hint.
+    # Hint FIRST — unknown_selector exits, so anything after it is dead code.
+    # Deriving the flag list from REGISTRY keeps a new entry from needing a
+    # second edit here to appear.
     echo "Try: $(registry_rows | cut -d'|' -f1 | grep -v '^-$' | tr '\n' ' ')— a name (claude:opus), a cli (codex), or cc-harness:<id> when the helper is on PATH" >&2
-    exit 2
+    unknown_selector "$selector"
   }
   local flag cli model supports mode kind
   IFS='|' read -r flag cli model supports mode kind <<<"$record"
