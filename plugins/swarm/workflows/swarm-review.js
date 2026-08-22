@@ -583,7 +583,13 @@ const externalVoiceSpecs = liveExternals
     // SWARM_TIMEOUT is set ON the command rather than inherited: the transport
     // subagent's environment is not ours to rely on, and the whole point is that
     // both timeouts come from one number.
-    cmd: `SWARM_TIMEOUT=${EFFECTIVE_TIMEOUT_S} bash "${ADAPTER}" run ${b.backend} ${b.flags} --lens-instr ${shQuote(instrFor(u))} --lens-instr-sum ${utf8Checksum(instrFor(u))} --prompt-file "${EXTERNAL_PROMPT}"` +
+    // EVERY interpolated path is shQuoted, not just the appended ones. Double
+    // quotes in this string do NOT protect anything: the transport agent runs
+    // the whole line through Bash, which still expands $(...), backticks and
+    // ${...} inside them. ADAPTER and EXTERNAL_PROMPT come from the same
+    // TMPDIR-derived paths the note below calls attacker-influencable, so
+    // quoting only --unit/--telemetry left the gap open on the same line.
+    cmd: `SWARM_TIMEOUT=${EFFECTIVE_TIMEOUT_S} bash ${shQuote(ADAPTER)} run ${b.backend} ${b.flags} --lens-instr ${shQuote(instrFor(u))} --lens-instr-sum ${utf8Checksum(instrFor(u))} --prompt-file ${shQuote(EXTERNAL_PROMPT)}` +
       // Appended, not interpolated into the base string, so a run without a
       // telemetry sink produces the exact command it always did.
       // shQuote BOTH values. This string is executed as a shell command by the

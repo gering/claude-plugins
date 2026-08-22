@@ -267,7 +267,9 @@ FINDING_NONCE="$(python3 -c 'import secrets; print(secrets.token_hex(8))')" \
 if [ -z "$FINDING_NONCE" ]; then echo "SWARM_NONCE_UNAVAILABLE=empty finding nonce"; rm -rf "$TMPD"; exit 1; fi
 
 echo "TMPD=$TMPD"; echo "DIFF=$DIFF"; echo "PROMPT=$PROMPT"; echo "TELEMETRY=$TELEMETRY"; echo "FINDING_NONCE=$FINDING_NONCE"
-echo "PROMPT_BYTES=$(wc -c < "$PROMPT")"
+# One read, reused below: the file can be hundreds of KiB and this ran twice.
+PROMPT_BYTES=$(wc -c < "$PROMPT" | tr -d '[:space:]')
+echo "PROMPT_BYTES=$PROMPT_BYTES"
 # Decide the oversize skip HERE, deterministically — do not leave the arithmetic
 # to the model (a compaction or a stale ceiling in context would let live voices
 # through and turn one clean skip into N per-call backend errors). Same pattern
@@ -292,16 +294,26 @@ case "$SWARM_CAP" in
   ''|*[!0-9]*|0) echo "SWARM_CFG_ERR=Invalid SWARM_MAX_PROMPT_BYTES='$SWARM_CAP' — must be a positive integer (bytes)"; rm -rf "$TMPD"; exit 0 ;;
 esac
 SWARM_CAP=$((10#$SWARM_CAP))
-if [ "$(wc -c < "$PROMPT")" -gt "$(( SWARM_CAP - 4096 ))" ]; then echo "EXTERNALS_OVERSIZE=1"; else echo "EXTERNALS_OVERSIZE=0"; fi
+if [ "$PROMPT_BYTES" -gt "$(( SWARM_CAP - 4096 ))" ]; then echo "EXTERNALS_OVERSIZE=1"; else echo "EXTERNALS_OVERSIZE=0"; fi
 # SWARM_TIMEOUT travels to the workflow so BOTH timeouts derive from one value.
 # Validate it here for the same reason as the cap above: the adapter refuses a
 # malformed value, and a skill that passed one through would only move the error
 # to every individual call.
-SWARM_TO="${SWARM_TIMEOUT:-600}"
-case "$SWARM_TO" in
-  ''|*[!0-9]*) echo "SWARM_CFG_ERR=Invalid SWARM_TIMEOUT='$SWARM_TO' — must be a non-negative integer (seconds; 0 disables)"; rm -rf "$TMPD"; exit 0 ;;
-esac
-echo "SWARM_TIMEOUT_S=$SWARM_TO"
+# Emit this ONLY when the user actually set it. The workflow derives its own
+# default from the Bash-tool ceiling minus the margin, and hard-coding 600 here
+# meant that default was never reached — every stock run was "capped" and warned
+# about it, which is the unconditional noise the warning was supposed to stop
+# being. An unset knob must stay unset all the way through.
+if [ -n "${SWARM_TIMEOUT:-}" ]; then
+  SWARM_TO="$SWARM_TIMEOUT"
+  case "$SWARM_TO" in
+    ''|*[!0-9]*) echo "SWARM_CFG_ERR=Invalid SWARM_TIMEOUT='$SWARM_TO' — must be a non-negative integer (seconds; 0 disables)"; rm -rf "$TMPD"; exit 0 ;;
+  esac
+  # Decimal-force it like SWARM_CAP above: the value is echoed into a BARE
+  # JavaScript numeric literal, where a leading zero is a legacy octal literal
+  # (0600 = 384) in sloppy mode and a SyntaxError under strict mode.
+  echo "SWARM_TIMEOUT_S=$((10#$SWARM_TO))"
+fi
 echo "JAIL=$JAIL"
 echo "LIVE_JSON=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json | tr -d '\n')"
 ```
@@ -356,15 +368,17 @@ Workflow({
     diffFile: "<DIFF>",
     externalPromptFile: "<PROMPT>",
     telemetryFile: "<TELEMETRY>",
-    timeoutSeconds: <SWARM_TIMEOUT_S>,
     findingNonce: "<FINDING_NONCE>",
     externalVoices: [<the live voices from step 1>]
   }
 })
 ```
 
-Fill `<DIFF>`/`<PROMPT>`/`<TELEMETRY>`/`<FINDING_NONCE>`/`<SWARM_TIMEOUT_S>` from the
-echo'd values (`timeoutSeconds` is a bare number, not a string). Add `max: true` to `args` when
+Fill `<DIFF>`/`<PROMPT>`/`<TELEMETRY>`/`<FINDING_NONCE>` from the echoed values.
+**Only if** the block echoed `SWARM_TIMEOUT_S` (it does so solely when the user
+set `SWARM_TIMEOUT`), add `timeoutSeconds: <SWARM_TIMEOUT_S>` — a bare number,
+not a string. Omit the field entirely otherwise, so the workflow applies its own
+derived default rather than being handed one that it must then cap. Add `max: true` to `args` when
 `--max` was given (step 1 stripped it) — the deepest-effort profile. Add
 `claude: false` to `args`
 for an **external-only control run** (codex + grok, no Claude finder
@@ -469,9 +483,14 @@ Then, when present:
 
   ```
   ⚠️  Konsens-Basis reduziert: <familiesPresent.length> von <familiesExpected.length> Modellfamilien
-      (ausgefallen: <familiesLost joined>) — „Konsens" heißt in diesem Lauf
-      Übereinstimmung von <familiesPresent joined>.
+      — „Konsens" heißt in diesem Lauf Übereinstimmung von <familiesPresent joined>.
   ```
+
+  Append `(ausgefallen: <familiesLost joined>)` to the first line **only when
+  `familiesLost` is non-empty** — in the consensus-unreachable-but-nothing-lost
+  case (a run that only ever had one family) the list is empty and printing an
+  empty parenthesis reads like a rendering bug in the very warning that is
+  supposed to be the trustworthy part of the report.
 
   If `balance.consensusReachable` is false, add: **kein Finding kann in diesem
   Lauf Konsens erreichen — alle laufen als Solo durch den Verifier.**

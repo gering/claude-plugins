@@ -226,7 +226,21 @@ check(
 )
 check(
     "adapter: rejects a non-positive-integer SWARM_MAX_PROMPT_BYTES",
-    re.search(r'max_bytes" =~ \^\[0-9\]\+\$ && "\$max_bytes" != 0', sh),
+    re.search(r'max_bytes" =~ \^\[0-9\]\+\$', sh) and re.search(r"\(\( max_bytes > 0 \)\)", sh),
+)
+# BOTH sides must parse the shared knob identically. They read the same env var
+# and gate the same decision, so a difference is not cosmetic: with `0100000`
+# the skill saw decimal 100000 and let every voice through, while the adapter
+# read octal 32768 and rejected each one — turning the deterministic single skip
+# into the per-call error storm it exists to prevent. Require the decimal force
+# on both sides, not just one.
+check(
+    "skill decimal-forces the cap",
+    re.search(r"SWARM_CAP=\$\(\(10#\$SWARM_CAP\)\)", skill),
+)
+check(
+    "adapter decimal-forces the cap too",
+    re.search(r"max_bytes=\$\(\(10#\$max_bytes\)\)", sh),
 )
 
 if mb and sk:

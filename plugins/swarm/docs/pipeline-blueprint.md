@@ -8,7 +8,7 @@
 > to the repo); this file is the concrete shape.
 >
 > The shipped `workflows/swarm-review.js` has since evolved past this snapshot
-> (11 lenses in 4 clusters, per-cluster fan-out for **every** voice — externals
+> (11 lenses in 5 clusters, per-cluster fan-out for **every** voice — externals
 > included, via the adapter's `--lens-instr` — and kind-aware verify for design
 > findings) — the workflow file is authoritative; this blueprint keeps the
 > original 5-lens PoC shape with its single broad external call per backend.

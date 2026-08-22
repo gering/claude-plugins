@@ -60,14 +60,21 @@ def load(path):
 
 
 def wall(rec, fallback):
-    """The limit THIS call ran under. Per-record, not global: SWARM_TIMEOUT is
-    overridable, so a fixed assumption would report a percentage of a wall that
-    was never in force."""
+    """The limit THIS call ran under, or None when it ran uncapped.
+
+    Per-record, not global: SWARM_TIMEOUT is overridable, so a fixed assumption
+    would report a percentage of a wall that was never in force. `0` is NOT a
+    missing value — it is the documented way to disable the adapter cap, and
+    treating it as absent made the report measure such a call against a 600 s
+    wall that never applied. A record with no field at all still falls back."""
+    raw = rec.get("timeout_seconds")
+    if raw is None:
+        return fallback
     try:
-        secs = int(rec.get("timeout_seconds") or 0)
+        secs = int(raw)
     except (TypeError, ValueError):
-        secs = 0
-    return secs if secs > 0 else fallback
+        return fallback
+    return secs if secs > 0 else None
 
 
 def label(rec):
@@ -84,7 +91,8 @@ def render(records, timeout_seconds):
         limit = wall(rec, timeout_seconds)
         pct = (secs / limit * 100) if limit else 0
         if rec.get("timed_out"):
-            mark = f"  ✗ TIMED OUT at the {limit}s wall"
+            mark = (f"  ✗ TIMED OUT at the {limit}s wall" if limit
+                    else "  ✗ TIMED OUT (no adapter cap — the outer window killed it)")
         elif rec.get("backend_rc") not in (0, None):
             mark = f"  ✗ failed (rc={rec.get('backend_rc')})"
         elif rec.get("adapter_rc") not in (0, None):
@@ -99,7 +107,13 @@ def render(records, timeout_seconds):
         else:
             mark = ""
         effort = rec.get("effort") or "?"
-        kib = (rec.get("prompt_bytes") or 0) / 1024
+        # Tolerate a non-numeric value rather than raising: this script's whole
+        # contract is that diagnostics never turn a completed review into a
+        # failed one, and a single malformed field must not take the report down.
+        try:
+            kib = float(rec.get("prompt_bytes") or 0) / 1024
+        except (TypeError, ValueError):
+            kib = 0.0
         lines.append(f"  {label(rec):<28} {secs:>4}s  {effort:<6} {kib:>6.1f} KiB{mark}")
     return lines
 
@@ -148,7 +162,9 @@ def main(argv):
         # topology is that a dead call costs specific coverage.
         print()
         for rec in timed_out:
-            print(f"  ⚠️  {label(rec)} hit the {wall(rec, timeout_seconds)}s wall — that cluster "
+            _w = wall(rec, timeout_seconds)
+            _where = f"the {_w}s wall" if _w else "the outer window (adapter cap disabled)"
+            print(f"  ⚠️  {label(rec)} hit {_where} — that cluster "
                   f"reviewed without {rec.get('backend', '?')}.")
     if note:
         print(f"  ({note})")

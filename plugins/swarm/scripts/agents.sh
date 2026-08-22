@@ -159,7 +159,20 @@ _json_escape() {
   v="${v//$'\n'/\\n}"
   v="${v//$'\r'/\\r}"
   v="${v//$'\t'/\\t}"
-  printf '%s' "$v"
+  # JSON forbids EVERY unescaped control character below 0x20, not just the three
+  # with short forms. Emitting one produces a record the reader discards as
+  # malformed — and a silently dropped record reads as "that voice never ran",
+  # the exact misreading this telemetry exists to prevent. Anything still
+  # remaining in that range becomes \u00XX.
+  local out="" ch i
+  for (( i = 0; i < ${#v}; i++ )); do
+    ch="${v:i:1}"
+    if [[ "$ch" < $'\x20' ]]; then
+      printf -v ch '\\u%04x' "'$ch"
+    fi
+    out+="$ch"
+  done
+  printf '%s' "$out"
 }
 
 _write_telemetry() {
@@ -602,23 +615,33 @@ _probe_degraded() {
   # routes is the runtime-lie this branch removes.
   echo "warning: grok model probe unavailable ($1) — readiness falls back to auth alone; the ${GROK_DEFAULT_MODEL} check did not run" >&2
 }
+_bounded_probe() {
+  # Run a LOCAL probe under the probe bound and print its stdout. Returns the
+  # command's rc, or 127 when no timeout binary exists to bound it with.
+  #
+  # Extracted because this prelude existed three times and had already drifted:
+  # one copy checked rc before trusting the output, another swallowed it with
+  # `|| true` and read an empty result as a definite answer — which turned a
+  # hung CLI into "that flag is missing, upgrade your install". The contract
+  # lives here now: `-k` is what actually enforces the bound (a CLI ignoring
+  # SIGTERM, or forking a stdout-inheriting child, keeps `$(...)` blocking past
+  # the deadline), and the CALLER decides what a non-zero rc means — it must
+  # never be conflated with a successful negative answer.
+  local to=""
+  if command -v timeout >/dev/null; then to="timeout"
+  elif command -v gtimeout >/dev/null; then to="gtimeout"
+  else return 127
+  fi
+  "$to" -k 3 "$PROBE_TIMEOUT" "$@" </dev/null 2>/dev/null
+}
+
 grok_model_fetch() {
   # Populates the cache globals. Call it DIRECTLY — never as `$(grok_model_fetch)`:
   # a command substitution runs it in a subshell, the assignments die with that
   # subshell, and every caller silently re-pays the network call.
   [[ -n "$_grok_models_done" ]] && return 0
   _grok_models_done=1
-  local to=""
-  if command -v timeout >/dev/null; then to="timeout"
-  elif command -v gtimeout >/dev/null; then to="gtimeout"
-  fi
-  if [[ -z "$to" ]]; then
-    # `ready`/`list` were purely local before this probe, so it must never be the
-    # thing that hangs them: with no way to bound the call, skip it rather than
-    # run it uncapped.
-    _probe_degraded "no timeout/gtimeout on PATH — install coreutils to restore it"
-    return 0
-  fi
+
   # Run grok DIRECTLY, not through sandboxed(): this is a readiness check, not a
   # review — it passes no untrusted diff to grok, so it needs no read-deny jail,
   # exactly like the sibling `codex login status` check a few lines down. Going
@@ -629,7 +652,14 @@ grok_model_fetch() {
   # grok that ignores SIGTERM, or forks a stdout-inheriting child, would keep the
   # `$(...)` substitution blocking past the timeout — the "must never hang" hole.
   local raw rc=0
-  raw="$("$to" -k 3 "$PROBE_TIMEOUT" grok models </dev/null 2>/dev/null)" || rc=$?
+  raw="$(_bounded_probe grok models)" || rc=$?
+  if (( rc == 127 )); then
+    # `ready`/`list` were purely local before this probe, so it must never be the
+    # thing that hangs them: with no way to bound the call, skip it rather than
+    # run it uncapped.
+    _probe_degraded "no timeout/gtimeout on PATH — install coreutils to restore it"
+    return 0
+  fi
   # Check rc BEFORE looking at the output, and discard whatever arrived: a probe
   # killed mid-stream (timeout) or erroring late can still have flushed a PARTIAL
   # list. Reading that as authoritative is worse than not probing — a truncated
@@ -706,6 +736,11 @@ _grok_version_newer() {
   # a false, so refuse the comparison — the caller reads that as "not newer" and
   # keeps what it had.
   case "$a_major$a_minor$b_major$b_minor" in *[!0-9]*) return 1 ;; esac
+  # Digits alone are not enough: "08"/"09" are digit-only yet invalid octal, and
+  # the comparisons below would abort the whole adapter under `set -e` ("value
+  # too great for base") instead of answering "not newer". Force decimal.
+  a_major=$((10#$a_major)); a_minor=$((10#$a_minor))
+  b_major=$((10#$b_major)); b_minor=$((10#$b_minor))
   if [[ "$a_major" -ne "$b_major" ]]; then
     [[ "$a_major" -gt "$b_major" ]]
     return
@@ -816,8 +851,9 @@ ready_hint() {
         # none verified). Telling the second user to "update the grok CLI" sends
         # them to update an already-current install, and never names the actual
         # one-line fix.
-        if [[ -n "$(_grok_highest_canonical)" ]]; then
-          echo "grok lists $(_grok_highest_canonical) but no schema-verified model — verify --json-schema on it, then add it to GROK_SCHEMA_VERIFIED in agents.sh"
+        local _top; _top="$(_grok_highest_canonical)"
+        if [[ -n "$_top" ]]; then
+          echo "grok lists $_top but no schema-verified model — verify --json-schema on it, then add it to GROK_SCHEMA_VERIFIED in agents.sh"
         else
           echo "this grok CLI offers no canonical model (see: grok models) — update the grok CLI"
         fi
@@ -970,8 +1006,18 @@ subcmd_run() {
   # and check a file's size BEFORE copying it (a 500 MiB file must not be
   # duplicated into TMPDIR first).
   local max_bytes="${SWARM_MAX_PROMPT_BYTES:-524288}" nbytes
-  [[ "$max_bytes" =~ ^[0-9]+$ && "$max_bytes" != 0 ]] \
+  [[ "$max_bytes" =~ ^[0-9]+$ ]] \
     || { echo "Invalid SWARM_MAX_PROMPT_BYTES='$max_bytes' — must be a positive integer (bytes)" >&2; exit 2; }
+  # Force DECIMAL, exactly as the skill's oversize guard does. Both read the same
+  # env var and must reach the same number: without this, "0100000" is decimal
+  # 100000 in the skill (which then lets every voice through) and OCTAL 32768
+  # here (which then rejects every one of them) — turning one deterministic skip
+  # into the per-call backend-error storm that guard exists to prevent. A
+  # leading-zero value that is not valid octal ("080000") would additionally die
+  # in the arithmetic under `set -e` instead of erroring here.
+  max_bytes=$((10#$max_bytes))
+  (( max_bytes > 0 )) \
+    || { echo "Invalid SWARM_MAX_PROMPT_BYTES='${SWARM_MAX_PROMPT_BYTES}' — must be a positive integer (bytes)" >&2; exit 2; }
   local prompt_path
   if [[ -n "$prompt_file" ]]; then
     [[ -f "$prompt_file" ]] || { echo "Prompt file not found: $prompt_file" >&2; exit 2; }
@@ -997,7 +1043,14 @@ subcmd_run() {
     (( nbytes > max_bytes )) && { echo "Prompt too large ($nbytes bytes > $max_bytes) — narrow the diff range, or raise SWARM_MAX_PROMPT_BYTES" >&2; exit 2; }
     prompt_path="$TMP_PROMPT"
   fi
-  (( nbytes > 0 )) || { echo "Empty prompt (use --prompt-file or stdin)" >&2; exit 2; }
+  # A byte count alone is WEAKER than the guard this replaced: before the
+  # out-of-band transport the prompt lived in a shell variable, and `[[ -z ]]`
+  # after command substitution rejected whitespace-only input too (substitution
+  # strips trailing newlines). Reviewing a prompt of blank lines wastes a full
+  # backend call and returns nothing useful, so check for non-whitespace content.
+  if ! LC_ALL=C grep -q '[^[:space:]]' "$prompt_path"; then
+    echo "Empty prompt (use --prompt-file or stdin)" >&2; exit 2
+  fi
 
   # Per-cluster external voices: the WORKFLOW owns LENS_BRIEF (single source of
   # truth for the lens set) and passes the gated cluster's briefs here; the
@@ -1195,28 +1248,16 @@ _grok_has_prompt_file() {
   # before any review work started. Same rule and same bound as the readiness
   # probe: `-k` is what actually enforces it, since a CLI that ignores SIGTERM or
   # forks a stdout-inheriting child would keep `$(...)` blocking past the deadline.
-  local to=""
-  if command -v timeout >/dev/null; then to="timeout"
-  elif command -v gtimeout >/dev/null; then to="gtimeout"
-  fi
+  # Check rc BEFORE the output: a probe killed at the deadline (124), SIGKILLed
+  # by `-k` (137), or never bounded at all (127) still yields EMPTY stdout, and
+  # reading that as "the flag is absent" would refuse a CLI that has it — telling
+  # the user to upgrade an already-current install while the voice dies. A probe
+  # that did not complete says nothing: assume the capability and let the real
+  # call report the truth.
   local help="" rc=0
-  if [[ -n "$to" ]]; then
-    # Check rc BEFORE the output, exactly like grok_model_fetch: a probe killed
-    # at the deadline (124) or SIGKILLed by `-k` (137) still returns EMPTY
-    # stdout, and reading that as "the flag is absent" would refuse a CLI that
-    # has it — telling the user to upgrade an already-current install while the
-    # voice dies. A probe that did not complete says nothing; assume the
-    # capability and let the real call report the truth.
-    help="$("$to" -k 3 "$PROBE_TIMEOUT" grok --help 2>/dev/null </dev/null)" || rc=$?
-    if (( rc != 0 )); then
-      echo "warning: \`grok --help\` probe did not complete (rc=$rc) — assuming --prompt-file is supported" >&2
-      return 0
-    fi
-  else
-    # No way to bound it. Do NOT run it uncapped — but do not fail the voice
-    # either: assume the capability and let the real call report the truth. A
-    # missing flag then surfaces as that call's error, which is strictly better
-    # than hanging here or refusing a CLI that may well support it.
+  help="$(_bounded_probe grok --help)" || rc=$?
+  if (( rc != 0 )); then
+    (( rc != 127 )) && echo "warning: \`grok --help\` probe did not complete (rc=$rc) — assuming --prompt-file is supported" >&2
     return 0
   fi
   case "$help" in *--prompt-file*) return 0 ;; *) return 1 ;; esac

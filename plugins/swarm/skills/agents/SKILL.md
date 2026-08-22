@@ -39,8 +39,12 @@ user_invocable: true
   (a schema-verified model), NOT that the token is valid/unexpired (codex, by contrast, runs
   a real `codex login status`). So grok can show Ready yet fail at review time
   on a stale token; treat it as "credentials present" and let the run surface a
-  real auth error. A not-ready hint naming the model list means the
-  grok CLI dropped/renamed the model — update the CLI, it is not an auth
-  problem. The model check degrades to auth-only (with a warning on stderr) when
+  real auth error. A not-ready hint naming the model list is NOT an auth problem,
+  and it has **two different remedies** — read which one the hint states:
+  the CLI offers no canonical model at all (too old → update it), or it offers
+  canonical models that are not schema-verified (usually NEWER than this adapter
+  knows → verify `--json-schema` on the named id and add it to
+  `GROK_SCHEMA_VERIFIED`). Never relay it as "update the CLI" by default; that
+  sends the second user to update an already-current install. The model check degrades to auth-only (with a warning on stderr) when
   the probe can't run — no coreutils `timeout` to bound it, or an unreadable
   model list.
