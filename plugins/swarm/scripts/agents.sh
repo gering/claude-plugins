@@ -9,6 +9,10 @@
 #   available <backend>   Exit 0 if the CLI is installed; prints its version
 #   ready <backend>       Exit 0 if authenticated/usable; hint on stderr if not
 #   jail                  Print jail=yes|no (working OS sandbox wrapper?)
+#   config                Print the RESOLVED numeric config (max_prompt_bytes,
+#                         cap_headroom, oversize_threshold, timeout_seconds,
+#                         probe_timeout_seconds). Callers read this instead of
+#                         parsing SWARM_* themselves — one parser, one verdict.
 #   run <backend> [opts]  Run a review prompt -> findings JSON on stdout
 #       --prompt-file <f>   Read the lens prompt from a file (default: stdin)
 #       --lens-instr <s>    Per-cluster lens instruction, prepended VERBATIM
@@ -247,17 +251,77 @@ column_or_cat() {
 # blocking a fan-out forever. Uses coreutils timeout/gtimeout when available;
 # passes through unchanged if neither exists (best-effort, never a hard dep).
 # Override seconds via SWARM_TIMEOUT; 0 disables.
-ADAPTER_TIMEOUT="${SWARM_TIMEOUT:-600}"
+# --- numeric configuration: ONE parse, ONE set of rules -----------------------
+#
+# Three env knobs are read by BOTH this adapter and the skill's prep block, and
+# every one of them has now caused the same bug class: the two sides parsed the
+# same string differently, or one side validated what the other did not. Three
+# separate review rounds found three separate instances (cap decimal-forced on
+# one side only; timeout decimal-forced on one side only; a post-conversion
+# positivity check present in one place). Patching the reported instance each
+# time never ended it, so the parse lives HERE and callers ask for the result
+# (`agents.sh config`) instead of re-deriving it.
+#
+# _resolve_int <name> <raw> <default> <min> [max]
+#   Prints the resolved value; exits 2 with a usage error otherwise. Rules, all
+#   of which exist because their absence was a real defect:
+#     - digits only (a sign or unit suffix must not reach arithmetic);
+#     - `10#` DECIMAL forcing, or "0100000" is octal here and decimal there;
+#     - the range check runs AFTER conversion, or "00" passes a `!= 0` test and
+#       then behaves as 0;
+#     - an explicit upper bound, or a huge value wraps in 64-bit arithmetic to a
+#       small positive number that still satisfies `> 0`.
+_resolve_int() {
+  local name="$1" raw="$2" def="$3" min="$4" max="${5:-}"
+  [[ -n "$raw" ]] || raw="$def"
+  [[ "$raw" =~ ^[0-9]+$ ]] \
+    || { echo "Invalid $name='$raw' — must be an integer" >&2; exit 2; }
+  # Reject before arithmetic: bash silently truncates on overflow, so a 25-digit
+  # value would wrap rather than error.
+  (( ${#raw} <= 18 )) \
+    || { echo "Invalid $name='$raw' — too large" >&2; exit 2; }
+  local v=$((10#$raw))
+  (( v >= min )) \
+    || { echo "Invalid $name='$raw' — must be >= $min" >&2; exit 2; }
+  if [[ -n "$max" ]]; then
+    (( v <= max )) \
+      || { echo "Invalid $name='$raw' — must be <= $max" >&2; exit 2; }
+  fi
+  printf '%s' "$v"
+}
+
+# Upper bounds are sanity rails, not policy: 1 GiB of prompt and a day of wall
+# clock are both far past anything a review can use, and both are small enough
+# that the arithmetic below can never wrap.
+SWARM_MAX_PROMPT_BYTES_MAX=1073741824
+SWARM_TIMEOUT_MAX=86400
+# The headroom the skill subtracts for the per-cluster lens instruction. A cap at
+# or below it would make the oversize threshold zero or negative — i.e. EVERY
+# prompt "too large" and every external voice dropped, silently. Defined here so
+# the skill can read it rather than hard-code a second copy.
+SWARM_CAP_HEADROOM=4096
+# Grace between SIGTERM and SIGKILL for every bounded call.
+TIMEOUT_KILL_GRACE=3
+
+ADAPTER_TIMEOUT="$(_resolve_int SWARM_TIMEOUT "${SWARM_TIMEOUT:-}" 600 0 "$SWARM_TIMEOUT_MAX")"
 _timeout_warned=""
 with_timeout() {
   if [[ "$ADAPTER_TIMEOUT" == "0" ]]; then "$@"; return; fi
-  if command -v timeout >/dev/null; then timeout "$ADAPTER_TIMEOUT" "$@"
-  elif command -v gtimeout >/dev/null; then gtimeout "$ADAPTER_TIMEOUT" "$@"
+  # `-k` is what actually ENFORCES the bound. Plain `timeout` only sends SIGTERM;
+  # a backend that ignores it — grok is documented as doing exactly that a few
+  # hundred lines down — or that forks a stdout-inheriting child keeps the
+  # command substitution blocking past the deadline. The outer Bash window then
+  # kills the whole adapter instead: rc is never 124, the EXIT trap never runs,
+  # so there is no "timed out after Ns" line and no telemetry record. That lost
+  # diagnosis is the thing this branch exists to prevent, and _bounded_probe
+  # already used -k for the same reason.
+  if command -v timeout >/dev/null; then timeout -k "$TIMEOUT_KILL_GRACE" "$ADAPTER_TIMEOUT" "$@"
+  elif command -v gtimeout >/dev/null; then gtimeout -k "$TIMEOUT_KILL_GRACE" "$ADAPTER_TIMEOUT" "$@"
   else
     # No coreutils timeout: run bare, but say so once — otherwise the documented
     # cap silently never applies (e.g. stock macOS) and a hung backend blocks.
     if [[ -z "$_timeout_warned" ]]; then
-      echo "warning: no timeout/gtimeout on PATH — external calls run WITHOUT the ${ADAPTER_TIMEOUT}s cap (install coreutils, or set SWARM_TIMEOUT=0 to silence)" >&2
+      echo "warning: no timeout/gtimeout on PATH — external calls run WITHOUT the ${ADAPTER_TIMEOUT}s cap, so a hung backend is killed by the outer window instead: no rc=124, no timeout message, and no telemetry record for that voice (install coreutils, or set SWARM_TIMEOUT=0 to silence)" >&2
       _timeout_warned=1
     fi
     "$@"
@@ -265,11 +329,12 @@ with_timeout() {
 }
 
 require_valid_timeout() {
-  # A malformed SWARM_TIMEOUT would reach `timeout` and exit 125 — which the
-  # rc==124 checks don't recognize, so every external run would misreport as a
-  # backend failure. Reject up front. Only the literal integer disables (0).
-  [[ "$ADAPTER_TIMEOUT" =~ ^[0-9]+$ ]] \
-    || { echo "Invalid SWARM_TIMEOUT='$ADAPTER_TIMEOUT' — must be a non-negative integer (seconds; 0 disables)" >&2; exit 2; }
+  # Kept as an explicit call site for readability; the value was already
+  # validated and decimal-forced by _resolve_int at startup, so a malformed
+  # SWARM_TIMEOUT can no longer reach `timeout` (which would exit 125 — a code
+  # the rc==124 checks do not recognise, making every run misreport as a backend
+  # failure).
+  :
 }
 
 # OS-level read-deny jail for external CLI calls. Both voices may now read
@@ -600,8 +665,14 @@ available_version() {
 # suits a probe that `list`/`ready` block on. Override with SWARM_PROBE_TIMEOUT;
 # a malformed or 0 value falls back to 10 (never uncapped, never a `timeout`
 # usage error that would read as "model missing").
-PROBE_TIMEOUT="${SWARM_PROBE_TIMEOUT:-10}"
-[[ "$PROBE_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || PROBE_TIMEOUT=10
+# Bounded at 20s deliberately. The workflow sizes its timeout margin from the
+# assumption that pre-timer probe work fits inside it; an unbounded value here
+# (SWARM_PROBE_TIMEOUT=300) would push two probes past that margin and let the
+# OUTER window kill the call before the inner cap fires — losing rc=124 and the
+# telemetry record, which is the diagnosis this whole branch exists to keep.
+# Keep this ceiling and swarm-review.js's TIMEOUT_MARGIN_S in sync.
+SWARM_PROBE_TIMEOUT_MAX=20
+PROBE_TIMEOUT="$(_resolve_int SWARM_PROBE_TIMEOUT "${SWARM_PROBE_TIMEOUT:-}" 10 1 "$SWARM_PROBE_TIMEOUT_MAX")"
 
 # grok's model list, memoized for the process (`grok models` is a network call —
 # fetch at most once).
@@ -627,12 +698,16 @@ _bounded_probe() {
   # SIGTERM, or forking a stdout-inheriting child, keeps `$(...)` blocking past
   # the deadline), and the CALLER decides what a non-zero rc means — it must
   # never be conflated with a successful negative answer.
+  # 126 as the "cannot bound this" sentinel, NOT 127: `timeout` itself exits 127
+  # when the command it was given does not exist, so a missing backend binary and
+  # a missing timeout binary would be indistinguishable — and the callers treat
+  # the two differently (assume-capability vs. degrade-and-report).
   local to=""
   if command -v timeout >/dev/null; then to="timeout"
   elif command -v gtimeout >/dev/null; then to="gtimeout"
-  else return 127
+  else return 126
   fi
-  "$to" -k 3 "$PROBE_TIMEOUT" "$@" </dev/null 2>/dev/null
+  "$to" -k "$TIMEOUT_KILL_GRACE" "$PROBE_TIMEOUT" "$@" </dev/null 2>/dev/null
 }
 
 grok_model_fetch() {
@@ -653,7 +728,7 @@ grok_model_fetch() {
   # `$(...)` substitution blocking past the timeout — the "must never hang" hole.
   local raw rc=0
   raw="$(_bounded_probe grok models)" || rc=$?
-  if (( rc == 127 )); then
+  if (( rc == 126 )); then
     # `ready`/`list` were purely local before this probe, so it must never be the
     # thing that hangs them: with no way to bound the call, skip it rather than
     # run it uncapped.
@@ -819,6 +894,12 @@ grok_model_offered() {
   # pinned id on offer?" — the pin is a floor, and readiness must agree with what
   # grok_select_model would actually run, or the probe rejects a CLI the review
   # would have used (exactly how the 1.0.3 marker change dropped grok entirely).
+  # The --prompt-file capability is a property of the INSTALLED CLI, so it
+  # belongs to readiness rather than to each run: probed here, a CLI without it
+  # is reported not-ready once and never enters externalVoices. Probed only
+  # inside run_grok (as it was), `list --json` advertised grok as live and every
+  # gated cluster then failed identically with the same upgrade message.
+  _grok_has_prompt_file || return 1
   grok_model_fetch
   [[ -z "$_grok_models" ]] && return 0
   [[ -n "$(_grok_highest_canonical verified)" ]]
@@ -851,6 +932,10 @@ ready_hint() {
         # none verified). Telling the second user to "update the grok CLI" sends
         # them to update an already-current install, and never names the actual
         # one-line fix.
+        if ! _grok_has_prompt_file; then
+          echo "this grok CLI has no --prompt-file — the adapter passes the prompt out-of-band so a large diff cannot hit the argv limit; update the grok CLI"
+          return
+        fi
         local _top; _top="$(_grok_highest_canonical)"
         if [[ -n "$_top" ]]; then
           echo "grok lists $_top but no schema-verified model — verify --json-schema on it, then add it to GROK_SCHEMA_VERIFIED in agents.sh"
@@ -948,6 +1033,24 @@ subcmd_jail() {
   if _read_web_safe codex; then echo "jail=yes"; else echo "jail=no"; fi
 }
 
+swarm_max_prompt_bytes() {
+  _resolve_int SWARM_MAX_PROMPT_BYTES "${SWARM_MAX_PROMPT_BYTES:-}" 524288 \
+    $(( SWARM_CAP_HEADROOM + 1 )) "$SWARM_MAX_PROMPT_BYTES_MAX"
+}
+
+subcmd_config() {
+  # The resolved, validated configuration as key=value lines, so the skill's prep
+  # block can READ what the adapter will enforce instead of re-deriving it. Any
+  # invalid value exits 2 here with the adapter's own message — one parser, one
+  # verdict, one wording, and no way for the two sides to disagree.
+  local cap; cap="$(swarm_max_prompt_bytes)"
+  echo "max_prompt_bytes=$cap"
+  echo "cap_headroom=$SWARM_CAP_HEADROOM"
+  echo "oversize_threshold=$(( cap - SWARM_CAP_HEADROOM ))"
+  echo "timeout_seconds=$ADAPTER_TIMEOUT"
+  echo "probe_timeout_seconds=$PROBE_TIMEOUT"
+}
+
 subcmd_run() {
   local backend="${1:-}"
   [[ -z "$backend" ]] && usage
@@ -1005,19 +1108,12 @@ subcmd_run() {
   # one. Measure BYTES (a multibyte prompt would slip a `${#prompt}` char count),
   # and check a file's size BEFORE copying it (a 500 MiB file must not be
   # duplicated into TMPDIR first).
-  local max_bytes="${SWARM_MAX_PROMPT_BYTES:-524288}" nbytes
-  [[ "$max_bytes" =~ ^[0-9]+$ ]] \
-    || { echo "Invalid SWARM_MAX_PROMPT_BYTES='$max_bytes' — must be a positive integer (bytes)" >&2; exit 2; }
-  # Force DECIMAL, exactly as the skill's oversize guard does. Both read the same
-  # env var and must reach the same number: without this, "0100000" is decimal
-  # 100000 in the skill (which then lets every voice through) and OCTAL 32768
-  # here (which then rejects every one of them) — turning one deterministic skip
-  # into the per-call backend-error storm that guard exists to prevent. A
-  # leading-zero value that is not valid octal ("080000") would additionally die
-  # in the arithmetic under `set -e` instead of erroring here.
-  max_bytes=$((10#$max_bytes))
-  (( max_bytes > 0 )) \
-    || { echo "Invalid SWARM_MAX_PROMPT_BYTES='${SWARM_MAX_PROMPT_BYTES}' — must be a positive integer (bytes)" >&2; exit 2; }
+  # Resolved by the ONE parser at startup (see _resolve_int): the floor is the
+  # headroom, so a cap at or below it — which would make the skill's oversize
+  # threshold zero or negative and silently drop every external voice — is
+  # rejected loudly instead.
+  local max_bytes nbytes
+  max_bytes="$(swarm_max_prompt_bytes)"
   local prompt_path
   if [[ -n "$prompt_file" ]]; then
     [[ -f "$prompt_file" ]] || { echo "Prompt file not found: $prompt_file" >&2; exit 2; }
@@ -1257,7 +1353,7 @@ _grok_has_prompt_file() {
   local help="" rc=0
   help="$(_bounded_probe grok --help)" || rc=$?
   if (( rc != 0 )); then
-    (( rc != 127 )) && echo "warning: \`grok --help\` probe did not complete (rc=$rc) — assuming --prompt-file is supported" >&2
+    (( rc != 126 )) && echo "warning: \`grok --help\` probe did not complete (rc=$rc) — assuming --prompt-file is supported" >&2
     return 0
   fi
   case "$help" in *--prompt-file*) return 0 ;; *) return 1 ;; esac
@@ -1283,6 +1379,21 @@ run_grok() {
   # is now the VERIFIED TABLE rather than one hard-coded id: a model that merely
   # accepts --json-schema and returns structuredOutput:null fails late, after
   # burning a full review, so reject up front with a usage error.
+  # An explicit override is schema-gated below, but that says nothing about
+  # whether the INSTALLED CLI offers the id: readiness would pass on the
+  # discovered model while every call dies at launch with "unknown model id".
+  # Check it against the list we already fetched (memoized — no extra call);
+  # skip silently when the list is unavailable, since that is the documented
+  # trust-auth degrade rather than evidence of absence.
+  if [[ -n "$model" ]]; then
+    grok_model_fetch
+    if [[ -n "$_grok_models" ]]; then
+      case $'\n'"$_grok_models"$'\n' in
+        *$'\n'"$grok_model"$'\n'*) ;;
+        *) echo "grok model '$grok_model' is not offered by this CLI (see: grok models)" >&2; exit 2 ;;
+      esac
+    fi
+  fi
   if ! _grok_schema_verified "$grok_model"; then
     echo "grok model '$grok_model' is not schema-verified — the adapter requires enforced --json-schema output. Verified: $(printf '%s' "$GROK_SCHEMA_VERIFIED" | tr '\n' ' ')" >&2
     exit 2
@@ -1375,6 +1486,7 @@ main() {
     available)     subcmd_available "$@" ;;
     ready)         subcmd_ready "$@" ;;
     jail)          subcmd_jail ;;
+    config)        subcmd_config ;;
     run)           subcmd_run "$@" ;;
     -h|--help)     print_usage; exit 0 ;;
     "")            usage ;;

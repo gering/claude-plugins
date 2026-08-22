@@ -30,7 +30,7 @@
       "name": "swarm",
       "source": "./plugins/swarm",
       "description": "Local mixture-of-agents code review for Claude Code. Fans a diff across Claude lenses plus the codex and grok CLIs — every voice running one call per gated lens cluster — with file-read + hardened web research under an OS secret-jail, merges by mechanism with cross-family consensus, verifies solo findings and all design suggestions, and presents one ranked report. Optional --fix / --loop applies the findings you agreed with; --pr reviews a GitHub PR diff and posts the result. Skills: /swarm:review, /swarm:agents.",
-      "version": "0.9.4"
+      "version": "0.10.0"
     },
     {
       "name": "settings",

@@ -168,14 +168,12 @@ elif js_fn:
 # calls the adapter then rejects. Read both from the EXECUTABLE code (the
 # adapter's assignment, the skill's `-gt` guard), never from prose: prose can
 # drift, and it is the code that decides.
-mb = re.search(r'local max_bytes="\$\{SWARM_MAX_PROMPT_BYTES:-(\d+)\}"', sh)
-check("adapter: max_bytes default found", mb)
-sk = re.search(
-    r'SWARM_CAP="\$\{SWARM_MAX_PROMPT_BYTES:-(\d+)\}"(?s:.*?)'
-    r'-gt "\$\(\( SWARM_CAP - (\d+) \)\)" \]; then echo "EXTERNALS_OVERSIZE=1"',
-    skill,
-)
-check("skill: EXTERNALS_OVERSIZE guard + shared cap default found", sk)
+mb = re.search(r"_resolve_int SWARM_MAX_PROMPT_BYTES [^\n]*? (\d+) ", sh)
+check("adapter: cap default found in the resolver call", mb)
+# The skill's oversize decision must still be DETERMINISTIC shell (never left to
+# the model) and must compare against the adapter-reported threshold.
+sk = re.search(r'-gt "\$OVERSIZE_THRESHOLD" \]; then echo "EXTERNALS_OVERSIZE=1"', skill)
+check("skill: EXTERNALS_OVERSIZE decided in shell against the adapter threshold", sk)
 # The two timeouts must derive from ONE value, with the adapter's cap strictly
 # below the Bash window. If they tie (both 600 s, the pre-0.9 state), the outer
 # kill can win and the run loses rc=124 — no "timed out after Ns", no telemetry
@@ -220,38 +218,64 @@ check(
 # EVERY diff counts as oversize — dropping all external voices SILENTLY, which is
 # the one failure mode the oversize path exists to make explicit. Found by the
 # review this split's own first run produced; pinned so it cannot regress.
+# A non-zero `config` exit must stop the run with the adapter's own message,
+# rather than falling through to a review that silently drops every external.
 check(
-    "skill: validates SWARM_MAX_PROMPT_BYTES like the adapter does",
-    re.search(r"case \"\$SWARM_CAP\" in\s*\n\s*''\|\*\[!0-9\]\*\|0\)[^\n]*SWARM_CFG_ERR", skill),
+    "skill: surfaces a config error and stops",
+    re.search(r'SWARM_CFG_ERR=\$\(printf', skill),
+)
+# ONE PARSER. Cap/timeout resolution used to live on both sides — the adapter and
+# the skill's prep block each read the same SWARM_* vars — and three review rounds
+# found three separate instances of one bug class: the cap decimal-forced on one
+# side only, the timeout decimal-forced on one side only, a positivity check that
+# ran before conversion in one place and after it in the other. Each produced two
+# DIFFERENT numbers from one string, silently, with the skill deciding whether the
+# externals run at all and the adapter deciding whether each call is accepted.
+# The resolution now lives solely in agents.sh and the skill READS it, so these
+# checks guard the structure rather than the wording of a duplicate.
+check(
+    "adapter: has one integer resolver",
+    re.search(r"^_resolve_int\(\) \{", sh, re.M),
 )
 check(
-    "adapter: rejects a non-positive-integer SWARM_MAX_PROMPT_BYTES",
-    re.search(r'max_bytes" =~ \^\[0-9\]\+\$', sh) and re.search(r"\(\( max_bytes > 0 \)\)", sh),
-)
-# BOTH sides must parse the shared knob identically. They read the same env var
-# and gate the same decision, so a difference is not cosmetic: with `0100000`
-# the skill saw decimal 100000 and let every voice through, while the adapter
-# read octal 32768 and rejected each one — turning the deterministic single skip
-# into the per-call error storm it exists to prevent. Require the decimal force
-# on both sides, not just one.
-check(
-    "skill decimal-forces the cap",
-    re.search(r"SWARM_CAP=\$\(\(10#\$SWARM_CAP\)\)", skill),
+    "adapter: exposes the resolved config",
+    re.search(r"^subcmd_config\(\) \{", sh, re.M) and re.search(r"^\s*config\)\s+subcmd_config", sh, re.M),
 )
 check(
-    "adapter decimal-forces the cap too",
-    re.search(r"max_bytes=\$\(\(10#\$max_bytes\)\)", sh),
+    "adapter: config reports the oversize threshold the skill needs",
+    "oversize_threshold=" in sh,
 )
-
-if mb and sk:
-    max_bytes = int(mb.group(1))
-    skill_default, headroom = int(sk.group(1)), int(sk.group(2))
+check(
+    "skill: reads the adapter config instead of parsing SWARM_* itself",
+    re.search(r'scripts/agents\.sh" config', skill),
+)
+# The negative half: a reintroduced parse in the skill is exactly the regression
+# this consolidation removed, so fail on one appearing again.
+check(
+    "skill: does not re-derive the cap",
+    not re.search(r"SWARM_MAX_PROMPT_BYTES:-\d+", skill),
+)
+check(
+    "skill: does not re-derive the oversize headroom",
+    not re.search(r"SWARM_CAP\s*-\s*4096", skill),
+)
+# Every knob must go through the one resolver, never straight into arithmetic.
+for knob in ("SWARM_TIMEOUT", "SWARM_PROBE_TIMEOUT", "SWARM_MAX_PROMPT_BYTES"):
     check(
-        f"skill cap default ({skill_default}) equals the adapter's ({max_bytes})",
-        skill_default == max_bytes,
+        f"adapter: {knob} is resolved by _resolve_int",
+        re.search(rf"_resolve_int {knob} ", sh),
     )
-    threshold = skill_default - headroom
-    check("skill threshold is below the adapter cap", threshold < max_bytes)
+
+# Both numbers now come from the adapter alone, so there is no cross-file default
+# to compare — what still has to hold is that the headroom actually covers the
+# largest lens instruction the workflow can build. A brief that outgrows it would
+# surface only as a per-call backend error at review time.
+hr = re.search(r"^SWARM_CAP_HEADROOM=(\d+)", sh, re.M)
+check("adapter: cap headroom found", hr)
+if mb and hr:
+    max_bytes = int(mb.group(1))
+    headroom = int(hr.group(1))
+    check("headroom leaves a usable cap", headroom < max_bytes)
     # Largest instruction the workflow can build. The FIXED prose is DERIVED from
     # the source (the literal chunks of lensInstr()/unitBrief()'s template
     # strings, with every ${...} expression removed) rather than copied here — a
@@ -283,8 +307,8 @@ if mb and sk:
         tags = len(" / ".join(f'"[{l}] "' for l in lenses).encode("utf-8"))
         worst = max(worst, fixed + body + tags)
     check(
-        f"oversize headroom ({max_bytes - threshold} B) covers the largest lens instruction (<= {worst} B)",
-        max_bytes - threshold >= worst,
+        f"oversize headroom ({headroom} B) covers the largest lens instruction (<= {worst} B)",
+        headroom >= worst,
     )
 
 # METHODOLOGICAL_LENSES: the verify-gating list of lenses that assert repo-wide

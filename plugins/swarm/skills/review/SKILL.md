@@ -280,39 +280,33 @@ echo "PROMPT_BYTES=$PROMPT_BYTES"
 # headroom for the per-cluster --lens-instr the workflow prepends; both the
 # shared default and that headroom are pinned against the adapter's max_bytes
 # and the largest lens instruction by test_lens_sync.py.
-# VALIDATE it the same way the adapter does. Sharing the knob means sharing its
-# contract: an unvalidated `SWARM_MAX_PROMPT_BYTES=abc` expands to 0 in the
-# arithmetic below, so the threshold becomes -4096, EVERY diff counts as oversize,
-# and all external voices are dropped SILENTLY — while the adapter would have
-# refused the same value loudly. A misconfiguration must not be able to quietly
-# reduce the ensemble to Claude-only.
-SWARM_CAP="${SWARM_MAX_PROMPT_BYTES:-524288}"
-# `10#` forces DECIMAL. Without it a leading-zero value ("010") is read as octal
-# by the arithmetic below — 8, not 10 — so a digits-only check passes while the
-# threshold silently becomes a different number than the user wrote.
-case "$SWARM_CAP" in
-  ''|*[!0-9]*|0) echo "SWARM_CFG_ERR=Invalid SWARM_MAX_PROMPT_BYTES='$SWARM_CAP' — must be a positive integer (bytes)"; rm -rf "$TMPD"; exit 0 ;;
+# ASK THE ADAPTER instead of re-deriving. Both sides used to parse SWARM_* on
+# their own, and three review rounds found three separate instances of the same
+# bug class: the cap decimal-forced on one side only; the timeout decimal-forced
+# on one side only; a positivity check applied after conversion in one place and
+# before it in the other. Each time the two sides reached DIFFERENT numbers from
+# the same string — and the failure was silent, because this block's verdict
+# decides whether the external voices run at all while the adapter's decides
+# whether each call is accepted. `config` prints the resolved, validated values
+# the adapter will actually enforce; a bad value exits non-zero here with the
+# adapter's own message, so there is exactly one parser and one wording.
+SWARM_CFG="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" config 2>&1)" || {
+  echo "SWARM_CFG_ERR=$(printf '%s' "$SWARM_CFG" | head -1)"; rm -rf "$TMPD"; exit 0
+}
+OVERSIZE_THRESHOLD=$(printf '%s\n' "$SWARM_CFG" | sed -n 's/^oversize_threshold=//p')
+case "$OVERSIZE_THRESHOLD" in
+  ''|*[!0-9]*) echo "SWARM_CFG_ERR=adapter config did not report a usable oversize_threshold"; rm -rf "$TMPD"; exit 0 ;;
 esac
-SWARM_CAP=$((10#$SWARM_CAP))
-if [ "$PROMPT_BYTES" -gt "$(( SWARM_CAP - 4096 ))" ]; then echo "EXTERNALS_OVERSIZE=1"; else echo "EXTERNALS_OVERSIZE=0"; fi
-# SWARM_TIMEOUT travels to the workflow so BOTH timeouts derive from one value.
-# Validate it here for the same reason as the cap above: the adapter refuses a
-# malformed value, and a skill that passed one through would only move the error
-# to every individual call.
-# Emit this ONLY when the user actually set it. The workflow derives its own
-# default from the Bash-tool ceiling minus the margin, and hard-coding 600 here
-# meant that default was never reached — every stock run was "capped" and warned
-# about it, which is the unconditional noise the warning was supposed to stop
-# being. An unset knob must stay unset all the way through.
+if [ "$PROMPT_BYTES" -gt "$OVERSIZE_THRESHOLD" ]; then echo "EXTERNALS_OVERSIZE=1"; else echo "EXTERNALS_OVERSIZE=0"; fi
+# Pass the timeout on ONLY when the user actually set it: the workflow derives
+# its own default from the Bash-tool ceiling minus the margin, and handing it a
+# value it will then cap made every stock run log "you asked for more than one
+# Bash call can hold". The value itself comes from `config` above, already
+# validated and decimal-forced — it lands in a BARE JavaScript numeric literal,
+# where a leading zero would be legacy octal (0600 = 384) or a strict-mode
+# SyntaxError.
 if [ -n "${SWARM_TIMEOUT:-}" ]; then
-  SWARM_TO="$SWARM_TIMEOUT"
-  case "$SWARM_TO" in
-    ''|*[!0-9]*) echo "SWARM_CFG_ERR=Invalid SWARM_TIMEOUT='$SWARM_TO' — must be a non-negative integer (seconds; 0 disables)"; rm -rf "$TMPD"; exit 0 ;;
-  esac
-  # Decimal-force it like SWARM_CAP above: the value is echoed into a BARE
-  # JavaScript numeric literal, where a leading zero is a legacy octal literal
-  # (0600 = 384) in sloppy mode and a SyntaxError under strict mode.
-  echo "SWARM_TIMEOUT_S=$((10#$SWARM_TO))"
+  printf '%s\n' "$SWARM_CFG" | sed -n 's/^timeout_seconds=/SWARM_TIMEOUT_S=/p'
 fi
 echo "JAIL=$JAIL"
 echo "LIVE_JSON=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json | tr -d '\n')"
@@ -515,8 +509,16 @@ Then, when present:
   block (skip the section when it prints nothing):
 
   ```sh
-  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/telemetry-report.py" "<TELEMETRY>"
+  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/telemetry-report.py" '<TELEMETRY>'
   ```
+
+  **Single quotes around every `<…>` placeholder you substitute into a shell
+  command — here and everywhere else in this skill.** These paths derive from
+  `mktemp -d "${TMPDIR:-/tmp}/…"`, so their text comes from the environment;
+  inside DOUBLE quotes bash still expands `$(...)`, backticks and `${...}` in
+  that text, single quotes do not. The workflow already quotes the same paths
+  for the same reason. This is placeholder hygiene, not a property of one
+  command: apply it to `<DIFF>`, `<PROMPT>` and `<TELEMETRY>` alike.
 
   It reports how long each external voice took and flags any call at ≥60% of the
   wall **that call actually ran under** — the script reads that per record, so do

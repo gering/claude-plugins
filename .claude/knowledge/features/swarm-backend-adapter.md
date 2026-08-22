@@ -373,6 +373,44 @@ is recorded too. `scripts/telemetry-report.py` renders it and flags any
 cannot show, because a voice that finished at 550 s and one that finished at
 20 s are both just "ok".
 
+## One parser for the numeric knobs (`agents.sh config`, 0.10.x)
+
+`SWARM_MAX_PROMPT_BYTES`, `SWARM_TIMEOUT` and `SWARM_PROBE_TIMEOUT` are read by
+BOTH the adapter and `/swarm:review`'s prep block, and for a while each side
+parsed them itself. **Three consecutive review rounds found three instances of
+one bug class** — the two sides deriving DIFFERENT numbers from the same string:
+
+| round | the half that was fixed | the half that was not |
+|---|---|---|
+| 1 | — | fallback pin raised to the newest verified model |
+| 2 | `10#` decimal forcing for the cap, in the skill | …not in the adapter |
+| 3 | `10#` for `SWARM_TIMEOUT`, in the skill | …not in the adapter |
+
+Each was silent and asymmetric in the worst way: the SKILL decides whether the
+external voices run at all, the ADAPTER decides whether each call is accepted. A
+disagreement therefore turns one clean "externals skipped" into N per-call
+backend errors, or lets a value through that every call then rejects.
+
+**The fix was structural, not another patch.** `_resolve_int` in `agents.sh` is
+the only place that parses these values — digits-only, `10#`-forced, range-checked
+*after* conversion, with an upper bound so a huge value cannot wrap in 64-bit
+arithmetic. `agents.sh config` prints the resolved set
+(`max_prompt_bytes`, `cap_headroom`, `oversize_threshold`, `timeout_seconds`,
+`probe_timeout_seconds`) and the skill READS it. `test_lens_sync.py` fails if a
+parse reappears on the skill side.
+
+Rules that came out of it, worth applying beyond this file:
+- **When a fix touches one half of a pair, check the other half in the same
+  edit.** Every critical finding in rounds 1–3 was introduced by the previous
+  round's fix, never by the original feature code.
+- **Range-check after normalization, never before**: `00` passes a `!= 0` test
+  and then behaves as `0`.
+- **A shared knob needs a shared parser**, not two implementations that agree
+  today.
+- `SWARM_PROBE_TIMEOUT` is capped (20 s) because the workflow's timeout margin is
+  sized from it — raising one without the other lets the outer Bash window kill a
+  call before the inner cap fires, which loses `rc=124` and the telemetry record.
+
 ## Gotchas (found in E2E testing, fixed in the adapter)
 
 - **codex hangs on inherited stdin *when the prompt is on argv*.** With a

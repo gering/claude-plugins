@@ -44,13 +44,28 @@ const TELEMETRY = INPUT.telemetryFile
 // window, so the adapter always reports the timeout itself. This does NOT raise
 // the ceiling — only an async transport can (see the async-poll-external-voices
 // task); it makes the ceiling say what it is.
-const BASH_TIMEOUT_MS = 600000            // hard maximum of the Bash tool — not a choice
+// Hard maximum of the Bash tool — not a choice. ACCEPTED RESIDUAL: this value is
+// only *requested* of the transport subagent in prose below; nothing here can
+// verify it actually passed it. If a future harness silently lowers the ceiling,
+// or the agent omits the argument, the ordering guarantee this file derives
+// (inner cap strictly below the outer window) is void and a timeout again
+// surfaces as a generic failure. Removing the assumption needs the async
+// transport (tasks/async-poll-external-voices.md), not a bigger margin.
+const BASH_TIMEOUT_MS = 600000
 // The inner cap must lose the race deterministically, so the margin has to cover
-// everything the adapter spends OUTSIDE the timed backend call — both bounded
-// probes (`grok models`, `grok --help`, SWARM_PROBE_TIMEOUT=10s each, plus their
-// -k 3 grace), jail construction and output validation. 30s left only ~5s of
-// slack against that worst case; 60s keeps the ordering intact without
-// meaningfully shrinking the review budget.
+// everything the adapter spends OUTSIDE the timed backend call: both bounded
+// probes (`grok models`, `grok --help`) plus their kill grace, jail
+// construction, and output validation.
+//
+// COUPLED to agents.sh — do not change one side alone:
+//   - SWARM_PROBE_TIMEOUT is capped there at 20s (SWARM_PROBE_TIMEOUT_MAX), so
+//     the two probes cost at most 2 x (20 + 3) = 46s. Raising that ceiling
+//     without raising this margin lets the OUTER window kill a call before the
+//     inner cap fires — no rc=124, no telemetry record, i.e. exactly the lost
+//     diagnosis this branch exists to prevent.
+//   - the adapter's own ADAPTER_TIMEOUT default (600) is only reached on a
+//     direct CLI call; through this workflow the effective value is always sent
+//     explicitly below, so the two literals cannot drift apart in a review.
 const TIMEOUT_MARGIN_S = 60
 // Default to the derived ceiling, not to 600: the inner cap must stay BELOW the
 // Bash window, so a default of 600 was always capped to 570 — and announced as
