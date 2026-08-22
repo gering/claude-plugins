@@ -13,7 +13,7 @@ Complementary to [pr-flow](../pr-flow/): pr-flow drives the GitHub-PR
 ## Status
 
 **Phase 5 of 6** — the pipeline can now **act**. `/swarm:review` fans a diff
-across three voices (Claude lenses + `codex` + `grok-4.5`), each running one
+across three voices (Claude lenses + `codex` + `grok`), each running one
 call per gated lens cluster,
 merges by mechanism, verifies solo findings + design suggestions, presents one
 ranked report, and —
@@ -46,7 +46,7 @@ presets).
 ## The pipeline (`/swarm:review`)
 
 ```
-Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok-4.5)
+Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok)
           → Merge (file, mechanism) → Verify (solos + design + unverified consensus) → Ranked synthesis
 ```
 
@@ -58,7 +58,7 @@ Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok-4.5)
    by nobody. Every pruned lens is reported as gated-out, never silently
    dropped.
 2. **Fan-out** — all voices at the **same granularity**: one Claude finder per
-   gated lens **cluster**, and `codex` + `grok-4.5` each once per gated cluster
+   gated lens **cluster**, and `codex` + `grok` each once per gated cluster
    too (per lens under `--max`). The gate prunes calls for everyone — a
    fully-gated-out cluster spawns nothing for any voice — and each finding's
    `[lens]` tag is authoritative, because the voice *is* that lens.

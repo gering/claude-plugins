@@ -87,6 +87,13 @@ def render(records, timeout_seconds):
             mark = f"  ✗ TIMED OUT at the {limit}s wall"
         elif rec.get("backend_rc") not in (0, None):
             mark = f"  ✗ failed (rc={rec.get('backend_rc')})"
+        elif rec.get("adapter_rc") not in (0, None):
+            # The adapter aborted BEFORE the backend ran (schema gate, missing
+            # capability, bad config), so backend_rc is null and the duration is
+            # ~0. Without this branch such a row renders unmarked — a voice that
+            # produced nothing looks exactly like a fast, healthy one, which is
+            # the misreading this whole report exists to prevent.
+            mark = f"  ✗ never reached the backend (adapter rc={rec.get('adapter_rc')})"
         elif limit and secs >= limit * WARN_FRACTION:
             mark = f"  ⚠️  {pct:.0f}% of the {limit}s wall"
         else:

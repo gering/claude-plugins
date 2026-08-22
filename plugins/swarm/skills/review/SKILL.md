@@ -9,7 +9,7 @@ user_invocable: true
 
 # Swarm Review
 
-> Fan one code review across Claude lenses + codex + grok-4.5, merge by
+> Fan one code review across Claude lenses + codex + grok, merge by
 > mechanism, verify solos + design clusters, and present one ranked report.
 
 ## Arguments
@@ -285,9 +285,13 @@ echo "PROMPT_BYTES=$(wc -c < "$PROMPT")"
 # refused the same value loudly. A misconfiguration must not be able to quietly
 # reduce the ensemble to Claude-only.
 SWARM_CAP="${SWARM_MAX_PROMPT_BYTES:-524288}"
+# `10#` forces DECIMAL. Without it a leading-zero value ("010") is read as octal
+# by the arithmetic below — 8, not 10 — so a digits-only check passes while the
+# threshold silently becomes a different number than the user wrote.
 case "$SWARM_CAP" in
   ''|*[!0-9]*|0) echo "SWARM_CFG_ERR=Invalid SWARM_MAX_PROMPT_BYTES='$SWARM_CAP' — must be a positive integer (bytes)"; rm -rf "$TMPD"; exit 0 ;;
 esac
+SWARM_CAP=$((10#$SWARM_CAP))
 if [ "$(wc -c < "$PROMPT")" -gt "$(( SWARM_CAP - 4096 ))" ]; then echo "EXTERNALS_OVERSIZE=1"; else echo "EXTERNALS_OVERSIZE=0"; fi
 # SWARM_TIMEOUT travels to the workflow so BOTH timeouts derive from one value.
 # Validate it here for the same reason as the cap above: the adapter refuses a
@@ -363,7 +367,7 @@ Fill `<DIFF>`/`<PROMPT>`/`<TELEMETRY>`/`<FINDING_NONCE>`/`<SWARM_TIMEOUT_S>` fro
 echo'd values (`timeoutSeconds` is a bare number, not a string). Add `max: true` to `args` when
 `--max` was given (step 1 stripped it) — the deepest-effort profile. Add
 `claude: false` to `args`
-for an **external-only control run** (codex + grok-4.5, no Claude finder
+for an **external-only control run** (codex + grok, no Claude finder
 lenses — merge/verify still run in-session); default is the full ensemble.
 When external voices are live, **once per run** (no per-query nag) announce
 the posture — branch on the step-1 `JAIL` value, never claim capabilities the
@@ -449,13 +453,19 @@ Then the balance block (ALWAYS, this shape), from `balance`:
 
 ```
 Bilanz:  <total> Findings (🔴<c> 🟡<w> ⚪<m> · <design> Design) · Konsens <consensus> · Solo <solo> · REFUTED <refuted> · Verdict ✅<a> 🟨<p> ❌<d>
-Agents:  <model> <findings> · …   (from balance.agents; EVERY backend is multi-voice — one call per gated cluster, per lens under --max. Render each backend's voice count so the topology is honest, e.g. `opus×5 7 · gpt×5 3 · grok-4.5×5 5`; claude runs in-session, codex/grok through the adapter)
+Agents:  <model> <findings> · …   (from balance.agents; EVERY backend is multi-voice — one call per gated cluster, per lens under --max. Render each backend's voice count so the topology is honest, e.g. `opus×5 7 · gpt×5 3 · grok×5 5`; claude runs in-session, codex/grok through the adapter)
 Lenses:  <gate.run joined>  —  gated-out: <gate.skip lenses>
 ```
 
 Then, when present:
-- **Family coverage** — if `balance.familiesLost` is non-empty, print this
-  IMMEDIATELY under the `Bilanz:` line, before anything else in this list:
+- **Family coverage** — print this IMMEDIATELY under the `Bilanz:` line, before
+  anything else in this list, whenever `balance.familiesLost` is non-empty **OR**
+  `balance.consensusReachable` is false. The two conditions are independent: a
+  run that only ever had ONE family (externals unavailable, or `claude: false`
+  with a single backend) loses nothing yet still cannot form consensus, and
+  nesting the second warning inside the first meant that run printed nothing at
+  all — the quietest possible failure of the exact guarantee this block exists
+  to state:
 
   ```
   ⚠️  Konsens-Basis reduziert: <familiesPresent.length> von <familiesExpected.length> Modellfamilien
@@ -490,7 +500,8 @@ Then, when present:
   ```
 
   It reports how long each external voice took and flags any call at ≥60% of the
-  600 s wall. **Do not summarize or re-derive these numbers** — a *surviving*
+  wall **that call actually ran under** — the script reads that per record, so do
+  not quote a fixed number here (the default inner cap is derived, not 600 s). **Do not summarize or re-derive these numbers** — a *surviving*
   call is invisible in `backendErrors`, so this is the only signal that a
   backend×cluster is drifting toward the ceiling *before* the run it finally
   crosses. A timed-out voice appears in BOTH places by design: `backendErrors`

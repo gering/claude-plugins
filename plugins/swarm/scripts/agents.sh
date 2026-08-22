@@ -49,8 +49,10 @@
 #            xhigh/max down to high, mirroring codex's missing max). Read+web via STRICT `--tools` allowlist
 #            (read_file,list_dir,grep,web_search,web_fetch) + `--cwd <repo>`;
 #            no write/shell tools. Readiness is model-aware: auth (non-empty
-#            ~/.grok/auth.json — there is no status command) AND grok-4.5 listed
-#            by `grok models`. The CLI rejects an unlisted -m id at launch
+#            ~/.grok/auth.json — there is no status command) AND at least one
+#            SCHEMA-VERIFIED canonical model listed by `grok models` (not one
+#            fixed id — the model is discovered); an unprobeable list degrades to
+#            trusting auth rather than dropping the backend. The CLI rejects an unlisted -m id at launch
 #            ("unknown model id") and drops/renames models between releases
 #            (0.2.101 removed grok-composer-2.5-fast), so an auth-only check
 #            would advertise a model the CLI no longer offers. The probe
@@ -75,10 +77,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_SCHEMA="$SCRIPT_DIR/schema/finding.schema.json"
 CODEX_DEFAULT_MODEL="gpt-5.6-terra"
-# The FLOOR, not the choice: discovery below may raise it to a newer canonical
-# model the CLI actually offers. Kept as the fallback for every path where
-# discovery cannot run (no model list, offline, unparseable output).
-GROK_DEFAULT_MODEL="grok-4.6"
+# The FALLBACK used wherever discovery cannot run — no model list, offline, an
+# unparseable listing. Deliberately the OLDEST still-verified id, not the newest:
+# this value is only ever reached when we could not read what the CLI offers, and
+# guessing high there is the expensive direction. An older CLI that ships
+# grok-4.5 but not grok-4.6 would be handed an unknown model id, reject every
+# call, and lose the whole grok family for the run — the exact silent-family-loss
+# this plugin keeps fighting. Guessing low costs at most a slightly older model
+# on a host we could not probe. Raise it only when the low end of
+# GROK_SCHEMA_VERIFIED is retired.
+GROK_DEFAULT_MODEL="grok-4.5"
 
 # --- canonical grok model discovery -------------------------------------------
 #
@@ -141,6 +149,19 @@ TELEMETRY_BYTES=""
 # reach the trap as exit 1 and the one distinction worth logging is lost.
 TELEMETRY_RC=""
 
+_json_escape() {
+  # Minimal JSON string escaping: backslash first (or it would double-escape the
+  # quotes we add next), then quotes, then the control characters that would
+  # break the one-line record.
+  local v="$1"
+  v="${v//\\/\\\\}"
+  v="${v//\"/\\\"}"
+  v="${v//$'\n'/\\n}"
+  v="${v//$'\r'/\\r}"
+  v="${v//$'\t'/\\t}"
+  printf '%s' "$v"
+}
+
 _write_telemetry() {
   # $1 = the adapter's exit code. Best-effort: telemetry must never turn a
   # successful review into a failure, so every step tolerates failure and the
@@ -157,8 +178,15 @@ _write_telemetry() {
   # Record the wall this call actually ran under: SWARM_TIMEOUT is overridable,
   # and a reader that assumed 600 would compute "% of the wall" against a limit
   # that was never in force.
+  # Escape the string fields. They are adapter-controlled today (cluster names,
+  # ids filtered by GROK_CANONICAL_RE), but a `"` or `\` in any of them would
+  # emit a line the reader silently SKIPS as malformed — telemetry that quietly
+  # loses records is worse than none, since it reads as "that voice never ran".
+  local _b _u _e _m
+  _b="$(_json_escape "$TELEMETRY_BACKEND")"; _u="$(_json_escape "$TELEMETRY_UNIT")"
+  _e="$(_json_escape "$TELEMETRY_EFFORT")";  _m="$(_json_escape "$TELEMETRY_MODEL")"
   printf '{"backend":"%s","unit":"%s","effort":"%s","model":"%s","prompt_bytes":%s,"seconds":%s,"timeout_seconds":%s,"backend_rc":%s,"adapter_rc":%s,"timed_out":%s}\n' \
-    "$TELEMETRY_BACKEND" "$TELEMETRY_UNIT" "$TELEMETRY_EFFORT" "$TELEMETRY_MODEL" \
+    "$_b" "$_u" "$_e" "$_m" \
     "$(( ${TELEMETRY_BYTES:-0} + 0 ))" "$secs" "$(( ADAPTER_TIMEOUT + 0 ))" "${TELEMETRY_RC:-null}" "${adapter_rc:-null}" \
     "$( [[ "${TELEMETRY_RC:-}" == "124" ]] && echo true || echo false )" \
     >> "$TELEMETRY_FILE" 2>/dev/null || true
@@ -781,7 +809,18 @@ ready_hint() {
       if [[ ! -s "$GROK_AUTH_FILE" ]]; then
         echo "run: grok login"
       else
-        echo "this grok CLI does not offer $GROK_DEFAULT_MODEL (see: grok models) — update the grok CLI"
+        # TWO different failures reach here, with OPPOSITE remedies. Since
+        # discovery, readiness fails when no SCHEMA-VERIFIED model is on offer —
+        # which happens both when the CLI is too old (no canonical model at all)
+        # and when it is NEWER than this adapter knows (canonical models listed,
+        # none verified). Telling the second user to "update the grok CLI" sends
+        # them to update an already-current install, and never names the actual
+        # one-line fix.
+        if [[ -n "$(_grok_highest_canonical)" ]]; then
+          echo "grok lists $(_grok_highest_canonical) but no schema-verified model — verify --json-schema on it, then add it to GROK_SCHEMA_VERIFIED in agents.sh"
+        else
+          echo "this grok CLI offers no canonical model (see: grok models) — update the grok CLI"
+        fi
       fi
       ;;
   esac
@@ -936,7 +975,7 @@ subcmd_run() {
   local prompt_path
   if [[ -n "$prompt_file" ]]; then
     [[ -f "$prompt_file" ]] || { echo "Prompt file not found: $prompt_file" >&2; exit 2; }
-    nbytes=$(wc -c < "$prompt_file")
+    nbytes=$(wc -c < "$prompt_file" | tr -d "[:space:]")
     (( nbytes > max_bytes )) && { echo "Prompt file too large ($nbytes bytes > $max_bytes) — narrow the diff range, or raise SWARM_MAX_PROMPT_BYTES" >&2; exit 2; }
     prompt_path="$prompt_file"
   else
@@ -948,8 +987,13 @@ subcmd_run() {
     # window between creation and the first write.
     TMP_PROMPT="$(mktemp)" || { echo "Could not create a temp file for the prompt" >&2; exit 2; }
     chmod 600 "$TMP_PROMPT"
-    cat > "$TMP_PROMPT"
-    nbytes=$(wc -c < "$TMP_PROMPT")
+    # Bound the COPY, not just the check. `cat > file` would write an unbounded
+    # stream to disk and only then measure it, which contradicts the size rule
+    # this function exists to enforce (a huge stdin could fill TMPDIR before the
+    # guard ever ran). Reading cap+1 bytes is enough to decide: exactly cap+1
+    # means the input was larger than the cap.
+    head -c "$(( max_bytes + 1 ))" > "$TMP_PROMPT"
+    nbytes=$(wc -c < "$TMP_PROMPT" | tr -d "[:space:]")
     (( nbytes > max_bytes )) && { echo "Prompt too large ($nbytes bytes > $max_bytes) — narrow the diff range, or raise SWARM_MAX_PROMPT_BYTES" >&2; exit 2; }
     prompt_path="$TMP_PROMPT"
   fi
@@ -1019,7 +1063,7 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
     prompt_path="$TMP_PROMPT"
     # Re-measure: the check above bounded the DIFF alone, but what the backend
     # ingests is instruction+diff.
-    nbytes=$(wc -c < "$prompt_path")
+    nbytes=$(wc -c < "$prompt_path" | tr -d "[:space:]")
     (( nbytes > max_bytes )) && { echo "Prompt too large with lens instruction ($nbytes bytes > $max_bytes) — narrow the diff range, or raise SWARM_MAX_PROMPT_BYTES" >&2; exit 2; }
   fi
 
@@ -1155,9 +1199,19 @@ _grok_has_prompt_file() {
   if command -v timeout >/dev/null; then to="timeout"
   elif command -v gtimeout >/dev/null; then to="gtimeout"
   fi
-  local help=""
+  local help="" rc=0
   if [[ -n "$to" ]]; then
-    help="$("$to" -k 3 "$PROBE_TIMEOUT" grok --help 2>/dev/null </dev/null || true)"
+    # Check rc BEFORE the output, exactly like grok_model_fetch: a probe killed
+    # at the deadline (124) or SIGKILLed by `-k` (137) still returns EMPTY
+    # stdout, and reading that as "the flag is absent" would refuse a CLI that
+    # has it — telling the user to upgrade an already-current install while the
+    # voice dies. A probe that did not complete says nothing; assume the
+    # capability and let the real call report the truth.
+    help="$("$to" -k 3 "$PROBE_TIMEOUT" grok --help 2>/dev/null </dev/null)" || rc=$?
+    if (( rc != 0 )); then
+      echo "warning: \`grok --help\` probe did not complete (rc=$rc) — assuming --prompt-file is supported" >&2
+      return 0
+    fi
   else
     # No way to bound it. Do NOT run it uncapped — but do not fail the voice
     # either: assume the capability and let the real call report the truth. A
@@ -1241,7 +1295,7 @@ run_grok() {
     # cause: an older CLI that predates the pinned model reports Ready (auth
     # heuristic) yet rejects the model id at runtime.
     (( rc == 124 )) && echo "grok timed out after ${ADAPTER_TIMEOUT}s" >&2 \
-      || echo "grok failed — check that the installed grok CLI knows model '$grok_model' ($GROK_DEFAULT_MODEL needs grok >= 0.2.101)" >&2
+      || echo "grok failed — check that the installed grok CLI offers model '$grok_model' (see: grok models)" >&2
     exit 1
   fi
   printf '%s' "$raw" | python3 -c '

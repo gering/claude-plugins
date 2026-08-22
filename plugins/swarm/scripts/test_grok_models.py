@@ -12,6 +12,7 @@ costs a whole voice and looks like nothing at all, so pin the shapes.
 The awk program is extracted from agents.sh and run as-is — never re-typed here,
 or the test would validate a copy while the shipped parser drifted.
 """
+import os
 import pathlib
 import re
 import subprocess
@@ -28,7 +29,7 @@ def check(name, cond):
         FAILS.append(name)
 
 
-sh = ADAPTER.read_text(encoding="utf-8")
+SRC = ADAPTER.read_text(encoding="utf-8")
 
 # Pull the awk program out of the assignment, exactly as shipped. Anchor on the
 # variable name and stop at `| awk '` rather than re-typing the printf in between:
@@ -36,9 +37,10 @@ sh = ADAPTER.read_text(encoding="utf-8")
 # escaping puzzle, and getting it wrong makes the extraction silently return
 # nothing — which would leave every assertion below passing over empty output.
 # (That is not hypothetical: the first version of this test did exactly that.)
-m = re.search(r"_grok_models=\"\$\(printf.*?\| awk '\n(.*?)'\)\"", sh, re.S)
-check("adapter: the grok-models awk program was found", m)
-# Fail LOUD rather than vacuously green if the extraction breaks.
+m = re.search(r"_grok_models=\"\$\(printf.*?\| awk '\n(.*?)'\)\"", SRC, re.S)
+# A hard exit, NOT a check(): every assertion below runs the extracted program,
+# so without it they would all pass over empty output. There is nothing to
+# accumulate here — the file cannot test anything.
 if not m:
     print("grok-models tests FAILED:\n  - could not extract the awk program from agents.sh "
           "(the assignment shape changed — fix this test's anchor, do not ignore it)")
@@ -123,13 +125,10 @@ check("ids with dots/dashes survive", "grok-4.5" in parse("  - grok-4.5\n"))
 # too strict drops grok from the ensemble (a whole model family, silently), too
 # loose picks a model that accepts --json-schema but returns structuredOutput:
 # null — which fails only AFTER a full review has been paid for.
-import os
-import subprocess as _sp
-
 REPO = HERE.parents[2]
 
 
-def sh(*lines, models=None, env=None):
+def run_bash(*lines, models=None, env=None):
     """Source agents.sh and run helper lines against a faked model list.
 
     `_grok_models` is normally filled by a network call; overriding it (and the
@@ -144,7 +143,7 @@ def sh(*lines, models=None, env=None):
     e = os.environ.copy()
     if env:
         e.update(env)
-    return _sp.run(["bash", "-c", harness], cwd=str(REPO), env=e,
+    return subprocess.run(["bash", "-c", harness], cwd=str(REPO), env=e,
                    capture_output=True, text=True, timeout=30)
 
 
@@ -152,8 +151,11 @@ def _q(text):
     return "'" + text.replace("'", "'\\''") + "'"
 
 
+PIN = run_bash('printf "%s" "$GROK_DEFAULT_MODEL"').stdout.strip()
+
+
 def newer(a, b):
-    r = sh(f'_grok_version_newer {a} {b} && echo yes || echo no')
+    r = run_bash(f'_grok_version_newer {a} {b} && echo yes || echo no')
     return r.stdout.strip() == "yes"
 
 
@@ -180,24 +182,24 @@ LIVE_CATALOG = "\n".join([
     "grok-build-0.1", "grok-composer-2.5-fast",
     "grok-imagine-image", "grok-imagine-video-1.5-preview",
 ])
-r = sh('_grok_highest_canonical', models=LIVE_CATALOG)
+r = run_bash('_grok_highest_canonical', models=LIVE_CATALOG)
 check("live catalog: the highest canonical id wins", r.stdout.strip() == "grok-4.6")
 
 for rejected in ("grok-3-mini", "grok-4.20-0309-reasoning", "grok-4.20-multi-agent-0309",
                  "grok-build-0.1", "grok-composer-2.5-fast", "grok-imagine-image"):
-    rr = sh(f'if [[ {_q(rejected)} =~ $GROK_CANONICAL_RE ]]; then echo match; else echo no; fi')
+    rr = run_bash(f'if [[ {_q(rejected)} =~ $GROK_CANONICAL_RE ]]; then echo match; else echo no; fi')
     check(f"filter rejects {rejected}", rr.stdout.strip() == "no")
 for accepted in ("grok-4.3", "grok-4.5", "grok-4.6", "grok-5", "grok-4.20"):
-    rr = sh(f'if [[ {_q(accepted)} =~ $GROK_CANONICAL_RE ]]; then echo match; else echo no; fi')
+    rr = run_bash(f'if [[ {_q(accepted)} =~ $GROK_CANONICAL_RE ]]; then echo match; else echo no; fi')
     check(f"filter accepts {accepted}", rr.stdout.strip() == "match")
 
 # A catalog that only regresses to grok-3 must not pull the adapter backwards.
-r = sh('_grok_highest_canonical', models="grok-3-mini\ngrok-3-mini-fast")
+r = run_bash('_grok_highest_canonical', models="grok-3-mini\ngrok-3-mini-fast")
 check("a grok-3-only catalog yields no canonical model", r.stdout.strip() == "")
 
 # --- the schema gate: verified selects, unverified only REPORTS ---------------
 def select(models, override=""):
-    r = sh(f'grok_select_model {_q(override)}',
+    r = run_bash(f'grok_select_model {_q(override)}',
            'printf "%s|%s" "$GROK_SELECTED_MODEL" "$GROK_SELECT_NOTE"',
            models=models)
     model, _, note = r.stdout.partition("|")
@@ -223,13 +225,13 @@ check("no note when nothing newer exists", note == "")
 # Canonical models exist but none verified → keep the pin and say so, rather than
 # run something unproven.
 m, note = select("grok-9\ngrok-8")
-check("no verified model → keeps the pin", m == "grok-4.6")
+check("no verified model → keeps the pin", m == PIN)
 check("no verified model → reports why", "no schema-verified model" in note)
 
 # An empty/unusable list must keep the pin: dropping grok entirely is worse than
 # running the known-good model (grok_model_fetch already reported the degrade).
 m, note = select("")
-check("empty model list keeps the pin", m == "grok-4.6")
+check("empty model list keeps the pin", m == PIN)
 
 # An explicit override wins over discovery — but the run_grok preflight still
 # gates it on the verified table (asserted live elsewhere).
@@ -240,17 +242,32 @@ check("explicit override beats discovery", m == "grok-4.5")
 # The 1.0.3 regression: readiness said "grok-4.5 not offered" for a CLI that
 # offered it, and grok vanished from every review. Readiness now asks whether ANY
 # verified model is on offer, which is exactly what grok_select_model resolves.
-r = sh('grok_model_offered && echo ready || echo not-ready', models=LIVE_CATALOG)
+r = run_bash('grok_model_offered && echo ready || echo not-ready', models=LIVE_CATALOG)
 check("readiness: verified model on offer → ready", r.stdout.strip() == "ready")
-r = sh('grok_model_offered && echo ready || echo not-ready', models="grok-9\ngrok-3-mini")
+r = run_bash('grok_model_offered && echo ready || echo not-ready', models="grok-9\ngrok-3-mini")
 check("readiness: no verified model → not ready", r.stdout.strip() == "not-ready")
-r = sh('grok_model_offered && echo ready || echo not-ready', models="")
+r = run_bash('grok_model_offered && echo ready || echo not-ready', models="")
 check("readiness: unusable list trusts auth (ready)", r.stdout.strip() == "ready")
 
 # The pin itself must be verified, or the fallback path selects a model that
 # run_grok then refuses — a self-inflicted outage on every degraded run.
-r = sh('_grok_schema_verified "$GROK_DEFAULT_MODEL" && echo yes || echo no')
+r = run_bash('_grok_schema_verified "$GROK_DEFAULT_MODEL" && echo yes || echo no')
 check("the pinned fallback model is itself schema-verified", r.stdout.strip() == "yes")
+
+# THE PIN MUST BE THE OLDEST VERIFIED ID, not the newest. It is reached ONLY when
+# discovery could not read the model list, i.e. exactly when we know least about
+# the host — and a CLI too old to offer the newest id would then be handed an
+# unknown model, reject every call, and lose the whole grok family for the run.
+# Guessing low costs a slightly older model; guessing high costs the backend.
+# (Regression: 0.9.2 briefly raised the pin to the newest verified id.)
+r = run_bash('printf "%s" "$GROK_SCHEMA_VERIFIED"')
+verified_ids = [x for x in r.stdout.split() if x]
+check("GROK_SCHEMA_VERIFIED is non-empty", bool(verified_ids))
+oldest = verified_ids[0]
+for cand in verified_ids[1:]:
+    if not newer(cand, oldest):
+        oldest = cand
+check(f"the fallback pin is the OLDEST verified id (expected {oldest})", PIN == oldest)
 
 
 # One verdict for the whole file. It has to be the LAST statement: an earlier

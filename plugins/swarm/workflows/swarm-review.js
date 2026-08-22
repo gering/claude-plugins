@@ -45,10 +45,21 @@ const TELEMETRY = INPUT.telemetryFile
 // the ceiling — only an async transport can (see the async-poll-external-voices
 // task); it makes the ceiling say what it is.
 const BASH_TIMEOUT_MS = 600000            // hard maximum of the Bash tool — not a choice
-const TIMEOUT_MARGIN_S = 30               // inner must lose the race, deterministically
+// The inner cap must lose the race deterministically, so the margin has to cover
+// everything the adapter spends OUTSIDE the timed backend call — both bounded
+// probes (`grok models`, `grok --help`, SWARM_PROBE_TIMEOUT=10s each, plus their
+// -k 3 grace), jail construction and output validation. 30s left only ~5s of
+// slack against that worst case; 60s keeps the ordering intact without
+// meaningfully shrinking the review budget.
+const TIMEOUT_MARGIN_S = 60
+// Default to the derived ceiling, not to 600: the inner cap must stay BELOW the
+// Bash window, so a default of 600 was always capped to 570 — and announced as
+// "you asked for more than one Bash call can hold" on every single default run.
+// A warning that fires unconditionally is noise, and it hid the case worth
+// hearing about (a user who really did set a too-large value).
 const REQUESTED_TIMEOUT_S = Number.isInteger(INPUT.timeoutSeconds) && INPUT.timeoutSeconds >= 0
   ? INPUT.timeoutSeconds
-  : 600
+  : BASH_TIMEOUT_MS / 1000 - TIMEOUT_MARGIN_S
 const MAX_INNER_S = BASH_TIMEOUT_MS / 1000 - TIMEOUT_MARGIN_S
 // 0 means "no adapter cap" and is passed through rather than overridden — but it
 // hands the kill to the outer window, i.e. exactly the unhelpful error above.
@@ -575,7 +586,13 @@ const externalVoiceSpecs = liveExternals
     cmd: `SWARM_TIMEOUT=${EFFECTIVE_TIMEOUT_S} bash "${ADAPTER}" run ${b.backend} ${b.flags} --lens-instr ${shQuote(instrFor(u))} --lens-instr-sum ${utf8Checksum(instrFor(u))} --prompt-file "${EXTERNAL_PROMPT}"` +
       // Appended, not interpolated into the base string, so a run without a
       // telemetry sink produces the exact command it always did.
-      (TELEMETRY ? ` --unit ${u.name} --telemetry "${TELEMETRY}"` : ''),
+      // shQuote BOTH values. This string is executed as a shell command by the
+      // transport agent, so a path or unit name carrying `"`, `$(...)`, a
+      // backtick or whitespace would close the argument and run as code — the
+      // neighbouring --lens-instr value is quoted for exactly this reason, and
+      // leaving these two raw was an inconsistency, not a judgement that they
+      // are safe. TMPDIR is attacker-influencable on a shared host.
+      (TELEMETRY ? ` --unit ${shQuote(u.name)} --telemetry ${shQuote(TELEMETRY)}` : ''),
   })))
 if (externalVoiceSpecs.length) {
   log(`External fan-out: ${externalVoiceSpecs.length} call(s) — ${liveBackends.join(' + ')} ` +
@@ -948,7 +965,12 @@ findings.forEach((c, i) => { c.num = i + 1 })
 // Per-backend rollup for the balance "Agents" line: concrete short model label
 // + voice/finding counts + whether it ran clean. Wall-time (per-agent durationMs)
 // needs a registered workflow to surface — tracked as P4 wiring.
-const MODEL_LABEL = { claude: 'opus', codex: 'gpt', grok: 'grok-4.5' }
+// Display labels for the balance line. `grok` is deliberately the FAMILY name,
+// not a version: the adapter discovers the model per run, so any id hard-coded
+// here is a claim the report cannot keep — it printed "grok-4.5" for a run that
+// executed grok-4.6. A label that says less is better than one that says
+// something false; the exact model per call lives in the telemetry record.
+const MODEL_LABEL = { claude: 'opus', codex: 'gpt', grok: 'grok' }
 const agents = {}
 for (const v of voices) {
   const a = agents[v.backend] || (agents[v.backend] = { backend: v.backend, model: MODEL_LABEL[v.backend] || v.backend, voices: 0, failedVoices: 0, findings: 0, ok: true })

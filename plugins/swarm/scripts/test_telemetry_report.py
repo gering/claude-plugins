@@ -5,7 +5,9 @@ The load-bearing property is NOT the formatting — it is that a review never
 fails because of its own diagnostics, and that a near-wall call is impossible to
 miss. Both are asserted here.
 """
+import atexit
 import importlib.util
+import itertools
 import pathlib
 import subprocess
 import sys
@@ -32,11 +34,18 @@ def run(args):
     )
 
 
+# One directory for every fixture, removed when the process exits. The previous
+# form used delete=False and never unlinked, so each run left ~11 .jsonl files
+# behind in TMPDIR — a test suite that quietly accumulates garbage.
+_FIXTURES = tempfile.TemporaryDirectory()
+atexit.register(_FIXTURES.cleanup)
+_seq = itertools.count()
+
+
 def write(lines):
-    fh = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
-    fh.write("\n".join(lines) + "\n")
-    fh.close()
-    return fh.name
+    path = pathlib.Path(_FIXTURES.name) / f"fixture-{next(_seq)}.jsonl"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(path)
 
 
 REC_FAST = '{"backend":"codex","unit":"threat","effort":"high","model":"m","prompt_bytes":1024,"seconds":30,"backend_rc":0,"adapter_rc":0,"timed_out":false}'
