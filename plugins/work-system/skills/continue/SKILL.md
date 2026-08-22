@@ -57,14 +57,25 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
 > not persist which worker a task used (per-task agent memory is a later idea), so
 > resume can't dispatch per CLI. The tab-reopen itself is CLI-agnostic (it just
 > reopens a tab at the worktree cwd), but the `claude -c` it runs resumes a
-> **claude** worker only. So if the task was kicked off with **codex/grok/kimi**
-> (`/kickoff … --codex`/`--grok`/`--kimi`/…), that `claude -c` starts a *new claude*
-> session, not the original worker. **Surface this inline** whenever you reopen:
-> tell the user that `claude -c` was sent and, for such a task, to run the
-> worker's own resume in the tab instead — `codex resume --last` (codex),
-> `grok -c` (grok), or `kimi -c` (kimi). Everything git/PR-derived (`/status`,
-> `/list`, the `[ws]` statusline) already works for any worker; only
-> session-resume is claude-shaped.
+> **claude** worker only. Two cases degrade, and they degrade differently:
+>
+> - **codex/grok/kimi** (`/kickoff … --codex`/`--grok`/`--kimi`/…) → that
+>   `claude -c` starts a *new claude* session, not the original worker. Visibly
+>   wrong, so the user can react.
+> - **`cc-harness:<id>`** → the resume is *silently* wrong, which is worse. A
+>   harness worker is a real claude session, so `claude -c` DOES resume its
+>   transcript — but without `cc-harness-agents exec` the routing env
+>   (`ANTHROPIC_BASE_URL`/`ANTHROPIC_MODEL`/context ceiling) is gone, so the
+>   conversation continues on the user's **default Claude model** instead of the
+>   foreign one. Nothing looks broken. To resume the actual worker, the user runs
+>   the launch form by hand in the tab:
+>   `cc-harness-agents exec <id> -- claude -c`.
+>
+> **Surface this inline** whenever you reopen: say that `claude -c` was sent and
+> name the per-worker resume — `codex resume --last` (codex), `grok -c` (grok),
+> `kimi -c` (kimi), or `cc-harness-agents exec <id> -- claude -c` (cc-harness).
+> Everything git/PR-derived (`/status`, `/list`, the `[ws]` statusline) already
+> works for any worker; only session-resume is claude-shaped.
 
 1. **Resolve the task's worktree:**
    - Get the prefix-stripped `task_name`: if you arrived here from the `linked` branch
@@ -141,6 +152,9 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
    If this task was kicked off with a codex/grok/kimi worker, that `claude -c` is a NEW
    Claude session, not your worker — resume the worker instead: `codex resume --last`
    (codex), `grok -c` (grok), or `kimi -c` (kimi) in the tab.
+   If it was a cc-harness worker, `claude -c` DOES resume the transcript but WITHOUT
+   the gateway routing — it continues on your default Claude model, not the foreign
+   one. Resume it properly with: `cc-harness-agents exec <id> -- claude -c`.
    ```
    Word it as *sent*, not "is running" — the helper delivered the keystrokes but can't
    confirm Claude actually came up (see the shell-startup race in the knowledge entry).

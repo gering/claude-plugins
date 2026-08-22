@@ -7,15 +7,20 @@
 # launch helper never hardcode a CLI list or an alias `if` chain.
 #
 # Subcommands:
-#   list [--json]                 Probe every entry -> human table or JSON array
-#                                 (columns: name, cli, model, available, note)
+#   list [--json|--tsv]           Probe every entry -> human table (display only),
+#                                 JSON array, or raw TSV. Columns are the same
+#                                 five everywhere: name, cli, model, available,
+#                                 note. `--tsv` is the machine-readable view with
+#                                 NO python3 dependency and is what /kickoff's
+#                                 picker parses; `--json` adds typed booleans.
 #   resolve <selector> [--session <name>]
 #                                 Map a selector to launch argv + metadata.
 #                                 Selectors: a shorthand flag (--fable, --opus,
 #                                 --codex, --sol, --grok, --kimi), a
 #                                 canonical name (claude:opus), a bare CLI
-#                                 (codex -> that CLI's default model), or
-#                                 cli:model (the --agent escape hatch).
+#                                 (codex -> that CLI's default model), cli:model
+#                                 (the --agent escape hatch), or cc-harness:<id>
+#                                 when the optional PATH helper lists it.
 #                                 Emits key=value lines incl. one `argv=` line
 #                                 per exec word. Exit 3 if the entry's CLI is
 #                                 unavailable (still prints available=no + note).
@@ -33,10 +38,23 @@
 #   grok    -> grok  -m <model> <bootstrap-prompt>
 #   kimi    -> sh -c 'if <seed>; then exec kimi -c --auto; else <marker+exit>; fi' \
 #                    kimi-worker <model> <bootstrap-prompt>          (seed+continue)
+#   cc-harness -> cc-harness-agents exec <id> -- claude [-n <session>] \
+#                    /work-system:continue
+#              (foreign model *inside* the CC harness, routed by an optional PATH
+#              helper — a full CC session, so lifecycle skills work unchanged. No
+#              --model: the helper env-sets it, then `exec`s into claude. argv[0]
+#              is the helper, so this entry is pane-run/kind=claude, never
+#              agent-start — see the transport note below.)
 #   The bootstrap prompt (codex/grok/kimi have no work-system skills) tells the
 #   agent to read TASK.md and drive the task to a PR. `supports=` metadata records
 #   which lifecycle hooks each agent honors, so /close and /continue can degrade
 #   for non-claude workers instead of faking claude-only behavior.
+#
+# Optional PATH helper `cc-harness-agents`. When present, `list` merges its rows;
+# when absent, one `command -v` is the only cost and behaviour is unchanged. The
+# helper owns gateway/creds/models — this registry never re-probes them.
+# THE CONTRACT LIVES IN plugins/work-system/docs/cc-harness-agents.md — read it
+# there rather than restating it here, where nothing checks the copies agree.
 #
 # HERDR TRANSPORT metadata (`herdr_mode=` / `herdr_kind=`).
 # herdr 0.7.5+ starts agents in an ALREADY-OPEN pane (`agent start <name> --kind
@@ -75,6 +93,9 @@
 # State & config (override for tests / relocation):
 #   WORK_SYSTEM_AGENT_PROJECT_STATE  the repo's default-agent file
 #                                    default: <repo-root>/.claude/work-system-agent
+#   WORK_SYSTEM_CC_HARNESS_AGENTS    path to the optional cc-harness-agents
+#                                    helper; default: `cc-harness-agents` on PATH.
+#                                    Point it at a stub to test without PATH munging.
 #   No global state and no shipped fallback — a repo with no default gets the
 #   picker instead.
 #
@@ -113,6 +134,21 @@ GROK_AUTH_FILE="${GROK_AUTH_FILE:-$HOME/.grok/auth.json}"
 # `~/.kimi-code/oauth/kimi-code` exists but stays 0 bytes even when logged in, so
 # probing that path would report every authenticated install as logged out.
 KIMI_CREDENTIALS_FILE="${KIMI_CREDENTIALS_FILE:-$HOME/.kimi-code/credentials/kimi-code.json}"
+
+# Optional foreign-model-in-CC-harness helper (PATH binary; absent = no-op).
+# Overridable for tests that want a specific path without PATH munging.
+HARNESS_BIN="${WORK_SYSTEM_CC_HARNESS_AGENTS:-cc-harness-agents}"
+HARNESS_NS="cc-harness"
+# Full CC session → same lifecycle hooks as a native claude worker.
+HARNESS_SUPPORTS="continue,close-exit,statusline,commit,pr"
+# Transport: `pane-run`, never `agent-start`. The argv is a WRAPPER
+# (`cc-harness-agents exec <id> -- claude …`), so argv[0] is the helper, not
+# herdr's canonical `claude` executable — the agent-start contract (argv[0] MUST
+# equal the kind) cannot express it. The helper `exec`s into claude, so herdr
+# detects kind=claude in that pane once it is up. This is exactly the
+# "dynamically-registered wrapper" case the transport metadata was designed for.
+HARNESS_HERDR_MODE="pane-run"
+HARNESS_HERDR_KIND="claude"
 
 # The bootstrap prompt for CLIs without work-system skills (codex, grok, kimi). One
 # argv word; the launch helper passes it verbatim.
@@ -197,6 +233,277 @@ usage() {
 # Emit one `flag|cli|model|supports|herdr_mode|herdr_kind` record per line.
 registry_rows() { printf '%s\n' "$REGISTRY"; }
 
+# ---------- optional cc-harness-agents helper ----------
+# COST NOTE: each invocation of this script that touches harness rows runs the
+# helper once, and a single /kickoff invokes the script two to three times
+# (picker view, then resolve, plus `default get` on the no-flag path) — so the
+# bounded probe runs that often, with no reuse across processes. A cross-process
+# cache was judged not worth the invalidation complexity; the row cap and the
+# 10s bound keep each call cheap. A single picker view that returns everything
+# at once would remove most of it — see tasks/move-picker-assembly-into-registry.md.
+#
+# Discovery is a cheap `command -v`. The helper owns availability (gateway +
+# per-provider creds) and the routing env; we never re-probe those here.
+# Names are already namespaced by the helper (`cc-harness:grok`) and do NOT
+# follow the native `cli:model` shape — the id is an agent key, not a model.
+harness_on_path() { command -v "$HARNESS_BIN" >/dev/null 2>&1; }
+
+# Run `cc-harness-agents list` bounded. Prints its stdout; returns its exit
+# code (0 = ok, 3 = capability absent, 124 = timed out, other = fail). Callers
+# treat non-zero as "no harness rows" (silent degrade).
+# Everything the helper prints is held in shell memory and rendered through the
+# picker, so the SIZE needs a bound too — run_bounded caps only runtime.
+HARNESS_MAX_BYTES=65536
+harness_list_raw() {
+  harness_on_path || return 1
+  local tmp rc size
+  tmp="$(mktemp)" || return 1
+  # Truncation IS done with `head -c` (an earlier comment here claimed the
+  # opposite — it survived the rewrite that introduced it).
+  # `head -c` runs INSIDE the bounded command, not in a pipeline around it. Two
+  # reasons: run_bounded's no-timeout(1) fallback branch captures the command's
+  # stdout to a file and cats it, so a bound applied outside would see the whole
+  # output only after it was already materialized — and that fallback is the
+  # branch a stock macOS (no coreutils) takes. Putting the cap inside means the
+  # shell never receives more than the limit on EITHER branch.
+  # `bash -c` with pipefail, not `sh -c`: the pipeline's own status is `head`'s,
+  # so a plain shell would swallow the HELPER's exit code — and code 3
+  # ("capability absent") is exactly what distinguishes "not configured here"
+  # from "configured but this provider is logged out". pipefail is not POSIX, so
+  # dash-as-sh cannot express this.
+  set +e
+  run_bounded 10 bash -c 'set -o pipefail; "$1" list 2>/dev/null | head -c "$2"' _ \
+    "$HARNESS_BIN" "$HARNESS_MAX_BYTES" >"$tmp"
+  rc=$?
+  set -e
+  # 141 is head closing the pipe at the cap (SIGPIPE) on a truncated-but-fine
+  # run; pipefail surfaces it, and it must not read as a helper failure.
+  [ "$rc" -eq 141 ] && rc=0
+  [ "$rc" -eq 0 ] || { rm -f "$tmp"; return "$rc"; }
+  # Strip a trailing partial line ONLY when the cap actually bit. Testing "does
+  # not end in a newline" alone deleted a COMPLETE final record from any helper
+  # that omits the trailing newline — and the contract never required one, so a
+  # conforming helper silently lost its last agent (invisible in the picker,
+  # unresolvable, no diagnostic). Truncation is what makes a partial line
+  # possible, so truncation is what gates the strip.
+  size=$(wc -c <"$tmp")
+  if [ "$size" -ge "$HARNESS_MAX_BYTES" ] && [ -s "$tmp" ] \
+     && [ "$(tail -c 1 "$tmp")" != "" ]; then
+    sed '$d' "$tmp"
+  else
+    cat "$tmp"
+  fi
+  rm -f "$tmp"
+}
+
+# harness_split <line> <var>... — split LINE on TABs into the named variables in
+# order; the LAST variable absorbs whatever remains (so a trailing note may itself
+# contain tabs). Used for BOTH the helper's 4-column raw rows and this file's
+# 5-column canonical rows, so the rule lives once.
+#
+# NOT `IFS=$'\t' read`: tab is an IFS *whitespace* character, so bash collapses
+# consecutive tabs into one delimiter and an EMPTY cell silently shifts every
+# later column — `name<TAB><TAB>yes<TAB>-` (empty model) parses as model="yes",
+# avail="-", which fail-closes a working agent to unavailable with a nonsense
+# model; the mirror case (empty avail, note "yes") would mark an unavailable
+# agent available, defeating harness_map_avail. A short field list simply leaves
+# the tail empty.
+harness_split() {
+  local rest="$1"; shift
+  local v
+  while [ "$#" -gt 1 ]; do
+    v="$1"; shift
+    case "$rest" in
+      *$'\t'*) printf -v "$v" '%s' "${rest%%$'\t'*}"; rest="${rest#*$'\t'}" ;;
+      *)       printf -v "$v" '%s' "$rest"; rest="" ;;
+    esac
+  done
+  printf -v "$1" '%s' "$rest"
+}
+
+# Neutralize an untrusted helper field before it reaches a terminal, the picker
+# prompt, or a `resolve` consumer. The helper is third-party code on the PATH and
+# its rows are rendered to the user as authoritative hints — the same risk class
+# the `--session` guard already rejects control characters for.
+# Strips ALL C0 controls + DEL (ANSI/ESC sequences, CR, embedded newlines that
+# could forge extra key=value lines). Byte-safe for UTF-8: every stripped byte is
+# < 0x80 and can never be part of a multi-byte sequence.
+#
+# Over-long values are ELIDED IN THE MIDDLE, never tail-truncated. Helper notes
+# are shaped "<what broke> (<path>) — <what to do>", so the ACTIONABLE half sits
+# at the END: tail-truncation would leave the user knowing something is broken
+# and not what to do, while head+tail loses only the middle of a path — the least
+# load-bearing part. This is defensive, not a fix for an observed overflow: the
+# current helper's longest note measures ~140 chars, comfortably inside the cap.
+# (An earlier report of a note landing exactly on the cap was retracted — it came
+# from a fixture with HOME pointed at a worktree; real notes derive the path from
+# $HOME.) The shape argument holds regardless of today's lengths, which is why
+# the elision stays.
+#
+# RESIDUAL, deliberately not handled here: Unicode bidi/zero-width overrides
+# (U+200B–200F, U+202A–202E, U+2066–2069) survive — stripping them portably needs
+# a multibyte-aware tool this bash-3.2 path cannot assume. The consuming skill
+# therefore treats the note as untrusted display text, never as an instruction.
+HARNESS_FIELD_MAX=200
+# Result lands in HS_OUT, not on stdout: every call site is per-field per-row, and
+# `$(harness_sanitize …)` forks a subshell each time — which is the cost the
+# parameter-expansion rewrite was supposed to remove, so returning through stdout
+# would have kept the fork it claimed to delete.
+harness_sanitize() {
+  local s head tail keep
+  # Parameter expansion, not `printf | tr`: `[[:cntrl:]]` covers C0 + DEL and
+  # leaves UTF-8 multi-byte sequences intact (verified on bash 3.2).
+  s="${1//[[:cntrl:]]/}"
+  if [ "${#s}" -le "$HARNESS_FIELD_MAX" ]; then HS_OUT="$s"; return 0; fi
+  keep=$(( HARNESS_FIELD_MAX - 3 ))
+  tail=$(( keep / 2 ))
+  head=$(( keep - tail ))
+  HS_OUT="${s:0:head}...${s: -tail}"
+}
+
+# Map a helper available cell to yes|no. Only the literal "yes" is available;
+# "no", "unknown", empty, and anything else → no (fail closed for launch).
+# HS_OUT contract like harness_sanitize — a `$( )` call site would fork per row,
+# which is the cost that convention was introduced to remove.
+harness_map_avail() {
+  case "$1" in yes) HS_OUT=yes ;; *) HS_OUT=no ;; esac
+}
+
+# Normalize helper note: a lone "-" means empty (the helper's "nothing to say").
+# Same HS_OUT contract as harness_sanitize (see there).
+harness_map_note() {
+  case "$1" in -|"") HS_OUT="" ;; *) harness_sanitize "$1" ;; esac
+}
+
+# True iff a helper row's name carries the required namespace. ONE definition,
+# used by both the list builder and the lookup: when these disagree, a row can be
+# invisible in `list`/`--json`/the picker yet still resolve, launch, and validate
+# as a committed repo default — breaking the invariant that whatever `list`
+# prints is exactly what can be chosen.
+# The id is an IDENTIFIER, not free text — it is handed back to the helper as
+# `exec <id>` and rendered as a picker selector, so it must be exactly
+# representable everywhere. One conservative charset settles three failure modes
+# at once instead of bolting on a special case per symptom:
+#   * empty id — used to list, resolve and store as a committed default while
+#     emitting an EMPTY argv word herdr-launch cannot tell from a dropped one;
+#   * invalid UTF-8 — survives control-char stripping, so the row listed, but
+#     `list --json` re-encoded it with U+FFFD and the displayed name no longer
+#     matched the byte-exact selector `resolve` wants;
+#   * a leading `-` — lands in the helper's OPTION position (`exec --version …`),
+#     so a selectable, committable agent produces argv the helper parses as a flag.
+# All three failed at LAUNCH, after herdr had already opened the tab. Rejecting
+# the row at list time is the honest failure, and it keeps every view agreeing.
+# Real ids look like `grok`, `kimi`, `sol`, `gpt-5.6-terra`; this admits those and
+# little else. `[:alnum:]` is ASCII-only under LC_ALL=C, which is the point.
+harness_id_ok() {
+  # LC_ALL=C is load-bearing, not hygiene: `[A-Za-z0-9…]` is a COLLATION range,
+  # so under a UTF-8 locale it admits characters the rule means to exclude
+  # (verified: `grök` passes under de_DE.UTF-8, is rejected under C). Assigning
+  # LC_ALL makes bash re-run setlocale immediately; `local` restores it on return.
+  local LC_ALL=C
+  case "$1" in
+    -*) return 1 ;;                        # never the helper's option position
+    *[!A-Za-z0-9._+/@-]*) return 1 ;;      # ASCII identifier charset only
+    "") return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+harness_row_in_ns() {
+  case "$1" in
+    "$HARNESS_NS":?*) harness_id_ok "${1#"$HARNESS_NS":}" ;;
+    *) return 1 ;;
+  esac
+}
+
+# THE one normalization pipeline: raw helper rows -> canonical
+# `name\tcli\tmodel\tavail\tnote`, sanitized and namespace-gated. Both `list`
+# and `resolve` consume THIS, never the raw output, so the name shown in the
+# picker is byte-for-byte the selector that resolves.
+#
+# Two separate pipelines drifted apart twice before this was unified: `list`
+# sanitized while the lookup matched RAW (a name carrying a control byte was
+# listed and pickable but exited 2 on resolve), and `list` dropped empty names
+# while the lookup accepted them. Agreement has to be structural, not a
+# convention two functions promise to keep.
+# Rows admitted per listing. The byte cap alone still let ~2600 rows through,
+# and normalization is per-row work that runs AFTER run_bounded has returned —
+# measured at ~8s per call on a 4000-row helper, hit two to three times per
+# /kickoff with no timeout and no diagnostic. A real helper lists a handful.
+HARNESS_MAX_ROWS=50
+harness_rows() {
+  local raw hrc=0 line seen=$'\n' kept=0
+  raw="$(harness_list_raw)" || hrc=$?
+  # An empty harness set has SEVERAL causes and this function cannot tell them
+  # apart to its caller (it returns rows, not status). Callers must therefore not
+  # claim WHY it is empty. Distinguish the one case that is not a failure —
+  # helper simply absent (rc 1 from the `command -v` guard) — from a helper that
+  # is installed but did not answer (3 = capability absent, 124 = timed out,
+  # anything else = crashed), and say so on stderr so a wedged gateway is not
+  # reported to the user as "no helper installed".
+  if [ "$hrc" -ne 0 ]; then
+    # Two different things, and only one deserves a warning:
+    #   1 = helper not on PATH        — the normal absent case
+    #   3 = capability absent         — helper installed, no gateway token. A
+    #       KNOWN, documented state ("not configured here"), so the contract in
+    #       docs/cc-harness-agents.md promises a silent no-op. Warning here made
+    #       every /kickoff on an unconfigured machine look broken.
+    #   else (124 timeout, crash)     — a malfunction the user cannot otherwise
+    #       see; that is what the stderr line is for.
+    case "$hrc" in
+      1|3) ;;
+      *) echo "cc-harness-agents on PATH but \`list\` failed (exit $hrc) — no harness agents offered" >&2 ;;
+    esac
+    return 0
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    harness_split "$line" HR_NAME HR_MODEL HR_AVAIL HR_NOTE
+    # THE NAME IS A KEY, NOT A LABEL — it is handed straight back to the helper
+    # as `exec <id>`. So it must survive verbatim: sanitizing it (as an earlier
+    # revision did) made `list` and `resolve` agree with each OTHER while
+    # disagreeing with the HELPER, which knows only the real id — the launch then
+    # failed after herdr had already opened the tab. Reject any name sanitizing
+    # would alter instead, exactly like the empty-id guard: an unrepresentable id
+    # is not a usable selector, and dropping it at list time is the honest
+    # failure. Non-injectivity dies with it — two ids can no longer collapse into
+    # one label that routes to whichever came first.
+    harness_sanitize "$HR_NAME"
+    [ "$HS_OUT" = "$HR_NAME" ] || continue
+    harness_row_in_ns "$HR_NAME" || continue
+    # Exact duplicates from the helper would still shadow each other; keep the
+    # first and drop the rest so one visible row means one reachable agent.
+    case "$seen" in *$'\n'"$HR_NAME"$'\n'*) continue ;; esac
+    seen="$seen$HR_NAME"$'\n'
+    kept=$(( kept + 1 ))
+    if [ "$kept" -gt "$HARNESS_MAX_ROWS" ]; then
+      echo "cc-harness-agents listed more than $HARNESS_MAX_ROWS agents — ignoring the rest" >&2
+      return 0
+    fi
+    # model/note are DISPLAY ONLY — never keys — so they are scrubbed, not gated.
+    harness_sanitize "$HR_MODEL"; local dmodel="$HS_OUT"
+    harness_map_note "$HR_NOTE"; local dnote="$HS_OUT"
+    harness_map_avail "$HR_AVAIL"; local davail="$HS_OUT"
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+      "$HR_NAME" "$HARNESS_NS" "$dmodel" "$davail" "$dnote"
+  done <<<"$raw"
+}
+
+# Filter harness_rows down to ONE agent; prints that canonical row (5 fields) or
+# returns 1. Matching the FIRST field of an already-canonical row is what makes
+# "listed" and "resolvable" the same predicate by construction.
+harness_lookup() {
+  local want="$1" full line name
+  full="$HARNESS_NS:${want#"$HARNESS_NS":}"
+  while IFS= read -r line; do
+    name="${line%%$'\t'*}"
+    [ "$name" = "$full" ] || continue
+    printf '%s\n' "$line"
+    return 0
+  done < <(harness_rows)
+  return 1
+}
+
 # find_row <how> <want> — the ONE reader over the registry table. `how` picks what
 # `want` is matched against: `name` (canonical cli:model), `flag` (shorthand, `-`
 # rows skipped), or `cli` (first row of that CLI = its default model). Prints the
@@ -224,16 +531,40 @@ find_row() {
   return 1
 }
 
-row_for_name()        { find_row name "$1"; }
 row_for_flag()        { find_row flag "$1"; }
 row_for_cli_default() { find_row cli  "$1"; }
 
+# Canonical name lookup. Also accepts a harness name (`cc-harness:grok`) when the
+# helper lists it — used by `default get`/`set` validation so a committed harness
+# default is accepted when the helper is present and rejected (→ picker) when absent.
+row_for_name() {
+  find_row name "$1" && return 0
+  case "$1" in
+    "$HARNESS_NS":*)
+      # EXISTENCE CHECK ONLY, and deliberately output-free. Both callers
+      # (validate_name, `default get`) branch on the exit code and discard stdout,
+      # and row_for_selector returns 1 for `cc-harness:*` so no record of ours can
+      # reach emit_argv. An earlier revision fabricated a pipe record here whose
+      # model slot meant something different from every other record's — a trap
+      # kept harmless only by a comment. Emitting nothing removes the trap instead
+      # of documenting it.
+      harness_lookup "$1" >/dev/null || return 1
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 # Resolve any selector to a registry record. Order: shorthand flag, canonical
 # cli:model name, bare CLI (its default model). Prints the record or fails (1).
+# Harness selectors (`cc-harness:…`) are NOT resolved here — the name is an agent
+# id, not cli:model, and the fabricated record's model slot means something else
+# on that path (see row_for_name). subcmd_resolve handles them via harness_lookup.
 row_for_selector() {
   local sel="$1"
   case "$sel" in
     --*) row_for_flag "$sel" && return 0 ;;
+    "$HARNESS_NS":*) return 1 ;;
     *:*) row_for_name "$sel" && return 0 ;;
     *)   row_for_cli_default "$sel" && return 0 ;;
   esac
@@ -381,6 +712,16 @@ shell_quote() {
   esac
 }
 
+# Append the shared claude launch tail to `words`: the optional `-n <session>`
+# and the plugin-qualified continue. Both claude-rooted arms (native and the
+# cc-harness wrapper) end this way; `/work-system:continue` is qualified because
+# a CC built-in/alias `/continue` shadows the skill, so the bare form would run
+# CC's own resume instead of the work-system flow.
+claude_tail() {
+  [ -n "$session" ] && words+=(-n "$session")
+  words+=(/work-system:continue)
+}
+
 emit_argv() {
   # Print `argv=<word>` lines for a resolved entry, then ONE `argv_shell=` line
   # with the same words shell-quoted. $1=cli $2=model $3=session.
@@ -389,10 +730,7 @@ emit_argv() {
   case "$cli" in
     claude)
       words=(claude --model "$model")
-      [ -n "$session" ] && words+=(-n "$session")
-      # Plugin-qualified: a CC built-in/alias `/continue` shadows the skill, so
-      # the bare form would run CC's own resume, not the work-system flow.
-      words+=(/work-system:continue)
+      claude_tail
       ;;
     codex) words=(codex -m "$model" "$BOOTSTRAP_PROMPT") ;;
     grok)  words=(grok  -m "$model" "$BOOTSTRAP_PROMPT") ;;
@@ -402,6 +740,14 @@ emit_argv() {
       # into the script text — so no amount of prompt content can reorder the
       # flags or be absorbed by `-p`.
       words=(sh -c "$KIMI_LAUNCH_SCRIPT" kimi-worker "$model" "$BOOTSTRAP_PROMPT")
+      ;;
+    cc-harness)
+      # Foreign model inside the CC harness. $2 is the BARE agent id (grok), not
+      # a model slug — the helper env-sets the model, so no --model here. It then
+      # `exec`s into claude, which is why the entry declares herdr_kind=claude
+      # (via pane-run: argv[0] is the helper, so agent-start cannot express it).
+      words=("$HARNESS_BIN" exec "$model" -- claude)
+      claude_tail
       ;;
   esac
   # Guard the expansion: under `set -u` a bash 3.2 `"${words[@]}"` on an EMPTY
@@ -416,6 +762,34 @@ emit_argv() {
   local shell_cmd="" w
   for w in "${words[@]}"; do shell_cmd="$shell_cmd$(shell_quote "$w") "; done
   printf 'argv_shell=%s\n' "${shell_cmd% }"
+}
+
+# Emit one resolved entry's key=value record, then its argv. ONE definition —
+# the harness arm and the native arm differ only in where the values come from,
+# and a second copy is where a later field lands in one path and not the other.
+# $1=name $2=cli $3=model $4=available $5=supports $6=herdr_mode $7=herdr_kind
+# $8=note $9=argv-model (the emit_argv slot: the bare agent id for cc-harness,
+# the model slug for everyone else) ${10}=session
+emit_record() {
+  printf 'name=%s\n' "$1"
+  printf 'cli=%s\n' "$2"
+  printf 'model=%s\n' "$3"
+  printf 'available=%s\n' "$4"
+  printf 'supports=%s\n' "$5"
+  # Modern-herdr transport (see the header). Always emitted — a consumer that
+  # cannot interpret the mode must fail closed rather than guess from the name.
+  printf 'herdr_mode=%s\n' "$6"
+  printf 'herdr_kind=%s\n' "$7"
+  [ -n "$8" ] && printf 'note=%s\n' "$8"
+  emit_argv "$2" "$9" "${10}"
+  [ "$4" = yes ] || exit 3
+}
+
+# The ONE place the unknown-selector line is written. Callers print their own
+# arm-specific hint first; this emits the shared line and exits 2.
+unknown_selector() {
+  echo "Unknown agent selector: $1" >&2
+  exit 2
 }
 
 subcmd_resolve() {
@@ -439,13 +813,42 @@ subcmd_resolve() {
   done
   [ -n "$selector" ] || { echo "resolve: missing selector" >&2; exit 2; }
 
+  # Harness path: name is an agent id (cc-harness:grok), NOT cli:model. Availability
+  # comes from the helper — we never re-probe gateway/creds. Helper absent or the
+  # name not listed → "unknown selector" (exit 2), same as any other miss; an
+  # explicitly listed-but-unavailable agent still resolves and exits 3.
+  case "$selector" in
+    "$HARNESS_NS":*)
+      local hline bare
+      # harness_split, not `IFS=$'\t' read` — see row_for_name.
+      if ! IFS= read -r hline < <(harness_lookup "$selector"); then
+        # Arm-specific hint only; the shared line is emitted once by the caller
+        # below, so the two paths cannot drift into different wording.
+        if harness_on_path; then
+          echo "Try: cc-harness-agents list  (or a native flag/name/cli)" >&2
+        else
+          echo "cc-harness agents require the \`cc-harness-agents\` helper on PATH — see plugins/work-system/docs/cc-harness-agents.md" >&2
+        fi
+        unknown_selector "$selector"
+      fi
+      harness_split "$hline" HR_NAME HR_CLI HR_MODEL HR_AVAIL HR_NOTE
+      bare="${HR_NAME#"$HARNESS_NS":}"
+      # `$bare` (not $HR_MODEL) is the emit_argv slot: this cli's argv needs the
+      # helper's agent id, while `model=` still reports the display model.
+      emit_record "$HR_NAME" "$HARNESS_NS" "$HR_MODEL" "$HR_AVAIL" \
+        "$HARNESS_SUPPORTS" "$HARNESS_HERDR_MODE" "$HARNESS_HERDR_KIND" \
+        "$HR_NOTE" "$bare" "$session"
+      return 0
+      ;;
+  esac
+
   local record
   record="$(row_for_selector "$selector")" || {
-    echo "Unknown agent selector: $selector" >&2
-    # Derive the flag list from REGISTRY rather than restating it — a new entry
-    # must not need a second edit here to appear in the hint.
-    echo "Try: $(registry_rows | cut -d'|' -f1 | grep -v '^-$' | tr '\n' ' ')— a name (claude:opus), or a cli (codex)" >&2
-    exit 2
+    # Hint FIRST — unknown_selector exits, so anything after it is dead code.
+    # Deriving the flag list from REGISTRY keeps a new entry from needing a
+    # second edit here to appear.
+    echo "Try: $(registry_rows | cut -d'|' -f1 | grep -v '^-$' | tr '\n' ' ')— a name (claude:opus), a cli (codex), or cc-harness:<id> when the helper is on PATH" >&2
+    unknown_selector "$selector"
   }
   local flag cli model supports mode kind
   IFS='|' read -r flag cli model supports mode kind <<<"$record"
@@ -453,25 +856,20 @@ subcmd_resolve() {
   local avail note
   IFS=$'\t' read -r avail note < <(entry_status "$cli" "$model")
 
-  printf 'name=%s\n' "$cli:$model"
-  printf 'cli=%s\n' "$cli"
-  printf 'model=%s\n' "$model"
-  printf 'available=%s\n' "$avail"
-  printf 'supports=%s\n' "$supports"
-  # Modern-herdr transport (see the header). Always emitted — a consumer that
-  # cannot interpret the mode must fail closed rather than guess from the name.
-  printf 'herdr_mode=%s\n' "$mode"
-  printf 'herdr_kind=%s\n' "$kind"
-  [ -n "$note" ] && printf 'note=%s\n' "$note"
-  emit_argv "$cli" "$model" "$session"
-
-  [ "$avail" = yes ] || exit 3
+  emit_record "$cli:$model" "$cli" "$model" "$avail" "$supports" \
+    "$mode" "$kind" "$note" "$model" "$session"
 }
 
 subcmd_list() {
-  local as_json=""
+  local as_json="" as_tsv=""
   case "${1:-}" in
     --json) as_json=1 ;;
+    # Machine-readable without python3. `--json` is the picker's first choice but
+    # exits 1 when python3 is missing, and the fallback must NOT be "split the
+    # column -t table on whitespace" — that is the ambiguous parse the JSON path
+    # exists to avoid (helper names and notes may contain spaces). The rows are
+    # already unpadded TSV internally; this just prints them.
+    --tsv)  as_tsv=1 ;;
     "") ;;
     *) echo "Unknown flag: $1" >&2; exit 2 ;;
   esac
@@ -483,13 +881,28 @@ subcmd_list() {
     IFS=$'\t' read -r avail note < <(entry_status "$cli" "$model")
     rows+="$cli:$model	$cli	$model	$avail	$note"$'\n'
   done < <(registry_rows)
+  # Append harness rows when the helper is present and healthy. A missing helper,
+  # exit 3 (no token), or a timed-out list is a silent no-op — one `command -v` is
+  # the only cost of the absent case.
+  #
+  # Re-add the trailing newline `$( )` strips, and only when there ARE rows (an
+  # unconditional append would add a blank line). Without it the LAST harness row
+  # has no newline, and the human table's `while read` drops it — silently, and
+  # only in the table, since the --json path parses it fine. That is the picker's
+  # input, so a dropped row is an agent the user can never choose.
+  local hrows
+  hrows="$(harness_rows)"
+  [ -n "$hrows" ] && rows+="$hrows"$'\n'
 
   if [ -n "$as_json" ]; then
     command -v python3 >/dev/null 2>&1 || { echo "python3 required for --json" >&2; exit 1; }
     printf '%s' "$rows" | python3 -c '
 import json, sys
 out = []
-for line in sys.stdin:
+# Read BYTES and decode leniently: harness_sanitize strips control characters
+# but not invalid UTF-8, and a text-mode read raises on the first bad byte —
+# killing the ENTIRE listing, native rows included, over one bad helper cell.
+for line in sys.stdin.buffer.read().decode("utf-8", "replace").splitlines():
     line = line.rstrip("\n")
     if not line:
         continue
@@ -502,10 +915,37 @@ print()
     return
   fi
 
+  if [ -n "$as_tsv" ]; then
+    printf '%s' "$rows"
+    return
+  fi
+
   # Human table. Use column when present; else a plain TSV still renders.
+  # Human table — DISPLAY ONLY. The picker classifies from `list --json` (see
+  # skills/kickoff/SKILL.md step 12), because this output is padded through
+  # `column -t` and note cells contain spaces.
+  #
+  # Split with harness_split, not `IFS=$'\t' read`: a harness row may carry an
+  # empty model, and the collapsing read shifted every later column — MODEL
+  # rendering as the availability value, which reads as "unavailable" for an
+  # agent that is fine. The ingest was fixed for this first; the display loop is
+  # the same trap one layer later.
+  #
+  # `|| [ -n "$line" ]` keeps a final line lacking a trailing newline (`read`
+  # returns non-zero there even though it filled the variable). The
+  # newline-terminated accumulation above should make it unreachable — it keeps
+  # the table correct anyway if a future change stops terminating `rows`, which
+  # already cost a silently unselectable agent once.
   { printf 'NAME\tCLI\tMODEL\tAVAILABLE\tNOTE\n'
-    printf '%s' "$rows" | while IFS=$'\t' read -r name cli model avail note; do
-      printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$cli" "$model" "$avail" "${note:--}"
+    printf '%s' "$rows" | while IFS= read -r line || [ -n "$line" ]; do
+      [ -n "$line" ] || continue
+      harness_split "$line" _n _c _m _a _note
+      # Placeholder EVERY empty cell, not just the note: `column -t -s $'\t'`
+      # treats consecutive separators as ONE, so an empty model would collapse in
+      # the renderer even though the split above kept it — the same column shift,
+      # one layer further out (MODEL showing the availability value).
+      printf '%s\t%s\t%s\t%s\t%s\n' \
+        "${_n:--}" "${_c:--}" "${_m:--}" "${_a:--}" "${_note:--}"
     done
   } | { command -v column >/dev/null 2>&1 && column -t -s $'\t' || cat; }
 }
@@ -543,6 +983,12 @@ subcmd_default() {
       # so a stale/removed/garbage (or attacker-supplied) name must NOT route the
       # launch: an unknown name is treated as "no default" → the caller shows the
       # picker, rather than failing every kickoff on a bogus committed value.
+      # A `cc-harness:<id>` default is validated against the LIVE helper (native
+      # names check the in-file REGISTRY), so this can cost a bounded subprocess
+      # and, if the helper is transiently down, reports "no default" — which the
+      # caller turns into the picker rather than a wrong launch. That is the
+      # intended fail-closed direction, but it is neither free nor silent: say so
+      # where a reader would otherwise assume a pure file read.
       local v; v="$(_kv_get "$PROJECT_STATE" default)"
       if [ -n "$v" ] && row_for_name "$v" >/dev/null 2>&1; then printf '%s\n' "$v"; fi
       ;;

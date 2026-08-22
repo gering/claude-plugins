@@ -15,9 +15,10 @@ user_invocable: true
 
 - `$ARGUMENTS` — `<branch> [agent-selector]`: optional branch name to adopt, plus an
   optional worker-agent selector (same set as `/kickoff`: `--fable`, `--opus`, `--sol`,
-  `--grok`, `--codex`, `--kimi`, `--agent <cli[:model]>`, `--pick`). The selector chooses the
-  worker the herdr auto-launch (step 13) starts; omit it to use the repo default. The
-  **branch is the token that does not start with `-`**; step 2 separates the two.
+  `--grok`, `--codex`, `--kimi`, `--agent <cli[:model]|cc-harness:<id>>`, `--pick`). The
+  selector chooses the worker the herdr auto-launch (step 13) starts; omit it to use the
+  repo default. The **branch is the token that does not start with `-`**; step 2 separates
+  the two.
 
 ## Critical: never persist a `cd` into the worktree
 
@@ -135,9 +136,10 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     selector may precede or follow the branch — never assume it comes "after" it):
     - a shorthand flag (`--fable`/`--opus`/`--sol`/`--grok`/`--codex`/`--kimi`) →
       `SELECTOR` is that flag verbatim;
-    - `--agent <cli[:model]>` → `SELECTOR` is the **`cli[:model]` value**, not the
+    - `--agent <cli[:model]|cc-harness:<id>>` → `SELECTOR` is the **value**, not the
       `--agent` token (the registry resolves the bare value; the flag verbatim fails as
-      an unknown selector — exit 2);
+      an unknown selector — exit 2). `cc-harness:<id>` only resolves when the helper is
+      on PATH — same as kickoff;
     - no selector token → the repo default (`SELECTOR="$(bash "$REG" default get)"`);
       empty default, or `--pick`, → the picker.
 
@@ -218,9 +220,11 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
          cd .claude/worktrees/<task-name>
          <the argv_shell= line, verbatim>
     ```
-    For a **claude** worker that is `claude --model <m> -n "<task-name>"
-    "/work-system:continue"` — `-n` names the session (shown in `/resume`),
-    `/work-system:continue` runs the resume flow (load TASK.md, commits, progress).
+    For a **claude** worker (including a `cc-harness:…` worker — full CC session,
+    helper only routes the model) that is `claude --model <m> -n "<task-name>"
+    "/work-system:continue"` (harness: `cc-harness-agents exec <id> -- claude -n …`)
+    — `-n` names the session (shown in `/resume`), `/work-system:continue` runs the
+    resume flow (load TASK.md, commits, progress).
     Use the plugin-qualified form: a Claude Code built-in `/continue` shadows the bare
     skill. **codex/grok/kimi** get the bootstrap prompt instead; kimi's is a two-phase
     form the registry emits (see `/kickoff` step 13b). Do **not**

@@ -1,10 +1,10 @@
 ---
 title: "Kickoff Agent Selection: registry, per-repo default, honest degradation"
 createdAt: 2026-07-17
-updatedAt: 2026-08-11
+updatedAt: 2026-08-16
 createdFrom: "session: 2026-07-17 (task/kickoff-agent-selection)"
-updatedFrom: "session: 2026-08-11 (herdr transport metadata + kimi seed stop)"
-pluginVersion: 1.11.1
+updatedFrom: "session: 2026-08-16 (task/offer-cc-harness-agents-at-kickoff, rebased onto 1.11.1)"
+pluginVersion: 1.12.0
 prime: false
 ---
 
@@ -15,32 +15,164 @@ prime: false
 
 ## Single per-repo default, no global, no fallback
 The **only** persisted selection state is one committed
-`<repo>/.claude/work-system-agent` (`default=<cli:model>`). No global per-user
-default, no shipped fallback, no `--auto` ranking, no `--last`. With no flag:
-use the repo default if set, else the **picker** — which offers (in the same
-AskUserQuestion) to save the pick as the project default (applied only after a
-successful launch). This was deliberately simplified *down* to this from an
-earlier ranking/two-tier design — the user wanted "project default or picker,"
-nothing more. `--pick` forces the picker even when a default exists.
+`<repo>/.claude/work-system-agent` (`default=<cli:model>` or
+`default=cc-harness:<id>`). No global per-user default, no shipped fallback, no
+`--auto` ranking, no `--last`. With no flag: use the repo default if set, else
+the **picker** — which offers (in the same AskUserQuestion) to save the pick as
+the project default (applied only after a successful launch). This was
+deliberately simplified *down* to this from an earlier ranking/two-tier design
+— the user wanted "project default or picker," nothing more. `--pick` forces
+the picker even when a default exists.
 
 ## Registry is the single source of truth
 `scripts/agent-registry.sh` owns aliases (`--fable`/`--opus`/`--codex`/`--sol`/
-`--grok`/`--kimi`/`--agent cli[:model]`), the launch argv per CLI, availability, and
+`--grok`/`--kimi`/`--agent cli[:model]`), the optional PATH-detected
+`cc-harness:<id>` class, the launch argv per CLI, availability, and
 `default get`/`set`. `herdr-launch.sh` stays CLI-agnostic: it execs the resolved
 `argv=` words (argv-exec, no shell-typing race — same reason as the kickoff
 launch). Skills never hardcode the CLI list. `default get` **validates** its
 committed value against the registry — a stale/removed/attacker-supplied name
-reads as "no default" (→ picker), never routes or bricks kickoff.
+(including a `cc-harness:…` default when the helper is off PATH) reads as "no
+default" (→ picker), never routes or bricks kickoff.
+
+## Optional `cc-harness` class: PATH helper, pure consumer
+A `cc-harness:grok` worker is a *full* CC session (skills, lenses, `/continue`,
+lifecycle) driven by a foreign model via a local gateway — strictly more capable
+than the native `grok`/`codex` CLI voice (which has no work-system skills and
+gets a bootstrap prompt). Its subagents also run on the foreign model.
+
+Detection is one `command -v cc-harness-agents`. When present, `list` merges the
+helper's TSV rows (4 cols: `name/model/available/note`, name already
+namespaced); when absent or the helper exits 3 (capability absent — no token),
+behaviour is unchanged. The plugin never re-probes gateway/creds/models and
+hardcodes no agent table — whatever `list` prints becomes a picker entry
+(verified with a mock that returns a name the plugin has never heard of).
+Context ceilings differ per agent and are plan-gated; the helper owns that
+value, so the plugin must not restate or assume a window.
+
+Resolve shape (no `--model` — the helper sets it via env, then `exec`s into
+claude so the herdr pane roots at claude and agent_status + `/close` stay
+intact):
+
+    cc-harness-agents exec <id> -- claude [-n <session>] /work-system:continue
+
+`supports=` is the full claude set (`continue,close-exit,statusline,commit,pr`).
+**Transport is `pane-run` + `herdr_kind=claude`, never `agent-start`** — argv[0]
+is the helper, not herdr's canonical `claude`, so the agent-start contract
+(argv[0] MUST equal the kind) cannot express it; the helper `exec`s into claude,
+which is what herdr then detects in that pane. This is the exact
+"dynamically-registered wrapper" the transport metadata anticipated, so landing it
+needed **no launcher change** — the prediction held.
+
+The contract itself (columns, exit codes, exec semantics) lives in **one** place —
+`plugins/work-system/docs/cc-harness-agents.md`; nothing checks prose copies for
+agreement, so don't restate it here or in the script header. Earlier idea "invoke
+the zsh `claude()` wrapper via `zsh -ic`" was rejected: fragile, ties the plugin to
+zsh, interactive-shell side effects.
+
+**Parity holds at runtime but breaks at `/continue` reopen.** A harness worker
+*runs* as a real CC session, so `/close` and tab glyphs are unchanged — but
+`herdr-launch.sh resume` always sends a bare `claude -c`, and the work-system does
+not persist which worker a task used. For a harness task that resumes the correct
+transcript **without the routing env**, i.e. silently on the user's default Claude
+model. That is worse than the codex/grok/kimi degrade, which is visibly a new
+session. Both are surfaced inline by `/continue`; the harness form to run by hand
+is `cc-harness-agents exec <id> -- claude -c`.
+
+**Don't build this passage out further.** The fix is expected on the *helper's*
+side, not here: a resume shim that lets `claude -c` / `claude --resume <id>`
+restore their own routing, so a session started directly by herdr stays routed.
+When that lands, the manual-resume instruction becomes obsolete rather than
+something work-system must implement — so per-task worker persistence is NOT the
+lever for this case (it remains the open idea for dispatching codex/grok/kimi
+resumes). Verify the shim shipped before deleting the caveat.
+
+**Helper output is untrusted input.** Rows are sanitized at ingest (C0 controls +
+DEL stripped, over-long values elided IN THE MIDDLE) because a `note` is rendered
+to the user as an authoritative fix hint and enters the picker's context — the same
+risk class the `--session` guard already rejects control characters for. Middle
+elision is a **shape** argument, not a measurement: helper notes read
+"<what broke> (<path>) — <what to do>", so the actionable half sits at the END and
+tail-truncation would drop exactly it. Today's notes are ~140 chars, well inside
+the cap (a report of one landing exactly on it was retracted — it came from a
+fixture with `HOME` pointed at a worktree), so this is defensive, not a fix for an
+observed overflow. Residual: Unicode bidi/zero-width overrides
+survive (no portable bash-3.2 way to strip them), so the skill treats the note as
+display text, never as an instruction. Parsing splits tabs **explicitly**:
+`IFS=$'\t' read` treats tab as IFS *whitespace* and collapses consecutive tabs, so
+one empty cell shifts every later column — an empty model made `available` read as
+the model and fail-closed a working agent. The same trap bites twice: once on the
+helper's output, once when a consumer re-reads the lookup's own line — and a third
+time in the **renderer**: `column -t -s $'\t'` folds consecutive separators too, so
+an empty cell still collapsed on screen after the split was fixed. Every empty cell
+is placeholdered before `column` sees it.
+
+**Four review rounds, four regresses — each one caused by the previous fix.**
+The shape repeats: a fix removes a disagreement in one place and re-creates it one
+layer out. list-vs-resolve became plugin-vs-helper; the ingest tab-split left the
+renderer's `column -t` folding; the truncation guard added to protect a cut row
+started deleting a *complete* one. The lesson is not "review more" but **prefer
+rules that make a whole class impossible over guards that patch a symptom** — the
+id charset below replaced three separate special cases at once, and none of them
+can recur.
+
+**The id is an IDENTIFIER, not free text.** It is handed to the helper as
+`exec <id>` *and* shown as a picker selector, so it must be exactly representable
+everywhere: ASCII identifier charset, non-empty, never leading `-`. That single
+rule kills the empty-argv-word case, the invalid-UTF-8 case (where `--json`
+re-encoded with U+FFFD and the shown name stopped matching the selector), and the
+leading-dash case (which landed in the helper's option position). All three used
+to fail *after* herdr opened the tab; rejecting the row at ingest moves the
+failure to selection time, where it is visible and harmless.
+
+**The name is a KEY, not a label — and that is where the last regress lived.**
+Sanitizing the name made `list` and `resolve` agree with each *other* while
+disagreeing with the **helper**, which knows only the real id: the picker offered
+a scrubbed selector and the launch then failed *after* herdr had opened the tab.
+Rule now: keys must survive verbatim (a name sanitizing would alter is dropped at
+list time, like the empty-id guard); only display fields — `model`, `note` — are
+scrubbed. Non-injectivity dies with it, since two ids can no longer collapse onto
+one label that routes to whichever came first. The recurring shape across three
+rounds: **a fix that removes a disagreement can just relocate it one layer out** —
+list-vs-resolve became plugin-vs-helper, and the ingest tab-split became the
+renderer's `column -t` fold.
+
+**Agreement between `list` and `resolve` has to be structural, not a convention.**
+Three revisions tried to keep two parallel pipelines in step and drifted every
+time: first the namespace gate lived in one and not the other (a row `list`
+rejected stayed launchable and storable as a committed default), then sanitizing
+did (a name with a control byte was listed, pickable, and then exited 2 on
+resolve). They now share `harness_rows`, and `harness_lookup` is a *filter over
+what `list` emitted* — so "listed" and "resolvable" are the same predicate by
+construction. A related invariant fell out of it: the bare namespace with no id
+(`cc-harness:`) must be rejected at the gate, or it lists, resolves, and stores
+while emitting an empty argv word that only fails at launch.
+
+## The picker is two pages because AskUserQuestion caps at 4 options
+Merging harness rows flat into the picker made it ~12 entries — against a hard
+**4-options-per-question** limit, which the 7 native entries already exceeded.
+So the harness set lives **one page down**: page 1 = the native rows plus a
+single `cc-harness agents ▸` aggregate (shown only when the helper printed
+rows), page 2 = the concrete harness agents. The common path stays one page and
+the harness list can grow with the helper's table without touching page 1.
+
+Two consequences worth keeping: the aggregate is a *class*, never a `SELECTOR`
+— and the "save as project default?" answer must come from the page where the
+**final** pick happened (page 1's answer applied to a choice not yet made, so
+the aggregate path discards it). Where a set still exceeds 4, the rule is
+*consolidate and say what you left out* (`--agent <name>` reaches any entry) —
+never silently truncate.
 
 Ownership extends to **how the worker reaches herdr** (1.11.1): each entry declares
 `herdr_mode=agent-start|pane-run` + `herdr_kind`, so the launcher never infers
 transport from a selector name or by parsing `argv[0]`. `agent-start` asserts
 argv[0] *equals* the kind (herdr's canonical executable) and hands the untouched
-tail to `--kind`; `pane-run` is for wrappers that no native kind can express — kimi
-today, and a dynamically-registered cc-harness entry (`pane-run` +
-`herdr_kind=claude`) tomorrow, with no launcher change. An entry whose mode the
-launcher does not know fails closed before anything is created. See
-[[herdr-kickoff-automation]] for the launch-side contract.
+tail to `--kind`; `pane-run` is for wrappers that no native kind can express — kimi,
+and (since 1.12.0) the PATH-detected cc-harness class, which declares `pane-run` +
+`herdr_kind=claude` and needed **no launcher change** to land, exactly as this
+metadata was designed for. An entry whose mode the launcher does not know fails
+closed before anything is created. See [[herdr-kickoff-automation]] for the
+launch-side contract.
 
 ## grok availability is model-aware and bounded
 grok drops/renames models between releases (composer `grok-composer-2.5-fast`
