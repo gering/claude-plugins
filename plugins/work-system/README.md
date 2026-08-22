@@ -205,7 +205,8 @@ is on `PATH`, `/kickoff` offers its foreign agents — e.g. `cc-harness:grok`,
 `cc-harness:kimi`, `cc-harness:sol`. These are full Claude Code sessions driven by
 a foreign model via a local gateway (skills, lenses, `/continue`, `/close` all
 work), not the native CLI voice. The picker keeps them **one page down**: page 1 is
-the usual worker list plus a single `cc-harness agents ▸` entry, and only choosing
+the usual worker list plus a single `cc-harness agents ▸` entry (shown when at
+least one harness agent is actually *available*), and only choosing
 that opens a second page with the concrete agents — so the familiar path stays one
 page and the harness list can grow freely. The plugin is a pure consumer of a small
 contract (`list` / `exec`); it hardcodes no gateway, no models, no agent table.

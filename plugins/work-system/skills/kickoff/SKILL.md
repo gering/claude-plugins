@@ -154,22 +154,23 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
       - **Empty** (no project default set, or the committed value was invalid) →
         fall through to the **picker** below.
     - **`--pick`, or no flag with no default set → the picker (two pages).** Run
-      `bash "$REG" list --json` **once** and split the array by each entry's `cli`
-      field: `cli == "cc-harness"` is the **harness** set, everything else the
-      **native** set. Use `--json`, **not** the human table — that one is padded
-      through `column -t` and its `note` cells contain spaces, so splitting it on
-      whitespace can misfile a row (a harness row read as native drops the aggregate
-      and makes every harness agent unreachable). The human table is for display only.
-      **If `--json` fails** (it exits 1 when `python3` is missing), fall back to
-      `bash "$REG" list --tsv`, which prints the same rows tab-separated with no
-      python3 dependency: split each line on **TAB** and take field 2 as the class.
-      Do **not** fall back to whitespace-splitting the padded `list` table — helper
-      names and notes may contain spaces, so that parse can read a harness row as
-      native and drop the aggregate entirely, which is the failure the JSON path
-      exists to avoid. Say that you fell back; never abort the picker over a
-      missing `python3`.
+      `bash "$REG" list --tsv` **once** and split each line on **TAB**:
+      `name / cli / model / available / note`. Field 2 is the class —
+      `cc-harness` is the **harness** set, everything else the **native** set.
+      One parse path, no interpreter: `--tsv` carries the same five fields as
+      `--json` and needs no `python3` (which `--json` hard-requires).
+      Do **not** parse the plain `list` table — it is padded through `column -t`
+      and helper names and notes may contain spaces, so a whitespace split can
+      read a harness row as native, drop the aggregate, and make every harness
+      agent unreachable. That table is display-only. (`--json` remains available
+      for anything that wants typed booleans.)
       The harness set is empty whenever the helper is off PATH — then there is no
-      page 2 and no aggregate option. **The page-1 rule below still applies**: it
+      page 2 and no aggregate option. **An empty set does not prove the helper is
+      absent**: it is also empty when the helper is installed but its probe failed
+      (gateway wedged, capability absent, timed out). `list` prints a one-line
+      note on **stderr** in that case — relay it if present, and otherwise say
+      "no cc-harness agents available" rather than asserting a reason you cannot
+      see. **The page-1 rule below still applies**: it
       groups by CLI to fit the 4-option cap, which the 7 shipped entries exceeded
       even before this feature. So "no harness agents" does not mean "byte-identical
       to the old picker" — say that plainly rather than implying nothing changed.
@@ -189,7 +190,12 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
          (`--agent cc-harness:<id>` still reaches them).
       2. Fill the remaining slots with the **native** entries, **one option per CLI**
          (not per model): label the CLI's default/most-likely model and name the
-         alternates in the description (e.g. "claude — opus (also: fable, sonnet)").
+         alternates in the description. **Label the CLI's own default — the FIRST
+         `REGISTRY` row for that CLI — because that is what `SELECTOR="<cli>"`
+         resolves to.** (claude's first row is `fable`, so "claude — fable (also:
+         opus, sonnet)"; labelling a non-default model and then resolving via the
+         bare CLI silently launches a different one.) If the user wants a named
+         alternate, set `SELECTOR` to the full `cli:model` instead.
       3. **Order the CLIs by this fixed rule** — with 4 shipped CLIs and a reserved
          aggregate slot the set does not fit, so *which* CLI drops out must not be
          improvisation that differs run to run:

@@ -796,26 +796,53 @@ check("table and --json agree on availability", all(
     for r in json.loads(e.run("list", "--json").stdout) if r["cli"] == "cc-harness"))
 e.close()
 
-# --- `list --tsv`: machine-readable without python3 ------------------------ #
-# The picker prefers --json, which exits 1 when python3 is missing. Its fallback
-# must not be "whitespace-split the column -t table": helper names and notes may
-# contain spaces, so that parse can misfile a harness row as native and drop the
-# aggregate entirely. --tsv prints the rows unpadded, which is unambiguous.
-e = Env(harness_agents=[("cc-harness:grok fast", "grok-4.5", "yes", "note with spaces")])
+# --- `list --tsv`: the picker's parse path ---------------------------------- #
+# The picker splits --tsv on TAB. It must stay unambiguous even when a DISPLAY
+# field contains spaces — which is exactly why the padded `list` table cannot be
+# whitespace-split: a harness row read as native drops the aggregate and makes
+# every harness agent unreachable. (The NAME cannot contain spaces at all: it is
+# an identifier, gated at ingest.)
+e = Env(harness_agents=[("cc-harness:grok", "grok 4.5 preview", "no",
+                         "run: cliproxyapi -xai-login (see the docs)")])
 tsv = [ln.split("\t") for ln in e.run("list", "--tsv").stdout.splitlines()
        if ln.startswith("cc-harness:")]
-check("--tsv keeps a space-bearing name in one field",
-      len(tsv) == 1 and tsv[0][0] == "cc-harness:grok fast")
+check("--tsv row has exactly 5 fields", len(tsv) == 1 and len(tsv[0]) == 5)
 check("--tsv puts the class in its own field", tsv[0][1] == "cc-harness")
-check("--tsv keeps a space-bearing note in one field", tsv[0][4] == "note with spaces")
-check("--tsv row has exactly 5 fields", len(tsv[0]) == 5)
+check("--tsv keeps a space-bearing model in one field", tsv[0][2] == "grok 4.5 preview")
+check("--tsv keeps a space-bearing note in one field",
+      tsv[0][4] == "run: cliproxyapi -xai-login (see the docs)")
 # The same row is genuinely ambiguous in the padded table — this is why the
-# fallback needed a real format rather than a parsing rule.
+# picker parses --tsv and treats `list` as display-only.
 table_row = [ln for ln in e.run("list").stdout.splitlines()
-             if ln.startswith("cc-harness:grok fast")][0]
+             if ln.startswith("cc-harness:grok")][0]
 check("the padded table is ambiguous for the same row (why --tsv exists)",
-      table_row.split()[1] == "fast")
+      table_row.split()[2] != "grok 4.5 preview")
+check("--tsv needs no python3 (same fields as --json)",
+      len(json.loads(e.run("list", "--json").stdout)) ==
+      len(e.run("list", "--tsv").stdout.strip().splitlines()))
 e.close()
+
+# --- the id is an identifier, not free text -------------------------------- #
+# One charset rule settles three launch-time failures at once: an empty id
+# (empty argv word), invalid UTF-8 (listed, but --json re-encodes it and the
+# displayed name stops matching the selector), and a leading dash (lands in the
+# helper's option position). All three used to fail AFTER herdr opened the tab.
+for bad, why in ((b"cc-harness:", "empty id"),
+                 (b"cc-harness:gr\xffok", "invalid UTF-8"),
+                 (b"cc-harness:--version", "leading dash"),
+                 (b"cc-harness:grok fast", "space in the id")):
+    e = Env(harness_agents=[("cc-harness:good", "m", "yes", "-")])
+    rows_sh = (b"  printf 'cc-harness:good\\tm\\tyes\\t-\\n'\n"
+               b"  printf '" + bad + b"\\tm\\tyes\\t-\\n'\n")
+    e.harness_bin.write_bytes(
+        b"#!/bin/sh\nif [ \"$1\" = \"list\" ]; then\n" + rows_sh + b"  exit 0\nfi\nexit 2\n")
+    e.harness_bin.chmod(0o755)
+    names = [r["name"] for r in json.loads(e.run("list", "--json").stdout)
+             if r["cli"] == "cc-harness"]
+    check("rejected at ingest: %s" % why, names == ["cc-harness:good"])
+    check("the valid row in the same listing survives: %s" % why,
+          e.run("resolve", "cc-harness:good").returncode == 0)
+    e.close()
 
 # Invalid UTF-8 from the helper must not abort the whole listing — including the
 # native rows, which have nothing to do with the bad byte.

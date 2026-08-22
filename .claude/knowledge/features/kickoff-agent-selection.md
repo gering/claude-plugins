@@ -107,6 +107,24 @@ time in the **renderer**: `column -t -s $'\t'` folds consecutive separators too,
 an empty cell still collapsed on screen after the split was fixed. Every empty cell
 is placeholdered before `column` sees it.
 
+**Four review rounds, four regresses — each one caused by the previous fix.**
+The shape repeats: a fix removes a disagreement in one place and re-creates it one
+layer out. list-vs-resolve became plugin-vs-helper; the ingest tab-split left the
+renderer's `column -t` folding; the truncation guard added to protect a cut row
+started deleting a *complete* one. The lesson is not "review more" but **prefer
+rules that make a whole class impossible over guards that patch a symptom** — the
+id charset below replaced three separate special cases at once, and none of them
+can recur.
+
+**The id is an IDENTIFIER, not free text.** It is handed to the helper as
+`exec <id>` *and* shown as a picker selector, so it must be exactly representable
+everywhere: ASCII identifier charset, non-empty, never leading `-`. That single
+rule kills the empty-argv-word case, the invalid-UTF-8 case (where `--json`
+re-encoded with U+FFFD and the shown name stopped matching the selector), and the
+leading-dash case (which landed in the helper's option position). All three used
+to fail *after* herdr opened the tab; rejecting the row at ingest moves the
+failure to selection time, where it is visible and harmless.
+
 **The name is a KEY, not a label — and that is where the last regress lived.**
 Sanitizing the name made `list` and `resolve` agree with each *other* while
 disagreeing with the **helper**, which knows only the real id: the picker offered

@@ -240,33 +240,43 @@ harness_on_path() { command -v "$HARNESS_BIN" >/dev/null 2>&1; }
 # code (0 = ok, 3 = capability absent, 124 = timed out, other = fail). Callers
 # treat non-zero as "no harness rows" (silent degrade).
 # Everything the helper prints is held in shell memory and rendered through the
-# picker, so the SIZE needs a bound too — run_bounded caps only runtime. Truncated
-# in-shell rather than via `head -c`: a pipe would SIGPIPE the helper and turn a
-# successful-but-chatty run into an apparent failure, i.e. a silent no-op.
+# picker, so the SIZE needs a bound too — run_bounded caps only runtime.
 HARNESS_MAX_BYTES=65536
 harness_list_raw() {
   harness_on_path || return 1
-  local tmp rc
+  local tmp rc size
   tmp="$(mktemp)" || return 1
-  # Bound at READ time. Capturing first and truncating after (`${out:0:N}`) still
-  # buffers the helper's ENTIRE stdout in shell memory, so a multi-GB writer that
-  # finishes inside the time bound OOMs the session before one byte is discarded.
-  # `head -c` closes the pipe at the limit instead. It also counts BYTES; the
-  # substring form counted characters, which is a different limit in a UTF-8
-  # locale. errexit/pipefail are lifted for the pipeline so PIPESTATUS can be
-  # read; 141 is head closing the pipe (SIGPIPE) on a truncated-but-fine run and
-  # must not read as a helper failure.
-  set +e +o pipefail
-  run_bounded 10 "$HARNESS_BIN" list 2>/dev/null | head -c "$HARNESS_MAX_BYTES" >"$tmp"
-  rc=${PIPESTATUS[0]}
-  set -e -o pipefail
-  case "$rc" in
-    0|141) ;;
-    *) rm -f "$tmp"; return "$rc" ;;
-  esac
-  # A byte cut can land mid-row, so drop a trailing partial line rather than
-  # letting harness_rows parse half a record as a real one.
-  if [ -s "$tmp" ] && [ "$(tail -c 1 "$tmp" | od -An -c | tr -d ' ')" != "\\n" ]; then
+  # Truncation IS done with `head -c` (an earlier comment here claimed the
+  # opposite — it survived the rewrite that introduced it).
+  # `head -c` runs INSIDE the bounded command, not in a pipeline around it. Two
+  # reasons: run_bounded's no-timeout(1) fallback branch captures the command's
+  # stdout to a file and cats it, so a bound applied outside would see the whole
+  # output only after it was already materialized — and that fallback is the
+  # branch a stock macOS (no coreutils) takes. Putting the cap inside means the
+  # shell never receives more than the limit on EITHER branch.
+  # `bash -c` with pipefail, not `sh -c`: the pipeline's own status is `head`'s,
+  # so a plain shell would swallow the HELPER's exit code — and code 3
+  # ("capability absent") is exactly what distinguishes "not configured here"
+  # from "configured but this provider is logged out". pipefail is not POSIX, so
+  # dash-as-sh cannot express this.
+  set +e
+  run_bounded 10 bash -c 'set -o pipefail; "$1" list 2>/dev/null | head -c "$2"' _ \
+    "$HARNESS_BIN" "$HARNESS_MAX_BYTES" >"$tmp"
+  rc=$?
+  set -e
+  # 141 is head closing the pipe at the cap (SIGPIPE) on a truncated-but-fine
+  # run; pipefail surfaces it, and it must not read as a helper failure.
+  [ "$rc" -eq 141 ] && rc=0
+  [ "$rc" -eq 0 ] || { rm -f "$tmp"; return "$rc"; }
+  # Strip a trailing partial line ONLY when the cap actually bit. Testing "does
+  # not end in a newline" alone deleted a COMPLETE final record from any helper
+  # that omits the trailing newline — and the contract never required one, so a
+  # conforming helper silently lost its last agent (invisible in the picker,
+  # unresolvable, no diagnostic). Truncation is what makes a partial line
+  # possible, so truncation is what gates the strip.
+  size=$(wc -c <"$tmp")
+  if [ "$size" -ge "$HARNESS_MAX_BYTES" ] && [ -s "$tmp" ] \
+     && [ "$(tail -c 1 "$tmp")" != "" ]; then
     sed '$d' "$tmp"
   else
     cat "$tmp"
@@ -356,13 +366,33 @@ harness_map_note() {
 # invisible in `list`/`--json`/the picker yet still resolve, launch, and validate
 # as a committed repo default — breaking the invariant that whatever `list`
 # prints is exactly what can be chosen.
+# The id is an IDENTIFIER, not free text — it is handed back to the helper as
+# `exec <id>` and rendered as a picker selector, so it must be exactly
+# representable everywhere. One conservative charset settles three failure modes
+# at once instead of bolting on a special case per symptom:
+#   * empty id — used to list, resolve and store as a committed default while
+#     emitting an EMPTY argv word herdr-launch cannot tell from a dropped one;
+#   * invalid UTF-8 — survives control-char stripping, so the row listed, but
+#     `list --json` re-encoded it with U+FFFD and the displayed name no longer
+#     matched the byte-exact selector `resolve` wants;
+#   * a leading `-` — lands in the helper's OPTION position (`exec --version …`),
+#     so a selectable, committable agent produces argv the helper parses as a flag.
+# All three failed at LAUNCH, after herdr had already opened the tab. Rejecting
+# the row at list time is the honest failure, and it keeps every view agreeing.
+# Real ids look like `grok`, `kimi`, `sol`, `gpt-5.6-terra`; this admits those and
+# little else. `[:alnum:]` is ASCII-only under LC_ALL=C, which is the point.
+harness_id_ok() {
+  case "$1" in
+    -*) return 1 ;;                        # never the helper's option position
+    *[!A-Za-z0-9._+/@-]*) return 1 ;;      # ASCII identifier charset only
+    "") return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 harness_row_in_ns() {
   case "$1" in
-    # The bare prefix with NO id is not an agent: it used to list, resolve, and
-    # store as a committed default while emitting an EMPTY argv word, which
-    # herdr-launch cannot tell from a dropped one — so the failure surfaced at
-    # launch instead of at selection. Require at least one char after the ns.
-    "$HARNESS_NS":?*) return 0 ;;
+    "$HARNESS_NS":?*) harness_id_ok "${1#"$HARNESS_NS":}" ;;
     *) return 1 ;;
   esac
 }
@@ -380,7 +410,17 @@ harness_row_in_ns() {
 harness_rows() {
   local raw hrc=0 line seen=$'\n'
   raw="$(harness_list_raw)" || hrc=$?
-  [ "$hrc" -eq 0 ] || return 0
+  # An empty harness set has SEVERAL causes and this function cannot tell them
+  # apart to its caller (it returns rows, not status). Callers must therefore not
+  # claim WHY it is empty. Distinguish the one case that is not a failure —
+  # helper simply absent (rc 1 from the `command -v` guard) — from a helper that
+  # is installed but did not answer (3 = capability absent, 124 = timed out,
+  # anything else = crashed), and say so on stderr so a wedged gateway is not
+  # reported to the user as "no helper installed".
+  if [ "$hrc" -ne 0 ]; then
+    [ "$hrc" -ne 1 ] && echo "cc-harness-agents on PATH but \`list\` failed (exit $hrc) — no harness agents offered" >&2
+    return 0
+  fi
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     harness_split "$line" HR_NAME HR_MODEL HR_AVAIL HR_NOTE
@@ -699,6 +739,13 @@ emit_record() {
   [ "$4" = yes ] || exit 3
 }
 
+# The ONE place the unknown-selector line is written. Callers print their own
+# arm-specific hint first; this emits the shared line and exits 2.
+unknown_selector() {
+  echo "Unknown agent selector: $1" >&2
+  exit 2
+}
+
 subcmd_resolve() {
   local selector="" session=""
   while [ $# -gt 0 ]; do
@@ -729,15 +776,14 @@ subcmd_resolve() {
       local hline bare
       # harness_split, not `IFS=$'\t' read` — see row_for_name.
       if ! IFS= read -r hline < <(harness_lookup "$selector"); then
-        # One shared line, arm-specific hint only — so the two paths can't drift
-        # into reporting the same condition with different wording.
-        echo "Unknown agent selector: $selector" >&2
+        # Arm-specific hint only; the shared line is emitted once by the caller
+        # below, so the two paths cannot drift into different wording.
         if harness_on_path; then
           echo "Try: cc-harness-agents list  (or a native flag/name/cli)" >&2
         else
           echo "cc-harness agents require the \`cc-harness-agents\` helper on PATH — see plugins/work-system/docs/cc-harness-agents.md" >&2
         fi
-        exit 2
+        unknown_selector "$selector"
       fi
       harness_split "$hline" HR_NAME HR_CLI HR_MODEL HR_AVAIL HR_NOTE
       bare="${HR_NAME#"$HARNESS_NS":}"
@@ -752,7 +798,7 @@ subcmd_resolve() {
 
   local record
   record="$(row_for_selector "$selector")" || {
-    echo "Unknown agent selector: $selector" >&2
+    unknown_selector "$selector"
     # Derive the flag list from REGISTRY rather than restating it — a new entry
     # must not need a second edit here to appear in the hint.
     echo "Try: $(registry_rows | cut -d'|' -f1 | grep -v '^-$' | tr '\n' ' ')— a name (claude:opus), a cli (codex), or cc-harness:<id> when the helper is on PATH" >&2
