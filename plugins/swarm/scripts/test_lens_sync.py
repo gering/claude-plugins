@@ -79,6 +79,30 @@ check("LENS_BRIEF keys == LENS_CLUSTERS lenses", brief_keys == set(cluster_lense
 # recreate the drift this test existed to catch AND fight the per-cluster
 # instruction (a "cover ALL lenses" line contradicts "review ONLY these").
 skill = SKILL.read_text(encoding="utf-8")
+
+# --- the prep block's heredocs must not evaluate their own text --------------
+# `cat <<HDR` is UNQUOTED on purpose: $NONCE and $CAP_RULES have to expand. But
+# an unquoted heredoc also runs backticks and $(...) inside its body — so a
+# markdown-styled `[lens]` in the prompt text was executed as a command. The
+# words vanished from the prompt the backends actually receive (leaving "the
+# exact  prefixes you may use") and every run printed "[lens]: command not
+# found" on stderr. Shipped in 0.7.0; three review rounds never saw it, because
+# reading the block is not running it.
+#
+# Checked as a CLASS, not as that one line: any backtick or $(...) inside an
+# unquoted heredoc body here is either dead text or an execution the author did
+# not intend. Quote the delimiter (<<'X') when the body needs neither.
+_prep = re.search(r"^```sh\n(.*?)^```", skill, re.S | re.M)
+check("skill: prep block found", _prep)
+_body = _prep.group(1) if _prep else ""
+_bad = []
+for _hd in re.finditer(r"<<(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1\n(.*?)^\2$", _body, re.S | re.M):
+    if _hd.group(1):          # <<'X' — body is literal, nothing to evaluate
+        continue
+    for _line in _hd.group(3).splitlines():
+        if "`" in _line or "$(" in _line:
+            _bad.append(_line.strip()[:60])
+check(f"skill: no backticks/$( inside an unquoted heredoc ({_bad})", not _bad)
 check("skill: HDR carries no lens-list mirror", not re.search(r"^- Cover ALL of these lenses:", skill, re.M))
 # The adapter flag the single-source design depends on must exist: without it the
 # workflow's per-cluster briefs would be silently dropped and every external voice

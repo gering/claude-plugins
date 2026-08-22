@@ -274,6 +274,10 @@ entries are grouped per plugin, newest first.
 
 ## swarm
 
+### 0.10.1 — 2026-08-22
+- **The prep block's heredoc executed part of its own prompt text.** `cat <<HDR` is unquoted so `$NONCE` and `$CAP_RULES` expand — but that also evaluates backticks in the body, and the rule listing the allowed finding prefixes was written with markdown backticks around `` `[lens]` ``. Bash ran it as a command: every review printed `[lens]: command not found` on stderr, and the prompt the backends actually received read "the exact  prefixes you may use" — the rule naming the tag format lost the tag. Shipped in 0.7.0 and present in every review since; three self-review rounds missed it because reading the block is not running it. Found by executing the 0.10.0 block end-to-end.
+- `test_lens_sync.py` now guards the **class**: any backtick or `$(` inside an *unquoted* heredoc in the prep block fails the suite, whatever the line says. Verified to fail on the reintroduced bug, so the check is not vacuously green.
+
 ### 0.10.0 — 2026-08-22
 Third `/swarm:review` round over this branch. Every critical it found had again been introduced by the *previous* round's fixes, and always in the same shape: a value that two places must agree on, fixed in one of them. Round 3 therefore answers the bug class instead of the instance — **the adapter is now the only parser of the numeric knobs**, and callers ask it for the result.
 - **New verb `agents.sh config`** prints the resolved, validated configuration (`max_prompt_bytes`, `cap_headroom`, `oversize_threshold`, `timeout_seconds`, `probe_timeout_seconds`). The skill's prep block reads those lines instead of re-deriving them from `SWARM_*`, so the two sides of the oversize gate can no longer reach different numbers from the same string; an invalid value fails once, in the adapter's own wording. `test_lens_sync.py` now guards the design itself — it requires the single parser and the `config` dispatch, and *negatively* asserts that no second parse reappears in the skill.
