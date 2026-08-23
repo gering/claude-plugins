@@ -1,7 +1,7 @@
 ---
 name: agents
 description: |
-  Shows swarm backend status: which review agents (claude, codex, grok) are
+  Shows swarm backend status: which review agents (claude, codex, grok, kimi) are
   installed and authenticated.
   Trigger: "swarm agents", "which review backends are live", "agent status".
 user_invocable: true
@@ -24,9 +24,9 @@ user_invocable: true
    - both true → ✅ ✅, Notes empty
 3. Close with one line stating which backends are live (all with
    `available && ready`), e.g.:
-   `Live backends: claude + codex + grok — full ensemble.`
+   `Live backends: claude + codex + grok + kimi — full ensemble.`
    If only claude is live, note that installing/authenticating the external
-   CLIs (`codex`, `grok`) would widen the ensemble. Do not reference other
+   CLIs (`codex`, `grok`, `kimi`) would widen the ensemble. Do not reference other
    swarm commands until they ship.
 
 ## Notes
@@ -34,6 +34,11 @@ user_invocable: true
 - Read-only, no side effects — safe to run anytime.
 - `claude` is always ready when Claude Code runs (reviews happen in-session
   via the Agent tool; the external CLIs are called through the adapter).
+- **`kimi` Ready is model/transport-aware** — it requires the real
+  `~/.kimi-code/credentials/kimi-code.json`, ACP stdio support, and the pinned
+  `kimi-code/k3-256k` model in `kimi provider list --json`. A failed/bounded
+  capability probe degrades audibly to trusting credentials rather than silently
+  dropping the Moonshot family; a clean negative stays not-ready.
 - **`grok` Ready is a heuristic** — it means a non-empty `~/.grok/auth.json`
   exists, that the CLI offers `--prompt-file` (the out-of-band prompt transport),
   **and** that `grok models` still lists a schema-verified model, NOT that the
