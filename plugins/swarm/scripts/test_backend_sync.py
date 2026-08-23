@@ -11,6 +11,7 @@ PLUGIN = HERE.parent
 ADAPTER = (HERE / "agents.sh").read_text(encoding="utf-8")
 WORKFLOW = (PLUGIN / "workflows" / "swarm-review.js").read_text(encoding="utf-8")
 SKILL = (PLUGIN / "skills" / "review" / "SKILL.md").read_text(encoding="utf-8")
+AGENTS_SKILL = (PLUGIN / "skills" / "agents" / "SKILL.md").read_text(encoding="utf-8")
 FAILS: list[str] = []
 
 
@@ -27,6 +28,15 @@ check("adapter backend enum found", bool(validated))
 rows = re.search(r"for b in ([a-z ]+); do", ADAPTER)
 row_set = set(rows.group(1).split()) if rows else set()
 check("adapter list rows equal backend enum", row_set == validated_set)
+
+ready_block = re.search(r"ready_check\(\).*?case .*?\n(.*?)\n\s*esac", ADAPTER, re.S)
+ready_set = set(re.findall(r"^\s*([a-z]+)\)", ready_block.group(1), re.M)) if ready_block else set()
+check("adapter readiness arms equal backend enum", ready_set == validated_set)
+
+run_blocks = re.findall(r"case \"\$backend\" in\n(.*?)\n\s*esac", ADAPTER, re.S)
+run_block = next((block for block in run_blocks if "run_codex" in block), "")
+run_set = set(re.findall(r"^\s*([a-z]+)\)\s+run_", run_block, re.M))
+check("adapter run dispatch equals external enum", run_set == externals)
 
 backend_block = re.search(r"const EXTERNAL_BACKENDS = \[(.*?)\n\]", WORKFLOW, re.S)
 workflow_set = set(re.findall(r"backend:\s*'([^']+)'", backend_block.group(1))) if backend_block else set()
@@ -46,6 +56,8 @@ for backend in sorted(externals):
     check(f"skill builds {backend} from LIVE_JSON", f'`"{backend}"`' in SKILL)
 check("skill omits Kimi when jail is unavailable",
       "include `\"kimi\"`" in SKILL and "`JAIL=jail=yes`" in SKILL)
+check("agent status applies Kimi jail gate",
+      "agents.sh\" jail" in AGENTS_SKILL and "plus `jail=yes` for Kimi" in AGENTS_SKILL)
 
 kimi_backend = re.search(r"\{ backend: 'kimi', flags: ([^}]+)\}", WORKFLOW)
 check("workflow registers Kimi effort flags", bool(kimi_backend))

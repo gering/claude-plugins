@@ -365,6 +365,48 @@ class TestFailClosedDegrade(unittest.TestCase):
         self.assertIn("/kimi-acp.py", argv, f"jailed Kimi must use ACP; argv:\n{argv}")
         self.assertIn("--effort\nhigh", argv, f"effective ACP effort missing; argv:\n{argv}")
 
+    def test_kimi_sigkill_is_reported_as_timeout(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".prompt") as pf:
+            pf.write("prompt text\n")
+            pf.flush()
+            r = _source(
+                "_read_web_safe() { return 0; }",
+                "_repo_root() { pwd; }",
+                "sandboxed() { return 137; }",
+                "_adapter_timeout=17",
+                f'( run_kimi "{pf.name}" high "" "{SCHEMA}" )',
+            )
+        self.assertEqual(r.returncode, 1, f"Kimi timeout must fail the voice: {r.stderr!r}")
+        self.assertIn("timed out after 17s", r.stderr,
+                      f"rc=137 must use the shared timeout diagnosis: {r.stderr!r}")
+        self.assertNotIn("failed (rc=137)", r.stderr,
+                         f"rc=137 must not look like a generic backend failure: {r.stderr!r}")
+
+    def _kimi_gate_rc(self, helper_rc: int):
+        with tempfile.NamedTemporaryFile("w", suffix=".prompt") as pf:
+            pf.write("prompt text\n")
+            pf.flush()
+            return _source(
+                "_read_web_safe() { return 0; }",
+                "_repo_root() { pwd; }",
+                f"sandboxed() {{ return {helper_rc}; }}",
+                "trap 'printf \"telemetry=%s\\n\" \"${TELEMETRY_RC-null}\" >&2' EXIT",
+                f'run_kimi "{pf.name}" high "" "{SCHEMA}"',
+            )
+
+    def test_kimi_preprompt_protocol_failure_has_no_backend_rc(self):
+        r = self._kimi_gate_rc(12)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("session negotiation failed before review", r.stderr)
+        self.assertIn("telemetry=", r.stderr)
+        self.assertNotIn("telemetry=0", r.stderr)
+
+    def test_kimi_postprompt_policy_failure_is_rejected_response(self):
+        r = self._kimi_gate_rc(13)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("response was rejected", r.stderr)
+        self.assertIn("telemetry=0", r.stderr)
+
 
 class TestPromptTransport(unittest.TestCase):
     """The prompt must never travel on argv. It used to, which made exec's

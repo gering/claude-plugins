@@ -3,8 +3,8 @@ title: "Swarm Review Pipeline (/swarm:review)"
 createdAt: 2026-07-08
 updatedAt: 2026-09-02
 createdFrom: "PR #24"
-updatedFrom: "fix-swarm-timeout-ceiling"
-pluginVersion: 1.9.0
+updatedFrom: "add-kimi-swarm-voice"
+pluginVersion: 0.11.0
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -13,11 +13,12 @@ reindexedAt: 2026-07-12
 
 P2 turns the blueprint into a working review: a **Workflow-tool script**
 (`plugins/swarm/workflows/swarm-review.js`) launched by the `/swarm:review`
-skill. Shape: `scope+gate → fan-out (3 voices) → merge (file,mechanism) →
-verify solos + design clusters → output-gated synthesis`. Three voices: Claude
-lenses ∥ codex ∥ grok (model discovered, not pinned — see [swarm-backend-adapter](swarm-backend-adapter.md)).
-A fourth, `grok-composer-2.5-fast`, was removed in swarm 0.4.3 — the grok CLI
-dropped the model.
+skill. Shape: `scope+gate → fan-out (4 families) → merge (file,mechanism) →
+verify solos + design clusters → output-gated synthesis`. Families: Claude
+lenses ∥ codex/openai ∥ grok ∥ kimi/moonshot (see
+[swarm-backend-adapter](swarm-backend-adapter.md)). The former extra
+`grok-composer-2.5-fast` voice was removed in swarm 0.4.3 when the CLI dropped
+that model; Kimi joined independently in 0.11.0.
 
 ## Lens set: 11 lenses in 5 clusters (0.5.0; `reach` split off 0.9.0)
 
@@ -57,8 +58,8 @@ truth** — every voice's fan-out units come from it, Claude and externals alike
   cross-file surface, where the old layout kept it alive because `correctness`
   held the cluster open. Cost when kept: one extra call per live backend.
 - **The cluster is the fan-out unit for EVERY voice** since 0.7.0 — Claude
-  finders (≤5) *and* codex/grok (one CLI call per gated cluster each);
-  `--max` splits all of them to one call per lens (≤11 units → ≤22 external
+  finders (≤5) *and* codex/grok/kimi (one CLI call per gated cluster each);
+  `--max` splits all of them to one call per lens (≤11 units → ≤33 external
   calls) — the granularity ladder is `--quick` (future) =
   one broad pass → default = per-cluster → `--max` = per-lens. The **gate
   stays per-lens** (a fully-pruned cluster spawns no agent for anyone); design lenses are
@@ -165,13 +166,13 @@ truth** — every voice's fan-out units come from it, Claude and externals alike
 ## Design decisions
 
 - **Consensus counts model *families*, not backends.** A cross-family cluster
-  (≥2 of claude / openai / grok) of TAGGED defect findings is CONFIRMED without
+  (≥2 of claude / openai / grok / moonshot) of TAGGED defect findings is CONFIRMED without
   extra verify; everything else goes through the 3-state verifier — solos
   (adversarial), all design clusters (applicability — consensus included, see
   the 0.5.0 lens-set section), and all-untagged clusters (no lens backs their
-  "consensus"). With composer removed (0.4.3) the backend→family map is 1:1, so
-  for consensus counting it is a no-op today — but the fan-out is
-  many-voices-per-family (one Claude finder per gated lens), so "same vendor
+  "consensus"). Kimi maps explicitly to `moonshot`, so the backend→family map
+  is observable again after composer removal had temporarily made it 1:1. The
+  fan-out is still many-voices-per-family (one Claude finder per gated lens), so "same vendor
   agreeing with itself is one vote, not a cross-check" stays the load-bearing
   invariant the day a second same-vendor voice returns.
 - **Security is intentionally minimal** (user directive: no cannons-at-sparrows).
@@ -193,7 +194,7 @@ truth** — every voice's fan-out units come from it, Claude and externals alike
   the delimiter); the workflow only collision-checks it against the returned
   findings and extends it deterministically (`nonce-1`, `-2`…) on collision.
 
-- **`args.claude: false`** runs an **external-only control** (codex + grok — the
+- **`args.claude: false`** runs an **external-only control** (codex + grok + kimi — the
   grok model is discovered at run time, never a pinned id,
   no Claude finder lenses, no gate; merge/verify still in-session).
   Proven useful: a control run found real bugs the with-Claude run missed (an
@@ -246,9 +247,9 @@ the diff out of the script, above). Claude applies edits between rounds.
   the report table contract this entry defines above (P2 reserved them).
 - **`--max` profile** (`INPUT.max` in the workflow): lifts every voice to its
   ceiling — codex `gpt-5.6-sol`@`xhigh` (codex has NO `max` tier, xhigh is its
-  top), Claude finder lenses + verifier `xhigh`; gate/merge and grok (`high` is
-  its ceiling since grok 0.2.101 dropped `max` — it runs there on both
-  profiles) unchanged. Orthogonal to `--fix`/`--loop`,
+  top), Claude finder lenses + verifier `xhigh`, and Kimi `thinking=max` via ACP;
+  gate/merge and grok (`high` is its ceiling since grok 0.2.101 dropped `max` —
+  it runs there on both profiles) unchanged. Orthogonal to `--fix`/`--loop`,
   composes with both. The profile's live settings are verified end-to-end
   (`gpt-5.6-sol`@`xhigh` at wiring time; grok re-verified at `--effort high` on
   0.2.101) — the "no silent fail on a non-existent model/effort" rule.
@@ -321,11 +322,11 @@ filled* — `gh pr diff <n>` (bare `--pr` resolves the current branch's PR via
 
 ## Per-cluster external prompts (shipped 0.7.0)
 
-Externals no longer run ONE broad multi-lens review each: codex and grok fan out
-over the **same gated clusters** as the Claude finders (`unitsFor()` builds the
-units once; `externalUnits` reuses `finderUnits` whenever a gate ran, so the two
-sides cannot drift). Cost is `live-backends × units` — ≤2×5 default, ≤2×11 under
-`--max` — logged at fan-out, never silently capped.
+Externals no longer run ONE broad multi-lens review each: codex, grok, and Kimi
+fan out over the **same gated clusters** as the Claude finders (`unitsFor()`
+builds the units once; `externalUnits` reuses `finderUnits` whenever a gate ran,
+so the two sides cannot drift). Cost is `live-backends × units` — ≤3×5 default,
+≤3×11 under `--max` — logged at fan-out, never silently capped.
 
 Decisions worth keeping:
 
@@ -337,7 +338,7 @@ Decisions worth keeping:
   write to the transport agent was the rejected alternative: it would put prompt
   assembly inside an LLM, breaking the same "fencing/assembly is never an LLM step"
   contract the diff fencing follows. Being on the adapter also makes it
-  backend-agnostic — a future voice (Kimi) inherits per-cluster prompts for free.
+  backend-agnostic — Kimi inherited per-cluster prompts without a second lens map.
   Consequence: the instruction rides as one single-quoted argv word in a command a
   haiku transport retypes, so briefs are guarded apostrophe-/control-char-free and
   the command is kept to one line. E2E: 8/8 calls round-tripped byte-exact.

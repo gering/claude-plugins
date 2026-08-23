@@ -361,8 +361,8 @@ if (!FINDING_NONCE) {
 // Two further effects, neither reachable by lowering effort:
 //   1. A timeout costs ONE lens instead of three — `correctness` and
 //      `removed-behavior` no longer die alongside it. That was the family-critical
-//      failure: grok is the only third-family voice, so one rc=124 removed the
-//      whole cluster's third opinion.
+//      failure at the time: grok was the only third-family voice, so one rc=124
+//      removed the whole cluster's third opinion.
 //   2. `reach` carries no MANDATORY lens, so the gate may prune it away
 //      ENTIRELY on a diff with no cross-file surface — where the old layout
 //      still spawned the expensive call because `correctness` held the cluster open.

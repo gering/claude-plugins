@@ -14,7 +14,9 @@ user_invocable: true
 ## Instructions
 
 1. Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json`
-2. Render the JSON array as a table:
+2. Run from the current repository: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" jail`
+   and record whether it returned `jail=yes`.
+3. Render the JSON array as a table:
 
    | Backend | Installed | Version | Ready | Notes |
    |---------|-----------|---------|-------|-------|
@@ -22,8 +24,10 @@ user_invocable: true
    - `available: false` → Installed ❌, Notes = "not installed"
    - `available: true, ready: false` → Ready ❌, Notes = the `hint` field (e.g. "run: codex login")
    - both true → ✅ ✅, Notes empty
-3. Close with one line stating which backends are live (all with
-   `available && ready`), e.g.:
+   - for `kimi`, when both are true but `jail=no`, keep its Ready value and set
+     Notes = "no working jail/repo root — unavailable for review"
+4. Close with one line stating which backends are live (`available && ready`,
+   plus `jail=yes` for Kimi), e.g.:
    `Live backends: claude + codex + grok + kimi — full ensemble.`
    If only claude is live, note that installing/authenticating the external
    CLIs (`codex`, `grok`, `kimi`) would widen the ensemble. Do not reference other
@@ -36,9 +40,11 @@ user_invocable: true
   via the Agent tool; the external CLIs are called through the adapter).
 - **`kimi` Ready is model/transport-aware** — it requires the real
   `~/.kimi-code/credentials/kimi-code.json`, ACP stdio support, and the pinned
-  `kimi-code/k3-256k` model in `kimi provider list --json`. A failed/bounded
-  capability probe degrades audibly to trusting credentials rather than silently
-  dropping the Moonshot family; a clean negative stays not-ready.
+  `kimi-code/k3-256k` model in `kimi provider list --json`. A failed, bounded, or
+  unrecognized-format capability probe degrades audibly to trusting credentials
+  rather than silently dropping the Moonshot family; a clean negative stays
+  not-ready. Kimi is live for reviews only with `jail=yes`, because ACP has no
+  safe jail-less read tier.
 - **`grok` Ready is a heuristic** — it means a non-empty `~/.grok/auth.json`
   exists, that the CLI offers `--prompt-file` (the out-of-band prompt transport),
   **and** that `grok models` still lists a schema-verified model, NOT that the
