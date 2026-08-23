@@ -1,9 +1,9 @@
 export const meta = {
   name: 'swarm-review',
-  description: 'Local mixture-of-agents review: scope+gate → fan-out (Claude lenses + codex + grok) → (file,mechanism) merge with family-aware consensus → verify solos + design clusters → output-gated ranked synthesis.',
+  description: 'Local mixture-of-agents review: scope+gate → fan-out (Claude lenses + codex + grok + kimi) → (file,mechanism) merge with family-aware consensus → verify solos + design clusters → output-gated ranked synthesis.',
   phases: [
     { title: 'Scope', detail: 'classify diff + gate lenses' },
-    { title: 'Fan-out', detail: 'Claude lens-cluster finders + codex + grok in parallel' },
+    { title: 'Fan-out', detail: 'Claude lens-cluster finders + codex + grok + kimi in parallel' },
     { title: 'Merge', detail: 'cluster by (file, mechanism), consensus by family' },
     { title: 'Verify', detail: '3-state verify of solo + design clusters' },
   ],
@@ -13,7 +13,7 @@ export const meta = {
 // args.adapter            absolute path to scripts/agents.sh
 // args.diffFile           file the Claude finders read (raw unified diff)
 // args.externalPromptFile file the external CLIs get (review instr + fenced diff)
-// args.externalVoices     which external backends are live (subset of codex, grok)
+// args.externalVoices     which external backends are live (subset of codex, grok, kimi)
 // args.claude             false → external-only control run (no Claude lenses)
 // args.max                true (strict boolean) → deepest-effort profile below
 // Normalize: the runtime may deliver `args` as an object OR a JSON string.
@@ -293,7 +293,8 @@ const fenceDegraded = !FINDING_NONCE  // no structural fence at merge/verify —
 // `--max` profile: lift every voice to its ceiling for a deepest-effort review.
 // codex has no `max` tier (xhigh is its top) + gets the stronger model; grok's
 // ladder is low|medium|high since 0.2.101, so `high` is already its ceiling on
-// both profiles; the in-session Claude finders and verifier go to `xhigh`.
+// both profiles; Kimi ACP exposes low|high|max, so the deepest profile selects
+// max while the normal profile stays high. In-session Claude goes to `xhigh`.
 // Strict === true: the skill always passes a boolean, and a stray truthy value
 // (max:1 / "true") should NOT silently trigger a slower, costlier run.
 // MAX_CODEX_MODEL must be a model the local codex CLI can load — if it's been
@@ -454,8 +455,9 @@ for (const l of MANDATORY_LENSES) {
 }
 
 // One finding. DRIFT WARNING: this schema is hand-mirrored in TWO places —
-// scripts/schema/finding.schema.json (canonical, CLI-enforced on codex/grok)
-// and this FINDING_ITEM. The caps double as injection limits, so both must stay
+// scripts/schema/finding.schema.json (canonical; CLI-enforced on codex/grok,
+// locally enforced after Kimi ACP) and this FINDING_ITEM. The caps double as
+// injection limits, so both must stay
 // in sync — edit them together.
 const FINDING_ITEM = {
   type: 'object', additionalProperties: false,
@@ -485,7 +487,7 @@ const EXTERNAL_SCHEMA = {
 // backend label -> model family. Consensus counts distinct FAMILIES, not
 // backends: if two voices ever share a vendor again (as grok-4.5 + composer
 // did), their agreement must count once, not as an independent cross-check.
-const FAMILY = { claude: 'claude', codex: 'openai', grok: 'grok' }
+const FAMILY = { claude: 'claude', codex: 'openai', grok: 'grok', kimi: 'moonshot' }
 
 // ---- output gate: last-line secret scrub over surviving findings ------------
 // Runs on EVERY finding (incl. Claude finders, which never pass the adapter)
@@ -533,7 +535,7 @@ function scrubFinding(f) {
 }
 
 // ---- finding fence: structural delimiter around untrusted finding text ------
-// Findings come back from external backends (codex/grok) as free text, then get
+// Findings come back from external backends (codex/grok/kimi) as free text, then get
 // re-interpolated into the merge- and verify-stage prompts. A malicious diff can
 // plant reviewer instructions in a finding field → second-order prompt injection.
 // Mirror the diff fence (SKILL.md § 1): wrap the untrusted text between two
@@ -710,10 +712,10 @@ const claudeThunks = finderUnits.map((u) => () =>
 // over the SAME units as the Claude finders, so the gate prunes calls for
 // everyone — a fully-gated-out cluster spawns nothing for any voice — and each
 // finding's [lens] tag becomes AUTHORITATIVE (the voice *is* that lens; no
-// self-tagging from a broad prompt). Both backends read files + research since
-// 0.6.0, so neither needs a diff-only brief variant.
+// self-tagging from a broad prompt). Every external backend can read files and
+// research under the same jail policy, so none needs a diff-only brief variant.
 // Cost: `live-backends × units` calls, each re-sending the fenced diff and
-// paying CLI startup — ≤2×5 by default, ≤2×11 under --max (the explicitly
+// paying CLI startup — ≤3×5 by default, ≤3×11 under --max (the explicitly
 // ordered ceiling). Logged below; never silently capped.
 const shQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
 // Single LINE by construction: this string is embedded in a command the transport
@@ -759,10 +761,11 @@ const utf8Checksum = (s) => {
 }
 // Only spawn transports for backends the skill reported live (probed via the
 // adapter); absent CLIs would otherwise show up as noisy "errors".
-const wantVoices = Array.isArray(INPUT.externalVoices) ? INPUT.externalVoices : ['codex', 'grok']
+const wantVoices = Array.isArray(INPUT.externalVoices) ? INPUT.externalVoices : ['codex', 'grok', 'kimi']
 const EXTERNAL_BACKENDS = [
   { backend: 'codex', flags: MAX ? `--model ${MAX_CODEX_MODEL} --effort xhigh` : '--effort high' },
   { backend: 'grok', flags: '--effort high' },
+  { backend: 'kimi', flags: MAX ? '--effort max' : '--effort high' },
 ]
 // A claude:false control run has no gate (the gate is a Claude agent), so the
 // externals keep their FULL-WIDTH coverage — per-cluster now, but over every
@@ -773,6 +776,7 @@ const EXTERNAL_BACKENDS = [
 const externalUnits = runClaude ? finderUnits : unitsFor(CANDIDATE_LENSES)
 const liveExternals = EXTERNAL_BACKENDS.filter((b) => wantVoices.includes(b.backend))
 const liveBackends = liveExternals.map((b) => b.backend)
+const reviewSources = [...(runClaude ? ['claude'] : []), ...liveBackends].join('/') || 'no live backend'
 const externalVoiceSpecs = liveExternals
   .flatMap((b) => externalUnits.map((u) => ({
     backend: b.backend, unit: u.name, lenses: u.lenses, label: `${b.backend}:${u.name}`,
@@ -1002,7 +1006,7 @@ if (pool.length > 0) {
   const numbered = pool.map((f, i) => `#${i} [${f.backend}/${f.lens}] ${oneLine(f.file)}:${f.line} — ${oneLine(f.summary)} :: ${oneLine(f.failure_scenario)}`).join('\n')
   const fence = fenceFindings('FINDINGS', numbered)
   const res = await agent(
-    `Merge/dedup step for a code review. ${pool.length} raw findings from claude/codex/grok are numbered below. ` +
+    `Merge/dedup step for a code review. ${pool.length} raw findings from ${reviewSources} are numbered below. ` +
     `Cluster by UNDERLYING ISSUE (defect or improvement proposal) — same file + same mechanism/proposal = one cluster — EVEN IF line numbers differ (external tools number against the inlined diff, so match on meaning, not line). ${fence.guard}\n` +
     `Per cluster return: file, representative line, a short mechanism key, severity (max of members), summary, the strongest failure_scenario, recommendation, dominant lens, and member_indices. Every index appears in exactly one cluster.\n\n` + fence.block,
     { label: 'merge:cluster', phase: 'Merge', schema: CLUSTER_SCHEMA, effort: 'medium' }
@@ -1246,12 +1250,12 @@ findings.forEach((c, i) => { c.num = i + 1 })
 // Per-backend rollup for the balance "Agents" line: concrete short model label
 // + voice/finding counts + whether it ran clean. Wall-time (per-agent durationMs)
 // needs a registered workflow to surface — tracked as P4 wiring.
-// Display labels for the balance line. `grok` is deliberately the FAMILY name,
-// not a version: the adapter discovers the model per run, so any id hard-coded
-// here is a claim the report cannot keep — it printed "grok-4.5" for a run that
-// executed grok-4.6. A label that says less is better than one that says
-// something false; the exact model per call lives in the telemetry record.
-const MODEL_LABEL = { claude: 'opus', codex: 'gpt', grok: 'grok' }
+// Display labels for the balance line. External labels deliberately name the
+// family/CLI, not a version: adapter discovery/overrides can change the actual
+// model per run, so a hard-coded id is a claim the report cannot keep. A label
+// that says less is better than one that says something false; exact models live
+// in per-call telemetry.
+const MODEL_LABEL = { claude: 'opus', codex: 'gpt', grok: 'grok', kimi: 'kimi' }
 const agents = {}
 for (const v of voices) {
   const a = agents[v.backend] || (agents[v.backend] = { backend: v.backend, model: MODEL_LABEL[v.backend] || v.backend, voices: 0, failedVoices: 0, findings: 0, ok: true })
