@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # agents.sh — swarm backend adapter layer
 #
-# Uniform interface over the review backends (claude, codex, grok) so swarm
-# skills never talk to an external CLI directly.
+# Uniform interface over the review backends (claude, codex, grok, kimi) so
+# swarm skills never talk to an external CLI directly.
 #
 # Subcommands:
 #   list [--json]         Probe all backends -> human table or JSON array
@@ -33,11 +33,13 @@
 #       --unit <name>       Cluster/lens label recorded in the telemetry line
 #
 # The prompt reaches the backend OUT-OF-BAND (codex: stdin · grok:
-# --prompt-file), never on argv — so the diff is bounded by model context, not
-# by exec's MAX_ARG_STRLEN. SWARM_MAX_PROMPT_BYTES (default 512 KiB) is that
-# sanity cap.
+# --prompt-file · kimi: ACP v1 NDJSON over stdio), never on argv — so the diff
+# is bounded by model context, not by exec's MAX_ARG_STRLEN.
+# SWARM_MAX_PROMPT_BYTES (default 512 KiB) is that sanity cap.
 #
-# Backend notes (probed against codex 0.147.0 / grok 1.0.13, 2026-07..08):
+# Backend notes (probed against codex 0.147.0 / grok 1.0.13 / kimi-code 0.32.0,
+# 2026-07..08):
+
 #   claude — probe-only: reviews run in-session via the Agent tool, so
 #            `run claude` is a usage error. available/ready/list include it.
 #   codex  — `codex exec --output-schema` under `-s read-only` with
@@ -68,8 +70,19 @@
 #            bounds it with its own watchdog where coreutils is missing. Its
 #            bound is SWARM_PROBE_TIMEOUT (10s, ceiling 20s), not SWARM_TIMEOUT
 #            (a review-length cap).
+#   kimi   — ACP v1 headless session over NDJSON stdio. `-p` is deliberately
+#            NOT used: it only accepts the full prompt on argv and would restore
+#            Linux MAX_ARG_STRLEN failures. The local ACP client rejects every
+#            approval-gated tool call, so read/search/fetch remain available but
+#            write/edit/shell cannot execute. Kimi has no CLI schema flag; the
+#            client validates the final assistant JSON strictly against the
+#            configured schema and fails closed without retry. ACP exposes the
+#            selected model and thinking ladder (low|high|max), so adapter effort
+#            maps down to those verified tiers instead of pretending it is ignored.
+#            No working jail/repo root means Kimi does not run at all: unlike the
+#            other CLIs it has no safe inline-prompt/tool-less fallback.
 #
-# Security floor (both external voices):
+# Security floor (all external voices):
 #   - OS secret-jail (sandbox-exec/bwrap) denies HOME secret stores +
 #     repo-ROOT .env*/data/*.pem/id_rsa*|id_ed25519*|…/*.key/.npmrc/.pypirc/
 #     credentials.json (nested via SWARM_DENY_PATHS; main checkout too in a
@@ -84,7 +97,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_SCHEMA="$SCRIPT_DIR/schema/finding.schema.json"
+KIMI_ACP_CLIENT="$SCRIPT_DIR/kimi-acp.py"
 CODEX_DEFAULT_MODEL="gpt-5.6-terra"
+KIMI_DEFAULT_MODEL="kimi-code/k3-256k"
+KIMI_BIN="${SWARM_KIMI_BIN:-kimi}"
 # The FALLBACK used wherever discovery cannot run — no model list, offline, an
 # unparseable listing. Deliberately the OLDEST still-verified id, not the newest:
 # this value is only ever reached when we could not read what the CLI offers, and
@@ -129,6 +145,10 @@ grok-4.6"
 # abort the whole script under `set -u` when HOME is unset.
 HOME="${HOME:-$(cd ~ 2>/dev/null && pwd || echo /nonexistent)}"
 GROK_AUTH_FILE="${GROK_AUTH_FILE:-$HOME/.grok/auth.json}"
+# Kimi's live OAuth token is here. ~/.kimi-code/oauth/kimi-code can exist as a
+# zero-byte compatibility path even while authenticated, so it is not an auth
+# signal (verified in work-system's Kimi worker integration).
+KIMI_CREDENTIALS_FILE="${KIMI_CREDENTIALS_FILE:-$HOME/.kimi-code/credentials/kimi-code.json}"
 
 # Temp files: codex's --output-last-message, and the assembled prompt the
 # backends read out-of-band (see the transport note in `run`). Both must be
@@ -157,7 +177,7 @@ TELEMETRY_BACKEND=""
 TELEMETRY_EFFORT=""
 TELEMETRY_MODEL=""
 TELEMETRY_BYTES=""
-# The backend CLI's own rc, captured before run_codex/run_grok translate it into
+# The backend CLI's own rc, captured before run_codex/run_grok/run_kimi translate it into
 # the adapter's exit code — otherwise a timeout (124) and a plain failure both
 # reach the trap as exit 1 and the one distinction worth logging is lost.
 TELEMETRY_RC=""
@@ -583,6 +603,7 @@ _sandbox_deny_paths_build() {
     "$HOME/.config/anthropic" "$HOME/.config/openai" "$HOME/.claude.json"
   if [[ "$own" != "codex" ]]; then printf '%s\n' "$HOME/.codex"; fi
   if [[ "$own" != "grok" ]]; then printf '%s\n' "$HOME/.grok"; fi
+  if [[ "$own" != "kimi" ]]; then printf '%s\n' "$HOME/.kimi-code"; fi
   # Repo-local secrets: .env*, data/, common key/cred files at repo root.
   # Best-effort (skip if not in a git work tree); only emit paths that exist so
   # the profile stays clean. The `[[ -e ]]` guard also filters an unmatched
@@ -880,8 +901,8 @@ sys.stdout.write(data)
 
 validate_backend() {
   case "$1" in
-    claude|codex|grok) ;;
-    *) echo "Unknown backend: $1 (expected claude|codex|grok)" >&2; exit 2 ;;
+    claude|codex|grok|kimi) ;;
+    *) echo "Unknown backend: $1 (expected claude|codex|grok|kimi)" >&2; exit 2 ;;
   esac
 }
 
@@ -909,7 +930,9 @@ available_version() {
     echo "${cver:-in-session}"
     return 0
   fi
-  command -v "$backend" >/dev/null || return 1
+  local executable="$backend"
+  [[ "$backend" == "kimi" ]] && executable="$KIMI_BIN"
+  command -v "$executable" >/dev/null || return 1
   # BOUNDED like every other pre-timer call. `<backend> --version` looks trivial
   # but runs before TELEMETRY_START on the `run` path, and a CLI wedged on a stale
   # leader socket or a hung PATH entry blocks here forever — wall clock the
@@ -925,7 +948,7 @@ available_version() {
   # (stock macOS), and the bounded call cannot make that choice itself: it runs
   # inside $(...) where it can neither warn once nor set a flag.
   _probe_setup_lenient
-  _probe_or_bare "$backend" --version 2>/dev/null | head -1 || true
+  _probe_or_bare "$executable" --version 2>/dev/null | head -1 || true
   return 0
 }
 
@@ -1254,6 +1277,82 @@ grok_parse_models() {
 '
 }
 
+# Kimi readiness has two independently bounded capability checks: ACP support
+# (the only argv-safe prompt transport) and the offered model catalog. Both are
+# memoized because `list` asks ready_check and ready_hint in the same process.
+_kimi_acp_done=""
+_kimi_acp_supported=""
+_kimi_models_done=""
+_kimi_models_known=""
+_kimi_models=""
+_kimi_probe_degraded() {
+  echo "warning: kimi probe unavailable ($1) — readiness falls back to authenticated install; the ACP/model check did not run" >&2
+}
+_kimi_has_acp() {
+  if [[ -n "$_kimi_acp_done" ]]; then
+    [[ "$_kimi_acp_supported" == "yes" ]]
+    return
+  fi
+  _kimi_acp_done=1
+  local help="" rc=0
+  help="$(_probe_or_bare "$KIMI_BIN" acp --help)" || rc=$?
+  if (( rc != 0 )); then
+    _kimi_probe_degraded "\`kimi acp --help\` did not complete (rc=$rc)"
+    _kimi_acp_supported=yes
+  elif [[ "$help" == *"Agent Client Protocol"* && "$help" == *"stdio"* ]]; then
+    _kimi_acp_supported=yes
+  else
+    _kimi_acp_supported=no
+  fi
+  [[ "$_kimi_acp_supported" == "yes" ]]
+}
+
+kimi_model_fetch() {
+  [[ -n "$_kimi_models_done" ]] && return 0
+  _kimi_models_done=1
+  local raw="" rc=0 parsed=""
+  raw="$(_probe_or_bare "$KIMI_BIN" provider list --json)" || rc=$?
+  if (( rc != 0 )); then
+    _kimi_probe_degraded "\`kimi provider list --json\` did not complete (rc=$rc)"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    _kimi_probe_degraded "python3 is unavailable to parse \`kimi provider list --json\`"
+    return 0
+  fi
+  parsed="$(printf '%s' "$raw" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+models = data.get("models") if isinstance(data, dict) else None
+if not isinstance(models, dict):
+    raise SystemExit(1)
+for model in models:
+    if isinstance(model, str) and model:
+        print(model)
+')" || rc=$?
+  if (( rc != 0 )); then
+    _kimi_probe_degraded "\`kimi provider list --json\` returned an unrecognized document"
+    return 0
+  fi
+  _kimi_models_known=yes
+  _kimi_models="$parsed"
+}
+
+kimi_model_offered() {
+  local model="$1"
+  kimi_model_fetch
+  # Unknown means probe-degraded, not definitely absent: trust auth and let the
+  # ACP session report a precise model-catalog error if the run reaches it.
+  [[ "$_kimi_models_known" != "yes" ]] && return 0
+  case $'\n'"$_kimi_models"$'\n' in
+    *$'\n'"$model"$'\n'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 grok_model_fetch() {
   # Populates the cache globals. Call it DIRECTLY — never as `$(grok_model_fetch)`:
   # a command substitution runs it in a subshell, the assignments die with that
@@ -1504,6 +1603,9 @@ ready_check() {
     # offers any model the adapter can drive (grok drops/renames models
     # between releases — 0.2.101 removed grok-composer-2.5-fast).
     grok)   [[ -s "$GROK_AUTH_FILE" ]] && grok_model_offered ;;
+    # ACP is the only out-of-band transport in kimi-code 0.32.0. The default
+    # model is pinned for deterministic ensemble behavior and must be offered.
+    kimi)   [[ -s "$KIMI_CREDENTIALS_FILE" ]] && _kimi_has_acp && kimi_model_offered "$KIMI_DEFAULT_MODEL" ;;
   esac
 }
 
@@ -1546,6 +1648,15 @@ ready_hint() {
         fi
       fi
       ;;
+    kimi)
+      if [[ ! -s "$KIMI_CREDENTIALS_FILE" ]]; then
+        echo "run: kimi login"
+      elif ! _kimi_has_acp; then
+        echo "this kimi CLI has no ACP stdio server — update kimi-code (verified on 0.32.0)"
+      else
+        echo "this kimi CLI does not offer $KIMI_DEFAULT_MODEL (see: kimi provider list --json)"
+      fi
+      ;;
   esac
 }
 
@@ -1569,7 +1680,9 @@ require_usable() {
   # probe_budget_seconds and therefore subtracted from the backend-s own wall.
   # The version string is worth a probe where it is SHOWN (`available`, `list`),
   # not where it is discarded.
-  if [[ "$backend" != "claude" ]] && ! command -v "$backend" >/dev/null; then
+  local executable="$backend"
+  [[ "$backend" == "kimi" ]] && executable="$KIMI_BIN"
+  if [[ "$backend" != "claude" ]] && ! command -v "$executable" >/dev/null; then
     echo "$backend: not installed" >&2
     exit 1
   fi
@@ -1594,7 +1707,7 @@ print_rows() {
   # column collapses adjacent tabs, shifting later columns left.
   local placeholder="${1:-}"
   local b ver avail rdy hint
-  for b in claude codex grok; do
+  for b in claude codex grok kimi; do
     ver="" avail=no rdy=no hint=""
     if ver="$(available_version "$b")"; then
       avail=yes
@@ -1747,10 +1860,11 @@ subcmd_run() {
   # `exec`'s per-argument limit the binding cap (Linux MAX_ARG_STRLEN = 128 KiB)
   # and forced a 120 KiB ceiling — above it the SKILL dropped ALL external
   # voices (EXTERNALS_OVERSIZE), i.e. the same damage as a backend timeout.
-  # Both CLIs accept the prompt out-of-band, so the adapter now normalizes every
-  # input form to ONE file and hands the PATH (never the content) to the backend:
+  # All CLIs accept the prompt out-of-band, so the adapter now normalizes every
+  # input form to ONE file and hands only transport metadata to the backend:
   #   codex — `[PROMPT]` omitted or `-` reads the instructions from stdin
   #   grok  — `--prompt-file <PATH>` (present on 0.2.112; preflighted, no fallback)
+  #   kimi  — the ACP client reads the file and sends its content over NDJSON stdio
   # The content is therefore never read into a shell variable either, so a large
   # diff no longer costs a full in-memory copy.
   #
@@ -1939,6 +2053,7 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
   case "$backend" in
     codex) run_codex "$prompt_path" "$effort" "$model" "$schema" ;;
     grok)  run_grok  "$prompt_path" "$effort" "$model" "$schema" ;;
+    kimi)  run_kimi  "$prompt_path" "$effort" "$model" "$schema" ;;
   esac
 }
 
@@ -2240,6 +2355,86 @@ if not (isinstance(out, dict) and isinstance(out.get("findings"), list)):
 json.dump(out, sys.stdout)
 print()
 ' | scrub_secrets
+}
+
+run_kimi() {
+  local prompt_path="$1" effort="$2" model="$3" schema="$4"
+
+  # kimi-code 0.32.0 exposes low|high|max through ACP session config even though
+  # the top-level CLI has no --effort flag. Map missing intermediate tiers DOWN,
+  # matching the conservative mappings used by codex/grok: a caller never gets a
+  # more expensive tier than requested merely because this ladder is sparse.
+  case "$effort" in
+    low|medium) effort="low" ;;
+    high|xhigh) effort="high" ;;
+    max) effort="max" ;;
+  esac
+  local kimi_model="${model:-$KIMI_DEFAULT_MODEL}"
+  TELEMETRY_EFFORT="$effort"; TELEMETRY_MODEL="$kimi_model"
+
+  [[ -f "$KIMI_ACP_CLIENT" ]] \
+    || { echo "kimi ACP client missing: $KIMI_ACP_CLIENT" >&2; exit 2; }
+
+  # Kimi has no CLI switch that removes read/web while still accepting the full
+  # prompt out-of-band. Its safe transport is ACP, whose client rejects every
+  # approval-gated write/edit/shell call while auto-allowed read/search/fetch stay
+  # available. Without the OS secret jail AND a resolvable repo root, those reads
+  # would have no hard credential boundary, so do not run a reduced imitation:
+  # fail once and let the skill omit Kimi from this host's externalVoices.
+  if ! _read_web_safe kimi; then
+    echo "kimi requires a working OS jail and resolvable repo root — refusing to run read/web-capable ACP without the secret boundary (fail closed)" >&2
+    exit 1
+  fi
+  local repo; repo="$(_repo_root)"
+
+  TMP_OUT="$(mktemp)"
+  chmod 600 "$TMP_OUT"
+
+  # FULL PROMPT OVER ACP STDIO: kimi -p is intentionally absent because it only
+  # accepts the prompt on argv. The Python client starts `kimi acp`, sends the
+  # prompt as an ACP ContentBlock over NDJSON, pins model/thinking/default mode,
+  # rejects every permission request, and validates the final assistant text
+  # against the configured schema. Kimi's own stderr is discarded inside the
+  # client; this outer redirect also withholds safe-but-unnecessary diagnostics
+  # from the workflow transport.
+  local rc=0
+  sandboxed kimi python3 "$KIMI_ACP_CLIENT" \
+      --prompt-file "$prompt_path" \
+      --schema "$schema" \
+      --cwd "$repo" \
+      --model "$kimi_model" \
+      --effort "$effort" >"$TMP_OUT" 2>/dev/null || rc=$?
+
+  case "$rc" in
+    0) TELEMETRY_RC=0 ;;
+    2)
+      # Schema/config incompatibility is an adapter usage error; the backend was
+      # never meaningfully entered, so leave backend_rc null in telemetry.
+      TELEMETRY_RC=""
+      echo "kimi ACP adapter rejected its configuration" >&2
+      exit 2
+      ;;
+    11|12)
+      # Kimi answered, but local schema/protocol/policy validation rejected it.
+      # Record backend_rc=0 so telemetry can distinguish this from "never ran".
+      TELEMETRY_RC=0
+      echo "kimi response was rejected by the ACP schema/policy gate" >&2
+      exit 1
+      ;;
+    124)
+      TELEMETRY_RC=124
+      echo "kimi ACP review timed out after ${ADAPTER_TIMEOUT}s" >&2
+      exit 1
+      ;;
+    *)
+      TELEMETRY_RC="$rc"
+      echo "kimi ACP review failed (rc=$rc)" >&2
+      exit 1
+      ;;
+  esac
+
+  [[ -s "$TMP_OUT" ]] || { echo "kimi ACP produced no output" >&2; exit 1; }
+  scrub_secrets <"$TMP_OUT"
 }
 
 main() {

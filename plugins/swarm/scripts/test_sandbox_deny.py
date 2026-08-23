@@ -95,14 +95,21 @@ class TestSandboxDenyPaths(unittest.TestCase):
 
     def test_own_backend_cred_dir_stays_readable(self):
         home = os.path.expanduser("~")
-        # codex keeps ~/.codex; denies ~/.grok
+        # Each backend keeps only its own credential directory readable.
         codex_paths = _bash_deny_paths("codex")
         self.assertNotIn(f"{home}/.codex", codex_paths)
         self.assertIn(f"{home}/.grok", codex_paths)
-        # grok keeps ~/.grok; denies ~/.codex
+        self.assertIn(f"{home}/.kimi-code", codex_paths)
+
         grok_paths = _bash_deny_paths("grok")
         self.assertNotIn(f"{home}/.grok", grok_paths)
         self.assertIn(f"{home}/.codex", grok_paths)
+        self.assertIn(f"{home}/.kimi-code", grok_paths)
+
+        kimi_paths = _bash_deny_paths("kimi")
+        self.assertNotIn(f"{home}/.kimi-code", kimi_paths)
+        self.assertIn(f"{home}/.codex", kimi_paths)
+        self.assertIn(f"{home}/.grok", kimi_paths)
 
     def test_repo_local_secrets_when_present(self):
         """When repo-local secret paths exist, they must appear in the denylist."""
@@ -274,25 +281,28 @@ class TestSandboxE2E(unittest.TestCase):
 SCHEMA = HERE / "schema" / "finding.schema.json"
 
 # Override sandboxed() to record the exact backend argv and emit canned valid
-# output (grok envelope on stdout; codex JSON into its --output-last-message
-# file), so run_codex/run_grok complete without a real CLI or jail. `_source`
-# writes the argv to $ARGV.
+# output (grok envelope on stdout; codex JSON into its --output-last-message;
+# Kimi's ACP helper shape on stdout), so all run_* functions complete without a
+# real CLI or jail. `_source` writes the argv to $ARGV.
 _RECORD_SANDBOXED = r'''
 sandboxed() {
   shift  # drop the backend name arg
   printf '%s\n' "$@" > "$ARGV"
-  local a prev="" out=""
+  local a prev="" out="" joined=" $* "
   for a in "$@"; do [ "$prev" = "--output-last-message" ] && out="$a"; prev="$a"; done
   [ -n "$out" ] && printf '{"findings":[]}' > "$out"
-  printf '{"structuredOutput":{"findings":[]}}'
+  case "$joined" in
+    *"/kimi-acp.py "*) printf '{"findings":[]}' ;;
+    *) printf '{"structuredOutput":{"findings":[]}}' ;;
+  esac
 }
 '''
 
 
 class TestFailClosedDegrade(unittest.TestCase):
     """The load-bearing fail-closed contract: a jail-less host must strip the
-    read+web tools (grok) and hard-disable web (codex); a jailed host must grant
-    them. Asserted on the actual argv run_grok/run_codex build."""
+    read+web tools (grok), hard-disable web (codex), and refuse Kimi entirely;
+    a jailed host grants the safe per-backend posture. Asserted on actual argv."""
 
     def _argv(self, backend: str, jail: bool) -> str:
         with tempfile.NamedTemporaryFile("r", suffix=".argv") as tf, \
@@ -314,7 +324,7 @@ class TestFailClosedDegrade(unittest.TestCase):
                 # what this test covers.
                 "_grok_has_prompt_file() { return 0; }",
                 _RECORD_SANDBOXED,
-                f'run_{backend} "{pf.name}" high "" "{SCHEMA}" >/dev/null 2>&1 || true',
+                f'( run_{backend} "{pf.name}" high "" "{SCHEMA}" ) >/dev/null 2>&1 || true',
                 env_extra={"ARGV": tf.name},
             )
             self.assertEqual(r.returncode, 0, f"harness failed: {r.stderr!r}")
@@ -346,13 +356,22 @@ class TestFailClosedDegrade(unittest.TestCase):
         self.assertIn("tools.web_search=true", argv,
                       f"jailed codex must enable web; argv:\n{argv}")
 
+    def test_kimi_refuses_to_run_without_jail(self):
+        argv = self._argv("kimi", jail=False)
+        self.assertEqual(argv, "", f"jail-less Kimi must never launch; argv:\n{argv}")
+
+    def test_kimi_runs_acp_client_when_jailed(self):
+        argv = self._argv("kimi", jail=True)
+        self.assertIn("/kimi-acp.py", argv, f"jailed Kimi must use ACP; argv:\n{argv}")
+        self.assertIn("--effort\nhigh", argv, f"effective ACP effort missing; argv:\n{argv}")
+
 
 class TestPromptTransport(unittest.TestCase):
     """The prompt must never travel on argv. It used to, which made exec's
     MAX_ARG_STRLEN the binding limit and forced a 120 KiB cap — above it the
     skill dropped EVERY external voice, the same damage as a backend timeout.
     Lives next to the fail-closed tests because it reuses their argv harness:
-    both assert on the exact command line run_codex/run_grok build.
+    both assert on the exact command line each external run function builds.
 
     A regression here is silent — the reviews still work on small diffs and only
     the large ones start failing — so pin the transport itself, not just its
@@ -376,10 +395,17 @@ class TestPromptTransport(unittest.TestCase):
         self.assertNotIn("prompt text", argv,
                          f"the prompt body must not appear on argv; argv:\n{argv}")
 
-    def test_neither_backend_receives_the_prompt_body(self):
-        # The harness prompt file contains "prompt text"; if either backend
-        # inlines the file's CONTENT, this catches it regardless of the flag used.
-        for backend in ("codex", "grok"):
+    def test_kimi_uses_acp_stdio_not_prompt_mode(self):
+        argv = self._argv("kimi")
+        self.assertIn("/kimi-acp.py", argv, f"Kimi must use ACP; argv:\n{argv}")
+        self.assertIn("--prompt-file", argv, f"ACP helper needs only the prompt path; argv:\n{argv}")
+        self.assertNotIn("\n-p\n", f"\n{argv}\n",
+                         f"kimi -p puts the full prompt on argv; argv:\n{argv}")
+
+    def test_no_backend_receives_the_prompt_body(self):
+        # The harness prompt file contains "prompt text"; if any backend inlines
+        # the file's CONTENT, this catches it regardless of the transport used.
+        for backend in ("codex", "grok", "kimi"):
             with self.subTest(backend=backend):
                 self.assertNotIn("prompt text", self._argv(backend))
 
