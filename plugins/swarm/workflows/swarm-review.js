@@ -53,20 +53,28 @@ const TELEMETRY = INPUT.telemetryFile
 // transport (tasks/async-poll-external-voices.md), not a bigger margin.
 const BASH_TIMEOUT_MS = 600000
 // The inner cap must lose the race deterministically, so the margin has to cover
-// everything the adapter spends OUTSIDE the timed backend call: both bounded
-// probes (`grok models`, `grok --help`) plus their kill grace, jail
-// construction, and output validation.
+// everything the adapter spends OUTSIDE the timed backend call: its bounded
+// probes plus their kill grace, jail construction, and output validation.
 //
-// COUPLED to agents.sh — do not change one side alone:
-//   - SWARM_PROBE_TIMEOUT is capped there at 20s (SWARM_PROBE_TIMEOUT_MAX), so
-//     the two probes cost at most 2 x (20 + 3) = 46s. Raising that ceiling
-//     without raising this margin lets the OUTER window kill a call before the
-//     inner cap fires — no rc=124, no telemetry record, i.e. exactly the lost
-//     diagnosis this branch exists to prevent.
-//   - the adapter's own ADAPTER_TIMEOUT default (600) is only reached on a
-//     direct CLI call; through this workflow the effective value is always sent
-//     explicitly below, so the two literals cannot drift apart in a review.
-const TIMEOUT_MARGIN_S = 60
+// The probe part is REPORTED by the adapter (`agents.sh config` →
+// probe_budget_seconds = max_probes x (probe_ceiling + kill_grace)), passed in by
+// the skill, and only defaulted here. It used to be a hand-derived literal that
+// re-stated the adapter's constants in a comment — the same split-brain the
+// `config` verb exists to end, and it bit exactly as predicted: 0.10.0 added a
+// third bounded probe (the --prompt-file capability check moving into readiness)
+// without touching this number, so worst-case pre-timer work became 3 x 23 = 69s
+// against a 60s margin. The outer window would then win the race and destroy the
+// rc=124 + telemetry evidence this whole branch exists to preserve. Reading the
+// number instead of restating it means adding a probe can no longer silently
+// overrun the margin.
+const PROBE_BUDGET_S = Number.isInteger(INPUT.probeBudgetSeconds) && INPUT.probeBudgetSeconds >= 0
+  ? INPUT.probeBudgetSeconds
+  : 46
+// Slack on top of the probe budget for the untimed remainder (jail construction,
+// prompt assembly, JSON validation). Small, fixed, and ours — not a mirror of
+// anything in the adapter.
+const TIMEOUT_SLACK_S = 14
+const TIMEOUT_MARGIN_S = PROBE_BUDGET_S + TIMEOUT_SLACK_S
 // Default to the derived ceiling, not to 600: the inner cap must stay BELOW the
 // Bash window, so a default of 600 was always capped to 570 — and announced as
 // "you asked for more than one Bash call can hold" on every single default run.

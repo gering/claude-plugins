@@ -101,8 +101,18 @@ check("percentage uses the record's own wall", "75%" in r.stdout)
 r = run([write([REC_OWN_WALL]), "--timeout-seconds", "9999"])
 check("an explicit --timeout-seconds does not override a record's own wall",
       "120s wall" in r.stdout)
-r = run([write([REC_NEAR]), "--timeout-seconds", "1200"])
-check("the fallback still applies to records without a wall", "⚠️" not in r.stdout)
+# The fallback and a record's own wall must coexist in ONE run: REC_NEAR (no wall
+# of its own) follows --timeout-seconds, REC_OWN_WALL keeps its 120s. The previous
+# version of this check re-ran the byte-identical command from 20 lines up, so it
+# reported the same behaviour twice and never exercised the mixed case.
+r = run([write([REC_NEAR, REC_OWN_WALL]), "--timeout-seconds", "1200"])
+# Each record is judged against ITS OWN wall: REC_OWN_WALL (90s of 120s = 75%)
+# flags, REC_NEAR (374s of the 1200s fallback = 31%) does not. One run, two
+# different walls — which is the property a second identical run could not show.
+check("mixed run: the record's own wall is kept", "120s wall" in r.stdout)
+check("mixed run: exactly the over-threshold record flags", r.stdout.count("⚠️") == 1)
+check("mixed run: the fallback keeps the other record quiet",
+      "374s" in r.stdout and "62%" not in r.stdout)
 
 # --- usage ------------------------------------------------------------------
 check("no args is a usage error", run([]).returncode == 2)

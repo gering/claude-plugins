@@ -194,7 +194,10 @@ _write_telemetry() {
   # multiple writes.
   # Record the wall this call actually ran under: SWARM_TIMEOUT is overridable,
   # and a reader that assumed 600 would compute "% of the wall" against a limit
-  # that was never in force.
+  # that was never in force. Read the MEMOIZED `_adapter_timeout` rather than
+  # calling adapter_timeout(): this runs from the EXIT trap, where _resolve_int's
+  # `exit 2` would replace the real status and lose the record. Unset (no timed
+  # call happened) writes 0, which the reader already understands as "no cap".
   # Escape the string fields. They are adapter-controlled today (cluster names,
   # ids filtered by GROK_CANONICAL_RE), but a `"` or `\` in any of them would
   # emit a line the reader silently SKIPS as malformed — telemetry that quietly
@@ -204,8 +207,8 @@ _write_telemetry() {
   _e="$(_json_escape "$TELEMETRY_EFFORT")";  _m="$(_json_escape "$TELEMETRY_MODEL")"
   printf '{"backend":"%s","unit":"%s","effort":"%s","model":"%s","prompt_bytes":%s,"seconds":%s,"timeout_seconds":%s,"backend_rc":%s,"adapter_rc":%s,"timed_out":%s}\n' \
     "$_b" "$_u" "$_e" "$_m" \
-    "$(( ${TELEMETRY_BYTES:-0} + 0 ))" "$secs" "$(( ADAPTER_TIMEOUT + 0 ))" "${TELEMETRY_RC:-null}" "${adapter_rc:-null}" \
-    "$( [[ "${TELEMETRY_RC:-}" == "124" ]] && echo true || echo false )" \
+    "$(( ${TELEMETRY_BYTES:-0} + 0 ))" "$secs" "$(( ${_adapter_timeout:-0} + 0 ))" "${TELEMETRY_RC:-null}" "${adapter_rc:-null}" \
+    "$( _is_timeout_rc "${TELEMETRY_RC:-0}" && echo true || echo false )" \
     >> "$TELEMETRY_FILE" 2>/dev/null || true
   return 0
 }
@@ -303,9 +306,33 @@ SWARM_CAP_HEADROOM=4096
 # Grace between SIGTERM and SIGKILL for every bounded call.
 TIMEOUT_KILL_GRACE=3
 
-ADAPTER_TIMEOUT="$(_resolve_int SWARM_TIMEOUT "${SWARM_TIMEOUT:-}" 600 0 "$SWARM_TIMEOUT_MAX")"
+# Did this rc come from hitting the wall? `timeout` reports 124 when SIGTERM
+# expired the command — but with `-k` a backend that IGNORES SIGTERM is SIGKILLed
+# instead and the shell reports 137 (128+9). Both mean "hit the wall", and grok
+# is documented right here as a CLI that ignores SIGTERM, so 137 is the EXPECTED
+# code for exactly the voice this branch keeps timing out. Keying only on 124
+# made that path print "check that the CLI offers model X" and record
+# timed_out:false — sending the operator to inspect a model list over a wall hit,
+# with the telemetry denying the timeout happened.
+_is_timeout_rc() { (( $1 == 124 || $1 == 137 )); }
+
+# Resolved LAZILY, on first use. Resolving at top level meant a bad value in a
+# shell profile (SWARM_TIMEOUT=600s) exited 2 from EVERY subcommand — `--help`,
+# `jail`, `list --json`, `available` — none of which use the timeout at all. The
+# old code validated on the `run` path only, so this was a silent behaviour
+# regression: `/swarm:agents` printed nothing and the review blamed a variable
+# the user never set. Verbs that DO use the value (`run`, `config`) still fail
+# loudly, which is the part worth keeping.
+_adapter_timeout=""
+adapter_timeout() {
+  [[ -n "$_adapter_timeout" ]] && return 0
+  _adapter_timeout="$(_resolve_int SWARM_TIMEOUT "${SWARM_TIMEOUT:-}" 600 0 "$SWARM_TIMEOUT_MAX")" \
+    || exit $?
+}
 _timeout_warned=""
 with_timeout() {
+  adapter_timeout
+  local ADAPTER_TIMEOUT="$_adapter_timeout"
   if [[ "$ADAPTER_TIMEOUT" == "0" ]]; then "$@"; return; fi
   # `-k` is what actually ENFORCES the bound. Plain `timeout` only sends SIGTERM;
   # a backend that ignores it — grok is documented as doing exactly that a few
@@ -326,15 +353,6 @@ with_timeout() {
     fi
     "$@"
   fi
-}
-
-require_valid_timeout() {
-  # Kept as an explicit call site for readability; the value was already
-  # validated and decimal-forced by _resolve_int at startup, so a malformed
-  # SWARM_TIMEOUT can no longer reach `timeout` (which would exit 125 — a code
-  # the rc==124 checks do not recognise, making every run misreport as a backend
-  # failure).
-  :
 }
 
 # OS-level read-deny jail for external CLI calls. Both voices may now read
@@ -672,7 +690,21 @@ available_version() {
 # telemetry record, which is the diagnosis this whole branch exists to keep.
 # Keep this ceiling and swarm-review.js's TIMEOUT_MARGIN_S in sync.
 SWARM_PROBE_TIMEOUT_MAX=20
-PROBE_TIMEOUT="$(_resolve_int SWARM_PROBE_TIMEOUT "${SWARM_PROBE_TIMEOUT:-}" 10 1 "$SWARM_PROBE_TIMEOUT_MAX")"
+# Lazy for the same reason as adapter_timeout(): `--help` and `list` must not die
+# on a knob they never read.
+_probe_timeout=""
+probe_timeout() {
+  [[ -n "$_probe_timeout" ]] && return 0
+  _probe_timeout="$(_resolve_int SWARM_PROBE_TIMEOUT "${SWARM_PROBE_TIMEOUT:-}" 10 1 "$SWARM_PROBE_TIMEOUT_MAX")" \
+    || exit $?
+}
+# How many bounded probes a single `run` may perform before the timed backend
+# call starts. Both are memoized per process, so the worst case is one
+# `grok models` plus one `grok --help`. The workflow's timeout margin must cover
+# this, and it now READS the number instead of re-deriving it by hand — that
+# hand-derivation is what let 0.10.0 add a third probe and silently overrun the
+# margin.
+SWARM_MAX_PROBES_PER_RUN=2
 
 # grok's model list, memoized for the process (`grok models` is a network call —
 # fetch at most once).
@@ -684,11 +716,11 @@ _probe_degraded() {
   # same trust-auth degrade, so each must be equally audible: the docs promise
   # the check falls back "never silently", and a promise that holds on only some
   # routes is the runtime-lie this branch removes.
-  echo "warning: grok model probe unavailable ($1) — readiness falls back to auth alone; the ${GROK_DEFAULT_MODEL} check did not run" >&2
+  echo "warning: grok model probe unavailable ($1) — readiness falls back to auth alone; the schema-verified-model check did not run" >&2
 }
 _bounded_probe() {
   # Run a LOCAL probe under the probe bound and print its stdout. Returns the
-  # command's rc, or 127 when no timeout binary exists to bound it with.
+  # command's rc, or 126 when no timeout binary exists to bound it with.
   #
   # Extracted because this prelude existed three times and had already drifted:
   # one copy checked rc before trusting the output, another swallowed it with
@@ -707,7 +739,8 @@ _bounded_probe() {
   elif command -v gtimeout >/dev/null; then to="gtimeout"
   else return 126
   fi
-  "$to" -k "$TIMEOUT_KILL_GRACE" "$PROBE_TIMEOUT" "$@" </dev/null 2>/dev/null
+  probe_timeout
+  "$to" -k "$TIMEOUT_KILL_GRACE" "$_probe_timeout" "$@" </dev/null 2>/dev/null
 }
 
 grok_model_fetch() {
@@ -747,8 +780,8 @@ grok_model_fetch() {
     # firing on a SIGTERM-ignoring grok, but an OS OOM-kill or an external
     # SIGKILL yields the same code, so don't assert a timeout that may not have
     # happened; word it for both.
-    if (( rc == 124 )); then _probe_degraded "\`grok models\` timed out after ${PROBE_TIMEOUT}s"
-    elif (( rc == 137 )); then _probe_degraded "\`grok models\` was killed (SIGKILL — likely the ${PROBE_TIMEOUT}s \`-k\` bound)"
+    if (( rc == 124 )); then _probe_degraded "\`grok models\` timed out after ${_probe_timeout}s"
+    elif (( rc == 137 )); then _probe_degraded "\`grok models\` was killed (SIGKILL — likely the ${_probe_timeout}s \`-k\` bound)"
     else _probe_degraded "\`grok models\` failed (rc=$rc)"
     fi
     return 0
@@ -1043,12 +1076,26 @@ subcmd_config() {
   # block can READ what the adapter will enforce instead of re-deriving it. Any
   # invalid value exits 2 here with the adapter's own message — one parser, one
   # verdict, one wording, and no way for the two sides to disagree.
-  local cap; cap="$(swarm_max_prompt_bytes)"
+  # Resolve into variables FIRST, each on its own line. `echo "x=$(resolver)"`
+  # would swallow the failure: _resolve_int's `exit 2` ends only the command
+  # substitution, and echo then succeeds — so `config` would print an empty value
+  # and exit 0, telling the skill everything is fine. A bare assignment keeps the
+  # substitution's status, so `set -e` aborts here with the adapter's message.
+  local cap
+  cap="$(swarm_max_prompt_bytes)"
+  adapter_timeout
+  probe_timeout
   echo "max_prompt_bytes=$cap"
   echo "cap_headroom=$SWARM_CAP_HEADROOM"
   echo "oversize_threshold=$(( cap - SWARM_CAP_HEADROOM ))"
-  echo "timeout_seconds=$ADAPTER_TIMEOUT"
-  echo "probe_timeout_seconds=$PROBE_TIMEOUT"
+  echo "timeout_seconds=$_adapter_timeout"
+  echo "probe_timeout_seconds=$_probe_timeout"
+  # The worst-case wall-clock this adapter can spend BEFORE the timed backend
+  # call starts: every bounded probe at its ceiling, plus its kill grace. The
+  # workflow subtracts this from the Bash window to size its inner cap, instead
+  # of keeping a hand-copied twin of these constants (which is how a third probe
+  # slipped in unnoticed).
+  echo "probe_budget_seconds=$(( SWARM_MAX_PROBES_PER_RUN * (SWARM_PROBE_TIMEOUT_MAX + TIMEOUT_KILL_GRACE) ))"
 }
 
 subcmd_run() {
@@ -1217,8 +1264,15 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
   fi
 
   require_usable "$backend"
+  # Resolve the wall HERE, in the main shell, before any subshell runs. The
+  # backend call happens inside `raw="$(sandboxed …)"`, so a resolution that
+  # first happens in with_timeout would memoize into that subshell and die with
+  # it: the "timed out after Ns" message would print an empty N, and
+  # _write_telemetry — running in the EXIT trap of the main shell — would record
+  # timeout_seconds:0, i.e. "no cap was in force" for a call that was capped.
+  # This is also where a malformed SWARM_TIMEOUT must fail the run loudly.
+  adapter_timeout
   require_python3
-  require_valid_timeout
 
   # Start the clock as late as possible: readiness probes and validation are
   # adapter overhead, and folding them into the number would misattribute them
@@ -1302,7 +1356,8 @@ run_codex() {
       -- - <"$prompt_path" >/dev/null 2>/dev/null || rc=$?
   TELEMETRY_RC="$rc"
   if (( rc != 0 )); then
-    (( rc == 124 )) && echo "codex exec timed out after ${ADAPTER_TIMEOUT}s" >&2 || echo "codex exec failed" >&2
+    if _is_timeout_rc "$rc"; then echo "codex exec timed out after ${_adapter_timeout}s" >&2
+    else echo "codex exec failed" >&2; fi
     exit 1
   fi
   [[ -s "$TMP_OUT" ]] || { echo "codex produced no output" >&2; exit 1; }
@@ -1325,6 +1380,8 @@ if not (isinstance(d, dict) and isinstance(d.get("findings"), list)):
 # — mutating tools (write, search_replace, run_terminal_command, spawn_*, …)
 # stay out. Web IDs probed 2026-07-20 on grok 0.2.103: web_search, web_fetch.
 # Do NOT fall back to a denylist that could admit a mutating tool.
+_grok_help_done=""
+_grok_help_rc=0
 _grok_has_prompt_file() {
   # Preflight for the out-of-band prompt flag. `--prompt-file` is what keeps the
   # diff off argv (see the transport note in `run`); an older CLI without it
@@ -1345,18 +1402,31 @@ _grok_has_prompt_file() {
   # probe: `-k` is what actually enforces it, since a CLI that ignores SIGTERM or
   # forks a stdout-inheriting child would keep `$(...)` blocking past the deadline.
   # Check rc BEFORE the output: a probe killed at the deadline (124), SIGKILLed
-  # by `-k` (137), or never bounded at all (127) still yields EMPTY stdout, and
+  # by `-k` (137), or never bounded at all (126) still yields EMPTY stdout, and
   # reading that as "the flag is absent" would refuse a CLI that has it — telling
   # the user to upgrade an already-current install while the voice dies. A probe
   # that did not complete says nothing: assume the capability and let the real
   # call report the truth.
+  # MEMOIZED, like grok_model_fetch: this is asked twice per `run grok` (once by
+  # grok_model_offered for readiness, once here) and each ask is a bounded probe.
+  # Unmemoized that made three probes per run against a margin budgeted for two —
+  # 3 x (20 + 3) = 69s > the 60s margin — so on a wedged CLI the OUTER window
+  # would kill the adapter before the inner cap fired, losing rc=124 and the
+  # telemetry record. Exactly the diagnosis this branch exists to preserve.
+  if [[ -n "$_grok_help_done" ]]; then return "$_grok_help_rc"; fi
+  _grok_help_done=1
   local help="" rc=0
   help="$(_bounded_probe grok --help)" || rc=$?
   if (( rc != 0 )); then
+    _grok_help_rc=0
     (( rc != 126 )) && echo "warning: \`grok --help\` probe did not complete (rc=$rc) — assuming --prompt-file is supported" >&2
     return 0
   fi
-  case "$help" in *--prompt-file*) return 0 ;; *) return 1 ;; esac
+  case "$help" in
+    *--prompt-file*) _grok_help_rc=0 ;;
+    *) _grok_help_rc=1 ;;
+  esac
+  return "$_grok_help_rc"
 }
 
 GROK_READ_TOOLS="read_file,list_dir,grep"
@@ -1446,8 +1516,9 @@ run_grok() {
     # stderr is deliberately discarded (injection guard), so name the likely
     # cause: an older CLI that predates the pinned model reports Ready (auth
     # heuristic) yet rejects the model id at runtime.
-    (( rc == 124 )) && echo "grok timed out after ${ADAPTER_TIMEOUT}s" >&2 \
-      || echo "grok failed — check that the installed grok CLI offers model '$grok_model' (see: grok models)" >&2
+    if _is_timeout_rc "$rc"; then echo "grok timed out after ${_adapter_timeout}s" >&2
+    else echo "grok failed — check that the installed grok CLI offers model '$grok_model' (see: grok models)" >&2
+    fi
     exit 1
   fi
   printf '%s' "$raw" | python3 -c '

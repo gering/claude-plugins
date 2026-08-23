@@ -389,6 +389,36 @@ pr_design = set(re.findall(r"'([a-z][a-z-]*)'|\"([a-z][a-z-]*)\"", dm.group(1) i
 pr_design = {a or b for a, b in pr_design}
 check("pr-post DESIGN_LENS_TAGS == design cluster", pr_design == set(clusters.get("design", [])))
 
+# --- the probe budget travels, it is not re-derived --------------------------
+# TIMEOUT_MARGIN_S used to be a hand-derived literal restating the adapter's
+# SWARM_PROBE_TIMEOUT_MAX + TIMEOUT_KILL_GRACE in a comment. 0.10.0 then added a
+# third bounded probe without touching it, and the margin silently stopped
+# covering the worst case — the outer Bash window would win the race and destroy
+# the rc=124 + telemetry evidence. The adapter reports the number now; these
+# checks keep it that way end to end.
+check("adapter: config reports probe_budget_seconds",
+      "probe_budget_seconds=" in sh and "SWARM_MAX_PROBES_PER_RUN" in sh)
+check("adapter: probe budget is derived from the ceiling + kill grace",
+      re.search(r"SWARM_MAX_PROBES_PER_RUN \* \(SWARM_PROBE_TIMEOUT_MAX \+ TIMEOUT_KILL_GRACE\)", sh))
+check("adapter: the --help capability probe is memoized",
+      "_grok_help_done" in sh and "_grok_help_rc" in sh)
+check("skill: the probe budget is echoed for the workflow",
+      "SWARM_PROBE_BUDGET_S" in skill)
+check("skill: the workflow call passes probeBudgetSeconds",
+      "probeBudgetSeconds:" in skill)
+check("workflow: the margin is built from the reported budget, not a literal",
+      re.search(r"const TIMEOUT_MARGIN_S = PROBE_BUDGET_S \+ TIMEOUT_SLACK_S", js))
+check("workflow: probeBudgetSeconds is read from INPUT",
+      "INPUT.probeBudgetSeconds" in js)
+
+# --- the presenter must not restate a configurable byte count ----------------
+# The prep block asks the adapter for the real threshold; prose that still says
+# "512 KiB (524288-byte)" tells the user the wrong number in the one message they
+# act on, and points them away from the override that actually fired.
+_lit = [l.strip()[:60] for l in skill.splitlines()
+        if not l.lstrip().startswith("#") and ("524288" in l or "512 KiB" in l)]
+check(f"skill: no hard-coded prompt cap in the prose ({_lit})", not _lit)
+
 if FAILS:
     print("lens-sync tests FAILED:", file=sys.stderr)
     for f in FAILS:
