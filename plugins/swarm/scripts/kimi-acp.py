@@ -25,6 +25,7 @@ from typing import Any
 EXIT_BACKEND = 10
 EXIT_RESPONSE = 11
 EXIT_PROTOCOL = 12
+EXIT_POLICY_RESPONSE = 13
 ACP_VERSION = 1
 
 
@@ -190,6 +191,7 @@ class AcpClient:
         self.collect_output = False
         self.output_chunks: list[str] = []
         self.unexpected_client_methods: list[str] = []
+        self.protocol_violations: list[str] = []
         self.unsafe_completed_tools: list[str] = []
         self.tool_kinds: dict[str, str] = {}
 
@@ -335,9 +337,17 @@ class AcpClient:
         if update_type in {"tool_call", "tool_call_update"}:
             tool_id = update.get("toolCallId")
             kind = update.get("kind")
-            if isinstance(tool_id, str) and isinstance(kind, str):
+            if not isinstance(tool_id, str) or not tool_id:
+                self.protocol_violations.append("tool update has no string toolCallId")
+                return
+            if isinstance(kind, str):
                 self.tool_kinds[tool_id] = kind
-            effective_kind = self.tool_kinds.get(tool_id, kind)
+            effective_kind = self.tool_kinds.get(tool_id)
+            if update.get("status") == "completed" and effective_kind is None:
+                self.protocol_violations.append(
+                    f"completed tool update {tool_id!r} has no known kind"
+                )
+                return
             if update.get("status") == "completed" and effective_kind in {
                 "edit",
                 "delete",
@@ -346,7 +356,7 @@ class AcpClient:
                 "switch_mode",
                 "other",
             }:
-                self.unsafe_completed_tools.append(str(effective_kind))
+                self.unsafe_completed_tools.append(effective_kind)
 
 
 def _select_option(config_options: Any, config_id: str) -> dict[str, Any]:
@@ -438,6 +448,7 @@ def main(argv: list[str]) -> int:
 
     executable = os.environ.get("SWARM_KIMI_BIN", "kimi")
     client = AcpClient(executable)
+    prompt_started = False
     previous_handlers: dict[int, Any] = {}
 
     def stop_child(signum: int, _frame: Any) -> None:
@@ -478,6 +489,7 @@ def main(argv: list[str]) -> int:
         _set_option(client, session_id, options, "mode", "default")
 
         client.collect_output = True
+        prompt_started = True
         result = client.request(
             "session/prompt",
             {
@@ -491,6 +503,9 @@ def main(argv: list[str]) -> int:
         if client.unexpected_client_methods:
             methods = ", ".join(sorted(set(client.unexpected_client_methods)))
             raise ProtocolError(f"server requested unsupported client method(s): {methods}")
+        if client.protocol_violations:
+            violations = "; ".join(sorted(set(client.protocol_violations)))
+            raise ProtocolError(f"malformed ACP tool update(s): {violations}")
         if client.unsafe_completed_tools:
             kinds = ", ".join(sorted(set(client.unsafe_completed_tools)))
             raise ProtocolError(f"unsafe tool completed despite approval guard: {kinds}")
@@ -516,7 +531,7 @@ def main(argv: list[str]) -> int:
         return EXIT_RESPONSE
     except ProtocolError as exc:
         _safe_error(f"protocol/policy failure: {exc}")
-        return EXIT_PROTOCOL
+        return EXIT_POLICY_RESPONSE if prompt_started else EXIT_PROTOCOL
     finally:
         client.close()
         for signum, handler in previous_handlers.items():

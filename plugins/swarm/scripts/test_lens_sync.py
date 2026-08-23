@@ -369,9 +369,24 @@ if mb and hr:
         body = len("; ".join(f"{l}: {briefs.get(l, '')}" for l in lenses).encode("utf-8"))
         tags = len(" / ".join(f'"[{l}] "' for l in lenses).encode("utf-8"))
         worst = max(worst, fixed + body + tags)
+    schema = HERE / "schema" / "finding.schema.json"
+    contract = subprocess.run(
+        ["bash", "-c", 'source "$1"; _kimi_output_contract "$2"',
+         "bash", str(ADAPTER), str(schema)],
+        capture_output=True, timeout=10,
+    )
+    check("adapter: Kimi output contract renders", contract.returncode == 0)
+    missing_contract = subprocess.run(
+        ["bash", "-c", 'source "$1"; _kimi_output_contract "$2"',
+         "bash", str(ADAPTER), str(schema.with_name("missing.schema.json"))],
+        capture_output=True, timeout=10,
+    )
+    check("adapter: Kimi output contract fails when schema cannot be read", missing_contract.returncode != 0)
+    kimi_contract_bytes = len(contract.stdout) if contract.returncode == 0 else headroom + 1
+    required = worst + kimi_contract_bytes
     check(
-        f"oversize headroom ({headroom} B) covers the largest lens instruction (<= {worst} B)",
-        headroom >= worst,
+        f"oversize headroom ({headroom} B) covers lens instruction + Kimi schema contract (<= {required} B)",
+        headroom >= required,
     )
 
 # METHODOLOGICAL_LENSES: the verify-gating list of lenses that assert repo-wide

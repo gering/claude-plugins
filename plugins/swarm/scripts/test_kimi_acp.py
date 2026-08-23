@@ -116,6 +116,19 @@ for raw in sys.stdin:
                     },
                 },
             })
+        elif scenario == "orphan-completed-update":
+            emit({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "fake-session",
+                    "update": {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": "orphan-tool",
+                        "status": "completed",
+                    },
+                },
+            })
 
         if scenario == "invalid-json":
             answer = "RAW_SECRET_SHOULD_NOT_LEAK"
@@ -232,15 +245,21 @@ class KimiAcpTests(unittest.TestCase):
 
     def test_unexpected_client_request_fails_review(self):
         result, records = self.run_helper("unexpected-client-request")
-        self.assertEqual(result.returncode, 12)
+        self.assertEqual(result.returncode, 13)
         self.assertIn("terminal/create", result.stderr)
         reply = next(record["client_error_response"] for record in records if "client_error_response" in record)
         self.assertEqual(reply["error"]["code"], -32601)
 
     def test_completed_unsafe_tool_fails_review(self):
         result, _ = self.run_helper("unsafe-completed")
-        self.assertEqual(result.returncode, 12)
+        self.assertEqual(result.returncode, 13)
         self.assertIn("unsafe tool completed", result.stderr)
+
+    def test_completed_tool_update_without_known_kind_fails_review(self):
+        result, _ = self.run_helper("orphan-completed-update")
+        self.assertEqual(result.returncode, 13)
+        self.assertIn("malformed ACP tool update", result.stderr)
+        self.assertIn("no known kind", result.stderr)
 
     def test_unsupported_schema_keyword_fails_before_backend(self):
         with tempfile.TemporaryDirectory() as td:

@@ -20,7 +20,8 @@ def check(name: str, condition: bool) -> None:
 
 
 def run_ready(*, help_text: str, models: str, help_rc: int = 0,
-              models_rc: int = 0, credentials: bool = True):
+              models_rc: int = 0, credentials: bool = True,
+              requested_model: str = ""):
     with tempfile.TemporaryDirectory() as td:
         cred = Path(td) / "credentials.json"
         if credentials:
@@ -32,6 +33,7 @@ def run_ready(*, help_text: str, models: str, help_rc: int = 0,
             "FAKE_MODELS": models,
             "FAKE_HELP_RC": str(help_rc),
             "FAKE_MODELS_RC": str(models_rc),
+            "FAKE_REQUESTED_MODEL": requested_model,
         })
         script = f'''set -euo pipefail
 source {str(AGENTS)!r}
@@ -46,7 +48,7 @@ _bounded_probe() {{
   fi
   return 99
 }}
-if ready_check kimi; then printf 'ready\n'; else printf 'not-ready\n'; fi
+if ready_check kimi "$FAKE_REQUESTED_MODEL"; then printf 'ready\n'; else printf 'not-ready\n'; fi
 '''
         return subprocess.run(
             ["bash", "-c", script],
@@ -57,6 +59,35 @@ if ready_check kimi; then printf 'ready\n'; else printf 'not-ready\n'; fi
         )
 
 
+def run_install_gate(*, display_version: bool):
+    with tempfile.TemporaryDirectory() as td:
+        fake = Path(td) / "kimi"
+        log = Path(td) / "invocations.log"
+        fake.write_text(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$FAKE_LOG\"\nprintf 'kimi 0.test\\n'\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        env = os.environ.copy()
+        env.update({"SWARM_KIMI_BIN": str(fake), "FAKE_LOG": str(log)})
+        action = "available_version kimi" if display_version else "require_usable kimi"
+        script = f'''set -euo pipefail
+source {str(AGENTS)!r}
+ready_check() {{ return 0; }}
+_bounded_probe() {{ printf 'bounded:%s\\n' "$*" >>"$FAKE_LOG"; "$@"; }}
+{action}
+'''
+        result = subprocess.run(
+            ["bash", "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=20,
+        )
+        invocations = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+        return result, invocations
+
+
 GOOD_HELP = "Run kimi-code as an Agent Client Protocol (ACP) server over stdio."
 GOOD_MODELS = json.dumps({"models": {"kimi-code/k3-256k": {"model": "k3-256k"}}})
 OTHER_MODELS = json.dumps({"models": {"kimi-code/other": {"model": "other"}}})
@@ -64,11 +95,22 @@ OTHER_MODELS = json.dumps({"models": {"kimi-code/other": {"model": "other"}}})
 r = run_ready(help_text=GOOD_HELP, models=GOOD_MODELS)
 check("ACP + pinned model + credentials is ready", r.returncode == 0 and r.stdout.strip() == "ready")
 
-r = run_ready(help_text="no ACP transport here", models=GOOD_MODELS)
+r = run_ready(help_text="unknown command", models=GOOD_MODELS, help_rc=2)
 check("missing ACP capability is not ready", r.stdout.strip() == "not-ready")
+
+r = run_ready(help_text="ACP server over standard I/O", models=GOOD_MODELS)
+check("ACP help wording drift degrades to ready", r.stdout.strip() == "ready")
+check("ACP help wording drift is audible", "unrecognized help text" in r.stderr)
 
 r = run_ready(help_text=GOOD_HELP, models=OTHER_MODELS)
 check("known catalog without pinned model is not ready", r.stdout.strip() == "not-ready")
+
+r = run_ready(
+    help_text=GOOD_HELP,
+    models=OTHER_MODELS,
+    requested_model="kimi-code/other",
+)
+check("explicit offered model override is ready", r.stdout.strip() == "ready")
 
 r = run_ready(help_text=GOOD_HELP, models=json.dumps({"models": {}}))
 check("known empty model catalog is not ready", r.stdout.strip() == "not-ready")
@@ -88,13 +130,31 @@ check("failed ACP probe is audible", "acp --help" in r.stderr and "rc=124" in r.
 r = run_ready(help_text=GOOD_HELP, models=GOOD_MODELS, credentials=False)
 check("missing credentials is not ready", r.stdout.strip() == "not-ready")
 
+r, invocations = run_install_gate(display_version=False)
+check("run gate accepts an installed ready backend", r.returncode == 0)
+check("run gate does not execute cosmetic version probe", invocations == [])
+
+r, invocations = run_install_gate(display_version=True)
+check("available version remains best effort", r.returncode == 0 and r.stdout.strip() == "kimi 0.test")
+check(
+    "available version uses bounded probe",
+    len(invocations) == 2
+    and invocations[0].startswith("bounded:")
+    and invocations[0].endswith(" --version")
+    and invocations[1] == "--version",
+)
+
 # Production constants: the task depends on the real token path (the similarly
 # named oauth/ path can stay empty while logged in) and a qualified model alias.
 script = f'''set -euo pipefail
 source {str(AGENTS)!r}
 printf '%s\n%s\n' "$KIMI_CREDENTIALS_FILE" "$KIMI_DEFAULT_MODEL"
 '''
-r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=20)
+env = os.environ.copy()
+env.pop("KIMI_CREDENTIALS_FILE", None)
+r = subprocess.run(
+    ["bash", "-c", script], capture_output=True, text=True, env=env, timeout=20
+)
 lines = r.stdout.splitlines()
 check("credential path uses credentials/kimi-code.json",
       bool(lines) and lines[0].endswith("/.kimi-code/credentials/kimi-code.json"))

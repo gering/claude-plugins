@@ -370,9 +370,11 @@ echo "LIVE_JSON=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json | t
   from `PROMPT_BYTES`. **Quote `SWARM_MAX_BYTES` / `PROMPT_BYTES` from the block,
   never a literal byte count** — the cap is configurable, so a hard-coded size
   states the wrong number in the one message the user acts on, and points them
-  away from the override that actually fired. The threshold sits a lens-instruction
-  headroom *under* the cap because the workflow prepends a per-cluster instruction
-  via `--lens-instr`, so what the backend ingests is instruction+diff. The cap now bounds
+  away from the override that actually fired. The threshold sits the adapter's
+  reported headroom under the cap because each backend receives a per-cluster
+  lens instruction and Kimi additionally receives the findings schema as an
+  output contract; `test_lens_sync.py` pins the combined worst case against the
+  adapter's `max_bytes`. The cap now bounds
   MODEL CONTEXT, not `exec` — the adapter passes the prompt out-of-band (codex stdin,
   grok `--prompt-file`, Kimi ACP stdio), so it should rarely fire; a hit means the range is genuinely
   too big to review in one call.
@@ -769,6 +771,7 @@ post. Do **not** re-implement the sanitize/gate/post logic inline.
      ],
      "has_quelle": true,
      "balance": "<the step-3 balance block, verbatim>",
+     "agents": ["<each balance.agents[].backend that entered the workflow>"],
      "notes": ["<every extra line from step 3, if any: coverage notes, redaction, backend errors, fence-degraded>"],
      "empty": false
    }
@@ -781,7 +784,9 @@ post. Do **not** re-implement the sanitize/gate/post logic inline.
    workflow's `num`, verbatim; `sev`/`v` = the glyphs; `ort` = raw `file:line`,
    no backticks).
    `has_quelle:false` for a single-source review (drops the `Source` column).
-   Pass each finding's `kind` and `lens` through verbatim on its row — the
+   Build `agents` from `balance.agents[].backend`, without adding configured or
+   skipped voices; the script uses it to name only actual participants in the
+   footer. Pass each finding's `kind` and `lens` through verbatim on its row — the
    SCRIPT renders one table, orders defect rows before design rows, and
    prefixes each design row's finding cell with its `[lens]` deterministically;
    do NOT hand-order or hand-prefix (rows keep step 3's shared numbering).
@@ -847,8 +852,8 @@ post. Do **not** re-implement the sanitize/gate/post logic inline.
   missed entirely. It is *not* a speed fix — the longest call only drops 374 s →
   313 s and total work rises. It also means a timeout costs one lens instead of
   three, and — holding no mandatory lens — the gate can drop `reach` entirely on
-  a diff with no cross-file surface. **Every** voice — Claude, codex,
-  grok — fans out one call per cluster by default, one per lens under `--max`;
+  a diff with no cross-file surface. **Every** voice — Claude, codex, grok,
+  kimi — fans out one call per cluster by default, one per lens under `--max`;
   the gate prunes per-lens and a fully-pruned cluster spawns nothing for anyone.
   The externals get their cluster's briefs through the adapter's `--lens-instr`
   (assembled in deterministic shell), so `LENS_BRIEF` in the workflow is the
@@ -856,7 +861,7 @@ post. Do **not** re-implement the sanitize/gate/post logic inline.
   from a broad prompt. Design findings carry `kind: "design"`: verified via an
   applicability prompt (reuse target real? simpler form behavior-identical?)
   and rendered in their own report section, apart from the defect ranking.
-- **Consensus = cross-family agreement** (≥2 of claude / openai / grok). Voices
+- **Consensus = cross-family agreement** (≥2 of claude / openai / grok / moonshot). Voices
   from one vendor count once — Claude's lens voices agreeing with each other is
   one family, not a quorum — so solos go through the adversarial verifier.
   **Design clusters are applicability-verified even with consensus**: agreement
@@ -870,7 +875,7 @@ post. Do **not** re-implement the sanitize/gate/post logic inline.
   linked worktree, the main checkout; root-level only, nested secrets via
   `SWARM_DENY_PATHS`; no working jail → fail closed **per voice**: grok
   tool-less/no-web, codex web hard-off with its own read-only sandbox's read
-  surface) —
+  surface, Kimi omitted entirely because ACP has no safe jail-less tier) —
   no write/shell tools. A prompt **egress guard** (outside the diff fence)
   forbids putting repo content into web queries; it is model-cooperation-
   dependent, not transport-enforced — the jail is the hard boundary.

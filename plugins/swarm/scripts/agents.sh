@@ -343,8 +343,9 @@ _resolve_int() {
 # that the arithmetic below can never wrap.
 SWARM_MAX_PROMPT_BYTES_MAX=1073741824
 SWARM_TIMEOUT_MAX=86400
-# The headroom the skill subtracts for the per-cluster lens instruction. A cap at
-# or below it would make the oversize threshold zero or negative — i.e. EVERY
+# The headroom the skill subtracts for the per-cluster lens instruction plus
+# Kimi's appended schema-output contract. A cap at or below it would make the
+# oversize threshold zero or negative — i.e. EVERY
 # prompt "too large" and every external voice dropped, silently. Defined here so
 # the skill can read it rather than hard-code a second copy.
 SWARM_CAP_HEADROOM=4096
@@ -441,7 +442,7 @@ with_timeout() {
   fi
 }
 
-# OS-level read-deny jail for external CLI calls. Both voices may now read
+# OS-level read-deny jail for external CLI calls. All external voices may read
 # project files (out-of-diff bugs), so the jail is the HARD boundary that bounds
 # blast radius if an injection steers a read: common secret stores stay
 # unreadable while the CLI's own config + non-secret project files remain
@@ -681,11 +682,11 @@ _scope_args() {
 
 _jail_available() {
   # $1 = backend. Builds the jail (memoized) and reports whether an OS sandbox
-  # wrapper exists. run_codex/run_grok consult this to FAIL CLOSED: the read+web
-  # posture is only safe under the OS secret-jail (the hard boundary), so on a
-  # host without sandbox-exec/bwrap the externals degrade to the 0.5.x
-  # tool-less/no-web flags instead of running read+web bare — 0.5.x was safe
-  # there precisely because the flags, not the jail, closed the channel.
+  # wrapper exists. All external run paths consult this to FAIL CLOSED: the
+  # read+web posture is only safe under the OS secret-jail (the hard boundary).
+  # Without one, codex/grok degrade to their 0.5.x restricted flags instead of
+  # running read+web bare; Kimi refuses because ACP has no equivalent safe
+  # no-read tier.
   _init_sandbox "${1:-}"
   (( ${#SANDBOX_CMD[@]} > 0 ))
 }
@@ -759,7 +760,7 @@ sys.stdout.write("(version 1)(allow default)(deny file-read* %s)" % " ".join(rul
   # sandbox-exec would otherwise fail every review run with an opaque backend
   # error instead of taking the callers' fail-closed degrade path. On probe
   # failure treat the host as jail-less (audibly) — _jail_available then
-  # reports false and run_codex/run_grok degrade.
+  # reports false and the external run paths fail closed.
   if ((${#SANDBOX_CMD[@]} > 0)); then
     if ! "${SANDBOX_CMD[@]}" true >/dev/null 2>&1; then
       echo "warning: ${SANDBOX_CMD[0]} is installed but not functional here — treating host as jail-less; externals fail closed" >&2
@@ -853,6 +854,13 @@ validate_backend() {
 
 # ---------- probes ----------
 
+backend_installed() {
+  local backend="$1" executable="$1"
+  [[ "$backend" == "claude" ]] && return 0
+  [[ "$backend" == "kimi" ]] && executable="$KIMI_BIN"
+  command -v "$executable" >/dev/null
+}
+
 available_version() {
   # Prints the backend's version line; exit 1 if not installed.
   local backend="$1"
@@ -870,7 +878,7 @@ available_version() {
   fi
   local executable="$backend"
   [[ "$backend" == "kimi" ]] && executable="$KIMI_BIN"
-  command -v "$executable" >/dev/null || return 1
+  backend_installed "$backend" || return 1
   # BOUNDED like every other pre-timer call. `<backend> --version` looks trivial
   # but runs before TELEMETRY_START on the `run` path, and a CLI wedged on a stale
   # leader socket or a hung PATH entry blocks here forever — wall clock the
@@ -1162,13 +1170,19 @@ _kimi_has_acp() {
   _kimi_acp_done=1
   local help="" rc=0
   help="$(_bounded_probe "$KIMI_BIN" acp --help)" || rc=$?
-  if (( rc != 0 )); then
+  if (( rc == 0 )); then
+    _kimi_acp_supported=yes
+    if [[ "$help" != *"Agent Client Protocol"* || "$help" != *"stdio"* ]]; then
+      _kimi_probe_degraded "\`kimi acp --help\` returned unrecognized help text"
+    fi
+  elif (( rc == 2 || rc == 127 )); then
+    # A normal CLI usage/not-found result is a clean negative: the installed
+    # binary cannot enter ACP. Timeouts and infrastructure failures remain
+    # inconclusive and degrade to trusting the authenticated install.
+    _kimi_acp_supported=no
+  else
     _kimi_probe_degraded "\`kimi acp --help\` did not complete (rc=$rc)"
     _kimi_acp_supported=yes
-  elif [[ "$help" == *"Agent Client Protocol"* && "$help" == *"stdio"* ]]; then
-    _kimi_acp_supported=yes
-  else
-    _kimi_acp_supported=no
   fi
   [[ "$_kimi_acp_supported" == "yes" ]]
 }
@@ -1424,7 +1438,7 @@ grok_model_offered() {
 }
 
 ready_check() {
-  local backend="$1"
+  local backend="$1" requested_model="${2:-}"
   case "$backend" in
     claude) return 0 ;;  # in-session, no separate auth
     # Bounded on every host (_probe_or_bare falls back to the polling watchdog),
@@ -1454,13 +1468,14 @@ ready_check() {
     grok)   [[ -s "$GROK_AUTH_FILE" ]] && grok_model_offered ;;
     # ACP is the only out-of-band transport in kimi-code 0.32.0. The default
     # model is pinned for deterministic ensemble behavior and must be offered.
-    kimi)   [[ -s "$KIMI_CREDENTIALS_FILE" ]] && _kimi_has_acp && kimi_model_offered "$KIMI_DEFAULT_MODEL" ;;
+    kimi)   [[ -s "$KIMI_CREDENTIALS_FILE" ]] && _kimi_has_acp && kimi_model_offered "${requested_model:-$KIMI_DEFAULT_MODEL}" ;;
   esac
 }
 
 ready_hint() {
   # claude needs no hint: it is always available + ready in-session.
-  case "$1" in
+  local backend="$1" requested_model="${2:-}"
+  case "$backend" in
     codex) echo "run: codex login" ;;
     grok)
       if [[ ! -s "$GROK_AUTH_FILE" ]]; then
@@ -1491,7 +1506,7 @@ ready_hint() {
       elif ! _kimi_has_acp; then
         echo "this kimi CLI has no ACP stdio server — update kimi-code (verified on 0.32.0)"
       else
-        echo "this kimi CLI does not offer $KIMI_DEFAULT_MODEL (see: kimi provider list --json)"
+        echo "this kimi CLI does not offer ${requested_model:-$KIMI_DEFAULT_MODEL} (see: kimi provider list --json)"
       fi
       ;;
   esac
@@ -1508,14 +1523,15 @@ subcmd_available() {
 }
 
 require_usable() {
-  # Shared installed+ready gate for `ready` and `run`.
-  local backend="$1"
-  if ! available_version "$backend" >/dev/null; then
+  # Shared installed+ready gate for `ready` and `run`. Do not fetch a cosmetic
+  # version here: every review call passes this gate, and only `list` displays it.
+  local backend="$1" requested_model="${2:-}"
+  if ! backend_installed "$backend"; then
     echo "$backend: not installed" >&2
     exit 1
   fi
-  if ! ready_check "$backend"; then
-    echo "$backend: not ready — $(ready_hint "$backend")" >&2
+  if ! ready_check "$backend" "$requested_model"; then
+    echo "$backend: not ready — $(ready_hint "$backend" "$requested_model")" >&2
     exit 1
   fi
 }
@@ -1832,7 +1848,7 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
   # Both resolved above, in THIS shell — so the wall recorded in telemetry is the
   # wall that will actually apply, not a value assigned inside a subshell.
   _set_enforced_wall
-  require_usable "$backend"
+  require_usable "$backend" "$model"
   require_python3
 
   # Start the clock as late as possible: readiness probes and validation are
@@ -2127,6 +2143,17 @@ print()
 ' | scrub_secrets
 }
 
+_kimi_output_contract() {
+  # Kimi has no schema-enforcement flag. Put the exact schema in its PROMPT so
+  # obedience has the best chance of succeeding, then independently validate the
+  # answer in kimi-acp.py. The contract follows the fenced diff: lensInstr remains
+  # the first text in the prompt, preserving the workflow's scope invariant.
+  local schema="$1"
+  printf '\n\nOUTPUT CONTRACT (HIGH PRIORITY): Return ONLY one JSON object matching this JSON Schema. No markdown fence, preface, explanation, or trailing text. Empty findings is valid.\n' &&
+    cat "$schema" &&
+    printf '\nThe response must be exactly the schema object and nothing else.\n'
+}
+
 run_kimi() {
   local prompt_path="$1" effort="$2" model="$3" schema="$4"
 
@@ -2144,6 +2171,25 @@ run_kimi() {
 
   [[ -f "$KIMI_ACP_CLIENT" ]] \
     || { echo "kimi ACP client missing: $KIMI_ACP_CLIENT" >&2; exit 2; }
+
+  # Codex/Grok get the schema through an enforcement flag; Kimi has no equivalent,
+  # so append it as a strict output instruction before the local validator checks
+  # the answer. Keep the caller-owned prompt immutable and account for the extra
+  # bytes in both the context cap and telemetry.
+  local kimi_prompt previous kimi_bytes max_bytes
+  kimi_prompt="$(mktemp)" || { echo "Could not create a temp file for the Kimi schema prompt" >&2; exit 2; }
+  chmod 600 "$kimi_prompt"
+  { cat "$prompt_path"; _kimi_output_contract "$schema"; } >"$kimi_prompt" \
+    || { rm -f "$kimi_prompt"; echo "Could not assemble the Kimi schema prompt" >&2; exit 2; }
+  previous="$TMP_PROMPT"
+  TMP_PROMPT="$kimi_prompt"
+  [[ -n "$previous" ]] && rm -f "$previous"
+  prompt_path="$TMP_PROMPT"
+  kimi_bytes=$(wc -c <"$prompt_path" | tr -d "[:space:]")
+  max_bytes="$(swarm_max_prompt_bytes)"
+  (( kimi_bytes > max_bytes )) \
+    && { echo "Kimi prompt too large with output schema ($kimi_bytes bytes > $max_bytes) — narrow the diff range, or raise SWARM_MAX_PROMPT_BYTES" >&2; exit 2; }
+  TELEMETRY_BYTES="$kimi_bytes"
 
   # Kimi has no CLI switch that removes read/web while still accepting the full
   # prompt out-of-band. Its safe transport is ACP, whose client rejects every
@@ -2175,6 +2221,12 @@ run_kimi() {
       --model "$kimi_model" \
       --effort "$effort" >"$TMP_OUT" 2>/dev/null || rc=$?
 
+  if _is_timeout_rc "$rc"; then
+    TELEMETRY_RC="$rc"
+    echo "kimi ACP review timed out after ${_adapter_timeout}s" >&2
+    exit 1
+  fi
+
   case "$rc" in
     0) TELEMETRY_RC=0 ;;
     2)
@@ -2184,16 +2236,19 @@ run_kimi() {
       echo "kimi ACP adapter rejected its configuration" >&2
       exit 2
       ;;
-    11|12)
+    11|13)
       # Kimi answered, but local schema/protocol/policy validation rejected it.
       # Record backend_rc=0 so telemetry can distinguish this from "never ran".
       TELEMETRY_RC=0
       echo "kimi response was rejected by the ACP schema/policy gate" >&2
       exit 1
       ;;
-    124)
-      TELEMETRY_RC=124
-      echo "kimi ACP review timed out after ${ADAPTER_TIMEOUT}s" >&2
+    12)
+      # ACP negotiation/configuration failed before session/prompt. No review
+      # response existed to reject, so leave backend_rc null rather than claiming
+      # a successful model answer.
+      TELEMETRY_RC=""
+      echo "kimi ACP session negotiation failed before review" >&2
       exit 1
       ;;
     *)

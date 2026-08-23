@@ -1,10 +1,10 @@
 # Swarm
 
 Local mixture-of-agents code review for Claude Code. Fans out one review
-across multiple independent agents — Claude subagents plus the `codex` and
-`grok` CLIs — merges and deduplicates their findings, and presents a single
-ranked report. Cross-agent agreement is a strong confidence signal when it
-occurs; single-agent findings (the common case) pass an adversarial 3-state
+across multiple independent agents — Claude subagents plus the `codex`, `grok`,
+and `kimi` CLIs — merges and deduplicates their findings, and presents a single
+ranked report. Cross-family agreement is a strong confidence signal when it
+occurs; single-family findings (the common case) pass an adversarial 3-state
 verifier so real catches survive and noise is dropped.
 
 Complementary to [pr-flow](../pr-flow/): pr-flow drives the GitHub-PR
@@ -13,11 +13,10 @@ Complementary to [pr-flow](../pr-flow/): pr-flow drives the GitHub-PR
 ## Status
 
 **Phase 5 of 6** — the pipeline can now **act**. `/swarm:review` fans a diff
-across three voices (Claude lenses + `codex` + `grok`), each running one
-call per gated lens cluster,
-merges by mechanism, verifies solo findings + design suggestions, presents one
-ranked report, and —
-with `--fix` / `--loop` — applies the findings you agreed with.
+across four model families (Claude lenses + `codex` + `grok` + `kimi`), each
+running one call per gated lens cluster, merges by mechanism, verifies solo
+findings + design suggestions, presents one ranked report, and — with `--fix` /
+`--loop` — applies the findings you agreed with.
 
 ## Commands
 
@@ -26,14 +25,15 @@ with `--fix` / `--loop` — applies the findings you agreed with.
   default branch (including uncommitted work). `--fix` applies the agreed
   findings once; `--loop[=N]` re-reviews after each fix round until it converges
   (cap default `10`); `--max` runs the deepest-effort profile (codex
-  `gpt-5.6-sol`/`xhigh`, Claude finders + verifier `xhigh`, and **every** voice
-  — Claude, codex, grok — fanning out per **lens** instead of per cluster;
-  grok already runs at `high`, its ceiling) — slower, more thorough, costs up
-  to `2 × 11` external calls, composes with `--fix`/`--loop`.
+  `gpt-5.6-sol`/`xhigh`, Claude finders + verifier `xhigh`, Kimi `max`, and
+  **every** voice — Claude, codex, grok, kimi — fanning out per **lens** instead
+  of per cluster; grok already runs at `high`, its ceiling) — slower, more
+  thorough, costs up to `3 × 11` external calls, composes with
+  `--fix`/`--loop`.
 - `/swarm:review --pr [<number>]` — run the same ensemble against a **GitHub
   PR's diff** (`gh pr diff`; bare `--pr` resolves the current branch's PR) and,
   after a single confirmation, post the output-gated result as a PR comment via
-  `gh pr comment` — the codex/grok/Claude voice on GitHub with no CI, repo
+  `gh pr comment` — the codex/grok/kimi/Claude ensemble on GitHub with no CI, repo
   secrets, or API-token cost. Read-only (never edits the tree); mutually
   exclusive with `--fix`/`--loop`. The comment is posted under your own `gh`
   identity, so it does not disturb pr-flow's `@claude` review polling.
@@ -46,7 +46,7 @@ presets).
 ## The pipeline (`/swarm:review`)
 
 ```
-Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok)
+Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok ∥ kimi)
           → Merge (file, mechanism) → Verify (solos + design + unverified consensus) → Ranked synthesis
 ```
 
@@ -58,8 +58,8 @@ Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok)
    by nobody. Every pruned lens is reported as gated-out, never silently
    dropped.
 2. **Fan-out** — all voices at the **same granularity**: one Claude finder per
-   gated lens **cluster**, and `codex` + `grok` each once per gated cluster
-   too (per lens under `--max`). The gate prunes calls for everyone — a
+   gated lens **cluster**, and `codex` + `grok` + `kimi` each once per gated
+   cluster too (per lens under `--max`). The gate prunes calls for everyone — a
    fully-gated-out cluster spawns nothing for any voice — and each finding's
    `[lens]` tag is authoritative, because the voice *is* that lens.
 3. **Merge** — an LLM step clusters findings by `(file, mechanism)`, not
@@ -94,7 +94,7 @@ section, so suggestions never dilute the defect ranking.
 
 **Consensus counts model *families*, not voices.** Several Claude lenses
 flagging the same thing is one vote, not a cross-check — a `CONSENSUS` tag
-requires ≥2 of *claude / openai / grok*. Everything else is a solo and earns
+requires ≥2 of *claude / openai / grok / moonshot*. Everything else is a solo and earns
 its place through the verifier. Only **tagged topical-defect** consensus is
 auto-accepted; design, all-untagged, and Claude-unchecked methodological
 consensus still go through the verifier (agreement isn't repo-grounded
@@ -112,10 +112,12 @@ tools. On a host with no working sandbox the adapter **fails closed per voice**
 prompt egress guard forbids putting repo content into web queries (model-
 cooperation-dependent; the jail is the hard boundary). A secret scrub at the
 adapter boundary plus a final **output gate** re-scrub findings before they reach you.
-Findings are advisory by default; `--fix` / `--loop` act only on the ones you
-agreed with, and **only Claude** applies edits — external agents stay
-review-only. The full threat model lives in `docs/pipeline-blueprint.md`
-§ Security.
+Kimi runs only when this OS jail is available: its ACP client denies every
+permission-gated operation, refuses successful mutating tool calls, and never
+falls back to an unjailed mode. Findings are advisory by default; `--fix` /
+`--loop` act only on the ones you agreed with, and **only Claude** applies edits
+— external agents stay review-only. The full threat model lives in
+`docs/pipeline-blueprint.md` § Security.
 
 ## Architecture
 
@@ -154,15 +156,25 @@ Backends:
 | `claude` | probe-only | reviews run in-session via the Agent tool |
 | `codex` | external reviewer | `codex exec -s read-only -C <repo> -c tools.web_search=true --output-schema` (model `gpt-5.6-terra`), prompt on stdin (`-- -`); file-read + web under read-only; auth via `codex login status` |
 | `grok` | external reviewer | headless `--prompt-file` with inline `--json-schema`; the model is **discovered** — the newest canonical id whose schema enforcement is verified (the current set lives in `GROK_SCHEMA_VERIFIED` in `agents.sh`), never a silent upgrade to an unverified one. Strict `--tools` allowlist (`read_file,list_dir,grep,web_search,web_fetch`) + `--cwd <repo>` — no write/shell. Readiness is model-aware: auth, `--prompt-file` support, **and** a verified model on offer in `grok models`. `ready` answers usable/not-usable plus a hint; the concrete id is selected at `run` time and appears in that call's telemetry line. |
+| `kimi` | external reviewer | ACP v1 over stdio (`kimi acp`), pinned to `kimi-code/k3-256k`; the complete prompt is an ACP content block, not argv. The client advertises no FS/terminal capability, rejects permission requests, allows approval-free read/search/web tools, and strictly validates the final response against the shared schema. Invalid output or policy/protocol drift is a visible backend error, never an empty review. Requires auth, ACP, the pinned model, and a working OS jail. |
 
 The prompt always reaches a backend **out-of-band** — never as an argv word — so
-the diff is bounded by model context rather than `exec`'s `MAX_ARG_STRLEN`.
-`SWARM_MAX_PROMPT_BYTES` (default 512 KiB) is that sanity cap; above it
-`/swarm:review` cleanly skips the externals instead of letting each call fail.
+the diff is bounded by model context rather than `exec`'s `MAX_ARG_STRLEN`:
+stdin for codex, `--prompt-file` for grok, and an ACP `session/prompt` content
+block for Kimi. `SWARM_MAX_PROMPT_BYTES` (default 512 KiB) is that sanity cap;
+above it `/swarm:review` cleanly skips the externals instead of letting each
+call fail. Kimi receives the schema as a high-priority output contract in that
+prompt, then the adapter validates its final JSON locally. There is no retry:
+an invalid response fails closed immediately rather than multiplying up to
+5 default or 11 `--max` calls.
 
-Each external call is timed (`--telemetry <file> --unit <name>`), and the report
-flags any voice at ≥60% of the `SWARM_TIMEOUT` wall — a call that *survives* at
-550 s is invisible in the error list but is the one about to start failing.
+Each external call is timed (`--telemetry <file> --unit <name>`), including
+Kimi's effective ACP model/thinking level and adapter-side schema rejection.
+The report flags any voice at ≥60% of the `SWARM_TIMEOUT` wall — a call that
+*survives* at 550 s is invisible in the error list but is the one about to start
+failing. `backend_rc=0` with a non-zero adapter result means the backend replied
+but its response was rejected; an ACP negotiation failure before `session/prompt`
+keeps `backend_rc` null instead of claiming a model response.
 
 Unavailable backends drop from the ensemble — `claude` alone still works.
 `/swarm:review` reports a backend that *errored* mid-run distinctly from one
@@ -170,8 +182,10 @@ that cleanly found nothing (error ≠ empty).
 
 ### Shared findings schema (`scripts/schema/finding.schema.json`)
 
-Both external CLIs enforce the same JSON schema on their output, so the
-ensemble merge receives uniform findings:
+Every external backend is normalized through the same JSON schema: codex and
+grok enforce it in their CLIs; Kimi is instructed with it and then validated
+strictly by the local ACP client. The ensemble merge therefore receives uniform
+findings, while malformed Kimi output becomes a visible backend error:
 
 ```json
 {
@@ -197,5 +211,6 @@ verifier tests in the confidence phase.
 ## Requirements
 
 - `python3` on PATH (JSON handling in the adapter).
-- `codex` and/or `grok` CLIs are optional — install and authenticate them to
-  widen the ensemble.
+- `codex`, `grok`, and/or `kimi` CLIs are optional — install and authenticate
+  them to widen the ensemble. Kimi additionally needs ACP support, the pinned
+  `kimi-code/k3-256k` model, and a working OS jail.
