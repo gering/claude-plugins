@@ -169,12 +169,31 @@ const PROBE_BUDGET_MAX_S = BASH_TIMEOUT_MS / 1000 / 2
 // and the fallback pair is internally consistent (39 = 3 x (10 + 3)) and pinned
 // against `agents.sh config` by test_lens_sync.py. Never mix a supplied value
 // with a defaulted one.
-const _probePairOk = [INPUT.probeTimeoutSeconds, INPUT.probeBudgetSeconds]
-  .every((v) => { const n = _num(v); return Number.isInteger(n) && n >= 0 })
+// Copies of the adapter's SWARM_MAX_PROBES_PER_RUN and TIMEOUT_KILL_GRACE,
+// pinned against agents.sh by test_lens_sync.py like every other rail here. They
+// are used ONLY to check the pair below, never to derive the budget — the
+// adapter stays the one place that computes it.
+const MAX_PROBES = 3
+const KILL_GRACE_S = 3
+const _ptRaw = _num(INPUT.probeTimeoutSeconds)
+const _pbRaw = _num(INPUT.probeBudgetSeconds)
+const _probeNumericOk = [_ptRaw, _pbRaw].every((n) => Number.isInteger(n) && n >= 0)
+// "Both are numbers" is not consistency. The invariant that matters is that the
+// budget COVERS the bound being pinned: the adapter may spend
+// MAX_PROBES x (bound + grace) before the timed call even starts, and the margin
+// is what keeps that plus the inner wall inside the outer Bash window. A caller
+// passing 20 with a budget of 39 satisfies both type checks and still overruns
+// (3 x 23 + 547 = 616 > 600) — the outer window then kills the adapter and takes
+// rc=124, the timeout message and the telemetry record with it.
+const _probeCoversOk = _probeNumericOk && _pbRaw >= MAX_PROBES * (_ptRaw + KILL_GRACE_S)
+const _probePairOk = _probeNumericOk && _probeCoversOk
 if (!_probePairOk && (INPUT.probeTimeoutSeconds !== undefined || INPUT.probeBudgetSeconds !== undefined)) {
-  log(`config handshake: probeTimeoutSeconds/probeBudgetSeconds did not arrive as a consistent pair ` +
-      `(${JSON.stringify(INPUT.probeTimeoutSeconds)} / ${JSON.stringify(INPUT.probeBudgetSeconds)}) — ` +
-      `using BOTH defaults (${PROBE_TIMEOUT_FALLBACK_S}s bound, ${PROBE_BUDGET_FALLBACK_S}s margin) so the margin still covers the bound`)
+  log(`config handshake: probeTimeoutSeconds/probeBudgetSeconds ` +
+      `(${JSON.stringify(INPUT.probeTimeoutSeconds)} / ${JSON.stringify(INPUT.probeBudgetSeconds)}) ` +
+      (_probeNumericOk
+        ? `do not hold: a ${_ptRaw}s bound needs at least ${MAX_PROBES * (_ptRaw + KILL_GRACE_S)}s of margin`
+        : `did not both arrive as numbers`) +
+      ` — using BOTH defaults (${PROBE_TIMEOUT_FALLBACK_S}s bound, ${PROBE_BUDGET_FALLBACK_S}s margin), which do`)
 }
 const PROBE_TIMEOUT_S = handshakeInt('probeTimeoutSeconds', _probePairOk ? INPUT.probeTimeoutSeconds : undefined, {
   fallback: PROBE_TIMEOUT_FALLBACK_S, min: 1, max: PROBE_TIMEOUT_MAX_S, optional: true,

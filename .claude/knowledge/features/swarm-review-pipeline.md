@@ -1,7 +1,7 @@
 ---
 title: "Swarm Review Pipeline (/swarm:review)"
 createdAt: 2026-07-08
-updatedAt: 2026-08-12
+updatedAt: 2026-09-02
 createdFrom: "PR #24"
 updatedFrom: "fix-swarm-timeout-ceiling"
 pluginVersion: 1.9.0
@@ -132,10 +132,13 @@ truth** — every voice's fan-out units come from it, Claude and externals alike
   `SWARM_TIMEOUT`, and `max: true` only for `--max`. Re-deriving the call from
   this entry is the documented use, so an out-of-date list here *is* the bug.
 - **Workflow JS has no Bash/filesystem access**, so the diff never enters the
-  script. The **skill** builds two temp files in deterministic Bash — the raw
+  script. The **skill** builds three temp files in deterministic Bash — the raw
   diff (Claude finders `Read` it) and a **fenced external prompt** (review
-  instructions + the diff wrapped in untrusted-data markers) — and passes their
-  paths. The external CLIs get the fenced prompt via `agents.sh run … --prompt-file`.
+  instructions + the diff wrapped in untrusted-data markers), plus the telemetry
+  sink each adapter call appends to — and passes their paths. Their common
+  parent is validated against a character allowlist before anything is echoed,
+  because those paths end up interpolated into shell commands by the model as
+  well as by the workflow. The external CLIs get the fenced prompt via `agents.sh run … --prompt-file`.
 - The skill invoking `Workflow` is the explicit **opt-in** the Workflow tool
   requires; a plugin skill may not otherwise trigger it.
 

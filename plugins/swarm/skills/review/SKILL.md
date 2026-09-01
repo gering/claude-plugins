@@ -557,11 +557,12 @@ Then, when present:
   that text, single quotes do not. The workflow already quotes the same paths
   for the same reason. This is placeholder hygiene, not a property of one
   command: apply it to `<DIFF>`, `<PROMPT>` and `<TELEMETRY>` alike.
-  **Single quotes are not sufficient on their own:** a `'` inside the path ends
-  the quoting, so if a substituted value contains a single quote, escape each one
-  as `'\''` (what the workflow's `shQuote` does) — or, simpler, refuse to run the
-  command and say the path is unusable. A `$TMPDIR` containing a quote is
-  pathological, not impossible.
+  You do **not** have to hand-escape quotes in these paths: the prep block
+  refuses to run at all unless `$TMPD` matches a conservative allowlist
+  (`SWARM_TMPD_ERR`), so every path it echoes is already shell-safe by
+  construction. Quote them anyway — the habit is what makes the guarantee
+  auditable — but the boundary is the block's, not yours. A guarantee that
+  depends on a model noticing a quote is not a boundary.
 
   It reports how long each external voice took and flags any call at ≥60% of the
   wall **that call actually ran under** — the script reads that per record, so do

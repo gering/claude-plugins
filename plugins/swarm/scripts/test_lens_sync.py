@@ -617,6 +617,16 @@ _pt_max_sh = re.search(r"SWARM_PROBE_TIMEOUT_MAX=(\d+)", sh)
 check(f"workflow probe-timeout fallback == adapter probe_timeout_seconds "
       f"(js={_pt_fb.group(1) if _pt_fb else '?'} adapter={_pt_reported or '?'})",
       bool(_pt_fb) and bool(_pt_reported) and _pt_fb.group(1) == _pt_reported)
+# The workflow checks the probe pair against these two, so a drift here would let
+# an inconsistent pair through — the overrun the check exists to catch.
+_mp_sh = re.search(r"SWARM_MAX_PROBES_PER_RUN=(\d+)", sh)
+_mp_js = re.search(r"const MAX_PROBES = (\d+)", js)
+_kg_sh = re.search(r"TIMEOUT_KILL_GRACE=(\d+)", sh)
+_kg_js = re.search(r"const KILL_GRACE_S = (\d+)", js)
+check("adapter+workflow: max-probes matches",
+      all([_mp_sh, _mp_js]) and _mp_sh.group(1) == _mp_js.group(1))
+check("adapter+workflow: kill grace matches",
+      all([_kg_sh, _kg_js]) and _kg_sh.group(1) == _kg_js.group(1))
 check("adapter+workflow: probe-timeout ceiling matches",
       all([_pt_max_js, _pt_max_sh]) and _pt_max_js.group(1) == _pt_max_sh.group(1))
 check(f"workflow fallback == adapter probe_budget_seconds "

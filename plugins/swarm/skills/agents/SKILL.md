@@ -37,10 +37,12 @@ user_invocable: true
 - **`grok` Ready is a heuristic** — it means a non-empty `~/.grok/auth.json`
   exists, that the CLI offers `--prompt-file` (the out-of-band prompt transport),
   **and** that `grok models` still lists a schema-verified model, NOT that the
-  token is valid/unexpired (codex, by contrast, runs
-  a real `codex login status` — bounded, and a probe that does NOT complete
-  degrades to "credentials present" with a stderr warning instead of reporting
-  not-ready, so a captive portal cannot silently drop the whole openai family).
+  token is valid/unexpired (codex, by contrast, runs a real `codex login
+  status`, bounded — and since that probe IS the auth question and reaches the
+  same network the review needs, a probe that hits the wall is reported
+  **not-ready**: a wedged CLI otherwise burns the full wall once per gated
+  cluster. Only "the probe could not be bounded at all" falls back to
+  credentials-present. The hint names which of the two happened).
   So grok can show Ready yet fail at review time
   on a stale token; treat it as "credentials present" and let the run surface a
   real auth error. A not-ready hint naming the model list is NOT an auth problem,
@@ -49,6 +51,7 @@ user_invocable: true
   model at all (also too old → update it), or it offers canonical models that are
   not schema-verified (usually NEWER than this adapter knows → verify
   `--json-schema` on the named id and add it to `GROK_SCHEMA_VERIFIED`). Never relay it as "update the CLI" by default; that
-  sends the second user to update an already-current install. The model check degrades to auth-only (with a warning on stderr) when
-  the probe can't run — no coreutils `timeout` to bound it, or an unreadable
-  model list.
+  sends the second user to update an already-current install. The model probe
+  always runs (the adapter bounds it with its own watchdog where coreutils is
+  missing); it degrades to auth-only, with a warning on stderr, only when the
+  list comes back empty or unreadable.

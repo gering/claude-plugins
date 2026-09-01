@@ -274,6 +274,17 @@ entries are grouped per plugin, newest first.
 
 ## swarm
 
+### 0.10.11 — 2026-09-02
+Loop round 7 — no criticals. Two real defects in the new bound, and a documentation round: four of the ten warnings were docs I wrote in 0.10.9 and then contradicted with the reversal in 0.10.10.
+
+- **The watchdog measures the wall from a clock instead of counting ticks.** Accumulating a fixed 100 ms per iteration ignored the fork/exec of `sleep` and the loop's own work, so every iteration cost more than it counted and the enforced cap drifted systematically long — on a 547 s wall a few percent is tens of seconds, i.e. straight past the 600 s outer window the margin exists to stay inside. It now compares `SECONDS` against a start value, strictly greater so a 1 s bound can never fire early (verified: 5/5 clean on a 0.5 s command, and a 10 s bound fires at 11 s).
+- **It signals the process group, like `timeout` does.** codex and grok spawn helpers; killing only the direct child left them reparented to init, holding sockets and burning API budget after the adapter had already reported a timeout — and across a `--loop` run they accumulate. The child is launched in its own group and the group is signalled, with bash's job notice suppressed so it cannot land in the adapter's stderr. Verified against a forking stub: zero orphans.
+- **`rc=126` no longer reads as a backend failure.** "Could not create a scratch file, so refusing to run unbounded" surfaced as *"grok failed — check that the installed grok CLI offers model X"*, sending the operator to a model list for a temp-dir problem. Both run paths name it.
+- **The probe pair is checked relationally, not just numerically.** Two numbers that are both integers still overrun: a 20 s bound with a 39 s margin means 3 × 23 + 547 = 616 s inside a 600 s window. The workflow now requires the budget to cover `max_probes × (bound + grace)` and falls back to the consistent default pair otherwise, with both constants pinned against `agents.sh` in CI.
+- **Docs match the code again.** `/swarm:agents` still promised the codex trust-auth degrade that 0.10.10 deliberately reversed, and still blamed missing coreutils for a grok degrade that no longer exists; the knowledge entry carried both the old skip rule and the new watchdog rule sixty lines apart. The asymmetry that decides the codex direction (its probe *is* the auth question; grok's asks a second one) is now recorded as the reason, so it does not get flipped a third time.
+- Also: the deny list is built only inside the two jail branches (a jail-less host paid two git forks and a ~50-path stat sweep for a value nothing read); the unreachable python3-less arm of the prompt-containment check is gone, replaced by a loud guard, since it answered a *different* question than the python3 path; `SWARM_PROBE_TIMEOUT`'s 20 s ceiling is documented user-facing; the telemetry field list in the adapter header names the fields actually emitted; and the review skill no longer asks the model to hand-escape quotes the prep block already refuses.
+- Declined, with the reasoning in place: a backend that exits 124 on its own is still read as a timeout when a wall is in force — `timeout` reports the same code, so the choice is only which way to be wrong, and the duration in the same record shows whether the call reached the wall.
+
 ### 0.10.10 — 2026-09-02
 Loop round 6. Four of the five criticals were 0.10.9's own watchdog, and the fifth was a shell-injection path the model was being asked to close by hand.
 

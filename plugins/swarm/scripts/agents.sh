@@ -27,8 +27,9 @@
 #       --model <name>      Backend model override
 #       --schema <file>     JSON schema to enforce (default: bundled finding.schema.json)
 #       --telemetry <file>  Append one JSON line per call (backend, unit, effort,
-#                           model, prompt_bytes, seconds, rc, timed_out). Written
-#                           on EVERY exit path, so a timeout is recorded too.
+#                           model, prompt_bytes, seconds, timeout_seconds,
+#                           backend_rc, adapter_rc, timed_out). Written on EVERY
+#                           exit path, so a timeout is recorded too.
 #       --unit <name>       Cluster/lens label recorded in the telemetry line
 #
 # The prompt reaches the backend OUT-OF-BAND (codex: stdin · grok:
@@ -62,10 +63,11 @@
 #            ("unknown model id") and drops/renames models between releases
 #            (0.2.101 removed grok-composer-2.5-fast), so an auth-only check
 #            would advertise a model the CLI no longer offers. The probe
-#            degrades to auth-only — with a warning, never silently — when it
-#            cannot run: no coreutils timeout to bound it, or an empty/
-#            unparseable list. Its bound is SWARM_PROBE_TIMEOUT (10s), not
-#            SWARM_TIMEOUT (a review-length cap).
+#            degrades to auth-only — with a warning, never silently — when the
+#            list comes back empty or unparseable. It always RUNS: the adapter
+#            bounds it with its own watchdog where coreutils is missing. Its
+#            bound is SWARM_PROBE_TIMEOUT (10s, ceiling 20s), not SWARM_TIMEOUT
+#            (a review-length cap).
 #
 # Security floor (both external voices):
 #   - OS secret-jail (sandbox-exec/bwrap) denies HOME secret stores +
@@ -364,6 +366,13 @@ _is_timeout_rc() {
   # 137 is 128+SIGKILL — OUR `-k` escalation, but also an OOM kill or any outside
   # `kill -9`; the wall-in-force test is what keeps those from being called a
   # timeout, and it is now the same test for both codes.
+  # ACCEPTED RESIDUAL: with a wall in force, a backend that exits 124 on its own
+  # is still read as a timeout. It is not distinguishable — `timeout` reports the
+  # same 124 for an expiry, and the watchdog is built to match it — so the choice
+  # is which way to be wrong. Claiming the timeout is the safer direction: the
+  # duration in the same telemetry record shows at a glance whether the call
+  # actually reached the wall, whereas a real timeout reported as a plain failure
+  # sends the operator to inspect a model list.
   [[ "${_enforced_wall:-0}" != "0" ]] || return 1
   (( $1 == 124 || $1 == 137 ))
 }
@@ -481,8 +490,17 @@ _assert_prompt_readable_in_jail() {
   # startup cost landing squarely in the pre-timer budget this branch spent three
   # rounds bounding. No associative array either: bash 3.2 (stock macOS) has none.
   local hit=""
-  if command -v python3 >/dev/null 2>&1; then
-    hit="$(_sandbox_deny_paths "$backend" | python3 -c '
+  # No python3-less arm. `run` calls require_python3 before it dispatches, so this
+  # function is only ever reached with python3 present — and the fallback that
+  # used to sit here answered a DIFFERENT question (a raw prefix compare, no
+  # realpath), so on the symlinked $TMPDIR that motivated the canonicalizing
+  # compare it returned the opposite verdict. An unreachable second answer to a
+  # safety question is worse than none: the next reader has to work out which one
+  # applies. Guard loudly instead, so a future caller that skips require_python3
+  # fails here rather than silently skipping the check.
+  command -v python3 >/dev/null 2>&1 \
+    || { echo "refusing to run: python3 is required to verify that the prompt file is readable inside the jail" >&2; exit 2; }
+  hit="$(_sandbox_deny_paths "$backend" | python3 -c '
 import os, sys
 prompt = os.path.realpath(sys.argv[1])
 for line in sys.stdin:
@@ -494,15 +512,6 @@ for line in sys.stdin:
         print(d)
         break
 ' "$1" 2>/dev/null || true)"
-  else
-    # No python3: string-compare only. Weaker (a symlinked TMPDIR can slip
-    # through) but better than skipping the check entirely.
-    local d
-    while IFS= read -r d; do
-      [[ -n "$d" ]] || continue
-      case "$1/" in "${d%/}"/*) hit="$d"; break ;; esac
-    done < <(_sandbox_deny_paths "$backend")
-  fi
 
   if [[ -n "$hit" ]]; then
     echo "refusing to run: the prompt file ($1) is inside a denied path ($hit) — inside the jail it would read as EMPTY and the backend would return 'no findings' from a call that never saw the diff. Move TMPDIR outside SWARM_DENY_PATHS." >&2
@@ -692,11 +701,14 @@ _init_sandbox() {
   local backend="${1:-}"
   [[ "$_sandbox_ready" == "$backend" ]] && return
   _sandbox_ready="$backend"
-  # Build the deny list ONCE, here in the main shell, so the containment check
-  # that follows reuses it instead of rebuilding it (see _deny_paths_ensure).
-  _deny_paths_ensure "$backend"
   SANDBOX_CMD=()
+  # Built ONCE, in the main shell, so the containment check that follows reuses it
+  # (see _deny_paths_ensure) — but only INSIDE the wrapper branches: on a host
+  # with neither sandbox-exec nor bwrap the list is never applied to anything, and
+  # building it there cost two git forks plus a ~50-path stat sweep per adapter
+  # process for a value nothing reads.
   if command -v sandbox-exec >/dev/null; then
+    _deny_paths_ensure "$backend"
     # Build the deny profile via python: realpath each path (defeats symlinks
     # like /tmp→/private/tmp, /etc→/private/etc — sandbox-exec matches the
     # resolved path) and deny it as BOTH a subpath (dirs + contents) and a
@@ -717,6 +729,7 @@ sys.stdout.write("(version 1)(allow default)(deny file-read* %s)" % " ".join(rul
 ')"
     SANDBOX_CMD=(sandbox-exec -p "$profile")
   elif command -v bwrap >/dev/null; then
+    _deny_paths_ensure "$backend"
     # --tmpfs masks a directory; a regular file (e.g. ~/.netrc) needs a bind of
     # an empty source instead — --tmpfs over a file dies with ENOTDIR.
     # REALPATH each path (readlink -f, resolving the final symlink component too):
@@ -987,14 +1000,15 @@ timeout_bin() {
 # error output, and codex reads its prompt on stdin).
 _bounded_bg() {
   local secs="$1"; shift
-  local out rc=0 waited_ms=0 step_ms=1000 pid
+  local out rc=0 pid t0 monitor=""
   out="$(mktemp)" || out=""
   if [[ -z "$out" ]]; then
     # FAIL CLOSED. The first version fell through to an unbounded run here, which
     # voided the bound on exactly the hosts this function exists for: a full or
     # read-only $TMPDIR turned "bounded everywhere" back into "hangs forever",
     # and the caller could not tell. 126 is the adapter-s established
-    # "could not bound this" sentinel (127 collides with command-not-found).
+    # "could not bound this" sentinel (127 collides with command-not-found), and
+    # run_codex/run_grok name it apart from a backend failure.
     echo "warning: could not create a scratch file to bound \`$1\` — refusing to run it unbounded" >&2
     return 126
   fi
@@ -1004,7 +1018,16 @@ _bounded_bg() {
   # assignment protects nothing and the inline `rm -f` on every return path is
   # the whole cleanup. The codex path runs in the main shell, where it works.
   TMP_BOUNDED="$out"
-  # `<&0` is NOT redundant. POSIX assigns an asynchronous command`s stdin to
+  # Monitor mode for the launch ONLY, so the child becomes its own process-group
+  # leader and the expiry below can signal the GROUP. Without it we signal the
+  # direct child alone, while `timeout` (which this path claims to be
+  # indistinguishable from) signals the group: codex and grok are node CLIs that
+  # spawn helpers, so a wedged call left its children reparented to init, still
+  # holding sockets and burning API budget after the adapter already reported a
+  # timeout — and across a `--loop` run those orphans accumulate.
+  case "$-" in *m*) monitor=1 ;; esac
+  set -m
+  # `<&0` is NOT redundant. POSIX assigns an asynchronous command-s stdin to
   # /dev/null before any explicit redirection, so a bare `"$@" &` silently starves
   # the child of stdin — and codex reads its whole prompt there (`-- - <file`).
   # That would have sent every codex voice an EMPTY prompt on any host without
@@ -1014,28 +1037,43 @@ _bounded_bg() {
   # still gets exactly what it asks for.
   "$@" >"$out" <&0 &
   pid=$!
-  # Poll granularity: a probe documented at ~40 ms must not be rounded up to a
-  # full second, paid once per probe, per backend, per gated cluster. POSIX only
-  # guarantees integer `sleep`, so try a fraction once — the child is already
-  # running, so the 100 ms is overlapped, not wasted — and fall back to whole
-  # seconds where it is rejected.
-  if sleep 0.1 2>/dev/null; then step_ms=100; waited_ms=100; fi
+  [[ -n "$monitor" ]] || set +m
+  # Measure the WALL, do not count ticks. Accumulating a fixed 100ms per iteration
+  # ignored the fork/exec of `sleep` plus the loop-s own work, so every iteration
+  # cost MORE than it counted and the enforced cap drifted systematically long —
+  # on a 547s wall a few percent of drift is tens of seconds, i.e. straight past
+  # the 600s outer window the whole margin exists to stay inside.
+  # `SECONDS` is the clock that costs no fork (`date` at 10 Hz for nine minutes
+  # would not be free) and exists on bash 3.2. It has 1s granularity, so compare
+  # STRICTLY GREATER: the first tick can arrive milliseconds after the launch, and
+  # `>=` would expire a 1s probe almost immediately. This fires between secs and
+  # secs+1 — never early, at most a second late.
+  t0=$SECONDS
   while kill -0 "$pid" 2>/dev/null; do
-    if (( waited_ms >= secs * 1000 )); then
-      kill -TERM "$pid" 2>/dev/null || true
-      sleep "$TIMEOUT_KILL_GRACE"
-      if kill -0 "$pid" 2>/dev/null; then
-        kill -KILL "$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
-        cat "$out"; rm -f "$out"; TMP_BOUNDED=""
-        return 137
-      fi
-      wait "$pid" 2>/dev/null || true
+    if (( SECONDS - t0 > secs )); then
+      # Signal the GROUP (negated pgid), falling back to the child if the group
+      # does not exist — then escalate, exactly like `timeout -k`.
+      # Wrapped in a stderr-silenced block: with monitor mode on for the launch,
+      # bash prints its own "Terminated: 15" job notice when it reaps the job,
+      # which would land in the adapter-s stderr and be reported as backend output.
+      { kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+        sleep "$TIMEOUT_KILL_GRACE"
+        if kill -0 "$pid" 2>/dev/null; then
+          kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          rc=137
+        else
+          wait "$pid" 2>/dev/null || true
+          rc=124
+        fi
+      } 2>/dev/null
       cat "$out"; rm -f "$out"; TMP_BOUNDED=""
-      return 124
+      return "$rc"
     fi
-    if (( step_ms == 100 )); then sleep 0.1; else sleep 1; fi
-    waited_ms=$(( waited_ms + step_ms ))
+    # 100ms where a fractional sleep works (a probe documented at ~40ms must not
+    # be rounded up to a full second, paid per probe, per backend, per gated
+    # cluster), whole seconds where POSIX-minimal `sleep` rejects the fraction.
+    sleep 0.1 2>/dev/null || sleep 1
   done
   # `|| rc=$?` and not a bare `wait`: under `set -e` a non-zero rc would exit the
   # whole adapter here instead of reaching the caller that has to interpret it.
@@ -1870,6 +1908,7 @@ run_codex() {
   TELEMETRY_RC="$rc"
   if (( rc != 0 )); then
     if _is_timeout_rc "$rc"; then echo "codex exec timed out after ${_adapter_timeout}s" >&2
+    elif (( rc == 126 )); then echo "codex exec could not be bounded — the adapter could not create a scratch file for its watchdog (check TMPDIR); refused rather than run uncapped" >&2
     else echo "codex exec failed" >&2; fi
     exit 1
   fi
@@ -2049,6 +2088,10 @@ run_grok() {
     # cause: an older CLI that predates the pinned model reports Ready (auth
     # heuristic) yet rejects the model id at runtime.
     if _is_timeout_rc "$rc"; then echo "grok timed out after ${_adapter_timeout}s" >&2
+    # 126 = the adapter refused to launch it unbounded, so grok never ran. Its own
+    # warning is written to the stderr this call discards, and without this branch
+    # the operator was sent to inspect a model list for a temp-dir failure.
+    elif (( rc == 126 )); then echo "grok could not be bounded — the adapter could not create a scratch file for its watchdog (check TMPDIR); refused rather than run uncapped" >&2
     else echo "grok failed — check that the installed grok CLI offers model '$grok_model' (see: grok models)" >&2
     fi
     exit 1

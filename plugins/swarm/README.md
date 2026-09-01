@@ -160,6 +160,10 @@ The prompt always reaches a backend **out-of-band** — never as an argv word �
 the diff is bounded by model context rather than `exec`'s `MAX_ARG_STRLEN`.
 `SWARM_MAX_PROMPT_BYTES` (default 512 KiB) is that sanity cap; above it
 `/swarm:review` cleanly skips the externals instead of letting each call fail.
+`SWARM_PROBE_TIMEOUT` (default 10 s) bounds the short readiness probes and is
+capped at 20 s — the review's timeout margin is derived from it, so a larger
+value would eat the wall it is meant to protect; `run` and `config` refuse
+anything above the ceiling rather than normalizing it.
 
 Each external call is timed (`--telemetry <file> --unit <name>`), and the report
 flags any voice that spent most of the wall **that call actually ran under** —

@@ -1,7 +1,7 @@
 ---
 title: "Swarm Backend Adapter Layer"
 createdAt: 2026-07-03
-updatedAt: 2026-08-06
+updatedAt: 2026-09-02
 createdFrom: "PR #21"
 updatedFrom: "fix-swarm-timeout-ceiling"
 pluginVersion: 1.9.0
@@ -14,7 +14,7 @@ reindexedAt: 2026-07-12
 The `swarm` plugin reviews locally with a mixture-of-agents ensemble: Claude
 subagents plus the external `codex` and `grok` CLIs. All deterministic backend
 logic lives in one script — `plugins/swarm/scripts/agents.sh` (verbs: `list`,
-`available`, `ready`, `jail`, `run`) — so skills never call an external CLI
+`available`, `ready`, `jail`, `config`, `run`) — so skills never call an external CLI
 directly. `jail` prints `jail=yes|no` (a working OS sandbox?) — the
 `/swarm:review` skill reads it to brand the run-start notice and the external
 prompt's capability lines honestly on a jail-less host (transport discards the
@@ -217,7 +217,7 @@ each voice pays an extra round-trip.
   `Invalid params: "unknown model id"`. `ready`/`list` now also require
   a schema-verified model in `grok models` (originally the pinned `grok-4.5`;
   since the discovery rework it is "any verified id on offer" — see the
-  discovery section below, which supersedes the pin described here) (grok is the one backend with a usable model-list
+  discovery notes in this section, which supersede the pin described here) (grok is the one backend with a usable model-list
   command; codex has none, so its model is trusted). The gotchas, all live-
   verified:
   - **Parse the bullet list by SHAPE — and pick the failure direction on
@@ -242,17 +242,23 @@ each voice pays an extra round-trip.
   - **An empty model list must NOT fail closed.** Offline, a timeout, or a
     future CLI renaming the subcommand would otherwise silently drop grok from
     every fan-out. Empty/unparseable → trust auth and let `run_grok` surface the
-    explicit error; a non-empty list *without* grok-4.5 → an honest "not ready"
-    plus an update-the-CLI hint.
+    explicit error; a non-empty list offering no schema-verified canonical id →
+    an honest "not ready" plus a hint that names WHICH of the three causes it is
+    (no `--prompt-file`, no canonical model, or canonical-but-unverified). The
+    rule was once "does it offer the pinned grok-4.5"; discovery replaced that
+    with "any verified id on offer", or a CLI newer than the adapter would be
+    rejected for offering only ids this file has not seen yet.
   - **A probe added to a local path must not make it hang — and must not lie
     when it can't run.** `ready`/`list` were purely local (stat the auth file)
     before this; the probe puts a network call in every `/swarm:agents` and
-    review start. With no coreutils `timeout`/`gtimeout` to bound it (stock
-    macOS), the probe is **skipped** rather than run uncapped, degrading to
-    trust-auth in ~25ms — but it **warns on stderr**, because a silent skip
-    would make the documented model-aware guarantee false on that host: the
-    same "promise that doesn't hold at runtime" bug the composer removal exists
-    to fix.
+    review start. It was once *skipped* where no coreutils `timeout` existed, on
+    the reasoning that an unbounded call was worse — 0.10.10 removed that: with
+    the watchdog it is bounded on every host, and skipping had become the
+    dangerous branch, because an empty list reads as trust-auth, so readiness
+    passed and discovery fell back to `GROK_DEFAULT_MODEL` — an id the CLI may
+    have withdrawn, killing every cluster at launch. Whatever the degrade, it
+    **warns on stderr**: a silent one makes the documented model-aware guarantee
+    false at runtime, the same bug class the composer removal exists to fix.
   - **Route every degrade through ONE audible exit.** This one spot was fixed
     across FIVE consecutive swarm rounds, each catching the previous round's
     miss: (1) the no-timeout branch ran uncapped; (2) it was capped but skipped
@@ -310,11 +316,28 @@ each voice pays an extra round-trip.
     `config` meanwhile advertised a probe budget the run could not enforce. The
     dilemma (lose the bound, or lose the answer and drop a whole family — 0.10.3
     did the latter) was false: `_watchdog_run` runs the probe in the background,
-    polls in 1s steps and escalates TERM→KILL, reporting `timeout(1)`'s own 124
-    and 137. Verified against all four behaviours (success, expiry, rc
-    passthrough, a SIGTERM-ignoring child). A probe rc may then be interpreted
-    the same way on every host — which is what lets codex's `login status`
-    timeout degrade to trust-auth instead of "not ready".
+    polls at 100ms where a fractional `sleep` works and escalates TERM→KILL,
+    reporting `timeout(1)`'s own 124
+    and 137, in its own process group so a CLI's spawned helpers die with it, and
+    measuring the wall from a real clock (counting fixed sleep increments drifted
+    systematically long, since each iteration costs more than it counts).
+    Verified against success, expiry, rc passthrough, a SIGTERM-ignoring child,
+    orphaned grandchildren, stdin passthrough and a real call per backend.
+  - **`<&0` when backgrounding, or the child gets `/dev/null`.** POSIX assigns an
+    asynchronous command's stdin to `/dev/null` *before* explicit redirections —
+    and codex reads its whole prompt on stdin, so the bound would have handed
+    every codex voice an empty prompt and counted the resulting
+    `{"findings":[]}` as a family that reviewed. Found by testing the passthrough,
+    not by reading the code.
+  - **Which way a bounded probe should fail depends on what it asks.** grok's
+    model probe asks a *second* question (which ids are offered), so a timeout
+    degrades to trust-auth and keeps a usable backend. `codex login status` IS
+    the auth question and reaches the same network the review call needs, so a
+    wall hit there is an honest **not-ready**: calling it ready costs one adapter
+    process per gated cluster, each re-running the hanging probe and burning the
+    full inner wall — five dead voices instead of one clean skip. Only rc 126
+    ("could not be bounded at all") trusts auth. This flipped between 0.10.9 and
+    0.10.10; the asymmetry above is the reason, so it does not need flipping again.
   - **Memoize by call convention, not by wishing.** `list="$(grok_model_list)"`
     runs the function in a *subshell*, so its cache-global assignments vanish
     and every caller silently re-pays the network call. The cache only works if
