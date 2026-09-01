@@ -203,6 +203,16 @@ for accepted in ("grok-4.3", "grok-4.5", "grok-4.6", "grok-5", "grok-4.20"):
 r = run_bash('_grok_highest_canonical', models="grok-3-mini\ngrok-3-mini-fast")
 check("a grok-3-only catalog yields no canonical model", r.stdout.strip() == "")
 
+# A prose bullet mentioning a model id must NOT be harvested as an offered model:
+# discovery would select it (it is schema-verified), and every call would then die
+# at launch with "unknown model id" — the whole grok family gone, silently.
+PROSE_LIST = """Available models:
+  * grok-4.5 (default)
+  - grok-4.6 reaches end of life on 2026-12-01
+"""
+check("a prose bullet is not parsed as an offered model",
+      parse(PROSE_LIST) == ["grok-4.5"])
+
 # --- the schema gate: verified selects, unverified only REPORTS ---------------
 def select(models, override=""):
     r = run_bash(f'grok_select_model {_q(override)}',

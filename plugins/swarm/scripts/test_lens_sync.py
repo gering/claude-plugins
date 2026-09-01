@@ -20,6 +20,7 @@ Prose DRIFT WARNINGs mark both mirrors; this test makes the sync mechanical
 (the same pattern as test_pr_post.py for the publish path).
 """
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -456,6 +457,62 @@ for _i, _l in enumerate(_sh_lines[:-1]):
         _cont.append(f"{_i + 2}: {_sh_lines[_i + 1].strip()[:50]}")
 check(f"adapter: no comment inside a line continuation ({_cont})", not _cont)
 
+# --- the subshell-memo class -------------------------------------------------
+# Five times on this branch a function assigned a global AND printed its result,
+# while every call site invoked it as `$(...)`. The assignment dies with the
+# substitution, so the memo never reaches a second caller and — worse for
+# _adapter_timeout / _enforced_wall — the EXIT trap in the PARENT reads an unset
+# value and writes a telemetry record that denies the cap existed.
+#
+# The rule that ends it: a function may EITHER print a result OR cache into a
+# global, never both. Checked mechanically, since reading the code has now failed
+# five times.
+_bad_memo = []
+_fn = None
+_body = []
+for _l in sh.splitlines() + ["}"]:
+    _m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{", _l)
+    if _m:
+        _fn, _body = _m.group(1), []
+        continue
+    if _fn is not None and _l == "}":
+        _src = "\n".join(_body)
+        # prints a result on stdout (not a warning: those go to >&2)
+        # printf/echo ANYWHERE on a statement, not just at line start: the
+        # regression that motivated this check hid inside
+        # `[[ -n "$x" ]] && { printf …; return 0; }`. Skip comment lines and
+        # anything redirected to stderr (warnings are not results).
+        def _is_result_print(_ln):
+            _m2 = re.search(r"(?:^|[;&|{]\s*)(printf|echo)\b", _ln)
+            if not _m2:
+                return False
+            if ">&2" in _ln or _ln.lstrip().startswith("#") or "printf -v" in _ln:
+                return False  # stderr warnings and printf -v are not results
+            # A printf INSIDE a command substitution feeds that substitution, not
+            # the function's stdout: `rp="$(readlink … || printf '%s' "$p")"`.
+            return "$(" not in _ln[: _m2.start(1)]
+
+        _prints = any(_is_result_print(_ln) for _ln in _src.splitlines())
+        # caches into a module-level global (leading underscore, not `local`)
+        _caches = re.search(r"^\s*_[A-Za-z0-9_]*(_done|_memo[A-Za-z0-9_]*|_rc|_wall|_timeout|_bin)?=", _src, re.M)
+        if _prints and _caches and _fn not in ("usage", "print_usage"):
+            # `local _b _u _e _m` declares four names on one line, so a plain
+            # "local <name>" substring test misses all but the first.
+            _locals = set()
+            for _ld in re.findall(r"^\s*local\s+([^;&|]+)", _src, re.M):
+                for _tok in _ld.split():
+                    _locals.add(_tok.split("=")[0])
+            _decl = [g for g in re.findall(r"^\s*(_[A-Za-z0-9_]+)=", _src, re.M)
+                     if g not in _locals]
+            if _decl:
+                _bad_memo.append(f"{_fn}() sets {_decl[0]} and prints")
+        _fn = None
+        continue
+    if _fn is not None:
+        _body.append(_l)
+check(f"adapter: no function both prints and caches into a global ({_bad_memo})",
+      not _bad_memo)
+
 check("adapter: SWARM_MAX_PROBES_PER_RUN is declared", _declared)
 check(f"adapter: pre-timer probe call sites still number 5 (got {_probe_sites}) — "
       f"if you added one, re-derive SWARM_MAX_PROBES_PER_RUN "
@@ -480,7 +537,16 @@ check("workflow: probeBudgetSeconds is read from INPUT",
 # without the skill in front of it. Pin it against what the adapter actually
 # reports — an unpinned copy of `max_probes x (ceiling + grace)` is the same
 # split-brain that already overran the margin once, and a comment cannot fail CI.
-_cfg = subprocess.run(["bash", str(ADAPTER), "config"], capture_output=True, text=True)
+# Scrubbed env: `config` prints RESOLVED values, so an exported SWARM_* knob in
+# the developer's shell would make this pin report drift in a constant nobody
+# touched — or, with SWARM_TIMEOUT=600s, make `config` exit 2 and fail three
+# checks naming the wrong cause. check-structure.py runs this in CI with the
+# ambient environment, so the scrub belongs here.
+_env = {k: v for k, v in os.environ.items() if not k.startswith("SWARM_")}
+_cfg = subprocess.run(["bash", str(ADAPTER), "config"],
+                      capture_output=True, text=True, env=_env)
+check("adapter: config runs with a clean env (unset SWARM_* to reproduce)",
+      _cfg.returncode == 0)
 check("adapter: config runs for the fallback pin", _cfg.returncode == 0)
 _reported = ""
 for _line in _cfg.stdout.splitlines():

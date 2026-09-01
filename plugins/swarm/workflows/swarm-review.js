@@ -765,10 +765,9 @@ const coverageNotes = []
 // "2 von 2". The X-von-Y line only says something when a family was actually
 // lost, so only that case produces it.
 if (familiesLost.length) {
-  coverageNotes.push(`Konsens-Basis reduziert: ${familiesPresent.length} von ${familiesExpected.length} Modellfamilien — "Konsens" heißt in diesem Lauf Übereinstimmung von ${familiesPresent.join(', ')}.`)
-}
-if (familiesLost.length) {
-  coverageNotes.push(`${familiesLost.join(', ')} contributed nothing this run — ${familiesPresent.length} of ${familiesExpected.length} model families reviewed.`)
+  // ONE sentence, not two: the previous pair stated the same "N of M families"
+  // fact twice (once in German, once in English) and the skill printed both.
+  coverageNotes.push(`Konsens-Basis reduziert: ${familiesLost.join(', ')} lieferte nichts — ${familiesPresent.length} von ${familiesExpected.length} Modellfamilien haben reviewt, "Konsens" heißt in diesem Lauf Übereinstimmung von ${familiesPresent.join(', ')}.`)
 }
 if (!consensusReachable) {
   coverageNotes.push(`Fewer than 2 model families returned, so NO finding in this run can reach consensus — every one falls back to solo + adversarial verifier.`)
@@ -806,7 +805,7 @@ for (const v of voices) {
     if (!CANDIDATE_LENSES.includes(lens)) {
       lens = Array.isArray(v.lenses) && v.lenses.length === 1 ? v.lenses[0] : 'unspecified'
     }
-    pool.push({ ...f, backend: v.backend, family: FAMILY[v.backend] || v.backend, lens, kind: lensKind(lens) })
+    pool.push({ ...f, backend: v.backend, family: familyOf(v.backend), lens, kind: lensKind(lens) })
   }
 }
 log(`Fan-out: ${pool.length} raw findings from ${voices.length} voices` +

@@ -371,7 +371,26 @@ _timeout_warned=""
 # The wall actually ENFORCED on the backend call (0 = none). Distinct from the
 # configured _adapter_timeout, which says nothing about whether a wrapper existed
 # to apply it.
+#
+# SET BY THE CALLER, in the main shell — never inside with_timeout. Both backends
+# invoke it as `raw="$(sandboxed …)"`, so an assignment there dies with the
+# substitution and the EXIT trap (which runs in the PARENT) wrote
+# timeout_seconds:0 for every grok call: telemetry-report then said "no adapter
+# cap — the outer window killed it" while the adapter's own stderr said "timed out
+# after Ns", and the near-wall warning could never fire for the one backend this
+# branch exists to diagnose. Fourth instance of this class; see the note on
+# _set_enforced_wall.
 _enforced_wall=0
+_set_enforced_wall() {
+  # Decide it where the answer is known and durable: a wall is enforced iff a
+  # wrapper exists AND a non-zero cap is configured. Both are already resolved in
+  # the main shell before the call.
+  if [[ -n "${_timeout_bin:-}" && -n "${_adapter_timeout:-}" && "${_adapter_timeout:-0}" != "0" ]]; then
+    _enforced_wall="$_adapter_timeout"
+  else
+    _enforced_wall=0
+  fi
+}
 with_timeout() {
   adapter_timeout
   local ADAPTER_TIMEOUT="$_adapter_timeout"
@@ -388,7 +407,6 @@ with_timeout() {
   # sweeps per process and two places to keep in step.
   timeout_bin
   if [[ -n "$_timeout_bin" ]]; then
-    _enforced_wall="$ADAPTER_TIMEOUT"
     "$_timeout_bin" -k "$TIMEOUT_KILL_GRACE" "$ADAPTER_TIMEOUT" "$@"
   else
     # No coreutils timeout: run bare, but say so once — otherwise the documented
@@ -415,11 +433,20 @@ _realpath_or_self() {
   # prompt path written the other. Fall back to the input when it cannot be
   # resolved — a best-effort compare beats no compare.
   local p="$1"
-  if command -v realpath >/dev/null 2>&1; then realpath -m -- "$p" 2>/dev/null || printf '%s' "$p"
-  elif command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$p" 2>/dev/null || printf '%s' "$p"
-  else printf '%s' "$p"
+  # python3 FIRST: it resolves a path that does not exist yet, which is what this
+  # needs, and it behaves the same everywhere. BSD/macOS `realpath` has no `-m`,
+  # so the GNU form fails there and the old order fell through to the raw string —
+  # silently turning the canonicalizing compare back into the string compare it
+  # was introduced to replace, on the very platform whose symlinked $TMPDIR
+  # motivated it.
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$p" 2>/dev/null && return 0
   fi
+  if command -v realpath >/dev/null 2>&1; then
+    realpath -m -- "$p" 2>/dev/null && return 0
+    realpath -- "$p" 2>/dev/null && return 0
+  fi
+  printf '%s' "$p"
 }
 
 _assert_prompt_readable_in_jail() {
@@ -433,7 +460,10 @@ _assert_prompt_readable_in_jail() {
   # deny list is never applied to anything, so refusing there would drop the whole
   # grok family for masking that cannot occur — the same silent-family-loss this
   # guard exists to prevent, in the opposite direction.
-  _jail_available || return 0
+  # Pass the backend explicitly: _jail_available memoizes per backend, and calling
+  # it bare asked about a different one than the run is for.
+  local backend="${2:-${TELEMETRY_BACKEND:-grok}}"
+  _jail_available "$backend" || return 0
   local prompt; prompt="$(_realpath_or_self "$1")"
   # `while read`, NOT `for d in $(...)`: the unquoted substitution word-splits on
   # IFS and glob-expands, so a deny entry containing a space ("/Users/me/My Temp")
@@ -449,7 +479,7 @@ _assert_prompt_readable_in_jail() {
         echo "refusing to run: the prompt file ($prompt) is inside a denied path ($d) — inside the jail it would read as EMPTY and the backend would return 'no findings' from a call that never saw the diff. Move TMPDIR outside SWARM_DENY_PATHS." >&2
         exit 2 ;;
     esac
-  done < <(_sandbox_deny_paths "${TELEMETRY_BACKEND:-grok}")
+  done < <(_sandbox_deny_paths "$backend")
 }
 
 _sandbox_deny_paths() {
@@ -482,7 +512,7 @@ _sandbox_deny_paths() {
   # trees). HOME cred stores are covered at full depth; nested repo secrets go
   # via SWARM_DENY_PATHS. (documented in [[swarm-backend-adapter]] § Posture)
   local repo
-  repo="$(_repo_root)"
+  _repo_root_ensure; repo="$_REPO_ROOT_MEMO"
   if [[ -n "$repo" ]]; then
     # When the reviewed root is a LINKED WORKTREE, also deny the MAIN checkout's
     # root globs: untracked .env/data/ never propagate into a worktree, so in
@@ -536,15 +566,17 @@ _sandbox_deny_paths() {
 # git work tree (callers fall back to the ambient cwd).
 _REPO_ROOT_DONE=""
 _REPO_ROOT_MEMO=""
-_repo_root() {
-  # Memoized per PROCESS: the adapter runs one backend per `run` invocation and
-  # never chdir's mid-run, so the toplevel is stable — resolve the git subprocess
-  # once instead of per caller (_scope_args, _sandbox_deny_paths, _read_web_safe).
-  if [[ -z "$_REPO_ROOT_DONE" ]]; then
-    _REPO_ROOT_DONE=1
-    _REPO_ROOT_MEMO="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-  fi
-  printf '%s' "$_REPO_ROOT_MEMO"
+_repo_root_ensure() {
+  # VOID setter — fills $_REPO_ROOT_MEMO, prints nothing. Callers read the
+  # variable directly.
+  #
+  # It used to print its result too, and every caller invoked it as `$(_repo_root)`
+  # — so the memo was written in a subshell that exited immediately and the `git
+  # rev-parse` fork ran once per caller anyway. A function cannot both print and
+  # cache; test_lens_sync.py now enforces that, and this is the case it found.
+  [[ -n "$_REPO_ROOT_DONE" ]] && return 0
+  _REPO_ROOT_DONE=1
+  _REPO_ROOT_MEMO="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 }
 
 _read_web_safe() {
@@ -554,7 +586,9 @@ _read_web_safe() {
   # -C/--cwd — so the reviewed repo's own .env*/data/keys would be readable and,
   # with web on, exfiltratable. The HOME denylist alone keeps _jail_available
   # true, so that check is not enough on its own — hence the second condition.
-  _jail_available "$1" && [[ -n "$(_repo_root)" ]]
+  _jail_available "$1" || return 1
+  _repo_root_ensure
+  [[ -n "$_REPO_ROOT_MEMO" ]]
 }
 
 _scope_args() {
@@ -565,7 +599,7 @@ _scope_args() {
   # success; on failure warns to stderr and prints nothing (caller runs
   # unscoped, falling back to the ambient cwd).
   local flag="$1" who="$2" repo
-  repo="$(_repo_root)"
+  _repo_root_ensure; repo="$_REPO_ROOT_MEMO"
   if [[ -n "$repo" ]]; then
     printf '%s\n%s\n' "$flag" "$repo"
   else
@@ -792,7 +826,9 @@ available_version() {
 # (SWARM_PROBE_TIMEOUT=300) would push two probes past that margin and let the
 # OUTER window kill the call before the inner cap fires — losing rc=124 and the
 # telemetry record, which is the diagnosis this whole branch exists to keep.
-# Keep this ceiling and swarm-review.js's TIMEOUT_MARGIN_S in sync.
+# The workflow no longer mirrors this by hand: `config` reports
+# probe_budget_seconds and swarm-review.js derives its margin from that. Raising
+# this ceiling still widens the budget, so raise it deliberately.
 SWARM_PROBE_TIMEOUT_MAX=20
 # Lazy for the same reason as adapter_timeout(): `--help` and `list` must not die
 # on a knob they never read.
@@ -981,12 +1017,27 @@ grok_model_fetch() {
   # the marker at all is what makes this brittle; accepting both is the minimal
   # fix that keeps the anti-prose guard (a bullet line per model) intact.
   _grok_models="$(printf '%s\n' "$raw" | awk '
+    # The id must be the FIRST token after the bullet, matched whole, on a short
+    # line. Scanning every field meant a prose bullet — " - grok-4.6 reaches end
+    # of life on 2026-12-01" — yielded grok-4.6 as an offered model; discovery
+    # then selects it (it is schema-verified) and every call dies at launch with
+    # "unknown model id", losing the grok family. NF<=3 admits "* grok-4.5
+    # (default)" while rejecting sentences. The `-` bullet itself must stay
+    # accepted: grok 1.0.3 marks only the default with `*`.
     /^[[:space:]]*[*-][[:space:]]/ {
-      for (i = 1; i <= NF; i++)
-        if (match($i, /grok-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*/)) {
-          print substr($i, RSTART, RLENGTH)
-          break
-        }
+      # The id must be the FIRST token after the bullet, and whatever follows it
+      # must be a parenthesised annotation — "(default)", "(successor to …)" —
+      # not a sentence. Scanning every field meant a prose bullet (" - grok-4.6
+      # reaches end of life on 2026-12-01") yielded grok-4.6 as an OFFERED model;
+      # discovery then selects it, since it is schema-verified, and every call
+      # dies at launch with "unknown model id" — the grok family gone, silently.
+      # The `-` bullet itself must stay accepted: grok 1.0.3 marks only the
+      # default with `*`.
+      if (NF >= 2 && (NF == 2 || $3 ~ /^\(/)) {
+        tok = $2
+        sub(/[.,;:]+$/, "", tok)
+        if (tok ~ /^grok-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*$/) print tok
+      }
     }')"
   if [[ -z "$_grok_models" ]]; then
     _probe_degraded "\`grok models\` returned no model ids — output format may have changed"
@@ -1034,28 +1085,23 @@ _grok_version_newer() {
   [[ "$a_minor" -gt "$b_minor" ]]
 }
 
-# Memo per mode. The scan is a subshell over the already-memoized catalog and is
-# asked for 3-4 times per `run grok` (readiness, selection, the hint path). The
-# leading "=" marks "computed", so an empty result memoizes as empty rather than
-# re-scanning every time.
-_grok_top_memo_any=""
-_grok_top_memo_verified=""
 _grok_highest_canonical() {
   # Highest listed id accepted by GROK_CANONICAL_RE, or "" if none is.
   # $1 = "verified" restricts the scan to schema-verified models.
+  #
+  # NOT memoized, deliberately. Every call site invokes this as `$(...)`, so any
+  # global it set would die with that subshell — the memo added in 0.10.6 never
+  # reached a second caller and only looked like an optimization. A function that
+  # PRINTS its result cannot also cache into a global; splitting it into a void
+  # setter plus a getter would buy a few forks over an already-memoized in-memory
+  # list, which is not worth a second calling convention in this file.
   local mode="${1:-any}" best="" id
-  if [[ "$mode" == "verified" ]]; then
-    [[ -n "$_grok_top_memo_verified" ]] && { printf '%s' "${_grok_top_memo_verified#=}"; return 0; }
-  else
-    [[ -n "$_grok_top_memo_any" ]] && { printf '%s' "${_grok_top_memo_any#=}"; return 0; }
-  fi
   while IFS= read -r id; do
     [[ -n "$id" ]] || continue
     [[ "$id" =~ $GROK_CANONICAL_RE ]] || continue
     if [[ "$mode" == "verified" ]] && ! _grok_schema_verified "$id"; then continue; fi
     if [[ -z "$best" ]] || _grok_version_newer "$id" "$best"; then best="$id"; fi
   done <<<"$_grok_models"
-  if [[ "$mode" == "verified" ]]; then _grok_top_memo_verified="=$best"; else _grok_top_memo_any="=$best"; fi
   printf '%s' "$best"
 }
 
@@ -1273,7 +1319,7 @@ subcmd_jail() {
   # web the adapter then strips. jail=no ⇒ the fail-closed degrade applies (grok
   # tool-less/no-web, codex web hard-off); the transport discards adapter
   # stderr, so this is the visible channel for that warning. Runs from the same
-  # cwd as the review, so its _repo_root matches the run's.
+  # cwd as the review, so its repo root matches the run's.
   if _read_web_safe codex; then echo "jail=yes"; else echo "jail=no"; fi
 }
 
@@ -1312,6 +1358,10 @@ subcmd_config() {
 subcmd_run() {
   local backend="${1:-}"
   [[ -z "$backend" ]] && usage
+  # Stamp the identity immediately: a record written by the EXIT trap on an early
+  # failure otherwise reads ":smoke" with an empty backend, unusable in a report
+  # whose whole job is naming which voice was lost.
+  TELEMETRY_BACKEND="$backend"
   shift
   validate_backend "$backend"
   if [[ "$backend" == "claude" ]]; then
@@ -1329,7 +1379,18 @@ subcmd_run() {
       --effort)      effort="$2"; shift 2 ;;
       --model)       model="$2";       shift 2 ;;
       --schema)      schema="$2";      shift 2 ;;
-      --telemetry)   TELEMETRY_FILE="$2"; shift 2 ;;
+      --telemetry)
+        TELEMETRY_FILE="$2"
+        # Arm the clock HERE, not only just before the backend call. A run that
+        # dies in readiness/config validation exited before TELEMETRY_START was
+        # ever set, so the EXIT trap wrote NOTHING — and a voice with no record is
+        # indistinguishable from one that never ran, which is the exact
+        # misreading this telemetry exists to prevent. The value is overwritten
+        # immediately before the backend call, so a normal run still measures only
+        # the backend; an early exit keeps this near-zero stamp and lands in the
+        # reader's "never reached the backend" category.
+        TELEMETRY_START="$(date +%s 2>/dev/null || true)"
+        shift 2 ;;
       --unit)        TELEMETRY_UNIT="$2"; shift 2 ;;
       *) echo "Unknown flag: $1" >&2; exit 2 ;;
     esac
@@ -1490,6 +1551,9 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
   # not something to degrade around.
   adapter_timeout
   _probe_setup_strict
+  # Both resolved above, in THIS shell — so the wall recorded in telemetry is the
+  # wall that will actually apply, not a value assigned inside a subshell.
+  _set_enforced_wall
   require_usable "$backend"
   require_python3
 
@@ -1735,7 +1799,7 @@ run_grok() {
     /*) ;;
     *)  prompt_path="$PWD/$prompt_path" ;;
   esac
-  _assert_prompt_readable_in_jail "$prompt_path"
+  _assert_prompt_readable_in_jail "$prompt_path" grok
   # The prompt file must stay READABLE INSIDE THE JAIL. The denylist covers HOME
   # secret stores and repo-root secrets, not TMPDIR, so the default path is fine —
   # but a custom SWARM_DENY_PATHS covering $TMPDIR would make this read fail, and
