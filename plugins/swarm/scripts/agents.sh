@@ -580,7 +580,7 @@ _jail_available() {
   # host without sandbox-exec/bwrap the externals degrade to the 0.5.x
   # tool-less/no-web flags instead of running read+web bare — 0.5.x was safe
   # there precisely because the flags, not the jail, closed the channel.
-  _init_sandbox "$1"
+  _init_sandbox "${1:-}"
   (( ${#SANDBOX_CMD[@]} > 0 ))
 }
 
