@@ -93,7 +93,19 @@ const MAX_PROMPT_BYTES_FALLBACK = 524288
 // paying for.
 const MAX_PROMPT_BYTES_MIN = 4097
 const MAX_PROMPT_BYTES_MAX = 1073741824
-const _capIn = Number.isInteger(INPUT.maxPromptBytes) ? INPUT.maxPromptBytes : MAX_PROMPT_BYTES_FALLBACK
+// Coerce a numeric STRING too ("524288"), and log whenever the handshake did not
+// deliver a usable value — not only when the result differs from the fallback.
+// Silently substituting the fallback re-opens the exact skill↔adapter split-brain
+// the `config` handshake exists to close: the skill gates the oversize skip on
+// the adapter-reported cap, then every adapter call is pinned with a DIFFERENT
+// one and dies with "Prompt file too large" — N per-call errors and nothing
+// saying the two sides disagreed.
+const _num = (v) => (typeof v === 'number' ? v : (typeof v === 'string' && /^\d+$/.test(v.trim()) ? Number(v) : NaN))
+const _capRaw = _num(INPUT.maxPromptBytes)
+if (!Number.isInteger(_capRaw)) {
+  log(`config handshake: maxPromptBytes missing or not a number (${JSON.stringify(INPUT.maxPromptBytes)}) — falling back to ${MAX_PROMPT_BYTES_FALLBACK}; the skill's oversize gate may have used a different cap`)
+}
+const _capIn = Number.isInteger(_capRaw) ? _capRaw : MAX_PROMPT_BYTES_FALLBACK
 const MAX_PROMPT_BYTES = Math.min(Math.max(_capIn, MAX_PROMPT_BYTES_MIN), MAX_PROMPT_BYTES_MAX)
 if (_capIn !== MAX_PROMPT_BYTES) {
   log(`maxPromptBytes=${_capIn} is outside what the adapter accepts — using ${MAX_PROMPT_BYTES}`)
@@ -103,8 +115,12 @@ const PROBE_BUDGET_FALLBACK_S = 69
 // hand `SWARM_TIMEOUT=-N` to the adapter, which rejects it — every voice failing
 // at launch instead of one clear error here.
 const PROBE_BUDGET_MAX_S = BASH_TIMEOUT_MS / 1000 / 2
-const _probeBudgetIn = Number.isInteger(INPUT.probeBudgetSeconds) && INPUT.probeBudgetSeconds >= 0
-  ? INPUT.probeBudgetSeconds
+const _budgetRaw = _num(INPUT.probeBudgetSeconds)
+if (!(Number.isInteger(_budgetRaw) && _budgetRaw >= 0)) {
+  log(`config handshake: probeBudgetSeconds missing or not a number (${JSON.stringify(INPUT.probeBudgetSeconds)}) — falling back to ${PROBE_BUDGET_FALLBACK_S}s of pre-timer margin`)
+}
+const _probeBudgetIn = Number.isInteger(_budgetRaw) && _budgetRaw >= 0
+  ? _budgetRaw
   : PROBE_BUDGET_FALLBACK_S
 const PROBE_BUDGET_S = Math.min(_probeBudgetIn, PROBE_BUDGET_MAX_S)
 if (_probeBudgetIn > PROBE_BUDGET_MAX_S) {
@@ -121,8 +137,12 @@ const TIMEOUT_MARGIN_S = PROBE_BUDGET_S + TIMEOUT_SLACK_S
 // A warning that fires unconditionally is noise, and it hid the case worth
 // hearing about (a user who really did set a too-large value).
 const MAX_INNER_S = BASH_TIMEOUT_MS / 1000 - TIMEOUT_MARGIN_S
-const REQUESTED_TIMEOUT_S = Number.isInteger(INPUT.timeoutSeconds) && INPUT.timeoutSeconds >= 0
-  ? INPUT.timeoutSeconds
+const _toRaw = _num(INPUT.timeoutSeconds)
+if (INPUT.timeoutSeconds !== undefined && !(Number.isInteger(_toRaw) && _toRaw >= 0)) {
+  log(`config handshake: timeoutSeconds present but not a number (${JSON.stringify(INPUT.timeoutSeconds)}) — using the derived ceiling ${MAX_INNER_S}s`)
+}
+const REQUESTED_TIMEOUT_S = Number.isInteger(_toRaw) && _toRaw >= 0
+  ? _toRaw
   : MAX_INNER_S
 // 0 means "no adapter cap" and is passed through rather than overridden — but it
 // hands the kill to the outer window, i.e. exactly the unhelpful error above.

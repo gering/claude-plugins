@@ -146,8 +146,8 @@ check("a fast SMALL call is not flagged", "⚠️" not in r.stdout)
 
 # The concrete model belongs in the report: the balance line only carries the
 # family, so an unrendered model field left "which model reviewed this?"
-# answerable only from the raw jsonl.
-r = run([write([REC_FAST_SMALL])])
+# answerable only from the raw jsonl. (Same run as above — re-running an
+# identical command would report one behaviour as two passes.)
 check("the record's model is rendered", "grok-4.6" in r.stdout)
 
 # A wall is a duration; 0 or negative made every percentage nonsense.

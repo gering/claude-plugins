@@ -457,6 +457,16 @@ for _i, _l in enumerate(_sh_lines[:-1]):
         _cont.append(f"{_i + 2}: {_sh_lines[_i + 1].strip()[:50]}")
 check(f"adapter: no comment inside a line continuation ({_cont})", not _cont)
 
+# The `grok models` parser is an awk program wrapped in single quotes, so a single
+# quote ANYWHERE inside it — comment text included — ends the shell quoting and
+# corrupts the parser. That failure is quiet at the shell level (`bash -n` stays
+# happy) and shows up only as "output format may have changed", i.e. as a lost
+# grok family. It has now happened twice while editing this very block.
+_awk = re.search(r"awk '\n(.*?)'\s*\)", sh, re.S)
+check("adapter: the models awk program is delimited", _awk)
+check("adapter: no apostrophe inside the awk program",
+      bool(_awk) and "'" not in _awk.group(1))
+
 # --- the subshell-memo class -------------------------------------------------
 # Five times on this branch a function assigned a global AND printed its result,
 # while every call site invoked it as `$(...)`. The assignment dies with the
@@ -547,7 +557,7 @@ _cfg = subprocess.run(["bash", str(ADAPTER), "config"],
                       capture_output=True, text=True, env=_env)
 check("adapter: config runs with a clean env (unset SWARM_* to reproduce)",
       _cfg.returncode == 0)
-check("adapter: config runs for the fallback pin", _cfg.returncode == 0)
+
 _reported = ""
 for _line in _cfg.stdout.splitlines():
     if _line.startswith("probe_budget_seconds="):

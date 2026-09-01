@@ -36,7 +36,7 @@
 # by exec's MAX_ARG_STRLEN. SWARM_MAX_PROMPT_BYTES (default 512 KiB) is that
 # sanity cap.
 #
-# Backend notes (probed against codex 0.144.6 / grok 1.0.13, 2026-07..08):
+# Backend notes (probed against codex 0.147.0 / grok 1.0.13, 2026-07..08):
 #   claude — probe-only: reviews run in-session via the Agent tool, so
 #            `run claude` is a usage error. available/ready/list include it.
 #   codex  — `codex exec --output-schema` under `-s read-only` with
@@ -213,7 +213,7 @@ _write_telemetry() {
   # same file, and a lone write under the pipe-buffer size is atomic with
   # O_APPEND, so lines interleave but never tear. Do not split this into
   # multiple writes.
-  # `_enforced_wall`, not `_adapter_timeout`: with no coreutils `timeout` the call
+  # Read `_enforced_wall`, NOT `_adapter_timeout`: with no coreutils `timeout` the call
   # ran BARE, so recording the configured value would report a cap that was never
   # in force, and the reader would compute "% of a wall" for a call nothing could
   # have stopped. with_timeout sets it only when it actually wrapped the command.
@@ -460,26 +460,46 @@ _assert_prompt_readable_in_jail() {
   # deny list is never applied to anything, so refusing there would drop the whole
   # grok family for masking that cannot occur — the same silent-family-loss this
   # guard exists to prevent, in the opposite direction.
-  # Pass the backend explicitly: _jail_available memoizes per backend, and calling
-  # it bare asked about a different one than the run is for.
-  local backend="${2:-${TELEMETRY_BACKEND:-grok}}"
+  #
+  # The caller always passes the backend explicitly; the fallback keeps a direct
+  # call in a test from being silently backend-less.
+  local backend="${2:-grok}"
   _jail_available "$backend" || return 0
-  local prompt; prompt="$(_realpath_or_self "$1")"
-  # `while read`, NOT `for d in $(...)`: the unquoted substitution word-splits on
-  # IFS and glob-expands, so a deny entry containing a space ("/Users/me/My Temp")
-  # became two non-matching words and this fail-closed guard silently failed OPEN —
-  # while the jail builders, which read the same list line-wise, still masked the
-  # file. Both other consumers in this file already do it this way.
-  local d rp
-  while IFS= read -r d; do
-    [[ -n "$d" ]] || continue
-    rp="$(_realpath_or_self "$d")"
-    case "$prompt/" in
-      "${rp%/}"/*)
-        echo "refusing to run: the prompt file ($prompt) is inside a denied path ($d) — inside the jail it would read as EMPTY and the backend would return 'no findings' from a call that never saw the diff. Move TMPDIR outside SWARM_DENY_PATHS." >&2
-        exit 2 ;;
-    esac
-  done < <(_sandbox_deny_paths "$backend")
+
+  # ONE python3 for the whole comparison. Canonicalization matters (macOS $TMPDIR
+  # is a symlink, and both jail builders realpath their entries, so a raw string
+  # compare asks a different question than the jail answers) — but doing it per
+  # entry forked an interpreter for each of ~25 deny paths on every grok call,
+  # startup cost landing squarely in the pre-timer budget this branch spent three
+  # rounds bounding. No associative array either: bash 3.2 (stock macOS) has none.
+  local hit=""
+  if command -v python3 >/dev/null 2>&1; then
+    hit="$(_sandbox_deny_paths "$backend" | python3 -c '
+import os, sys
+prompt = os.path.realpath(sys.argv[1])
+for line in sys.stdin:
+    d = line.strip()
+    if not d:
+        continue
+    rd = os.path.realpath(d)
+    if prompt == rd or prompt.startswith(rd.rstrip("/") + "/"):
+        print(d)
+        break
+' "$1" 2>/dev/null || true)"
+  else
+    # No python3: string-compare only. Weaker (a symlinked TMPDIR can slip
+    # through) but better than skipping the check entirely.
+    local d
+    while IFS= read -r d; do
+      [[ -n "$d" ]] || continue
+      case "$1/" in "${d%/}"/*) hit="$d"; break ;; esac
+    done < <(_sandbox_deny_paths "$backend")
+  fi
+
+  if [[ -n "$hit" ]]; then
+    echo "refusing to run: the prompt file ($1) is inside a denied path ($hit) — inside the jail it would read as EMPTY and the backend would return 'no findings' from a call that never saw the diff. Move TMPDIR outside SWARM_DENY_PATHS." >&2
+    exit 2
+  fi
 }
 
 _sandbox_deny_paths() {
@@ -914,7 +934,10 @@ _probe_or_bare() {
   # Callers that must NOT run unbounded (the network-reaching `grok models`) test
   # $_timeout_bin themselves and skip instead. Extracted because the if/else was
   # written out twice and the two copies are what a third call site would clone.
-  if [[ -n "$_timeout_bin" ]]; then _bounded_probe "$@"; else "$@"; fi
+  # `</dev/null` on BOTH branches: _bounded_probe applies it, and a bare fallback
+  # without it lets a CLI that reads stdin block forever on an interactive shell —
+  # a probe that must never hang, hanging.
+  if [[ -n "$_timeout_bin" ]]; then _bounded_probe "$@"; else "$@" </dev/null; fi
 }
 
 _bounded_probe() {
@@ -1025,16 +1048,32 @@ grok_model_fetch() {
     # (default)" while rejecting sentences. The `-` bullet itself must stay
     # accepted: grok 1.0.3 marks only the default with `*`.
     /^[[:space:]]*[*-][[:space:]]/ {
-      # The id must be the FIRST token after the bullet, and whatever follows it
-      # must be a parenthesised annotation — "(default)", "(successor to …)" —
-      # not a sentence. Scanning every field meant a prose bullet (" - grok-4.6
-      # reaches end of life on 2026-12-01") yielded grok-4.6 as an OFFERED model;
-      # discovery then selects it, since it is schema-verified, and every call
-      # dies at launch with "unknown model id" — the grok family gone, silently.
+      # Accept: bullet, then the id as the FIRST token, then EITHER nothing or a
+      # BRACKETED annotation — "(default)", "[stable]", "{beta}". Surrounding
+      # backticks/quotes and trailing punctuation are stripped off the id.
+      #
+      # This is a deliberate trade-off between two ways to lose the grok family,
+      # and it is not symmetric:
+      #   - harvesting PROSE as a model ("- grok-4.6 reaches end of life on …")
+      #     makes discovery select an id the CLI does not offer; every call then
+      #     dies at launch and nothing says why. SILENT.
+      #   - rejecting an unfamiliar annotation style ("- grok-4.5 Fast reasoning
+      #     model") empties the list, which lands in the documented trust-auth
+      #     degrade: _probe_degraded WARNS on stderr and the pinned fallback is
+      #     used. LOUD, and recoverable by adding the style here.
+      # So when the two cannot be told apart syntactically — and a bare word after
+      # the id cannot be — prefer the loud failure. Bracketed annotations are the
+      # convention every observed listing uses, which is why they are admitted.
       # The `-` bullet itself must stay accepted: grok 1.0.3 marks only the
       # default with `*`.
-      if (NF >= 2 && (NF == 2 || $3 ~ /^\(/)) {
+      if (NF >= 2 && (NF == 2 || $3 ~ /^[(\[{]/)) {
         tok = $2
+        # NOTE: no apostrophe may appear anywhere in this awk program (comments
+        # included) — the whole program is wrapped in awk with single quotes, so
+        # one would end the shell quoting and silently corrupt the parser. It did:
+        # three fixtures went red and the live probe reported "output format may
+        # have changed".
+        gsub(/[`"]/, "", tok)
         sub(/[.,;:]+$/, "", tok)
         if (tok ~ /^grok-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*$/) print tok
       }
@@ -1228,16 +1267,8 @@ ready_hint() {
 
 # ---------- subcommands ----------
 
-# Every display verb resolves the probe knob HERE, before the command
-# substitutions in print_rows/available_version. Left to the lenient resolver
-# inside those subshells, the "warn once" flag was set in a shell that exits
-# immediately: the warning printed once per backend row (or not at all, when the
-# subshell's stderr was captured), and the memo never reached the parent — so the
-# value was re-resolved for every probe. Third variant of the same subshell bug.
-_display_setup() { _probe_setup_lenient; }
-
 subcmd_available() {
-  _display_setup
+  _probe_setup_lenient
   local backend="${1:-}"
   [[ -z "$backend" ]] && usage
   validate_backend "$backend"
@@ -1258,7 +1289,7 @@ require_usable() {
 }
 
 subcmd_ready() {
-  _display_setup
+  _probe_setup_lenient
   local backend="${1:-}"
   [[ -z "$backend" ]] && usage
   validate_backend "$backend"
@@ -1286,7 +1317,7 @@ print_rows() {
 }
 
 subcmd_list() {
-  _display_setup
+  _probe_setup_lenient
   case "${1:-}" in
     --json)
       require_python3
@@ -1800,12 +1831,6 @@ run_grok() {
     *)  prompt_path="$PWD/$prompt_path" ;;
   esac
   _assert_prompt_readable_in_jail "$prompt_path" grok
-  # The prompt file must stay READABLE INSIDE THE JAIL. The denylist covers HOME
-  # secret stores and repo-root secrets, not TMPDIR, so the default path is fine —
-  # but a custom SWARM_DENY_PATHS covering $TMPDIR would make this read fail, and
-  # under bwrap a masked path reads as EMPTY rather than erroring: the backend
-  # would then review an empty prompt and return "no findings" from a call that
-  # looks perfectly healthy. Never add TMPDIR to the denylist.
   local raw rc=0
   raw="$(sandboxed grok grok -m "$grok_model" --effort "$effort" \
       ${tool_args[@]+"${tool_args[@]}"} \

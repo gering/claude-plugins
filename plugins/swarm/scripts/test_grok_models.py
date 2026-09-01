@@ -49,8 +49,6 @@ if not m:
 
 def parse(listing):
     """Run the shipped awk program over a raw `grok models` listing."""
-    if not m:
-        return []
     out = subprocess.run(
         ["awk", m.group(1)], input=listing, capture_output=True, text=True,
     )
@@ -212,6 +210,16 @@ PROSE_LIST = """Available models:
 """
 check("a prose bullet is not parsed as an offered model",
       parse(PROSE_LIST) == ["grok-4.5"])
+
+# Bracketed annotations are the convention real listings use; a future format
+# adding one must not empty the catalog (which would drop grok to the pinned
+# fallback), and a backticked id must still be read.
+ANNOTATED = """Available models:
+  * grok-4.6 [stable]
+  - `grok-4.5` (legacy)
+"""
+check("bracketed annotations and backticked ids still parse",
+      sorted(parse(ANNOTATED)) == ["grok-4.5", "grok-4.6"])
 
 # --- the schema gate: verified selects, unverified only REPORTS ---------------
 def select(models, override=""):
