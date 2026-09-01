@@ -37,11 +37,15 @@ test**, so the refactor was regression-guarded by running its classification
 over a *live herdr snapshot* before and after and confirming byte-identical
 output — the technique to reach for when refactoring an untested renderer.
 
-`herdr-teardown.sh` was deliberately **left alone**: its `realpath(cwd) ==
-target` lookup is a 1:1 match against one given path returning a tab id — a
-*different* operation from the 1:N "classify this cwd against the repo's whole
-worktrees dir" that `classify_cwd` does. Forcing it through the shared helper
-would be scope creep with regression risk on a tested path.
+`herdr-teardown.sh`'s **tab lookups** were deliberately **left alone**: their
+`realpath(cwd) == target` match is a 1:1 test against one given path returning a
+tab id — a *different* operation from the 1:N "classify this cwd against the
+repo's whole worktrees dir" that `classify_cwd` does. Forcing them through the
+shared helper would be scope creep with regression risk on a tested path. The
+split held up: when `manager-session` (work-system 1.13.0) needed the *1:N* form
+— is any agent sitting at the repo root? — it sourced `$HERDR_MATCH_PRELUDE`
+rather than growing a third copy. The rule is the operation, not the file: 1:1
+stays local, 1:N uses the prelude.
 
 ## `lanes.sh` — the derived-live lane view
 

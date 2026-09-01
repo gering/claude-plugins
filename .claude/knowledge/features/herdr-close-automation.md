@@ -54,15 +54,34 @@ points worth keeping:
   `[ref]`**: refs cannot be mapped back to a repo (they match neither
   `agent_session.value` nor any pane/tab id), so a guess could message a stranger.
   Real-world friction, worth knowing before "improving" this: several unrelated repos
-  can all have a tab titled `Manager`, and then no offer ever appears — by design.
+  can all have a tab titled `Manager`, and then no offer ever appears — by design. Count
+  only **live interactive** sessions there: offline / Remote-Control namesakes can neither
+  receive a close nor legitimately veto one, and counting them kills the feature outright.
+  Because the title is settable by any process in the pane, the confirmation must **name
+  the resolved recipient** — a person catching a wrong name is the actual trust anchor
+  here, not the string match.
 - **Fail-closed everywhere.** Two agents at the repo root, a non-claude or not-live one
   there, an unreadable cwd, a junk list element, an empty/malformed list, missing tools
   → `unverified` → no offer, today's flow unchanged. A wrong `none` costs only the
   offer; a wrong `name=` would send a close request to a stranger session.
-- **The request is untrusted data on arrival.** The Manager re-runs
-  `task-status.sh assess` itself and checks `repo=` against its own main repo. The
-  message authorizes running the normal gated `/close`, nothing more — it is explicitly
-  *not* user approval to skip the merge gate because the worker claimed `pr=` is merged.
+- **The request is unauthenticated, so the receiver asks.** Cross-session messages carry
+  no proof of origin, and a close is destructive. The Manager therefore validates
+  (`task=` against `^[A-Za-z0-9._-]+$` before it touches any command, `repo=` against its
+  own main repo), cross-checks `worktree=` against the live lanes, re-runs
+  `task-status.sh assess` itself — and then **asks the user once, even on a verified
+  merged PR**. That is the one place `/close` asks where a user-invoked close would not:
+  a user invocation *is* the authorization; an inbound message is not. Ship-blocking
+  distinction, found in review — the earlier "verified merge proceeds unasked" rule let a
+  forged request delete a worktree somebody was still working in.
+- **The payload is three fields — `task=`, `worktree=`, `repo=` — on purpose.** No `pr=`
+  or `branch=`: the Manager re-derives both and is told not to trust them, so carrying
+  them would only widen what a misdelivered message leaks. What is left is exactly what
+  the receiver cross-checks the request against.
+- **The gate also refuses cases the delegation cannot serve**, not just unsafe ones: an
+  unconfirmed merge (the step-2 question belongs to the person with the context, not to a
+  tab they are not looking at) and an `/adopt`-ed branch that kept a non-`task/` name
+  (unresolvable by name outside its worktree, so the Manager would receive a close it
+  cannot resolve).
 
 ## Design decisions
 
