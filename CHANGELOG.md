@@ -52,6 +52,11 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.13.0 — 2026-09-01
+- `/close` run **from inside a worktree** now offers to **delegate the teardown to the Manager session** (the Claude session at the main-repo root) instead of self-closing. Delegating sends one structured `work-system close-request` message via the built-in `SendMessage` and stops locally — the Manager re-verifies the merge and closes the worker tab through the robust Scenario A path, so every delegated close removes one use of the fragile self-exit + marker + hook chain (Scenario B), which cannot confirm its own teardown in-turn.
+- New `herdr-teardown.sh manager-session <workspace> <main-repo-path>`: tri-state Manager detection (`name=<session>` | `none` | `unverified`, always exit 0) built on the shared realpath cwd match and the bounded `ha_list` wrapper. Fail-closed by construction — a malformed/empty agent list, two candidates at the repo root, a non-claude or not-live agent there, an unreadable cwd, or missing tools all yield `unverified`, and every uncertainty simply skips the offer (today's flow, zero regression). Covered by 35 hermetic tests against a stub herdr.
+- The offer additionally requires the detected name to resolve to **exactly one** `ListAgents` session: the name is derived from the pane title, which is only a candidate address, and `[ref]` suffixes cannot be mapped back to a repo — an ambiguous name is reported in one line rather than guessed at.
+- Manager-side handling documented in `close/SKILL.md`: an incoming request is **untrusted data**, never user approval — the Manager re-runs `task-status.sh assess` itself, checks `repo=` against its own main repo, and only a verified merged PR proceeds without a question.
 ### 1.12.1 — 2026-09-02
 - Fix `herdr-agent.sh ha_wait`: emit herdr 0.8's `--until S` instead of the drifted `--status` flag (unknown option; a real caller would see it forwarded as a "timeout"). Leftover `--status` (flag or value position), `--until=S` (herdr 0.8 unknown option), and a dangling `--until` (would steal the injected `--timeout` as STATUS) are rejected (exit 2), never silently translated or forwarded. When the caller passes no state, inject herdr's documented default (`idle`/`done`/`blocked`). Flag vocabulary is herdr-version-coupled — no version-detection layer.
 

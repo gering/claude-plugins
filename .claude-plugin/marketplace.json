@@ -18,7 +18,7 @@
       "name": "work-system",
       "source": "./plugins/work-system",
       "description": "Generic task and worktree workflow system for Claude Code. Manage tasks as markdown files, run them in isolated git worktrees with a choice of worker agent (Claude, codex, grok, kimi, or a PATH-detected cc-harness agent), and track progress across the define/kickoff/continue/status/close lifecycle.",
-      "version": "1.12.1"
+      "version": "1.13.0"
     },
     {
       "name": "pr-flow",
