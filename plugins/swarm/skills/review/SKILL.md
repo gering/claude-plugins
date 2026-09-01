@@ -295,18 +295,19 @@ SWARM_CFG="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" config 2>&1)" || {
 # comparison or a bare JS literal — the failure mode this whole `config` handshake
 # exists to remove. A here-doc, not a pipe: a `while read` on the right side of a
 # pipe runs in a subshell and its assignments would be lost.
-CFG_MAX=""; CFG_THRESH=""; CFG_TO=""; CFG_PROBE=""
+CFG_MAX=""; CFG_THRESH=""; CFG_TO=""; CFG_PROBE=""; CFG_PROBE_TO=""
 while IFS='=' read -r _k _v; do
   case "$_k" in
     max_prompt_bytes)     CFG_MAX="$_v" ;;
     oversize_threshold)   CFG_THRESH="$_v" ;;
     timeout_seconds)      CFG_TO="$_v" ;;
     probe_budget_seconds) CFG_PROBE="$_v" ;;
+    probe_timeout_seconds) CFG_PROBE_TO="$_v" ;;
   esac
 done <<CFGEOF
 $SWARM_CFG
 CFGEOF
-for _pair in "oversize_threshold=$CFG_THRESH" "max_prompt_bytes=$CFG_MAX" "timeout_seconds=$CFG_TO" "probe_budget_seconds=$CFG_PROBE"; do
+for _pair in "oversize_threshold=$CFG_THRESH" "max_prompt_bytes=$CFG_MAX" "timeout_seconds=$CFG_TO" "probe_budget_seconds=$CFG_PROBE" "probe_timeout_seconds=$CFG_PROBE_TO"; do
   case "${_pair#*=}" in
     ''|*[!0-9]*) echo "SWARM_CFG_ERR=adapter config did not report a usable ${_pair%%=*}"; rm -rf "$TMPD"; exit 0 ;;
   esac
@@ -325,6 +326,7 @@ if [ -n "${SWARM_TIMEOUT:-}" ]; then
 fi
 echo "SWARM_MAX_BYTES=$CFG_MAX"
 echo "SWARM_PROBE_BUDGET_S=$CFG_PROBE"
+echo "SWARM_PROBE_TIMEOUT_S=$CFG_PROBE_TO"
 echo "JAIL=$JAIL"
 echo "LIVE_JSON=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json | tr -d '\n')"
 ```
@@ -384,6 +386,7 @@ Workflow({
     telemetryFile: "<TELEMETRY>",
     findingNonce: "<FINDING_NONCE>",
     probeBudgetSeconds: <SWARM_PROBE_BUDGET_S>,
+    probeTimeoutSeconds: <SWARM_PROBE_TIMEOUT_S>,
     maxPromptBytes: <SWARM_MAX_BYTES>,
     externalVoices: [<the live voices from step 1>]
   }
@@ -391,10 +394,14 @@ Workflow({
 ```
 
 Fill `<DIFF>`/`<PROMPT>`/`<TELEMETRY>`/`<FINDING_NONCE>` from the echoed values,
-and pass `probeBudgetSeconds: <SWARM_PROBE_BUDGET_S>` plus
-`maxPromptBytes: <SWARM_MAX_BYTES>` (both bare numbers) so the workflow sizes its
-timeout margin from what the adapter reports, and pins the same prompt cap onto
-every adapter call instead of trusting environment inheritance.
+and pass `probeBudgetSeconds: <SWARM_PROBE_BUDGET_S>`,
+`probeTimeoutSeconds: <SWARM_PROBE_TIMEOUT_S>` and
+`maxPromptBytes: <SWARM_MAX_BYTES>` (all bare numbers) so the workflow sizes its
+timeout margin from what the adapter reports, and pins the same prompt cap and
+probe bound onto every adapter call instead of trusting environment inheritance.
+The probe bound is load-bearing, not cosmetic: the adapter derives the probe
+budget from the value it resolves, so a run that budgets one number and enforces
+another re-opens the race the margin exists to win.
 **Only if** the block echoed `SWARM_TIMEOUT_S`, add `timeoutSeconds:
 <SWARM_TIMEOUT_S>` — a bare number, not a string. Omit the field entirely
 otherwise, so the workflow applies its own derived default rather than being

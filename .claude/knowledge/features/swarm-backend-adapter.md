@@ -283,12 +283,31 @@ each voice pays an extra round-trip.
     three vanished when the jail came back out). The probe runs grok directly.
   - **Bound it with `timeout -k`, its own knob.** `SWARM_TIMEOUT` caps a
     *review* (600s, `0` disables) — useless for a probe that `list` blocks on;
-    `SWARM_PROBE_TIMEOUT` (10s) is separate and a malformed/`0` value falls back
-    to 10, never uncapped. Plain `timeout` only SIGTERMs, so a grok that ignores
+    `SWARM_PROBE_TIMEOUT` (10s, ceiling `SWARM_PROBE_TIMEOUT_MAX`=20) is
+    separate. Since 0.10.x it is **validated fail-closed** on the `run`/`config`
+    paths: a malformed, `0` or over-ceiling value exits 2 rather than being
+    quietly normalized, which surfaces to the review skill as `SWARM_CFG_ERR`
+    and aborts the run with the adapter's own wording. (`list`/`ready` still
+    degrade to 10 with a warning — a bad knob must not make *listing* impossible.)
+    The workflow pins the resolved value onto every adapter call, because
+    `config` now derives `probe_budget_seconds` from the *resolved* bound rather
+    than from the ceiling. Plain `timeout` only SIGTERMs, so a grok that ignores
     SIGTERM (or forks a stdout-inheriting child) keeps the `$(...)` substitution
     blocking past the deadline — the "must never hang" hole. `-k <grace>` sends
     SIGKILL after the grace period; treat both rc 124 (SIGTERM) and 137
-    (SIGKILL) as "timed out".
+    (SIGKILL) as "timed out" — but only when a wall was actually **in force**
+    (`_enforced_wall`), or a backend that exits 124 on its own is reported as an
+    adapter timeout with `timeout_seconds:0`.
+  - **"No coreutils, so run bare" is not a bound.** Stock macOS has no
+    `timeout`/`gtimeout`, i.e. the unbounded path was the *common* one, and
+    `config` meanwhile advertised a probe budget the run could not enforce. The
+    dilemma (lose the bound, or lose the answer and drop a whole family — 0.10.3
+    did the latter) was false: `_watchdog_run` runs the probe in the background,
+    polls in 1s steps and escalates TERM→KILL, reporting `timeout(1)`'s own 124
+    and 137. Verified against all four behaviours (success, expiry, rc
+    passthrough, a SIGTERM-ignoring child). A probe rc may then be interpreted
+    the same way on every host — which is what lets codex's `login status`
+    timeout degrade to trust-auth instead of "not ready".
   - **Memoize by call convention, not by wishing.** `list="$(grok_model_list)"`
     runs the function in a *subshell*, so its cache-global assignments vanish
     and every caller silently re-pays the network call. The cache only works if
@@ -437,3 +456,52 @@ Rules that came out of it, worth applying beyond this file:
 - **Exit-code discipline matters** because the ensemble treats non-zero `run`
   as "backend dropped": stdout must stay pure findings-JSON (all CLI noise to
   stderr or /dev/null), and success must exit 0.
+
+## Bash traps this adapter keeps paying for (2026-09, from 8 review rounds)
+
+Each of these produced a real, silent failure here, each was found by review
+rather than by reading, and each is now checked mechanically in
+`test_lens_sync.py` — because reading the code failed every time.
+
+**A function may print a result OR cache into a global — never both.** Every call
+site in this file is `$(...)`, so a global assigned inside dies with the subshell.
+Five instances: `adapter_timeout`, `probe_timeout`, `_enforced_wall`,
+`_grok_highest_canonical`'s memo, `_repo_root`. The damage is not just a missed
+optimization — `_write_telemetry` runs in the EXIT trap of the PARENT, so a value
+memoized in a subshell made every grok record claim `timeout_seconds:0`, i.e.
+"no cap was in force" for a call that was capped. Resolve in the main shell before
+the substitution, or split into a void setter plus direct reads.
+
+**No apostrophe anywhere inside `awk '…'`, comments included.** One ends the shell
+quoting and corrupts the parser. `bash -n` stays happy; the only symptom is
+`grok models` "returned no model ids", i.e. a silently lost model family. Happened
+twice in one sitting — once in code, once in the comment explaining that code.
+
+**No comment inside a `\`-continued command.** The shell ends the logical line at
+the `#` and every remaining argument vanishes. A note added above `--prompt-file`
+turned the grok invocation into a bare `--prompt-file …` (rc=127), with valid
+syntax throughout.
+
+**Stock macOS is bash 3.2 — no `declare -A`.** An associative-array cache broke
+`source agents.sh` outright there.
+
+**Prefer the LOUD failure when two cases are syntactically indistinguishable.**
+In the `grok models` parser, prose (`- grok-4.6 reaches end of life…`) and an
+annotation (`- grok-4.5 Fast reasoning model`) cannot be told apart. Harvesting
+prose makes discovery select an unoffered id and every call dies at launch with
+nothing saying why; rejecting an unknown annotation empties the list and lands in
+the trust-auth degrade, which WARNS on stderr. So the parser admits only bracketed
+annotations and rejects bare words.
+
+**A guard that fails open is worse than no guard.** The prompt-in-denied-path
+preflight iterated `$(_sandbox_deny_paths …)` unquoted, so a deny path containing
+a space word-split into non-matching entries — while the jail builders, reading
+the same list line-wise, still masked the file. Read line-wise; canonicalize both
+sides (macOS `$TMPDIR` is a symlink, and BSD `realpath` has no `-m`, so try
+python3 first).
+
+**Verify a new guard by reintroducing the bug.** Three guards written during these
+rounds were vacuously green on the first attempt (a regex that stopped at the
+offending character, a `local` filter that missed multi-name declarations, a
+`printf` matcher anchored to line start). A guard nobody has seen fail is a guard
+nobody has tested.

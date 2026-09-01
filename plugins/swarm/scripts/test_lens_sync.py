@@ -214,8 +214,18 @@ check(
 # different env would put the two halves of one gate back out of sync.
 check(
     "workflow: pins SWARM_MAX_PROMPT_BYTES on the transport command",
-    re.search(r"SWARM_MAX_PROMPT_BYTES=\$\{MAX_PROMPT_BYTES\} bash ", js),
+    re.search(r"SWARM_MAX_PROMPT_BYTES=\$\{MAX_PROMPT_BYTES\} ", js),
 )
+# The probe bound travels the same way and for a stronger reason: the adapter
+# derives probe_budget_seconds from the value it RESOLVES, so a run that budgets
+# one bound and enforces another puts the timeout race back where it started.
+check(
+    "workflow: pins SWARM_PROBE_TIMEOUT on the transport command",
+    re.search(r"SWARM_PROBE_TIMEOUT=\$\{PROBE_TIMEOUT_S\} bash ", js),
+)
+check("skill: passes probeTimeoutSeconds to the workflow", "probeTimeoutSeconds:" in skill)
+check("skill: reads probe_timeout_seconds from the adapter config",
+      "probe_timeout_seconds)" in skill)
 check("skill: passes maxPromptBytes to the workflow", "maxPromptBytes:" in skill)
 check(
     "workflow: the Bash window is derived, not a second hard-coded literal",
@@ -427,8 +437,11 @@ check("pr-post DESIGN_LENS_TAGS == design cluster", pr_design == set(clusters.ge
 # checks keep it that way end to end.
 check("adapter: config reports probe_budget_seconds",
       "probe_budget_seconds=" in sh and "SWARM_MAX_PROBES_PER_RUN" in sh)
-check("adapter: probe budget is derived from the ceiling + kill grace",
-      re.search(r"SWARM_MAX_PROBES_PER_RUN \* \(SWARM_PROBE_TIMEOUT_MAX \+ TIMEOUT_KILL_GRACE\)", sh))
+# From the RESOLVED probe timeout, not its ceiling: budgeting the ceiling charged
+# every run for probes twice as long as the ones it actually enforces, and the
+# workflow handed that margin back as lost wall time on every external call.
+check("adapter: probe budget is derived from the resolved bound + kill grace",
+      re.search(r"SWARM_MAX_PROBES_PER_RUN \* \(_probe_timeout \+ TIMEOUT_KILL_GRACE\)", sh))
 # SWARM_MAX_PROBES_PER_RUN is hand-maintained, and it is the ONLY link between
 # "how much pre-timer work exists" and the margin the workflow derives from it. A
 # new _bounded_probe call site that nobody counted is invisible to that margin —
@@ -462,7 +475,7 @@ check(f"adapter: no comment inside a line continuation ({_cont})", not _cont)
 # corrupts the parser. That failure is quiet at the shell level (`bash -n` stays
 # happy) and shows up only as "output format may have changed", i.e. as a lost
 # grok family. It has now happened twice while editing this very block.
-_awk = re.search(r"awk '\n(.*?)'\s*\)", sh, re.S)
+_awk = re.search(r"grok_parse_models\(\) \{\n  awk '\n(.*?)\n'\n\}", sh, re.S)
 check("adapter: the models awk program is delimited", _awk)
 check("adapter: no apostrophe inside the awk program",
       bool(_awk) and "'" not in _awk.group(1))
@@ -589,6 +602,21 @@ check("adapter+workflow: prompt-cap floor matches (headroom + 1)",
       all([_hdr, _jsmin]) and int(_jsmin.group(1)) == int(_hdr.group(1)) + 1)
 check("adapter+workflow: prompt-cap ceiling matches",
       all([_capmax, _jsmax]) and _jsmax.group(1) == _capmax.group(1))
+# Same pin for the probe bound the workflow now pins onto every call: its
+# fallback must be the adapter's resolved default and its ceiling the adapter's
+# rail, or a direct workflow invocation pins a value the adapter refuses.
+_pt_reported = ""
+for _line in _cfg.stdout.splitlines():
+    if _line.startswith("probe_timeout_seconds="):
+        _pt_reported = _line.split("=", 1)[1].strip()
+_pt_fb = re.search(r"const PROBE_TIMEOUT_FALLBACK_S = (\d+)", js)
+_pt_max_js = re.search(r"const PROBE_TIMEOUT_MAX_S = (\d+)", js)
+_pt_max_sh = re.search(r"SWARM_PROBE_TIMEOUT_MAX=(\d+)", sh)
+check(f"workflow probe-timeout fallback == adapter probe_timeout_seconds "
+      f"(js={_pt_fb.group(1) if _pt_fb else '?'} adapter={_pt_reported or '?'})",
+      bool(_pt_fb) and bool(_pt_reported) and _pt_fb.group(1) == _pt_reported)
+check("adapter+workflow: probe-timeout ceiling matches",
+      all([_pt_max_js, _pt_max_sh]) and _pt_max_js.group(1) == _pt_max_sh.group(1))
 check(f"workflow fallback == adapter probe_budget_seconds "
       f"(js={_fb.group(1) if _fb else '?'} adapter={_reported or '?'})",
       bool(_fb) and bool(_reported) and _fb.group(1) == _reported)

@@ -9,12 +9,12 @@ every review: the third model family gone, silently, which is the exact failure
 mode the swarm timeout work exists to prevent. A format the parser mis-reads
 costs a whole voice and looks like nothing at all, so pin the shapes.
 
-The awk program is extracted from agents.sh and run as-is — never re-typed here,
-or the test would validate a copy while the shipped parser drifted.
+The parser is the shipped `grok_parse_models` function, sourced from agents.sh
+and driven directly — never re-typed here, and no longer scraped out with a
+regex anchor that a reformat can silently break.
 """
 import os
 import pathlib
-import re
 import subprocess
 import sys
 
@@ -29,28 +29,27 @@ def check(name, cond):
         FAILS.append(name)
 
 
-SRC = ADAPTER.read_text(encoding="utf-8")
-
-# Pull the awk program out of the assignment, exactly as shipped. Anchor on the
-# variable name and stop at `| awk '` rather than re-typing the printf in between:
-# matching backslashes through a Python regex into a shell string is its own
-# escaping puzzle, and getting it wrong makes the extraction silently return
-# nothing — which would leave every assertion below passing over empty output.
-# (That is not hypothetical: the first version of this test did exactly that.)
-m = re.search(r"_grok_models=\"\$\(printf.*?\| awk '\n(.*?)'\)\"", SRC, re.S)
-# A hard exit, NOT a check(): every assertion below runs the extracted program,
-# so without it they would all pass over empty output. There is nothing to
-# accumulate here — the file cannot test anything.
-if not m:
-    print("grok-models tests FAILED:\n  - could not extract the awk program from agents.sh "
-          "(the assignment shape changed — fix this test's anchor, do not ignore it)")
+# Drive the SHIPPED function, do not scrape it. Both test files used to pull the
+# awk program out of agents.sh with their own regex anchor, and the two anchors
+# differed in strictness: a reformat of the assignment (moving the printf, a
+# here-string, an added pipe stage) kept one matching and left this file exiting
+# 1 with "could not extract" — 20+ format regressions off, silently, until
+# someone repaired the anchor. Its own function needs no anchor at all.
+_HAVE_FN = subprocess.run(
+    ["bash", "-c", f'source "{ADAPTER}"; declare -f grok_parse_models >/dev/null'],
+    capture_output=True, text=True,
+)
+if _HAVE_FN.returncode != 0:
+    print("grok-models tests FAILED:\n  - agents.sh does not define grok_parse_models "
+          "(the parser moved or was renamed — fix this test, do not ignore it)")
     sys.exit(1)
 
 
 def parse(listing):
-    """Run the shipped awk program over a raw `grok models` listing."""
+    """Run the shipped parser over a raw `grok models` listing."""
     out = subprocess.run(
-        ["awk", m.group(1)], input=listing, capture_output=True, text=True,
+        ["bash", "-c", f'source "{ADAPTER}"; grok_parse_models'],
+        input=listing, capture_output=True, text=True,
     )
     return [line for line in out.stdout.splitlines() if line.strip()]
 

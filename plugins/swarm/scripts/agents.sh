@@ -340,18 +340,20 @@ TIMEOUT_KILL_GRACE=3
 # timed_out:false — sending the operator to inspect a model list over a wall hit,
 # with the telemetry denying the timeout happened.
 _is_timeout_rc() {
-  (( $1 == 124 )) && return 0
+  # A wall must have been IN FORCE for either code to mean "we killed it", and
+  # `_enforced_wall` is the single value that says so (set by _set_enforced_wall
+  # in the main shell: a wrapper exists AND a non-zero cap is configured).
+  # Re-deriving that predicate from _timeout_bin + _adapter_timeout here made a
+  # second copy of it — and the 124 branch carried NO copy at all. A backend that
+  # exits 124 on its own (any wrapper that calls `timeout` internally propagates
+  # it) was then reported as `timed out after 0s` with timeout_seconds:0, which
+  # telemetry-report renders as the self-contradictory "no adapter cap — the
+  # outer window killed it" for a call whose EXIT trap demonstrably ran.
   # 137 is 128+SIGKILL — OUR `-k` escalation, but also an OOM kill or any outside
-  # `kill -9`. Only claim a wall hit when a wall was actually in force; with the
-  # cap disabled (SWARM_TIMEOUT=0) or unresolved, a 137 is somebody else's kill
-  # and "timed out after 0s" would be a plain lie.
-  # Both conditions matter: a wall must have been in force AND a wrapper must have
-  # existed to enforce it. With no timeout binary the call ran bare, so nothing
-  # here could have sent SIGKILL — a 137 is then an OOM kill or an outside
-  # `kill -9`, and calling it a timeout points the operator at the wrong cause.
-  (( $1 == 137 )) \
-    && [[ -n "${_adapter_timeout:-}" && "${_adapter_timeout:-0}" != "0" ]] \
-    && [[ -n "${_timeout_bin:-}" ]]
+  # `kill -9`; the wall-in-force test is what keeps those from being called a
+  # timeout, and it is now the same test for both codes.
+  [[ "${_enforced_wall:-0}" != "0" ]] || return 1
+  (( $1 == 124 || $1 == 137 ))
 }
 
 # Resolved LAZILY, on first use. Resolving at top level meant a bad value in a
@@ -502,7 +504,36 @@ for line in sys.stdin:
   fi
 }
 
+# The deny list is deterministic within a process (the repo root is memoized,
+# the glob sweep only stats), so building it twice per `run grok` — once inside
+# _init_sandbox, once for the prompt-containment check — is pure duplicate work:
+# two extra `git` forks plus ~50 stats per external call, one call per gated
+# cluster.
+#
+# Split into a VOID SETTER plus a PURE PRINTER rather than memoizing in place.
+# Every caller invokes the list as `$( )` or in a process substitution, so an
+# assignment inside the printer would die with that subshell and re-pay the work
+# anyway — the print-and-cache class test_lens_sync.py now forbids outright.
+# Fail-safe by construction: if the setter never ran in the main shell, the
+# printer just rebuilds. The optimization can be lost; the answer cannot.
+_DENY_PATHS_FOR=""
+_DENY_PATHS_MEMO=""
+_deny_paths_ensure() {
+  local backend="${1:-}"
+  [[ "$_DENY_PATHS_FOR" == "backend:$backend" ]] && return 0
+  _DENY_PATHS_MEMO="$(_sandbox_deny_paths_build "$backend")"
+  _DENY_PATHS_FOR="backend:$backend"
+}
 _sandbox_deny_paths() {
+  local backend="${1:-}"
+  if [[ "$_DENY_PATHS_FOR" == "backend:$backend" ]]; then
+    printf '%s\n' "$_DENY_PATHS_MEMO"
+    return 0
+  fi
+  _sandbox_deny_paths_build "$backend"
+}
+
+_sandbox_deny_paths_build() {
   # $1 = the calling backend (its OWN credential dir stays readable — it needs
   # it to authenticate; the OTHER backends' cred dirs are denied so an injected
   # read can't steal a sibling's token. ACCEPTED RESIDUAL: with web on, an
@@ -655,6 +686,9 @@ _init_sandbox() {
   local backend="${1:-}"
   [[ "$_sandbox_ready" == "$backend" ]] && return
   _sandbox_ready="$backend"
+  # Build the deny list ONCE, here in the main shell, so the containment check
+  # that follows reuses it instead of rebuilding it (see _deny_paths_ensure).
+  _deny_paths_ensure "$backend"
   SANDBOX_CMD=()
   if command -v sandbox-exec >/dev/null; then
     # Build the deny profile via python: realpath each path (defeats symlinks
@@ -927,17 +961,72 @@ timeout_bin() {
   else _timeout_bin=""
   fi
 }
+# Bound a probe on a host with NO coreutils wrapper (stock macOS is the common
+# case, not the exotic one). Runs the command in the background, polls in 1s
+# steps and escalates SIGTERM -> SIGKILL, reporting timeout(1)'s own codes: 124
+# when the deadline expired, 137 when the escalation had to kill it.
+#
+# It exists because "run bare when no wrapper exists" was not a bound at all: on
+# that host a wedged CLI (captive portal, stale leader socket, blocked FS) hung
+# the whole review before any review work started, and `config` meanwhile
+# advertised a probe_budget_seconds the run could not enforce — the workflow
+# shrank its inner cap for a budget that bought nothing, and the outer Bash
+# window, not the adapter, did the killing: no rc, no message, no telemetry.
+# The trade-off this replaces was real (0.10.3 dropped codex on such hosts by
+# treating "could not bound" as "probe failed"), but it was a false dilemma:
+# polling gives the ANSWER and the BOUND on every host.
+#
+# 1s granularity is fine for a bound that is at most SWARM_PROBE_TIMEOUT_MAX
+# seconds, and the kill escalation matches `-k`: a CLI that ignores SIGTERM (grok
+# is documented as one) is killed rather than waited on forever.
+_watchdog_run() {
+  local secs="$1"; shift
+  local out rc=0 waited=0 pid
+  # Probe stdout only — stderr is discarded exactly as _bounded_probe discards it,
+  # so a caller parsing the output sees the same thing on both paths. The file
+  # holds a version/help string, never the diff (see TMP_PROMPT for that one).
+  out="$(mktemp)" || { "$@" </dev/null; return $?; }
+  "$@" </dev/null >"$out" 2>/dev/null &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( waited >= secs )); then
+      kill -TERM "$pid" 2>/dev/null || true
+      sleep "$TIMEOUT_KILL_GRACE"
+      if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        rm -f "$out"
+        return 137
+      fi
+      wait "$pid" 2>/dev/null || true
+      rm -f "$out"
+      return 124
+    fi
+    sleep 1
+    waited=$(( waited + 1 ))
+  done
+  # `|| rc=$?` and not a bare `wait`: under `set -e` a non-zero probe rc would
+  # exit the whole adapter here instead of being returned to the caller that has
+  # to interpret it.
+  wait "$pid" || rc=$?
+  cat "$out"
+  rm -f "$out"
+  return "$rc"
+}
+
 _probe_or_bare() {
-  # Run bounded when a wrapper exists, unbounded otherwise — the degrade contract
-  # `with_timeout` has always documented, for the call sites where losing the
-  # answer is worse than losing the bound (a version string, a local auth check).
-  # Callers that must NOT run unbounded (the network-reaching `grok models`) test
-  # $_timeout_bin themselves and skip instead. Extracted because the if/else was
-  # written out twice and the two copies are what a third call site would clone.
-  # `</dev/null` on BOTH branches: _bounded_probe applies it, and a bare fallback
-  # without it lets a CLI that reads stdin block forever on an interactive shell —
-  # a probe that must never hang, hanging.
-  if [[ -n "$_timeout_bin" ]]; then _bounded_probe "$@"; else "$@" </dev/null; fi
+  # Bounded EITHER WAY: by the coreutils wrapper when one exists, by the polling
+  # watchdog when it does not. Callers that must not even attempt the call (the
+  # network-reaching `grok models`) still test $_timeout_bin themselves and skip.
+  # Extracted because the if/else was written out twice and the two copies are
+  # what a third call site would clone.
+  # `</dev/null` on BOTH branches: a probe that reads stdin would otherwise block
+  # forever on an interactive shell — a probe that must never hang, hanging.
+  if [[ -n "$_timeout_bin" ]]; then
+    _bounded_probe "$@"
+  else
+    _watchdog_run "${_probe_timeout:-10}" "$@"
+  fi
 }
 
 _bounded_probe() {
@@ -969,6 +1058,66 @@ _bounded_probe() {
   # loudly on its own behalf.
   [[ -n "$_timeout_bin" ]] || return 1
   "$_timeout_bin" -k "$TIMEOUT_KILL_GRACE" "$_probe_timeout" "$@" </dev/null 2>/dev/null
+}
+
+# The parser as its OWN function, reading the raw listing on stdin. It used to be
+# inlined in the assignment below, which forced both test files to SCRAPE it back
+# out of this file with a regex; the two anchors then differed in strictness, so
+# a reformat could silently disable one whole test file (20+ format regressions)
+# while the other stayed green. Its own function is drivable directly — see
+# test_grok_models.py, which sources this file and pipes fixtures through it.
+grok_parse_models() {
+  awk '
+    # The id must be the FIRST token after the bullet, matched whole, on a short
+    # line. Scanning every field meant a prose bullet — " - grok-4.6 reaches end
+    # of life on 2026-12-01" — yielded grok-4.6 as an offered model; discovery
+    # then selects it (it is schema-verified) and every call dies at launch with
+    # "unknown model id", losing the grok family. NF<=3 admits "* grok-4.5
+    # (default)" while rejecting sentences. The `-` bullet itself must stay
+    # accepted: grok 1.0.3 marks only the default with `*`.
+    /^[[:space:]]*[*-][[:space:]]/ {
+      # Accept: bullet, then the id as the FIRST token, then EITHER nothing or a
+      # BRACKETED annotation — "(default)", "[stable]", "{beta}". Surrounding
+      # backticks/quotes and trailing punctuation are stripped off the id.
+      #
+      # This is a deliberate trade-off between two ways to lose the grok family,
+      # and it is not symmetric:
+      #   - harvesting PROSE as a model ("- grok-4.6 reaches end of life on …")
+      #     makes discovery select an id the CLI does not offer; every call then
+      #     dies at launch and nothing says why. SILENT.
+      #   - rejecting an unfamiliar annotation style ("- grok-4.5 Fast reasoning
+      #     model") empties the list, which lands in the documented trust-auth
+      #     degrade: _probe_degraded WARNS on stderr and the pinned fallback is
+      #     used. LOUD, and recoverable by adding the style here.
+      # So when the two cannot be told apart syntactically — and a bare word after
+      # the id cannot be — prefer the loud failure. Bracketed annotations are the
+      # convention every observed listing uses, which is why they are admitted.
+      # The `-` bullet itself must stay accepted: grok 1.0.3 marks only the
+      # default with `*`.
+      # An annotation can also state the model is NOT usable — "[retired]",
+      # "(deprecated)", "- grok-4.6 [coming soon]". The bracket rule alone
+      # admits those, discovery then SELECTS the id (it is canonical and
+      # schema-verified, and the membership guard runs only for an explicit
+      # --model override), and every call dies at launch with "unknown model id":
+      # the silent family loss this parser exists to prevent, caused by the
+      # parser. Reading the annotation is the only way to tell an offered model
+      # from a listed-but-withdrawn one, so a withdrawal vocabulary is checked
+      # here. An unknown wording still falls through to the loud degrade.
+      low = tolower($0)
+      if (low ~ /(retired|deprecated|unavailable|not available|sunset|end of life|end-of-life|coming soon|disabled|removed)/) next
+      if (NF >= 2 && (NF == 2 || $3 ~ /^[(\[{]/)) {
+        tok = $2
+        # NOTE: no apostrophe may appear anywhere in this awk program (comments
+        # included) — the whole program is wrapped in awk with single quotes, so
+        # one would end the shell quoting and silently corrupt the parser. It did:
+        # three fixtures went red and the live probe reported "output format may
+        # have changed".
+        gsub(/[`"]/, "", tok)
+        sub(/[.,;:]+$/, "", tok)
+        if (tok ~ /^grok-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*$/) print tok
+      }
+    }
+'
 }
 
 grok_model_fetch() {
@@ -1039,45 +1188,7 @@ grok_model_fetch() {
   # failure this plugin's timeout work exists to make impossible. Anchoring on
   # the marker at all is what makes this brittle; accepting both is the minimal
   # fix that keeps the anti-prose guard (a bullet line per model) intact.
-  _grok_models="$(printf '%s\n' "$raw" | awk '
-    # The id must be the FIRST token after the bullet, matched whole, on a short
-    # line. Scanning every field meant a prose bullet — " - grok-4.6 reaches end
-    # of life on 2026-12-01" — yielded grok-4.6 as an offered model; discovery
-    # then selects it (it is schema-verified) and every call dies at launch with
-    # "unknown model id", losing the grok family. NF<=3 admits "* grok-4.5
-    # (default)" while rejecting sentences. The `-` bullet itself must stay
-    # accepted: grok 1.0.3 marks only the default with `*`.
-    /^[[:space:]]*[*-][[:space:]]/ {
-      # Accept: bullet, then the id as the FIRST token, then EITHER nothing or a
-      # BRACKETED annotation — "(default)", "[stable]", "{beta}". Surrounding
-      # backticks/quotes and trailing punctuation are stripped off the id.
-      #
-      # This is a deliberate trade-off between two ways to lose the grok family,
-      # and it is not symmetric:
-      #   - harvesting PROSE as a model ("- grok-4.6 reaches end of life on …")
-      #     makes discovery select an id the CLI does not offer; every call then
-      #     dies at launch and nothing says why. SILENT.
-      #   - rejecting an unfamiliar annotation style ("- grok-4.5 Fast reasoning
-      #     model") empties the list, which lands in the documented trust-auth
-      #     degrade: _probe_degraded WARNS on stderr and the pinned fallback is
-      #     used. LOUD, and recoverable by adding the style here.
-      # So when the two cannot be told apart syntactically — and a bare word after
-      # the id cannot be — prefer the loud failure. Bracketed annotations are the
-      # convention every observed listing uses, which is why they are admitted.
-      # The `-` bullet itself must stay accepted: grok 1.0.3 marks only the
-      # default with `*`.
-      if (NF >= 2 && (NF == 2 || $3 ~ /^[(\[{]/)) {
-        tok = $2
-        # NOTE: no apostrophe may appear anywhere in this awk program (comments
-        # included) — the whole program is wrapped in awk with single quotes, so
-        # one would end the shell quoting and silently corrupt the parser. It did:
-        # three fixtures went red and the live probe reported "output format may
-        # have changed".
-        gsub(/[`"]/, "", tok)
-        sub(/[.,;:]+$/, "", tok)
-        if (tok ~ /^grok-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*$/) print tok
-      }
-    }')"
+  _grok_models="$(printf '%s\n' "$raw" | grok_parse_models)"
   if [[ -z "$_grok_models" ]]; then
     _probe_degraded "\`grok models\` returned no model ids — output format may have changed"
   fi
@@ -1217,16 +1328,26 @@ ready_check() {
   local backend="$1"
   case "$backend" in
     claude) return 0 ;;  # in-session, no separate auth
-    # Bounded when possible (it is a NETWORK call on the pre-timer path, so a
-    # captive portal or dead proxy would otherwise stall past the timeout margin),
-    # but a host without coreutils must NOT lose the whole codex family: an
-    # unbounded probe is what every other path does there, and reporting
-    # "not ready — run: codex login" to an already-authenticated user while
-    # silently dropping the openai family from the ensemble is far worse than an
-    # unbounded local call.
+    # Bounded on every host (_probe_or_bare falls back to the polling watchdog),
+    # because this is a NETWORK call on the pre-timer path: a captive portal or
+    # dead proxy would otherwise stall past the timeout margin.
+    #
+    # But a probe that did not COMPLETE answers nothing about auth, and the rc
+    # must not be read as a definite "no". Reporting "not ready — run: codex
+    # login" to an already-authenticated user drops the whole openai family from
+    # the ensemble, and the review then reports it as "backend not live" rather
+    # than as a degrade. grok refuses that same trade one branch down
+    # (grok_model_fetch degrades to trust-auth and warns); this is the identical
+    # rule for the sibling backend. Reserve not-ready for a definitive negative.
     codex)
       _probe_setup_lenient
-      _probe_or_bare codex login status >/dev/null 2>&1
+      local codex_rc=0
+      _probe_or_bare codex login status >/dev/null 2>&1 || codex_rc=$?
+      if (( codex_rc == 124 || codex_rc == 137 )); then
+        echo "warning: \`codex login status\` did not complete within ${_probe_timeout}s (rc=$codex_rc) — readiness falls back to auth alone; the login check did not run" >&2
+        return 0
+      fi
+      return "$codex_rc"
       ;;
     # Model-aware: auth alone would advertise grok even when the CLI no longer
     # offers any model the adapter can drive (grok drops/renames models
@@ -1379,11 +1500,17 @@ subcmd_config() {
   echo "timeout_seconds=$_adapter_timeout"
   echo "probe_timeout_seconds=$_probe_timeout"
   # The worst-case wall-clock this adapter can spend BEFORE the timed backend
-  # call starts: every bounded probe at its ceiling, plus its kill grace. The
-  # workflow subtracts this from the Bash window to size its inner cap, instead
-  # of keeping a hand-copied twin of these constants (which is how a third probe
-  # slipped in unnoticed).
-  echo "probe_budget_seconds=$(( SWARM_MAX_PROBES_PER_RUN * (SWARM_PROBE_TIMEOUT_MAX + TIMEOUT_KILL_GRACE) ))"
+  # call starts: every bounded probe at the bound that will ACTUALLY apply, plus
+  # its kill grace. The workflow subtracts this from the Bash window to size its
+  # inner cap, instead of keeping a hand-copied twin of these constants (which is
+  # how a third probe slipped in unnoticed).
+  # Derived from the RESOLVED probe timeout, not from its ceiling: budgeting the
+  # ceiling charged every run for 20s probes even when 10s (the default) is what
+  # gets enforced, and shrank every external call's usable wall time for margin
+  # nothing could spend. Safe only because the workflow pins SWARM_PROBE_TIMEOUT
+  # onto the adapter command line the same way it pins SWARM_TIMEOUT — the value
+  # budgeted here is the value the adapter will enforce.
+  echo "probe_budget_seconds=$(( SWARM_MAX_PROBES_PER_RUN * (_probe_timeout + TIMEOUT_KILL_GRACE) ))"
 }
 
 subcmd_run() {
@@ -1555,12 +1682,20 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
     local assembled
     assembled="$(mktemp)" || { echo "Could not create a temp file for the assembled prompt" >&2; exit 2; }
     chmod 600 "$assembled"
-    { printf '%s\n\n' "$lens_instr"; cat "$prompt_path"; } > "$assembled" \
-      || { rm -f "$assembled"; echo "Could not assemble the lens instruction and prompt" >&2; exit 2; }
-    # Hand the trap the new file before dropping the old one, so no exit path in
-    # between can leak an untracked temp file holding the diff.
+    # Hand the file to the trap BEFORE any content lands in it. Assigning
+    # TMP_PROMPT only after the write left a window in which the file already
+    # held the untrusted diff while cleanup() could not see it — a kill during
+    # the `cat` (outer window, OOM) then left the diff on disk with nothing left
+    # to remove it. Registering first is free; the old file is dropped after.
+    # ACCEPTED RESIDUAL: bare `mktemp` puts it in $TMPDIR, not in the skill's
+    # scratch dir, so a SIGKILL still leaves a 0600 file the skill's `rm -rf
+    # "$TMPD"` cannot reach. Threading the skill's directory through the adapter
+    # would add a flag for a hard-kill-only case; the trap covers every path a
+    # signal handler can run at all.
     local previous="$TMP_PROMPT"
     TMP_PROMPT="$assembled"
+    { printf '%s\n\n' "$lens_instr"; cat "$prompt_path"; } > "$assembled" \
+      || { rm -f "$assembled"; TMP_PROMPT="$previous"; echo "Could not assemble the lens instruction and prompt" >&2; exit 2; }
     [[ -n "$previous" ]] && rm -f "$previous"
     prompt_path="$TMP_PROMPT"
     # Re-measure: the check above bounded the DIFF alone, but what the backend
@@ -1730,16 +1865,20 @@ _grok_has_prompt_file() {
   if [[ -n "$_grok_help_done" ]]; then return "$_grok_help_rc"; fi
   _grok_help_done=1
   _probe_setup_lenient
-  # `_probe_or_bare`, not `_bounded_probe`: `grok --help` is a local call, and
-  # assuming the capability when no wrapper exists meant an OLD CLI without
-  # --prompt-file was reported READY on any host without coreutils — every gated
-  # cluster then failed identically at launch. An unbounded local probe answers
-  # the question; assuming does not.
+  # `_probe_or_bare`, not `_bounded_probe`: the question must be ANSWERED on a
+  # host with no coreutils too. Assuming the capability there reported an OLD CLI
+  # without --prompt-file as READY, and every gated cluster then failed
+  # identically at launch. `_probe_or_bare` now bounds that answer either way
+  # (wrapper, else watchdog), so this no longer trades the bound for the answer.
   local help="" rc=0
   help="$(_probe_or_bare grok --help)" || rc=$?
   if (( rc != 0 )); then
     _grok_help_rc=0
-    [[ -n "$_timeout_bin" ]] && echo "warning: \`grok --help\` probe did not complete (rc=$rc) — assuming --prompt-file is supported" >&2
+    # Unconditional now: the probe is bounded on every host (watchdog fallback),
+    # so a non-zero rc always means the probe itself failed — it is never the
+    # "ran unbounded, cannot have timed out" case the old $_timeout_bin gate
+    # silenced.
+    echo "warning: \`grok --help\` probe did not complete (rc=$rc) — assuming --prompt-file is supported" >&2
     return 0
   fi
   case "$help" in

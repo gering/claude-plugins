@@ -116,7 +116,17 @@ truth** — every voice's fan-out units come from it, Claude and externals alike
 - **`${CLAUDE_PLUGIN_ROOT}` is NOT substituted inside a `.js` file** (only in
   SKILL.md/markdown). So the adapter path and the temp-file paths must be passed
   **via `args`** from the skill (which *does* get the substitution), e.g.
-  `Workflow({scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/swarm-review.js", args: {adapter, diffFile, externalPromptFile, externalVoices}})`.
+  `Workflow({scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/swarm-review.js", args: {…}})`.
+  The shipped skill passes **eight** fields, and each absent one degrades
+  silently rather than loudly — which is why the list is worth stating in full:
+  `adapter`, `diffFile`, `externalPromptFile`, `externalVoices` (the originals),
+  plus `findingNonce` (absent → the second-order finding fence is disabled,
+  `fenceDegraded`), `telemetryFile` (absent → no `--telemetry/--unit`, so the
+  report's voice-timing section silently prints nothing), and
+  `probeBudgetSeconds` / `probeTimeoutSeconds` / `maxPromptBytes` (absent → a
+  "config handshake" warning plus a fallback, so the workflow's margin and cap
+  can disagree with the skill's oversize gate). Re-deriving the call from this
+  entry is the documented use, so an out-of-date list here *is* the bug.
 - **Workflow JS has no Bash/filesystem access**, so the diff never enters the
   script. The **skill** builds two temp files in deterministic Bash — the raw
   diff (Claude finders `Read` it) and a **fenced external prompt** (review

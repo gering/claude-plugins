@@ -38,7 +38,10 @@ user_invocable: true
   exists, that the CLI offers `--prompt-file` (the out-of-band prompt transport),
   **and** that `grok models` still lists a schema-verified model, NOT that the
   token is valid/unexpired (codex, by contrast, runs
-  a real `codex login status`). So grok can show Ready yet fail at review time
+  a real `codex login status` — bounded, and a probe that does NOT complete
+  degrades to "credentials present" with a stderr warning instead of reporting
+  not-ready, so a captive portal cannot silently drop the whole openai family).
+  So grok can show Ready yet fail at review time
   on a stale token; treat it as "credentials present" and let the run surface a
   real auth error. A not-ready hint naming the model list is NOT an auth problem,
   and it has **three different remedies** — read which one the hint states:

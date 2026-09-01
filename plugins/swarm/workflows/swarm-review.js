@@ -101,31 +101,60 @@ const MAX_PROMPT_BYTES_MAX = 1073741824
 // one and dies with "Prompt file too large" — N per-call errors and nothing
 // saying the two sides disagreed.
 const _num = (v) => (typeof v === 'number' ? v : (typeof v === 'string' && /^\d+$/.test(v.trim()) ? Number(v) : NaN))
-const _capRaw = _num(INPUT.maxPromptBytes)
-if (!Number.isInteger(_capRaw)) {
-  log(`config handshake: maxPromptBytes missing or not a number (${JSON.stringify(INPUT.maxPromptBytes)}) — falling back to ${MAX_PROMPT_BYTES_FALLBACK}; the skill's oversize gate may have used a different cap`)
+// ONE coercion for every numeric value the config handshake delivers. The
+// coerce -> validate -> log -> fall back -> clamp sequence was written out once
+// per knob, and the copies had already drifted apart: maxPromptBytes validated
+// on Number.isInteger ALONE, so a negative value took the *valid* branch — no
+// "config handshake" diagnostic, silently clamped to the floor, and every
+// external voice then died with "Prompt file too large" while the identical
+// probeBudgetSeconds input did print the line that would have named the cause.
+// A single rule cannot drift from itself.
+//   optional  — the input may legitimately be absent (the workflow derives its
+//               own value); only a PRESENT-but-bad value is worth a warning.
+//   clampNote — the knob-specific sentence for a value outside the rails; the
+//               generic one is fine for a plain cap.
+const handshakeInt = (name, raw, { fallback, min, max, optional = false, clampNote = null }) => {
+  const n = _num(raw)
+  const ok = Number.isInteger(n) && n >= 0
+  if (!ok && !(optional && raw === undefined)) {
+    log(`config handshake: ${name} missing or not a number (${JSON.stringify(raw)}) — falling back to ${fallback}`)
+  }
+  const v = ok ? n : fallback
+  const clamped = Math.min(Math.max(v, min), max)
+  if (clamped !== v) {
+    log(clampNote ? clampNote(v, clamped) : `${name}=${v} is outside what the adapter accepts — using ${clamped}`)
+  }
+  return clamped
 }
-const _capIn = Number.isInteger(_capRaw) ? _capRaw : MAX_PROMPT_BYTES_FALLBACK
-const MAX_PROMPT_BYTES = Math.min(Math.max(_capIn, MAX_PROMPT_BYTES_MIN), MAX_PROMPT_BYTES_MAX)
-if (_capIn !== MAX_PROMPT_BYTES) {
-  log(`maxPromptBytes=${_capIn} is outside what the adapter accepts — using ${MAX_PROMPT_BYTES}`)
-}
-const PROBE_BUDGET_FALLBACK_S = 69
+const MAX_PROMPT_BYTES = handshakeInt('maxPromptBytes', INPUT.maxPromptBytes, {
+  fallback: MAX_PROMPT_BYTES_FALLBACK, min: MAX_PROMPT_BYTES_MIN, max: MAX_PROMPT_BYTES_MAX,
+})
+// The probe bound the adapter will enforce. Pinned onto the command line for the
+// same reason SWARM_TIMEOUT is (the transport subagent's environment is not ours
+// to rely on) — and now load-bearing: the adapter derives probe_budget_seconds
+// from the RESOLVED probe timeout, so the margin sized below is only honest if
+// the adapter resolves the same value this run budgeted for. Left unpinned, a
+// SWARM_PROBE_TIMEOUT present only in the transport env also made every voice
+// exit 2 with "must be <= 20" — N identical per-call errors instead of the one
+// clean SWARM_CFG_ERR the handshake exists to produce.
+// Rails mirror the adapter's (default 10, SWARM_PROBE_TIMEOUT_MAX); both are
+// pinned against `agents.sh config` in test_lens_sync.py.
+const PROBE_TIMEOUT_FALLBACK_S = 10
+const PROBE_TIMEOUT_MAX_S = 20
+const PROBE_TIMEOUT_S = handshakeInt('probeTimeoutSeconds', INPUT.probeTimeoutSeconds, {
+  fallback: PROBE_TIMEOUT_FALLBACK_S, min: 1, max: PROBE_TIMEOUT_MAX_S,
+})
+// Restates the adapter's arithmetic for a direct workflow invocation with no
+// skill in front of it: max_probes x (resolved probe timeout + kill grace).
+const PROBE_BUDGET_FALLBACK_S = 39
 // Bounded on BOTH sides: an unbounded budget would drive MAX_INNER_S negative and
 // hand `SWARM_TIMEOUT=-N` to the adapter, which rejects it — every voice failing
 // at launch instead of one clear error here.
 const PROBE_BUDGET_MAX_S = BASH_TIMEOUT_MS / 1000 / 2
-const _budgetRaw = _num(INPUT.probeBudgetSeconds)
-if (!(Number.isInteger(_budgetRaw) && _budgetRaw >= 0)) {
-  log(`config handshake: probeBudgetSeconds missing or not a number (${JSON.stringify(INPUT.probeBudgetSeconds)}) — falling back to ${PROBE_BUDGET_FALLBACK_S}s of pre-timer margin`)
-}
-const _probeBudgetIn = Number.isInteger(_budgetRaw) && _budgetRaw >= 0
-  ? _budgetRaw
-  : PROBE_BUDGET_FALLBACK_S
-const PROBE_BUDGET_S = Math.min(_probeBudgetIn, PROBE_BUDGET_MAX_S)
-if (_probeBudgetIn > PROBE_BUDGET_MAX_S) {
-  log(`probeBudgetSeconds=${_probeBudgetIn} exceeds half the Bash window — capped to ${PROBE_BUDGET_S}s so the inner timeout stays positive`)
-}
+const PROBE_BUDGET_S = handshakeInt('probeBudgetSeconds', INPUT.probeBudgetSeconds, {
+  fallback: PROBE_BUDGET_FALLBACK_S, min: 0, max: PROBE_BUDGET_MAX_S,
+  clampNote: (v, c) => `probeBudgetSeconds=${v} exceeds half the Bash window — capped to ${c}s so the inner timeout stays positive`,
+})
 // Slack on top of the probe budget for the untimed remainder (jail construction,
 // prompt assembly, JSON validation). Small, fixed, and ours — not a mirror of
 // anything in the adapter.
@@ -137,13 +166,11 @@ const TIMEOUT_MARGIN_S = PROBE_BUDGET_S + TIMEOUT_SLACK_S
 // A warning that fires unconditionally is noise, and it hid the case worth
 // hearing about (a user who really did set a too-large value).
 const MAX_INNER_S = BASH_TIMEOUT_MS / 1000 - TIMEOUT_MARGIN_S
-const _toRaw = _num(INPUT.timeoutSeconds)
-if (INPUT.timeoutSeconds !== undefined && !(Number.isInteger(_toRaw) && _toRaw >= 0)) {
-  log(`config handshake: timeoutSeconds present but not a number (${JSON.stringify(INPUT.timeoutSeconds)}) — using the derived ceiling ${MAX_INNER_S}s`)
-}
-const REQUESTED_TIMEOUT_S = Number.isInteger(_toRaw) && _toRaw >= 0
-  ? _toRaw
-  : MAX_INNER_S
+// Unclamped here on purpose: 0 ("no adapter cap") and the Bash-window ceiling
+// are both handled below, with their own messages.
+const REQUESTED_TIMEOUT_S = handshakeInt('timeoutSeconds', INPUT.timeoutSeconds, {
+  fallback: MAX_INNER_S, min: 0, max: Number.MAX_SAFE_INTEGER, optional: true,
+})
 // 0 means "no adapter cap" and is passed through rather than overridden — but it
 // hands the kill to the outer window, i.e. exactly the unhelpful error above.
 const EFFECTIVE_TIMEOUT_S = REQUESTED_TIMEOUT_S === 0 ? 0 : Math.min(REQUESTED_TIMEOUT_S, MAX_INNER_S)
@@ -663,9 +690,11 @@ const externalVoiceSpecs = liveExternals
     // lenses it was never told to review — quietly hollowing out the "the voice
     // IS its cluster" guarantee. 8 hex chars survive a retype far more reliably
     // than 1 KB of prose, and the adapter refuses to run without them.
-    // SWARM_TIMEOUT is set ON the command rather than inherited: the transport
-    // subagent's environment is not ours to rely on, and the whole point is that
-    // both timeouts come from one number.
+    // All THREE strictly-validated knobs are set ON the command rather than
+    // inherited: the transport subagent's environment is not ours to rely on,
+    // and the whole point is that the handshake decides them once. Leaving one
+    // unpinned is how a value the adapter refuses reaches every call as N
+    // identical per-call errors instead of one clean handshake failure.
     // EVERY interpolated path is shQuoted, not just the appended ones. Double
     // quotes in this string do NOT protect anything: the transport agent runs
     // the whole line through Bash, which still expands $(...), backticks and
@@ -677,7 +706,7 @@ const externalVoiceSpecs = liveExternals
     // caching was declined in 0.9.4 — a cached 'model absent' would outlive the CLI
     // upgrade that fixes it — and the probes are bounded and counted in
     // probe_budget_seconds, so the cost is paid in parallel, not against the margin.
-    cmd: `SWARM_TIMEOUT=${EFFECTIVE_TIMEOUT_S} SWARM_MAX_PROMPT_BYTES=${MAX_PROMPT_BYTES} bash ${shQuote(ADAPTER)} run ${b.backend} ${b.flags} --lens-instr ${shQuote(instrFor(u))} --lens-instr-sum ${utf8Checksum(instrFor(u))} --prompt-file ${shQuote(EXTERNAL_PROMPT)}` +
+    cmd: `SWARM_TIMEOUT=${EFFECTIVE_TIMEOUT_S} SWARM_MAX_PROMPT_BYTES=${MAX_PROMPT_BYTES} SWARM_PROBE_TIMEOUT=${PROBE_TIMEOUT_S} bash ${shQuote(ADAPTER)} run ${b.backend} ${b.flags} --lens-instr ${shQuote(instrFor(u))} --lens-instr-sum ${utf8Checksum(instrFor(u))} --prompt-file ${shQuote(EXTERNAL_PROMPT)}` +
       // Appended, not interpolated into the base string, so a run without a
       // telemetry sink produces the exact command it always did.
       // shQuote BOTH values. This string is executed as a shell command by the
@@ -789,10 +818,19 @@ if (familiesLost.length) {
   // fact twice (once in German, once in English) and the skill printed both.
   coverageNotes.push(`Konsens-Basis reduziert: ${familiesLost.join(', ')} lieferte nichts — ${familiesPresent.length} von ${familiesExpected.length} Modellfamilien haben reviewt, "Konsens" heißt in diesem Lauf Übereinstimmung von ${familiesPresent.join(', ')}.`)
 }
-if (!consensusReachable) {
-  coverageNotes.push(`Fewer than 2 model families returned, so NO finding in this run can reach consensus — every one falls back to solo + adversarial verifier.`)
+// Scoped to actual LOSS, and worded for what happened. Gated on
+// `!consensusReachable` alone this fired on a stock Claude-only install — where
+// nothing was lost and there was never a second family to agree with — and the
+// skill prints every entry verbatim as a ⚠️ that it is told never to soften. So
+// a review that ran exactly as configured was reported as degraded, in the one
+// English sentence of an otherwise German block. Same mis-scoping the header one
+// branch up was fixed for in 0.10.6.
+if (!consensusReachable && familiesExpected.length >= 2) {
+  coverageNotes.push(`Weniger als 2 Modellfamilien haben geliefert — kein Finding in diesem Lauf kann Konsens erreichen; jedes fällt auf solo + adversarialen Verifier zurück.`)
+} else if (!consensusReachable) {
+  coverageNotes.push(`Nur eine Modellfamilie (${familiesPresent.join(', ')}) ist in diesem Lauf konfiguriert — Konsens ist per Definition nicht anwendbar; jedes Finding läuft über solo + adversarialen Verifier.`)
 } else if (unitsDegraded.length) {
-  coverageNotes.push(`Clusters ${unitsDegraded.join(', ')} had fewer than 2 families return: findings THERE fall back to solo + verifier. The remaining clusters are unaffected.`)
+  coverageNotes.push(`Cluster ${unitsDegraded.join(', ')}: weniger als 2 Familien haben geliefert — Findings DORT fallen auf solo + Verifier zurück. Die übrigen Cluster sind unberührt.`)
 }
 if (unitsDegraded.length) {
   log(`Cluster coverage: ${unitsDegraded.join(', ')} had fewer than 2 families return — findings there cannot reach consensus and fall back to solo + verifier`)
