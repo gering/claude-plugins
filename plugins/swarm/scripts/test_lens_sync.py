@@ -452,10 +452,12 @@ check("adapter: probe budget is derived from the resolved bound + kill grace",
 # include codex's login-status probe that grok never runs. So pin the site COUNT
 # itself — adding one forces this number to be touched, and touching it forces a
 # decision about whether the worst case moved too.
+# The definition lines end in `() {`, so the trailing space in the two markers
+# already excludes them — an extra `"_probe_or_bare() {" not in l` clause could
+# never fire and only suggested the opposite.
 _probe_sites = len([l for l in sh.splitlines()
                     if ("_bounded_probe " in l or "_probe_or_bare " in l)
-                    and not l.lstrip().startswith("#")
-                    and "_probe_or_bare() {" not in l])
+                    and not l.lstrip().startswith("#")])
 _declared = re.search(r"SWARM_MAX_PROBES_PER_RUN=(\d+)", sh)
 # A comment inside a `\`-continued command silently truncates it: the shell ends
 # the logical line at the `#`, so every remaining argument disappears while

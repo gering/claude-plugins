@@ -220,15 +220,22 @@ each voice pays an extra round-trip.
   discovery section below, which supersedes the pin described here) (grok is the one backend with a usable model-list
   command; codex has none, so its model is trusted). The gotchas, all live-
   verified:
-  - **Parse the bullet list by SHAPE, not position — and match the id
-    SUBSTRING, not the field.** Lines read `  * grok-4.5 (default)`, but keying
-    on `$2` turns a reworded line (`  * default: grok-4.5`) into garbage tokens
-    that read as "the model is gone" and fail closed. Matching whole
-    whitespace-fields starting `grok-` fixes that but still drags glued-on
-    punctuation along (`grok-4.5,`, `` `grok-4.5` ``, ANSI codes), which breaks
-    the exact-match the same way. Extract with a pattern ending on
-    alphanumerics (`grok-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*`); a line with no
-    id-shaped token then contributes nothing, landing in the trust-auth degrade.
+  - **Parse the bullet list by SHAPE — and pick the failure direction on
+    purpose.** Lines read `  * grok-4.5 (default)`, but 1.0.3 marks only the
+    default with `*`, so a `*`-only matcher loses every other model. The shipped
+    rule (`grok_parse_models`, its own function since 0.10.9 so both test files
+    drive it instead of scraping it): a `*` or `-` bullet, the id as the FIRST
+    token, then either nothing or a BRACKETED annotation, id matched whole
+    (`grok-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*`) with backticks and trailing
+    punctuation stripped. Two ways to lose the family, and they are NOT
+    symmetric: harvesting prose ("- grok-4.6 reaches end of life on …") makes
+    discovery select an id the CLI refuses and every call dies at launch,
+    silently; rejecting an unfamiliar annotation empties the list and lands in
+    the trust-auth degrade, which WARNS. So when the two cannot be told apart
+    syntactically, prefer the loud one. An annotation that states the model is
+    withdrawn (`[retired]`, `(deprecated)`, `coming soon`, …) is rejected
+    explicitly — it satisfies the bracket rule but names a model that is not on
+    offer, which is the silent direction.
   - **Match without a pipe to `grep -q`**: an early-exiting `grep -q` can
     SIGPIPE the writer, and under `set -o pipefail` a *hit* would then report
     failure. Newline-fence the list and use a `case` substring match.

@@ -91,6 +91,13 @@ const MAX_PROMPT_BYTES_FALLBACK = 524288
 // shell — so test_lens_sync.py pins both against agents.sh, the same way the two
 // fallbacks are pinned. A copy nobody checks is what this whole branch keeps
 // paying for.
+// Considered and DECLINED: having `config` report its own bounds and clamping
+// against those instead. Every value here reaches the workflow as a placeholder
+// a MODEL transcribes out of prose in SKILL.md — that transport is the weak
+// link (it is why the probe bound and budget must now arrive as a pair), so
+// three more placeholders would buy freshness by adding the failure mode we are
+// already defending against. A CI pin costs one test and cannot be mis-typed at
+// runtime. Revisit if the args ever travel as one structured value.
 const MAX_PROMPT_BYTES_MIN = 4097
 const MAX_PROMPT_BYTES_MAX = 1073741824
 // Coerce a numeric STRING too ("524288"), and log whenever the handshake did not
@@ -141,17 +148,39 @@ const MAX_PROMPT_BYTES = handshakeInt('maxPromptBytes', INPUT.maxPromptBytes, {
 // pinned against `agents.sh config` in test_lens_sync.py.
 const PROBE_TIMEOUT_FALLBACK_S = 10
 const PROBE_TIMEOUT_MAX_S = 20
-const PROBE_TIMEOUT_S = handshakeInt('probeTimeoutSeconds', INPUT.probeTimeoutSeconds, {
-  fallback: PROBE_TIMEOUT_FALLBACK_S, min: 1, max: PROBE_TIMEOUT_MAX_S,
-})
 // Restates the adapter's arithmetic for a direct workflow invocation with no
-// skill in front of it: max_probes x (resolved probe timeout + kill grace).
+// skill in front of it: max_probes x (resolved probe timeout + kill grace), i.e.
+// 3 x (10 + 3). Declared HERE, next to the bound it is derived from, because the
+// pair check below reads both — and a `const` referenced above its declaration
+// is a runtime ReferenceError, not a hoisted undefined.
 const PROBE_BUDGET_FALLBACK_S = 39
 // Bounded on BOTH sides: an unbounded budget would drive MAX_INNER_S negative and
 // hand `SWARM_TIMEOUT=-N` to the adapter, which rejects it — every voice failing
 // at launch instead of one clear error here.
 const PROBE_BUDGET_MAX_S = BASH_TIMEOUT_MS / 1000 / 2
-const PROBE_BUDGET_S = handshakeInt('probeBudgetSeconds', INPUT.probeBudgetSeconds, {
+// The probe bound and the probe budget are ONE fact reported twice: the adapter
+// derives the budget from the bound it resolves. Accepting them as independent
+// arguments let a run pin one and fall back on the other — a margin sized for
+// 10s probes while 20s probes are pinned reaches 616s inside a 600s window, and
+// the outer kill destroys exactly the rc + telemetry evidence the margin exists
+// to preserve. They are two placeholders a model fills in from prose, so "one
+// arrives, the other does not" is a routine outcome, not an exotic one.
+// So: take them as a PAIR. If either is missing or malformed, both fall back —
+// and the fallback pair is internally consistent (39 = 3 x (10 + 3)) and pinned
+// against `agents.sh config` by test_lens_sync.py. Never mix a supplied value
+// with a defaulted one.
+const _probePairOk = [INPUT.probeTimeoutSeconds, INPUT.probeBudgetSeconds]
+  .every((v) => { const n = _num(v); return Number.isInteger(n) && n >= 0 })
+if (!_probePairOk && (INPUT.probeTimeoutSeconds !== undefined || INPUT.probeBudgetSeconds !== undefined)) {
+  log(`config handshake: probeTimeoutSeconds/probeBudgetSeconds did not arrive as a consistent pair ` +
+      `(${JSON.stringify(INPUT.probeTimeoutSeconds)} / ${JSON.stringify(INPUT.probeBudgetSeconds)}) — ` +
+      `using BOTH defaults (${PROBE_TIMEOUT_FALLBACK_S}s bound, ${PROBE_BUDGET_FALLBACK_S}s margin) so the margin still covers the bound`)
+}
+const PROBE_TIMEOUT_S = handshakeInt('probeTimeoutSeconds', _probePairOk ? INPUT.probeTimeoutSeconds : undefined, {
+  fallback: PROBE_TIMEOUT_FALLBACK_S, min: 1, max: PROBE_TIMEOUT_MAX_S, optional: true,
+})
+const PROBE_BUDGET_S = handshakeInt('probeBudgetSeconds', _probePairOk ? INPUT.probeBudgetSeconds : undefined, {
+  optional: true,
   fallback: PROBE_BUDGET_FALLBACK_S, min: 0, max: PROBE_BUDGET_MAX_S,
   clampNote: (v, c) => `probeBudgetSeconds=${v} exceeds half the Bash window — capped to ${c}s so the inner timeout stays positive`,
 })

@@ -91,6 +91,18 @@ Decide what to review from the user's argument, then run the block:
 ```sh
 set -euo pipefail
 TMPD="$(mktemp -d "${TMPDIR:-/tmp}/swarm-review.XXXXXX")"
+# Every path this block echoes ($DIFF, $PROMPT, $TELEMETRY) is later interpolated
+# into a shell command — by the workflow (which shQuotes it) but also by the
+# MODEL, when it runs telemetry-report.py in step 3. Prose telling the model to
+# quote is not a boundary: $TMPDIR is environment-derived and writable by whoever
+# controls the profile or the CI runner, so `/tmp/a'"'"'$(cmd)'"'"'` would close the
+# mandated quotes and execute. Decide it HERE instead, mechanically and before
+# anything is echoed: a conservative allowlist over the whole path, refused loudly
+# rather than sanitized (a sanitized path points somewhere the caller did not ask
+# for). Everything under TMPD inherits the guarantee, since we append the rest.
+case "$TMPD" in
+  *[!A-Za-z0-9._/-]*|"") echo "SWARM_TMPD_ERR=refusing to run: the temp dir path contains characters that are unsafe to interpolate into a shell command ($TMPD) — set TMPDIR to a plain path"; rm -rf "$TMPD"; exit 0 ;;
+esac
 DIFF="$TMPD/diff.txt"; PROMPT="$TMPD/external-prompt.txt"; TELEMETRY="$TMPD/telemetry.jsonl"
 
 # --- Diff source: ONE block, ONE `set -euo pipefail`, dispatched by a flag ----
@@ -346,6 +358,9 @@ echo "LIVE_JSON=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json | t
   fail; the adapter's own message names which one, so do not guess or attribute it
   to a specific variable. Fixing it is the user's call, not something to work
   around by silently reviewing Claude-only.
+- `SWARM_TMPD_ERR=…` → surface the message and **stop**. `TMPDIR` contains
+  characters that cannot be safely interpolated into a shell command, and every
+  path this run would hand you is derived from it.
 - `SWARM_EMPTY` → tell the user there is nothing to review (clean working tree /
   no branch delta) and stop.
 - `SWARM_NONCE_UNAVAILABLE=…` → the finding-fence nonce could not be minted

@@ -135,6 +135,7 @@ agents.sh jail                # jail=yes|no — will read+web be granted? (worki
                               # OS sandbox AND a resolvable repo root)
 agents.sh run <backend> [--prompt-file f] [--lens-instr s --lens-instr-sum hex]
                         [--effort E] [--model M] [--schema f]
+                        [--telemetry f --unit name]
                               # lens prompt in → findings JSON out
                               # --lens-instr: the gated cluster's lens briefs,
                               # prepended verbatim before the prompt body. The
@@ -161,8 +162,10 @@ the diff is bounded by model context rather than `exec`'s `MAX_ARG_STRLEN`.
 `/swarm:review` cleanly skips the externals instead of letting each call fail.
 
 Each external call is timed (`--telemetry <file> --unit <name>`), and the report
-flags any voice at ≥60% of the `SWARM_TIMEOUT` wall — a call that *survives* at
-550 s is invisible in the error list but is the one about to start failing.
+flags any voice that spent most of the wall **that call actually ran under** —
+recorded per record, not assumed from `SWARM_TIMEOUT`, which is overridable and
+which the workflow shrinks by its probe margin. A call that *survives* near the
+wall is invisible in the error list but is the one about to start failing.
 
 Unavailable backends drop from the ensemble — `claude` alone still works.
 `/swarm:review` reports a backend that *errored* mid-run distinctly from one

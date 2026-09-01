@@ -117,16 +117,20 @@ truth** — every voice's fan-out units come from it, Claude and externals alike
   SKILL.md/markdown). So the adapter path and the temp-file paths must be passed
   **via `args`** from the skill (which *does* get the substitution), e.g.
   `Workflow({scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/swarm-review.js", args: {…}})`.
-  The shipped skill passes **eight** fields, and each absent one degrades
-  silently rather than loudly — which is why the list is worth stating in full:
+  The shipped skill passes these fields (no count — a count is the part that
+  goes stale first), and each absent one degrades silently rather than loudly,
+  which is why the list is worth stating in full:
   `adapter`, `diffFile`, `externalPromptFile`, `externalVoices` (the originals),
   plus `findingNonce` (absent → the second-order finding fence is disabled,
   `fenceDegraded`), `telemetryFile` (absent → no `--telemetry/--unit`, so the
   report's voice-timing section silently prints nothing), and
   `probeBudgetSeconds` / `probeTimeoutSeconds` / `maxPromptBytes` (absent → a
   "config handshake" warning plus a fallback, so the workflow's margin and cap
-  can disagree with the skill's oversize gate). Re-deriving the call from this
-  entry is the documented use, so an out-of-date list here *is* the bug.
+  can disagree with the skill's oversize gate) — the probe bound and budget are
+  taken as a PAIR, so supplying one without the other makes BOTH fall back.
+  Two more are conditional: `timeoutSeconds` only when the user set
+  `SWARM_TIMEOUT`, and `max: true` only for `--max`. Re-deriving the call from
+  this entry is the documented use, so an out-of-date list here *is* the bug.
 - **Workflow JS has no Bash/filesystem access**, so the diff never enters the
   script. The **skill** builds two temp files in deterministic Bash — the raw
   diff (Claude finders `Read` it) and a **fenced external prompt** (review
