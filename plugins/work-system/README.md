@@ -327,8 +327,17 @@ and decides self-close vs. a different-tab close by pane id. Two entry points:
   **verifies** the tab is gone; if the close didn't take — or herdr couldn't be
   re-queried to confirm it — it names the tab so you can close it by hand rather
   than leaving a silent orphan.
-- **From inside the worktree tab**: Claude cannot close its own tab, only exit
-  cleanly. So `/close` focuses the main tab and arms a **detached `/exit`** that
+- **From inside the worktree tab, with a Manager session running**: `/close`
+  first offers to **delegate the whole close to the Manager** (the session at the
+  main-repo root). Delegating sends it one `work-system close-request` message and
+  stops — the Manager verifies the merge itself and closes this tab as a *different*
+  tab, i.e. via the robust path above. Preferred whenever offered. The offer appears
+  only when the Manager is verifiably there: inside herdr, exactly one live Claude
+  agent sits at the repo root, and its name resolves to exactly one session. Any
+  doubt (no Manager, an ambiguous name, herdr unreachable) silently falls through to
+  the self-close below.
+- **From inside the worktree tab, otherwise**: Claude cannot close its own tab, only
+  exit cleanly. So `/close` focuses the main tab and arms a **detached `/exit`** that
   fires once the turn ends — Claude exits cleanly, the armed marker + `SessionEnd`
   hook close its tab, and you land back in the main session, hands-free. (The injector polls until the
   prompt is idle before delivering the exit; injecting into a busy TUI is

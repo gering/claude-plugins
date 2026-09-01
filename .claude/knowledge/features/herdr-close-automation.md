@@ -1,10 +1,10 @@
 ---
 title: "herdr /close Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-08-11
+updatedAt: 2026-09-01
 createdFrom: "PR #18"
-updatedFrom: "session: 2026-08-11 (herdr 0.7.5+ shell-pane lifecycle)"
-pluginVersion: 1.11.1
+updatedFrom: "session: 2026-09-01 (task/delegate-worktree-close-to-manager)"
+pluginVersion: 1.13.0
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -19,6 +19,50 @@ lives in one tested helper — `plugins/work-system/scripts/herdr-teardown.sh`
 durable design and the hard-won TUI-exit gotchas; the scripts are the source of
 truth. Companion to [herdr-kickoff-automation](herdr-kickoff-automation.md) (kickoff creates the tab this
 tears down).
+
+## Delegating a worker close to the Manager (1.13.0) — the preferred path
+
+Scenario B is the fragile half of this feature: a worker closing *itself* needs the
+armed marker + the `SessionEnd` hook + a detached `/exit` injector that polls for idle,
+and it still **cannot confirm its own teardown in-turn** (hence the always-printed
+"close it by hand" fallback). The Manager, by contrast, survives the close and sees the
+worker tab as just another tab — i.e. Scenario A, which closes once and *verifies*.
+
+So a `/close` invoked inside a worktree now offers to hand the whole close to the
+Manager (one `SendMessage` carrying a `work-system close-request` block, then stop).
+**Every delegated close removes one use of Scenario B** — the point is not convenience,
+it is deleting a use of the path that cannot self-verify.
+
+Detection lives in `herdr-teardown.sh manager-session` (tri-state
+`name=<session>|none|unverified`, always exit 0, like `worktree-tab-state`). Design
+points worth keeping:
+
+- **`herdr agent list`, not `pane list`.** Only the agent list distinguishes a live
+  claude session from a bare shell that survived an earlier `/exit` — and a shell at
+  the repo root must never be offered as a delegation target. It also carries the
+  terminal title the address is derived from. Reuses the shared realpath cwd match
+  (`$HERDR_MATCH_PRELUDE`) and the bounded, JSON-validating `ha_list`.
+- **The address is the terminal title, not herdr's `name`.** Verified live: a herdr
+  agent named `gcp-auth-159` hosts the session `answer-gcp-auth-questions-buchhalter-159`
+  (the name `ListAgents` shows). herdr strips only its own `✳` status glyph, so one
+  leading symbol+space (the working spinner `◐`/`◑`) is stripped here too — requiring
+  the space, so a punctuation-led name like `/habemus-event` survives intact.
+- **The name is a CANDIDATE, never an address.** Also verified live: a pane titled
+  `Alpha-Architect` belongs to the session `alpha-architect-c9` — titles can be custom
+  or stale. The skill therefore resolves the name against `ListAgents` and drops the
+  offer when it matches zero or more than one session. **Never disambiguate with a
+  `[ref]`**: refs cannot be mapped back to a repo (they match neither
+  `agent_session.value` nor any pane/tab id), so a guess could message a stranger.
+  Real-world friction, worth knowing before "improving" this: several unrelated repos
+  can all have a tab titled `Manager`, and then no offer ever appears — by design.
+- **Fail-closed everywhere.** Two agents at the repo root, a non-claude or not-live one
+  there, an unreadable cwd, a junk list element, an empty/malformed list, missing tools
+  → `unverified` → no offer, today's flow unchanged. A wrong `none` costs only the
+  offer; a wrong `name=` would send a close request to a stranger session.
+- **The request is untrusted data on arrival.** The Manager re-runs
+  `task-status.sh assess` itself and checks `repo=` against its own main repo. The
+  message authorizes running the normal gated `/close`, nothing more — it is explicitly
+  *not* user approval to skip the merge gate because the worker claimed `pr=` is merged.
 
 ## Design decisions
 
