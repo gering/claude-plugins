@@ -9,7 +9,12 @@
 #        herdr-agent.sh list                       (validated agent-list JSON)
 #        herdr-agent.sh get  <target>              (validated single-agent JSON)
 #        herdr-agent.sh read <target> [flags…]     (best-effort text, never a schema)
-#        herdr-agent.sh wait <target> --status S [--timeout MS]   (bounded)
+#        herdr-agent.sh wait <target> [--until S] [--timeout MS]  (bounded)
+#          S = idle|working|blocked|done|unknown (repeatable). Flag names are
+#          herdr-version-coupled (verified 0.8: --until S, not --status and not
+#          --until=S). Leftover --status and --until=S / dangling --until are
+#          rejected (exit 2), never translated. No version probe — a rename
+#          fails closed at the first real caller.
 #      Every wrapper DEGRADES rather than blocks: a missing herdr/python3, an
 #      unreachable server, or malformed JSON is a non-zero exit with empty
 #      stdout — never a hang, never a partial/garbage line. Exit codes below.
@@ -26,7 +31,7 @@
 #
 # Exit codes (CLI + ha_* functions):
 #   0  success
-#   2  usage — a required <target> argument was missing
+#   2  usage — missing/invalid <target>, or a leftover --status on wait
 #   3  herdr and/or python3 not on PATH        (degrade — tools absent)
 #   4  herdr call failed / empty output         (degrade — server unreachable)
 #   5  output was not the expected JSON shape   (degrade — malformed)
@@ -165,10 +170,23 @@ ha_read() {
   _ha_bounded "$HA_CALL_TIMEOUT_SECS" herdr agent read "$target" "$@"
 }
 
-# `herdr agent wait <target> --status S [--timeout MS]` — BOUNDED: if the caller
-# omits --timeout, inject the default so the call can never block forever. herdr
-# blocks server-side until the status is reached or the timeout elapses (no busy
-# poll here); its rc is forwarded (0 reached, non-zero timeout/error).
+# `herdr agent wait <target> [--until S] [--timeout MS]` — BOUNDED: if the
+# caller omits --timeout, inject the default so the call can never block
+# forever. herdr blocks server-side until a matched status is reached or the
+# timeout elapses (no busy poll here); its rc is forwarded (0 reached,
+# non-zero timeout/error).
+#
+# --until S is repeatable; valid S: idle|working|blocked|done|unknown.
+# herdr 0.8 accepts `--until S` only (NOT `--until=S` — unknown option), so
+# equals-form is rejected, never forwarded and never treated as "present".
+# has_until flips only after a real STATUS is consumed: a dangling `--until`
+# (last, or followed by another flag) is exit 2, otherwise the injected
+# `--timeout` would be parsed as STATUS. When the caller passes no --until,
+# inject herdr 0.8's documented default (idle, done, blocked) so the match
+# set is explicit rather than inherited. A leftover --status / --status=*
+# is REJECTED (exit 2) in flag AND value position — never rewritten, never
+# swallowed as the value of --until/--timeout. Flag vocabulary is
+# herdr-version-coupled; there is no version probe.
 ha_wait() {
   ha_have || return 3
   local target="${1:-}"
@@ -176,18 +194,58 @@ ha_wait() {
   shift
   # Detect BOTH `--timeout MS` and `--timeout=MS`, so a caller's explicit bound in
   # either form is honoured (no duplicate appended), and capture its value to size
-  # the client wall-bound below.
+  # the client wall-bound below. `--until` is space-separated only (herdr 0.8).
   local a has_timeout=0 next=0 eff_ms="$HA_WAIT_DEFAULT_TIMEOUT_MS"
+  local has_until=0 until_next=0
   for a in "$@"; do
-    if [ "$next" = 1 ]; then eff_ms="$a"; next=0; continue; fi
+    if [ "$next" = 1 ]; then
+      case "$a" in
+        --status|--status=*)
+          echo "ha_wait: --status is not a herdr flag; use --until <idle|working|blocked|done|unknown> (repeatable)" >&2
+          return 2
+          ;;
+      esac
+      eff_ms="$a"; next=0; continue
+    fi
+    if [ "$until_next" = 1 ]; then
+      case "$a" in
+        --status|--status=*)
+          echo "ha_wait: --status is not a herdr flag; use --until <idle|working|blocked|done|unknown> (repeatable)" >&2
+          return 2
+          ;;
+        -*)
+          echo "ha_wait: --until requires a status <idle|working|blocked|done|unknown>" >&2
+          return 2
+          ;;
+      esac
+      has_until=1
+      until_next=0
+      continue
+    fi
     case "$a" in
-      --timeout)   has_timeout=1; next=1 ;;
-      --timeout=*) has_timeout=1; eff_ms="${a#--timeout=}" ;;
+      --timeout)           has_timeout=1; next=1 ;;
+      --timeout=*)         has_timeout=1; eff_ms="${a#--timeout=}" ;;
+      --until)             until_next=1 ;;
+      --until=*)
+        echo "ha_wait: --until=S is not a herdr flag; use --until <idle|working|blocked|done|unknown> (repeatable)" >&2
+        return 2
+        ;;
+      --status|--status=*)
+        echo "ha_wait: --status is not a herdr flag; use --until <idle|working|blocked|done|unknown> (repeatable)" >&2
+        return 2
+        ;;
     esac
   done
+  if [ "$until_next" = 1 ]; then
+    echo "ha_wait: --until requires a status <idle|working|blocked|done|unknown>" >&2
+    return 2
+  fi
   if [ "$has_timeout" -eq 0 ]; then
     set -- "$@" --timeout "$HA_WAIT_DEFAULT_TIMEOUT_MS"
     eff_ms="$HA_WAIT_DEFAULT_TIMEOUT_MS"
+  fi
+  if [ "$has_until" -eq 0 ]; then
+    set -- "$@" --until idle --until done --until blocked
   fi
   # Client wall-bound sized ABOVE the server --timeout (+5s margin), so it only
   # fires if the server wedges and ignores its own timeout — the "never a hang"
@@ -206,7 +264,7 @@ ha_main() {
     read) ha_read "$@" ;;
     wait) ha_wait "$@" ;;
     *)
-      echo "usage: ${0##*/} {list | get <target> | read <target> [flags…] | wait <target> --status S [--timeout MS]}" >&2
+      echo "usage: ${0##*/} {list | get <target> | read <target> [flags…] | wait <target> [--until S] [--timeout MS]}" >&2
       return 2
       ;;
   esac

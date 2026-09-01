@@ -7,7 +7,8 @@ Manager tooling call). Covers: list validation (ok / malformed → 5 / herdr
 failure → 4), the tools-absent degrade (→ 3, no hang), get validation, read as
 best-effort passthrough (herdr rc + text forwarded, no schema), and that wait is
 BOUNDED — a caller-omitted --timeout is injected, a caller-supplied one is left
-alone.
+alone — and that it emits --until (never --status), injecting herdr 0.8's
+idle|done|blocked default when the caller passes no state flag.
 """
 import json as jsonlib
 import os
@@ -151,28 +152,92 @@ e.close()
 
 # --- wait: caller omits --timeout → the default is injected (bounded) ------ #
 e = Env({"agent wait": ("", "", 0)}, log_argv=True)
-r = e.run("wait", "w1:p1", "--status", "idle")
+r = e.run("wait", "w1:p1", "--until", "idle")
 argv = e.logged_argv()
 check("wait: exit 0", r.returncode == 0)
 check("wait: --timeout injected when omitted", "--timeout" in argv)
 check("wait: default value injected", "10000" in argv)
+check("wait: emits --until not --status", "--until" in argv and "--status" not in argv)
+check("wait: until value forwarded", "idle" in argv)
 e.close()
 
 # --- wait: caller's own --timeout is preserved, not doubled ---------------- #
 e = Env({"agent wait": ("", "", 0)}, log_argv=True)
-r = e.run("wait", "w1:p1", "--status", "idle", "--timeout", "500")
+r = e.run("wait", "w1:p1", "--until", "idle", "--timeout", "500")
 argv = e.logged_argv()
 check("wait: caller timeout preserved", "500" in argv)
 check("wait: default not appended over caller's", "10000" not in argv)
 check("wait: exactly one --timeout", argv.count("--timeout") == 1)
+check("wait: timeout path still emits --until", "--until" in argv and "idle" in argv)
 e.close()
 
 # --- wait: the --timeout=MS form is honored too (no default appended) ------ #
 e = Env({"agent wait": ("", "", 0)}, log_argv=True)
-r = e.run("wait", "w1:p1", "--status", "idle", "--timeout=500")
+r = e.run("wait", "w1:p1", "--until", "idle", "--timeout=500")
 argv = e.logged_argv()
 check("wait: --timeout= form detected", "--timeout=500" in argv)
 check("wait: default not appended over --timeout= form", "10000" not in argv)
+e.close()
+
+# --- wait: no --until → inject herdr 0.8 default idle|done|blocked --------- #
+e = Env({"agent wait": ("", "", 0)}, log_argv=True)
+r = e.run("wait", "w1:p1")
+argv = e.logged_argv()
+check("wait: default-until path exit 0", r.returncode == 0)
+check("wait: default --until injected three times", argv.count("--until") == 3)
+check("wait: default includes idle", "idle" in argv)
+check("wait: default includes done", "done" in argv)
+check("wait: default includes blocked", "blocked" in argv)
+check("wait: default-until path still injects --timeout", "--timeout" in argv)
+check("wait: default-until path does not emit --status", "--status" not in argv)
+e.close()
+
+# --- wait: --until=S is rejected (herdr 0.8 unknown option, not rewritten) - #
+e = Env({"agent wait": ("", "", 0)}, log_argv=True)
+r = e.run("wait", "w1:p1", "--until=working")
+check("wait: --until= form rejected → exit 2", r.returncode == 2)
+check("wait: --until= never reaches herdr", "wait" not in e.logged_argv())
+check("wait: --until= error names space form", "--until" in r.stderr)
+e.close()
+
+# --- wait: dangling --until is rejected (must not steal injected --timeout) - #
+e = Env({"agent wait": ("", "", 0)}, log_argv=True)
+r = e.run("wait", "w1:p1", "--until")
+check("wait: dangling --until rejected → exit 2", r.returncode == 2)
+check("wait: dangling --until never reaches herdr", "wait" not in e.logged_argv())
+e.close()
+
+e = Env({"agent wait": ("", "", 0)}, log_argv=True)
+r = e.run("wait", "w1:p1", "--until", "--timeout", "500")
+check("wait: --until followed by a flag rejected → exit 2", r.returncode == 2)
+check("wait: flag-after-until never reaches herdr", "wait" not in e.logged_argv())
+e.close()
+
+# --- wait: leftover --status is rejected, never translated or forwarded ---- #
+e = Env({"agent wait": ("", "", 0)}, log_argv=True)
+r = e.run("wait", "w1:p1", "--status", "idle")
+check("wait: --status rejected → exit 2", r.returncode == 2)
+check("wait: --status never reaches herdr", "wait" not in e.logged_argv())
+check("wait: --status error names --until", "--until" in r.stderr)
+e.close()
+
+e = Env({"agent wait": ("", "", 0)}, log_argv=True)
+r = e.run("wait", "w1:p1", "--status=idle")
+check("wait: --status= form rejected → exit 2", r.returncode == 2)
+check("wait: --status= never reaches herdr", "wait" not in e.logged_argv())
+e.close()
+
+# value-position --status (would be swallowed by --until/--timeout consume)
+e = Env({"agent wait": ("", "", 0)}, log_argv=True)
+r = e.run("wait", "w1:p1", "--until", "--status", "idle")
+check("wait: --until --status rejected → exit 2", r.returncode == 2)
+check("wait: --until --status never reaches herdr", "wait" not in e.logged_argv())
+e.close()
+
+e = Env({"agent wait": ("", "", 0)}, log_argv=True)
+r = e.run("wait", "w1:p1", "--timeout", "--status", "idle")
+check("wait: --timeout --status rejected → exit 2", r.returncode == 2)
+check("wait: --timeout --status never reaches herdr", "wait" not in e.logged_argv())
 e.close()
 
 # --- missing <target> is a usage error (2), NOT server-unreachable (4) ----- #
@@ -193,7 +258,7 @@ for sub in ("get", "read", "wait"):
 # The fake herdr still receives the herdr args verbatim through the bounding
 # wrapper, so the arg contract is unchanged; this just confirms it still runs.
 e = Env({"agent wait": ("", "", 0)}, log_argv=True)
-r = e.run("wait", "w1:p1", "--status", "idle")
+r = e.run("wait", "w1:p1", "--until", "idle")
 check("wait: still exits 0 through the wall-bound wrapper", r.returncode == 0)
 check("wait: herdr args reach the server through the bound", "wait" in e.logged_argv())
 e.close()
