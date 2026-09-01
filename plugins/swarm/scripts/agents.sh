@@ -11,8 +11,10 @@
 #   jail                  Print jail=yes|no (working OS sandbox wrapper?)
 #   config                Print the RESOLVED numeric config (max_prompt_bytes,
 #                         cap_headroom, oversize_threshold, timeout_seconds,
-#                         probe_timeout_seconds). Callers read this instead of
-#                         parsing SWARM_* themselves — one parser, one verdict.
+#                         probe_timeout_seconds, probe_budget_seconds). Callers
+#                         read this instead of parsing SWARM_* themselves — one
+#                         parser, one verdict. probe_budget_seconds is what the
+#                         workflow sizes its timeout margin from.
 #   run <backend> [opts]  Run a review prompt -> findings JSON on stdout
 #       --prompt-file <f>   Read the lens prompt from a file (default: stdin)
 #       --lens-instr <s>    Per-cluster lens instruction, prepended VERBATIM
@@ -34,7 +36,7 @@
 # by exec's MAX_ARG_STRLEN. SWARM_MAX_PROMPT_BYTES (default 512 KiB) is that
 # sanity cap.
 #
-# Backend notes (probed against codex 0.144.6 / grok 0.2.112, 2026-07..08):
+# Backend notes (probed against codex 0.144.6 / grok 1.0.13, 2026-07..08):
 #   claude — probe-only: reviews run in-session via the Agent tool, so
 #            `run claude` is a usage error. available/ready/list include it.
 #   codex  — `codex exec --output-schema` under `-s read-only` with
@@ -211,6 +213,10 @@ _write_telemetry() {
   # same file, and a lone write under the pipe-buffer size is atomic with
   # O_APPEND, so lines interleave but never tear. Do not split this into
   # multiple writes.
+  # `_enforced_wall`, not `_adapter_timeout`: with no coreutils `timeout` the call
+  # ran BARE, so recording the configured value would report a cap that was never
+  # in force, and the reader would compute "% of a wall" for a call nothing could
+  # have stopped. with_timeout sets it only when it actually wrapped the command.
   # Record the wall this call actually ran under: SWARM_TIMEOUT is overridable,
   # and a reader that assumed 600 would compute "% of the wall" against a limit
   # that was never in force. Read the MEMOIZED `_adapter_timeout` rather than
@@ -226,7 +232,7 @@ _write_telemetry() {
   _e="$(_json_escape "$TELEMETRY_EFFORT")";  _m="$(_json_escape "$TELEMETRY_MODEL")"
   printf '{"backend":"%s","unit":"%s","effort":"%s","model":"%s","prompt_bytes":%s,"seconds":%s,"timeout_seconds":%s,"backend_rc":%s,"adapter_rc":%s,"timed_out":%s}\n' \
     "$_b" "$_u" "$_e" "$_m" \
-    "$(( ${TELEMETRY_BYTES:-0} + 0 ))" "$secs" "$(( ${_adapter_timeout:-0} + 0 ))" "${TELEMETRY_RC:-null}" "${adapter_rc:-null}" \
+    "$(( ${TELEMETRY_BYTES:-0} + 0 ))" "$secs" "$(( ${_enforced_wall:-0} + 0 ))" "${TELEMETRY_RC:-null}" "${adapter_rc:-null}" \
     "$( _is_timeout_rc "${TELEMETRY_RC:-0}" && echo true || echo false )" \
     >> "$TELEMETRY_FILE" 2>/dev/null || true
   return 0
@@ -362,6 +368,10 @@ adapter_timeout() {
     || exit $?
 }
 _timeout_warned=""
+# The wall actually ENFORCED on the backend call (0 = none). Distinct from the
+# configured _adapter_timeout, which says nothing about whether a wrapper existed
+# to apply it.
+_enforced_wall=0
 with_timeout() {
   adapter_timeout
   local ADAPTER_TIMEOUT="$_adapter_timeout"
@@ -378,6 +388,7 @@ with_timeout() {
   # sweeps per process and two places to keep in step.
   timeout_bin
   if [[ -n "$_timeout_bin" ]]; then
+    _enforced_wall="$ADAPTER_TIMEOUT"
     "$_timeout_bin" -k "$TIMEOUT_KILL_GRACE" "$ADAPTER_TIMEOUT" "$@"
   else
     # No coreutils timeout: run bare, but say so once — otherwise the documented
@@ -397,23 +408,48 @@ with_timeout() {
 # readable (verified: ~/.aws blocked, ~/.codex readable). macOS: sandbox-exec;
 # Linux: bwrap; else passthrough (scrub_secrets + backend flags remain).
 # Extra deny paths via SWARM_DENY_PATHS (colon-separated absolute paths).
+_realpath_or_self() {
+  # Both jail builders realpath their deny entries, so a raw string compare here
+  # answers a different question than the jail asks: on macOS $TMPDIR is a symlink
+  # (/var → /private/var), and a deny entry written either way would not match the
+  # prompt path written the other. Fall back to the input when it cannot be
+  # resolved — a best-effort compare beats no compare.
+  local p="$1"
+  if command -v realpath >/dev/null 2>&1; then realpath -m -- "$p" 2>/dev/null || printf '%s' "$p"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$p" 2>/dev/null || printf '%s' "$p"
+  else printf '%s' "$p"
+  fi
+}
+
 _assert_prompt_readable_in_jail() {
   # grok reads the prompt from a PATH, inside the jail. A deny entry covering that
   # path does not error under bwrap — it masks the file, which reads as EMPTY. The
   # backend then reviews nothing, returns schema-valid `{"findings":[]}` in
   # seconds, and the pipeline counts it as a family that reviewed and found
   # nothing. Prose ("never deny TMPDIR") cannot stop that; a check can.
-  # Refuse when any deny entry is a path PREFIX of the prompt file. Fail closed:
-  # an unreviewable run must be loud, never a quiet clean bill of health.
-  local prompt="$1" d
-  for d in $(_sandbox_deny_paths "${TELEMETRY_BACKEND:-grok}"); do
+  #
+  # ONLY when a jail is actually in force: with neither sandbox-exec nor bwrap the
+  # deny list is never applied to anything, so refusing there would drop the whole
+  # grok family for masking that cannot occur — the same silent-family-loss this
+  # guard exists to prevent, in the opposite direction.
+  _jail_available || return 0
+  local prompt; prompt="$(_realpath_or_self "$1")"
+  # `while read`, NOT `for d in $(...)`: the unquoted substitution word-splits on
+  # IFS and glob-expands, so a deny entry containing a space ("/Users/me/My Temp")
+  # became two non-matching words and this fail-closed guard silently failed OPEN —
+  # while the jail builders, which read the same list line-wise, still masked the
+  # file. Both other consumers in this file already do it this way.
+  local d rp
+  while IFS= read -r d; do
     [[ -n "$d" ]] || continue
+    rp="$(_realpath_or_self "$d")"
     case "$prompt/" in
-      "$d"/*|"${d%/}"/*)
+      "${rp%/}"/*)
         echo "refusing to run: the prompt file ($prompt) is inside a denied path ($d) — inside the jail it would read as EMPTY and the backend would return 'no findings' from a call that never saw the diff. Move TMPDIR outside SWARM_DENY_PATHS." >&2
         exit 2 ;;
     esac
-  done
+  done < <(_sandbox_deny_paths "${TELEMETRY_BACKEND:-grok}")
 }
 
 _sandbox_deny_paths() {
@@ -998,16 +1034,28 @@ _grok_version_newer() {
   [[ "$a_minor" -gt "$b_minor" ]]
 }
 
+# Memo per mode. The scan is a subshell over the already-memoized catalog and is
+# asked for 3-4 times per `run grok` (readiness, selection, the hint path). The
+# leading "=" marks "computed", so an empty result memoizes as empty rather than
+# re-scanning every time.
+_grok_top_memo_any=""
+_grok_top_memo_verified=""
 _grok_highest_canonical() {
   # Highest listed id accepted by GROK_CANONICAL_RE, or "" if none is.
   # $1 = "verified" restricts the scan to schema-verified models.
   local mode="${1:-any}" best="" id
+  if [[ "$mode" == "verified" ]]; then
+    [[ -n "$_grok_top_memo_verified" ]] && { printf '%s' "${_grok_top_memo_verified#=}"; return 0; }
+  else
+    [[ -n "$_grok_top_memo_any" ]] && { printf '%s' "${_grok_top_memo_any#=}"; return 0; }
+  fi
   while IFS= read -r id; do
     [[ -n "$id" ]] || continue
     [[ "$id" =~ $GROK_CANONICAL_RE ]] || continue
     if [[ "$mode" == "verified" ]] && ! _grok_schema_verified "$id"; then continue; fi
     if [[ -z "$best" ]] || _grok_version_newer "$id" "$best"; then best="$id"; fi
   done <<<"$_grok_models"
+  if [[ "$mode" == "verified" ]]; then _grok_top_memo_verified="=$best"; else _grok_top_memo_any="=$best"; fi
   printf '%s' "$best"
 }
 
@@ -1084,9 +1132,6 @@ ready_check() {
   local backend="$1"
   case "$backend" in
     claude) return 0 ;;  # in-session, no separate auth
-    # BOUNDED for the same reason as available_version: this is a NETWORK call on
-    # the pre-timer path, and a captive portal or dead proxy turns it into a stall
-    # the timeout margin never budgeted for.
     # Bounded when possible (it is a NETWORK call on the pre-timer path, so a
     # captive portal or dead proxy would otherwise stall past the timeout margin),
     # but a host without coreutils must NOT lose the whole codex family: an
@@ -1099,7 +1144,7 @@ ready_check() {
       _probe_or_bare codex login status >/dev/null 2>&1
       ;;
     # Model-aware: auth alone would advertise grok even when the CLI no longer
-    # offers the one model the adapter can drive (grok drops/renames models
+    # offers any model the adapter can drive (grok drops/renames models
     # between releases — 0.2.101 removed grok-composer-2.5-fast).
     grok)   [[ -s "$GROK_AUTH_FILE" ]] && grok_model_offered ;;
   esac
@@ -1444,7 +1489,7 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
   # Strict, because `run` APPLIES both values: a malformed knob is an error here,
   # not something to degrade around.
   adapter_timeout
-  probe_timeout
+  _probe_setup_strict
   require_usable "$backend"
   require_python3
 
@@ -1590,8 +1635,13 @@ _grok_has_prompt_file() {
   if [[ -n "$_grok_help_done" ]]; then return "$_grok_help_rc"; fi
   _grok_help_done=1
   _probe_setup_lenient
+  # `_probe_or_bare`, not `_bounded_probe`: `grok --help` is a local call, and
+  # assuming the capability when no wrapper exists meant an OLD CLI without
+  # --prompt-file was reported READY on any host without coreutils — every gated
+  # cluster then failed identically at launch. An unbounded local probe answers
+  # the question; assuming does not.
   local help="" rc=0
-  help="$(_bounded_probe grok --help)" || rc=$?
+  help="$(_probe_or_bare grok --help)" || rc=$?
   if (( rc != 0 )); then
     _grok_help_rc=0
     [[ -n "$_timeout_bin" ]] && echo "warning: \`grok --help\` probe did not complete (rc=$rc) — assuming --prompt-file is supported" >&2
@@ -1678,6 +1728,13 @@ run_grok() {
     tool_args=(--tools "" --disable-web-search)
   fi
 
+  # Absolute before the containment test: grok resolves --prompt-file against
+  # `--cwd <repo>`, so a relative path would be compared as-is here and match no
+  # deny prefix while the backend reads a different file entirely.
+  case "$prompt_path" in
+    /*) ;;
+    *)  prompt_path="$PWD/$prompt_path" ;;
+  esac
   _assert_prompt_readable_in_jail "$prompt_path"
   # The prompt file must stay READABLE INSIDE THE JAIL. The denylist covers HOME
   # secret stores and repo-root secrets, not TMPDIR, so the default path is fine —

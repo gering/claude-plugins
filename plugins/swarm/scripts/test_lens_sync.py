@@ -240,9 +240,17 @@ check(
     "workflow: exposes family coverage in balance",
     all(k in js for k in ("familiesExpected,", "familiesPresent,", "familiesLost,", "consensusReachable,")),
 )
+# The reduced-consensus WORDING lives in the workflow now — header included. The
+# skill prints coverageNotes verbatim and templates nothing: a header gated there
+# on "coverageNotes is non-empty" announced "reduziert: 1 von 1 Modellfamilien" on
+# every Claude-only run, and "2 von 2" for a cluster-only degradation.
 check(
-    "skill: renders the reduced-consensus warning",
-    "coverageNotes" in skill and "Konsens-Basis reduziert" in skill,
+    "skill: prints coverageNotes and templates no header of its own",
+    "coverageNotes" in skill and "Konsens-Basis reduziert" not in skill,
+)
+check(
+    "workflow: owns the reduced-consensus header",
+    "Konsens-Basis reduziert" in js,
 )
 # The scoped/global distinction is DECIDED in the workflow now: prose that
 # re-derives it from the three raw flags is what got the scoping wrong (a single
@@ -494,6 +502,17 @@ check(f"workflow cap fallback == adapter max_prompt_bytes "
 # every external voice at launch.
 check("workflow: the prompt cap is bounded on both sides",
       "MAX_PROMPT_BYTES_MIN" in js and "MAX_PROMPT_BYTES_MAX" in js)
+# Those two rails are COPIES of the adapter's (it cannot run shell), so pin them —
+# an unchecked copy of a bound is the same split-brain as an unchecked copy of a
+# default, and this branch has paid for that lesson repeatedly.
+_hdr = re.search(r"SWARM_CAP_HEADROOM=(\d+)", sh)
+_capmax = re.search(r"SWARM_MAX_PROMPT_BYTES_MAX=(\d+)", sh)
+_jsmin = re.search(r"const MAX_PROMPT_BYTES_MIN = (\d+)", js)
+_jsmax = re.search(r"const MAX_PROMPT_BYTES_MAX = (\d+)", js)
+check("adapter+workflow: prompt-cap floor matches (headroom + 1)",
+      all([_hdr, _jsmin]) and int(_jsmin.group(1)) == int(_hdr.group(1)) + 1)
+check("adapter+workflow: prompt-cap ceiling matches",
+      all([_capmax, _jsmax]) and _jsmax.group(1) == _capmax.group(1))
 check(f"workflow fallback == adapter probe_budget_seconds "
       f"(js={_fb.group(1) if _fb else '?'} adapter={_reported or '?'})",
       bool(_fb) and bool(_reported) and _fb.group(1) == _reported)

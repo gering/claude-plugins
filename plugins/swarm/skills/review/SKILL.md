@@ -274,9 +274,8 @@ echo "PROMPT_BYTES=$PROMPT_BYTES"
 # to the model (a compaction or a stale ceiling in context would let live voices
 # through and turn one clean skip into N per-call backend errors). Same pattern
 # as the --pr/--fix rejection above: the Bash block decides, the model reads a
-# flag. Read the SAME env knob as the adapter with the SAME default, so raising
-# SWARM_MAX_PROMPT_BYTES actually reaches the externals instead of being
-# short-circuited by a skip that never heard about it. The 4 KiB subtracted is
+# flag.
+#
 # ASK THE ADAPTER instead of re-deriving. Both sides used to parse SWARM_* on
 # their own, and three review rounds found three separate instances of the same
 # bug class: the cap decimal-forced on one side only; the timeout decimal-forced
@@ -495,29 +494,23 @@ Lenses:  <gate.run joined>  —  gated-out: <gate.skip lenses>
 ```
 
 Then, when present:
-- **Family coverage** — when `balance.coverageNotes` is non-empty, print this
-  IMMEDIATELY under the `Bilanz:` line, before anything else in this list:
-
-  ```
-  ⚠️  Konsens-Basis reduziert: <familiesPresent.length> von <familiesExpected.length> Modellfamilien
-      — „Konsens" heißt in diesem Lauf Übereinstimmung von <familiesPresent joined>.
-  ```
-
-  then **each `coverageNotes` entry verbatim** (translated, not reinterpreted).
-  **The workflow decides what these say** — which of the three situations holds,
-  and whether the damage is run-wide or scoped to named clusters. Do not re-derive
-  it from `familiesLost` / `unitsDegraded` / `consensusReachable` yourself: the
-  three mean different things, the conditional prose that used to live here got
-  the scoping wrong (one degraded cluster was reported as "no finding in this run
-  can reach consensus", next to a header stating full coverage), and a rule this
-  fiddly cannot survive in prose that no test can check.
+- **Family coverage** — when `balance.coverageNotes` is non-empty, print each
+  entry **verbatim** (translated, not reinterpreted) as a `⚠️` block IMMEDIATELY
+  under the `Bilanz:` line, before anything else in this list. **Do not add a
+  header of your own and do not re-derive anything** from `familiesLost` /
+  `unitsDegraded` / `consensusReachable`: the workflow decides which of the three
+  situations holds, whether the damage is run-wide or scoped to named clusters,
+  and whether an "X von Y Familien" line is even meaningful. A header templated
+  here announced "reduziert: 1 von 1 Modellfamilien" on every stock Claude-only
+  run and "2 von 2" for a single degraded cluster — a rule this fiddly cannot
+  survive as prose no test can check.
 
   Why it belongs *here* and not only under backend errors: consensus is defined
   as ≥2 agreeing families, so reduced coverage changes what every `CONSENSUS` and
   every solo in the table above MEANS — a finding that would have been
   corroborated is instead routed through the adversarial verifier. The numbers
-  look identical to a healthy run; only this line distinguishes them. Never omit
-  it, and never soften it into "one backend had an issue".
+  look identical to a healthy run; only these lines distinguish them. Never omit
+  them, and never soften them into "one backend had an issue".
 - **Fence degraded** — if `fenceDegraded` (or `balance.fenceDegraded`) is true,
   print a prominent warning line: **⚠️ the second-hop finding-fence was OFF this
   run** (no valid `findingNonce` reached the workflow), so merge/verify ran with

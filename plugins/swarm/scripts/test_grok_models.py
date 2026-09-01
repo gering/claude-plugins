@@ -281,8 +281,8 @@ check(f"the fallback pin is the OLDEST verified id (expected {oldest})", PIN == 
 # it recorded failures into FAILS that nothing ever read — the exact
 # vacuously-green failure this file warns about at the top.
 if FAILS:
-    print("grok-models tests FAILED:")
+    print("grok-models tests FAILED:", file=sys.stderr)
     for f in FAILS:
-        print(f"  - {f}")
+        print(f"  - {f}", file=sys.stderr)
     sys.exit(1)
 print("grok-models: all tests passed")

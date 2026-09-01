@@ -86,6 +86,11 @@ const BASH_TIMEOUT_MS = 600000
 // silent Claude-only review. The fallback is pinned against `agents.sh config` in
 // test_lens_sync.py, like PROBE_BUDGET_FALLBACK_S.
 const MAX_PROMPT_BYTES_FALLBACK = 524288
+// Mirrors of the adapter's own rails (SWARM_CAP_HEADROOM + 1, and
+// SWARM_MAX_PROMPT_BYTES_MAX). They are copies because this file cannot run
+// shell — so test_lens_sync.py pins both against agents.sh, the same way the two
+// fallbacks are pinned. A copy nobody checks is what this whole branch keeps
+// paying for.
 const MAX_PROMPT_BYTES_MIN = 4097
 const MAX_PROMPT_BYTES_MAX = 1073741824
 const _capIn = Number.isInteger(INPUT.maxPromptBytes) ? INPUT.maxPromptBytes : MAX_PROMPT_BYTES_FALLBACK
@@ -170,7 +175,7 @@ if (!ADAPTER || !DIFF_FILE || !EXTERNAL_PROMPT) {
   return {
     error: 'swarm-review requires args.adapter, args.diffFile, args.externalPromptFile',
     gate: null, findings: [], refuted: [], backendErrors: [], fenceDegraded: false,
-    balance: { total: 0, design: 0, consensus: 0, solo: 0, refuted: 0, redactions: 0, fenceDegraded: false, voices: 0, agents: [], backendErrors: [], rawPerLens: {}, survivingPerLens: {}, familiesExpected: [], familiesPresent: [], familiesLost: [], unitsDegraded: [], consensusReachable: false },
+    balance: { total: 0, design: 0, consensus: 0, solo: 0, refuted: 0, redactions: 0, fenceDegraded: false, voices: 0, agents: [], backendErrors: [], rawPerLens: {}, survivingPerLens: {}, familiesExpected: [], familiesPresent: [], familiesLost: [], unitsDegraded: [], consensusReachable: false, coverageNotes: [] },
   }
 }
 
@@ -742,15 +747,26 @@ const unitsDegraded = Array.from(unitsByName.entries())
 // one becomes a solo. That is a different review, not a degraded log line.
 // Global reachability is necessary but not sufficient: claim it only when EVERY
 // unit could also reach it, so the balance line cannot overstate the review.
-// TWO questions, two flags. Collapsing them made a single degraded cluster read
-// as "no finding in this run can reach consensus" — false for every healthy
-// cluster, and printed next to a header stating full family coverage.
+// TWO questions, two flags. This one is GLOBAL only: can any finding in this run
+// reach consensus at all? Per-cluster degradation is `unitsDegraded`, and the
+// sentences that describe either case are built once in `coverageNotes` below.
+// Collapsing them made a single degraded cluster read as "no finding in this run
+// can reach consensus" — false for every healthy cluster, printed next to a
+// header stating full family coverage.
 const consensusReachable = familiesPresent.length >= 2
 if (familiesLost.length) {
   log(`Family coverage: lost ${familiesLost.join(', ')} — ${familiesPresent.length} of ${familiesExpected.length} families reviewed` +
       (familiesPresent.length >= 2 ? '' : '; consensus is UNREACHABLE this run, every finding falls back to solo + verifier'))
 }
 const coverageNotes = []
+// The HEADER is emitted here as well, not templated in the skill: gated there on
+// "coverageNotes is non-empty" it fired for a single-family run and announced
+// "reduziert: 1 von 1 Modellfamilien" — and for a cluster-only degradation
+// "2 von 2". The X-von-Y line only says something when a family was actually
+// lost, so only that case produces it.
+if (familiesLost.length) {
+  coverageNotes.push(`Konsens-Basis reduziert: ${familiesPresent.length} von ${familiesExpected.length} Modellfamilien — "Konsens" heißt in diesem Lauf Übereinstimmung von ${familiesPresent.join(', ')}.`)
+}
 if (familiesLost.length) {
   coverageNotes.push(`${familiesLost.join(', ')} contributed nothing this run — ${familiesPresent.length} of ${familiesExpected.length} model families reviewed.`)
 }

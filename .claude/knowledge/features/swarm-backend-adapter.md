@@ -125,11 +125,14 @@ inlined diff (callers, config, types, library/CVE knowledge).
    IS OS-enforced. Accepted residual, documented so nobody assumes the jail
    blocks writes.
 
-The 120-KiB inline-diff cap is **unchanged** in 0.6.0; file-read now makes a
-future reduction of inlining possible (have the agent read the file itself) —
-coordinate that separately, do not duplicate transport work here.
+The 120-KiB inline-diff cap described above was **removed in 0.8.0** (see the
+out-of-band transport section): the prompt no longer travels on argv, so the cap
+is now model context (`SWARM_MAX_PROMPT_BYTES`, 512 KiB default). Letting the
+agent read the diff file itself was considered there and REJECTED — delivery
+stops being verifiable, the untrusted diff arrives outside the nonce fence, and
+each voice pays an extra round-trip.
 
-## Verified CLI facts (codex 0.144.6 / grok 0.2.112, 2026-07..08)
+## Verified CLI facts (codex 0.147.0 / grok 1.0.13, 2026-07..09)
 
 - **The prompt travels OUT-OF-BAND, never on argv** — codex reads it from stdin
   (`-- -`; the help states an omitted or `-` PROMPT reads stdin), grok takes
@@ -398,7 +401,10 @@ the only place that parses these values — digits-only, `10#`-forced, range-che
 *after* conversion, with an upper bound so a huge value cannot wrap in 64-bit
 arithmetic. `agents.sh config` prints the resolved set
 (`max_prompt_bytes`, `cap_headroom`, `oversize_threshold`, `timeout_seconds`,
-`probe_timeout_seconds`) and the skill READS it. `test_lens_sync.py` fails if a
+`probe_timeout_seconds`, `probe_budget_seconds`) and the skill READS it —
+`probe_budget_seconds` is what the workflow sizes its timeout margin from, so a
+new pre-timer probe must be counted in `SWARM_MAX_PROBES_PER_RUN` or the margin
+silently stops covering the worst case. `test_lens_sync.py` fails if a
 parse reappears on the skill side.
 
 Rules that came out of it, worth applying beyond this file:
