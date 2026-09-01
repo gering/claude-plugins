@@ -461,10 +461,10 @@ check("adapter: probe budget is derived from the resolved bound + kill grace",
 # "how much pre-timer work exists" and the margin the workflow derives from it. A
 # new _bounded_probe call site that nobody counted is invisible to that margin —
 # exactly how 0.10.0 overran it.
-#
 # The call sites and the constant are NOT equal on purpose: the constant is the
-# worst case for ONE backend (grok: --version, models, --help), while the sites
-# include codex's login-status probe that grok never runs. So pin the site COUNT
+# worst case for ONE backend on the run path (kimi: acp --help + provider list;
+# grok: models + --help). Version probing is display-only. The sites also include
+# codex's login-status probe that the others never run. Pin the site COUNT
 # itself — adding one forces this number to be touched, and touching it forces a
 # decision about whether the worst case moved too.
 _probe_sites = len([l for l in sh.splitlines()
@@ -552,13 +552,13 @@ check(f"adapter: no function both prints and caches into a global ({_bad_memo})"
       not _bad_memo)
 
 check("adapter: SWARM_MAX_PROBES_PER_RUN is declared", _declared)
-check(f"adapter: pre-timer probe call sites still number 5 (got {_probe_sites}) — "
+check(f"adapter: pre-timer probe call sites still number 7 (got {_probe_sites}) — "
       f"if you added one, re-derive SWARM_MAX_PROBES_PER_RUN "
       f"(currently {_declared.group(1) if _declared else '?'}, the worst case for a "
       f"single backend) and update this pin",
-      _probe_sites == 5)
-check("adapter: the declared worst case covers grok's three probes",
-      bool(_declared) and int(_declared.group(1)) >= 3)
+      _probe_sites == 7)
+check("adapter: the declared worst case covers the heaviest backend's two run-path probes",
+      bool(_declared) and int(_declared.group(1)) >= 2)
 
 check("adapter: the --help capability probe is memoized",
       "_grok_help_done" in sh and "_grok_help_rc" in sh)

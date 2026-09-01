@@ -71,8 +71,12 @@
 #   kimi   — ACP v1 headless session over NDJSON stdio. `-p` is deliberately
 #            NOT used: it only accepts the full prompt on argv and would restore
 #            Linux MAX_ARG_STRLEN failures. The local ACP client rejects every
-#            approval-gated tool call, so read/search/fetch remain available but
-#            write/edit/shell cannot execute. Kimi has no CLI schema flag; the
+#            approval-gated tool call and fails a completed mutating tool, but
+#            that is defense-in-depth only: Kimi 0.32 can auto-approve some
+#            in-repo writes without request_permission. The hard write boundary
+#            is the OS jail (repository/Git remount-ro / file-write deny) plus
+#            an ephemeral HOME/KIMI_CODE_HOME that holds only a private copy of
+#            the managed-provider credentials. Kimi has no CLI schema flag; the
 #            client validates the final assistant JSON strictly against the
 #            configured schema and fails closed without retry. ACP exposes the
 #            selected model and thinking ladder (low|high|max), so adapter effort
@@ -85,9 +89,17 @@
 #     repo-ROOT .env*/data/*.pem/id_rsa*|id_ed25519*|…/*.key/.npmrc/.pypirc/
 #     credentials.json (nested via SWARM_DENY_PATHS; main checkout too in a
 #     linked worktree). No working jail -> fail closed per voice.
+#   - OS repository/Git immutability: protected roots are file-write denied
+#     (sandbox-exec) or bound then remounted read-only (bwrap), with
+#     GIT_OPTIONAL_LOCKS=0 so git exploration does not try to refresh the
+#     index. Writes to private runtime/temp locations stay allowed.
+#   - Kimi additionally starts with isolated HOME/KIMI_CODE_HOME (credentials
+#     copy only; no ambient config/hooks/MCP/sessions) and telemetry/update/
+#     keep-alive switches off.
 #   - Egress guard is a prompt policy (model-cooperation-dependent) — the
 #     jail is the hard boundary. scrub_secrets filters OUTPUT only.
-#   - No write/shell/network-write tools; review is read-only.
+#   - CLI-level no-write/no-shell flags and ACP rejection are defense-in-depth.
+#     Arbitrary child-process execution is NOT portably prevented (residual).
 #
 # Exit codes: 0 ok · 1 unavailable / not ready / run failed · 2 usage error
 
@@ -142,6 +154,10 @@ grok-4.6"
 # Default HOME so `$HOME` expansions below (auth file, sandbox deny paths) don't
 # abort the whole script under `set -u` when HOME is unset.
 HOME="${HOME:-$(cd ~ 2>/dev/null && pwd || echo /nonexistent)}"
+# Freeze the operator home used by the denylist. run_kimi replaces HOME with an
+# ephemeral directory so Kimi cannot load ambient config; secret paths must still
+# refer to the real home, not that runtime copy.
+SWARM_HOST_HOME="$HOME"
 GROK_AUTH_FILE="${GROK_AUTH_FILE:-$HOME/.grok/auth.json}"
 # Kimi's live OAuth token is here. ~/.kimi-code/oauth/kimi-code can exist as a
 # zero-byte compatibility path even while authenticated, so it is not an auth
@@ -155,6 +171,7 @@ KIMI_CREDENTIALS_FILE="${KIMI_CREDENTIALS_FILE:-$HOME/.kimi-code/credentials/kim
 # including the error ones.
 TMP_OUT=""
 TMP_PROMPT=""
+TMP_KIMI_HOME=""
 
 # Per-call telemetry (opt-in via --telemetry). WHY it exists: an external voice
 # that dies at the wall is reported, but a voice that *survived* at 550s looks
@@ -264,6 +281,7 @@ cleanup() {
   local rc=$?
   if [[ -n "${TMP_OUT:-}" ]]; then rm -f "$TMP_OUT"; fi
   if [[ -n "${TMP_PROMPT:-}" ]]; then rm -f "$TMP_PROMPT"; fi
+  if [[ -n "${TMP_KIMI_HOME:-}" ]]; then rm -rf "$TMP_KIMI_HOME"; fi
   _write_telemetry "$rc"
 }
 trap cleanup EXIT
@@ -564,17 +582,20 @@ _sandbox_deny_paths_build() {
   # allowlist: the node/bun-based CLIs load runtime from all over $HOME, so
   # deny-$HOME breaks them (documented in the blueprint). scrub_secrets + env
   # filtering + the prompt egress guard back it up.
-  local own="${1:-}"
+  local own="${1:-}" host="${SWARM_HOST_HOME:-$HOME}"
   printf '%s\n' \
-    "$HOME/.aws" "$HOME/.ssh" "$HOME/.gnupg" "$HOME/.netrc" \
-    "$HOME/.config/gcloud" "$HOME/.kube" "$HOME/.docker" \
-    "$HOME/.git-credentials" "$HOME/.npmrc" "$HOME/.pypirc" \
-    "$HOME/.config/gh" "$HOME/.cargo/credentials" "$HOME/.cargo/credentials.toml" \
-    "$HOME/.gitconfig" "$HOME/.config/git" "/etc/master.passwd" \
-    "$HOME/.config/anthropic" "$HOME/.config/openai" "$HOME/.claude.json"
-  if [[ "$own" != "codex" ]]; then printf '%s\n' "$HOME/.codex"; fi
-  if [[ "$own" != "grok" ]]; then printf '%s\n' "$HOME/.grok"; fi
-  if [[ "$own" != "kimi" ]]; then printf '%s\n' "$HOME/.kimi-code"; fi
+    "$host/.aws" "$host/.ssh" "$host/.gnupg" "$host/.netrc" \
+    "$host/.config/gcloud" "$host/.kube" "$host/.docker" \
+    "$host/.git-credentials" "$host/.npmrc" "$host/.pypirc" \
+    "$host/.config/gh" "$host/.cargo/credentials" "$host/.cargo/credentials.toml" \
+    "$host/.gitconfig" "$host/.config/git" "/etc/master.passwd" \
+    "$host/.config/anthropic" "$host/.config/openai" "$host/.claude.json"
+  if [[ "$own" != "codex" ]]; then printf '%s\n' "$host/.codex"; fi
+  if [[ "$own" != "grok" ]]; then printf '%s\n' "$host/.grok"; fi
+  # Always deny the ambient Kimi store: run_kimi copies only the managed-provider
+  # credentials into an ephemeral HOME/KIMI_CODE_HOME, so the real ~/.kimi-code
+  # (hooks, MCP, sessions, config, plugins) must not stay readable even to Kimi.
+  printf '%s\n' "$host/.kimi-code"
   # Repo-local secrets: .env*, data/, common key/cred files at repo root.
   # Best-effort (skip if not in a git work tree); only emit paths that exist so
   # the profile stays clean. The `[[ -e ]]` guard also filters an unmatched
@@ -591,18 +612,10 @@ _sandbox_deny_paths_build() {
     # root globs: untracked .env/data/ never propagate into a worktree, so in
     # the standard /kickoff layout the real secrets sit in the main checkout —
     # a plain readable sibling path without this (0.6.0 self-review, round 2).
-    local roots=("$repo") common main
-    # --git-common-dir can print a path RELATIVE to CWD, so run it with -C "$repo"
-    # (→ relative to $repo, which we control) and anchor any relative result there.
-    # Bash-only resolution (cd+pwd -P), NOT `--path-format=absolute` (git >= 2.31)
-    # or a python realpath: this runs on the bwrap path too, which must not gain a
-    # git-version floor or a python3 dep. `cd … && pwd -P` canonicalizes symlinks.
-    common="$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null || true)"
-    if [[ -n "$common" ]]; then
-      [[ "$common" = /* ]] || common="$repo/$common"
-      main="$(cd "$(dirname -- "$common")" 2>/dev/null && pwd -P || true)"
-      if [[ -n "$main" && "$main" != "$repo" && -d "$main" ]]; then roots+=("$main"); fi
-    fi
+    local roots=() r
+    while IFS= read -r r; do
+      [[ -n "$r" ]] && roots+=("$r")
+    done < <(_repo_protected_roots)
     # Key globs are the SSH id names (id_rsa*/id_ed25519*/…), NOT a bare id_* —
     # that would jail legit files (id_utils.py), and under bwrap a denied path
     # reads as silently EMPTY (tmpfs / /dev/null bind), not EPERM, feeding the
@@ -650,6 +663,39 @@ _repo_root_ensure() {
   [[ -n "$_REPO_ROOT_DONE" ]] && return 0
   _REPO_ROOT_DONE=1
   _REPO_ROOT_MEMO="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+}
+
+_repo_protected_roots() {
+  # Canonical physical paths that must stay OS-read-only during a review:
+  # the reviewed worktree, the main checkout when this is a linked worktree,
+  # and Git control directories that are not already contained by those roots.
+  _repo_root_ensure
+  local repo="$_REPO_ROOT_MEMO"
+  [[ -n "$repo" ]] || return 0
+  local roots=("$repo") common main gitdir rp seen="" r
+  common="$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null || true)"
+  if [[ -n "$common" ]]; then
+    [[ "$common" = /* ]] || common="$repo/$common"
+    roots+=("$common")
+    main="$(cd "$(dirname -- "$common")" 2>/dev/null && pwd -P || true)"
+    if [[ -n "$main" && -d "$main" && ( -d "$main/.git" || -f "$main/.git" ) ]]; then
+      roots+=("$main")
+    fi
+  fi
+  gitdir="$(git -C "$repo" rev-parse --git-dir 2>/dev/null || true)"
+  if [[ -n "$gitdir" ]]; then
+    [[ "$gitdir" = /* ]] || gitdir="$repo/$gitdir"
+    roots+=("$gitdir")
+  fi
+  for r in "${roots[@]}"; do
+    rp="$(_realpath_or_self "$r")"
+    [[ -e "$rp" ]] || continue
+    case $'\n'"$seen"$'\n' in
+      *$'\n'"$rp"$'\n'*) continue ;;
+    esac
+    seen+="$rp"$'\n'
+    printf '%s\n' "$rp"
+  done
 }
 
 _read_web_safe() {
@@ -718,18 +764,35 @@ _init_sandbox() {
     # resolved path) and deny it as BOTH a subpath (dirs + contents) and a
     # literal (single files like ~/.netrc).
     local profile
-    profile="$(_sandbox_deny_paths "$backend" | python3 -c '
+    profile="$(
+      {
+        _sandbox_deny_paths "$backend"
+        printf '%s\n' '--write--'
+        _repo_protected_roots
+      } | python3 -c '
 import os, sys
-rules = []
+read_rules, write_rules = [], []
+mode = "read"
 for line in sys.stdin:
     p = line.strip()
     if not p:
         continue
+    if p == "--write--":
+        mode = "write"
+        continue
     rp = os.path.realpath(p)
     esc = rp.replace("\\", "\\\\").replace("\"", "\\\"")
-    rules.append("(subpath \"%s\")" % esc)
-    rules.append("(literal \"%s\")" % esc)
-sys.stdout.write("(version 1)(allow default)(deny file-read* %s)" % " ".join(rules))
+    rule = "(subpath \"%s\") (literal \"%s\")" % (esc, esc)
+    if mode == "write":
+        write_rules.append(rule)
+    else:
+        read_rules.append(rule)
+parts = ["(version 1)(allow default)"]
+if read_rules:
+    parts.append("(deny file-read* %s)" % " ".join(read_rules))
+if write_rules:
+    parts.append("(deny file-write* %s)" % " ".join(write_rules))
+sys.stdout.write("".join(parts))
 ')"
     SANDBOX_CMD=(sandbox-exec -p "$profile")
   elif command -v bwrap >/dev/null; then
@@ -741,7 +804,14 @@ sys.stdout.write("(version 1)(allow default)(deny file-read* %s)" % " ".join(rul
     # name were masked. sandbox-exec realpaths in its profile builder; the bwrap
     # path must match, or Linux under-denies. Mask BOTH the link name and the
     # resolved target so neither is a bypass.
+    # Repository mounts are bound explicitly and remounted read-only AFTER secret
+    # masks so a later --bind cannot shadow a .env tmpfs, and remount-ro does not
+    # undo those child masks.
     local args=(--dev-bind / /) p rp q targets
+    while IFS= read -r p; do
+      [[ -n "$p" ]] || continue
+      if [[ -d "$p" ]]; then args+=(--bind "$p" "$p"); fi
+    done < <(_repo_protected_roots)
     while IFS= read -r p; do
       rp="$(readlink -f -- "$p" 2>/dev/null || printf '%s' "$p")"
       # Mask the link name, plus its resolved target when it differs (a symlink).
@@ -753,6 +823,11 @@ sys.stdout.write("(version 1)(allow default)(deny file-read* %s)" % " ".join(rul
         fi
       done
     done < <(_sandbox_deny_paths "$backend")
+    while IFS= read -r p; do
+      [[ -n "$p" && -d "$p" ]] || continue
+      args+=(--remount-ro "$p")
+    done < <(_repo_protected_roots)
+    args+=(--unshare-pid --proc /proc --die-with-parent --new-session)
     SANDBOX_CMD=(bwrap "${args[@]}")
   fi
   # Probe that the wrapper actually WORKS, not merely exists on PATH: a
@@ -793,7 +868,7 @@ sandboxed() {
   local backend="$1"; shift
   _init_sandbox "$backend"
   if ((${#SANDBOX_CMD[@]} == 0)) && [[ -z "$_sandbox_warned" ]]; then
-    echo "warning: no sandbox-exec/bwrap — external calls run without an OS read-deny jail (secret scrub + env filter still apply)" >&2
+    echo "warning: no sandbox-exec/bwrap — external calls run without an OS secret-read/repo-write jail (secret scrub + env filter still apply)" >&2
     _sandbox_warned=1
   fi
   local env_args=() _e
@@ -810,6 +885,7 @@ sandboxed() {
   # first `-u` after an assignment as the command.
   with_timeout env ${env_args[@]+"${env_args[@]}"} \
     GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    GIT_OPTIONAL_LOCKS=0 \
     ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"} "$@"
 }
 
@@ -925,14 +1001,16 @@ probe_timeout() {
 }
 # How many bounded probes a single `run` may perform before the timed backend
 # call starts. Every one is memoized per process, so this is the worst case for
-# the heaviest backend (grok): `--version`, `grok models`, `grok --help`. codex
-# needs two (`--version`, `login status`).
+# one backend on the run path. Version probing is display-only (`list` /
+# `available`); `require_usable` does not call it. Heaviest run path is therefore
+# two probes: grok (`grok models`, `grok --help`) or kimi (`acp --help`,
+# `provider list --json`). Codex needs one (`login status`).
 # CHANGE THIS WHENEVER A PRE-TIMER PROBE IS ADDED. The workflow reads the derived
 # budget instead of re-deriving it, so this constant is the single place the
 # arithmetic lives — but it only stays honest if a new probe is counted here. An
 # uncounted probe is invisible to the margin, which is exactly how 0.10.0 overran
 # it.
-SWARM_MAX_PROBES_PER_RUN=3
+SWARM_MAX_PROBES_PER_RUN=2
 
 # grok's model list, memoized for the process (`grok models` is a network call —
 # fetch at most once).
@@ -1168,8 +1246,12 @@ _kimi_has_acp() {
     return
   fi
   _kimi_acp_done=1
+  # Local capability probe, same contract as `grok --help`: bound when a wrapper
+  # exists, run bare otherwise. Skipping it on a host without coreutils would
+  # advertise ACP on an old CLI that does not have it.
+  _probe_setup_lenient
   local help="" rc=0
-  help="$(_bounded_probe "$KIMI_BIN" acp --help)" || rc=$?
+  help="$(_probe_or_bare "$KIMI_BIN" acp --help)" || rc=$?
   if (( rc == 0 )); then
     _kimi_acp_supported=yes
     if [[ "$help" != *"Agent Client Protocol"* || "$help" != *"stdio"* ]]; then
@@ -1191,6 +1273,13 @@ kimi_model_fetch() {
   [[ -n "$_kimi_models_done" ]] && return 0
   _kimi_models_done=1
   local raw="" rc=0 parsed=""
+  # Network-reaching catalog: never run it unbounded. No timeout wrapper →
+  # audible degrade, same as `grok models`.
+  _probe_setup_lenient
+  if [[ -z "$_timeout_bin" ]]; then
+    _kimi_probe_degraded "no timeout/gtimeout on PATH — install coreutils to restore the model catalog probe"
+    return 0
+  fi
   raw="$(_bounded_probe "$KIMI_BIN" provider list --json)" || rc=$?
   if (( rc != 0 )); then
     _kimi_probe_degraded "\`kimi provider list --json\` did not complete (rc=$rc)"
@@ -2154,6 +2243,27 @@ _kimi_output_contract() {
     printf '\nThe response must be exactly the schema object and nothing else.\n'
 }
 
+_kimi_prepare_runtime() {
+  # VOID setter — fills TMP_KIMI_HOME, prints nothing. Copies only the managed
+  # provider credentials into an ephemeral HOME so ACP cannot load ambient
+  # config, hooks, MCP servers, plugins, trust records, sessions, or history.
+  local home dest
+  home="$(mktemp -d "${TMPDIR:-/tmp}/swarm-kimi.XXXXXX")" \
+    || { echo "Could not create an isolated Kimi HOME" >&2; exit 2; }
+  chmod 700 "$home"
+  TMP_KIMI_HOME="$home"
+  dest="$home/.kimi-code/credentials"
+  mkdir -p "$dest" || { echo "Could not create the isolated Kimi credential dir" >&2; exit 2; }
+  chmod 700 "$home/.kimi-code" "$dest"
+  if [[ ! -s "$KIMI_CREDENTIALS_FILE" ]]; then
+    echo "kimi credentials missing: $KIMI_CREDENTIALS_FILE" >&2
+    exit 1
+  fi
+  cp "$KIMI_CREDENTIALS_FILE" "$dest/kimi-code.json" \
+    || { echo "Could not copy Kimi credentials into the isolated runtime" >&2; exit 1; }
+  chmod 600 "$dest/kimi-code.json"
+}
+
 run_kimi() {
   local prompt_path="$1" effort="$2" model="$3" schema="$4"
 
@@ -2192,16 +2302,27 @@ run_kimi() {
   TELEMETRY_BYTES="$kimi_bytes"
 
   # Kimi has no CLI switch that removes read/web while still accepting the full
-  # prompt out-of-band. Its safe transport is ACP, whose client rejects every
-  # approval-gated write/edit/shell call while auto-allowed read/search/fetch stay
-  # available. Without the OS secret jail AND a resolvable repo root, those reads
-  # would have no hard credential boundary, so do not run a reduced imitation:
-  # fail once and let the skill omit Kimi from this host's externalVoices.
+  # prompt out-of-band. Its safe transport is ACP under the OS jail: secret-read
+  # isolation plus repository/Git immutability. ACP permission rejection is
+  # defense-in-depth only. Without the jail AND a resolvable repo root, do not
+  # run a reduced imitation: fail once and let the skill omit Kimi.
   if ! _read_web_safe kimi; then
     echo "kimi requires a working OS jail and resolvable repo root — refusing to run read/web-capable ACP without the secret boundary (fail closed)" >&2
     exit 1
   fi
-  local repo; repo="$(_repo_root)"
+  local repo
+  _repo_root_ensure
+  repo="$_REPO_ROOT_MEMO"
+  [[ -n "$repo" ]] \
+    || { echo "kimi requires a resolvable repo root" >&2; exit 1; }
+
+  case "$prompt_path" in
+    /*) ;;
+    *)  prompt_path="$PWD/$prompt_path" ;;
+  esac
+  _assert_prompt_readable_in_jail "$prompt_path" kimi
+
+  _kimi_prepare_runtime
 
   TMP_OUT="$(mktemp)"
   chmod 600 "$TMP_OUT"
@@ -2210,10 +2331,18 @@ run_kimi() {
   # accepts the prompt on argv. The Python client starts `kimi acp`, sends the
   # prompt as an ACP ContentBlock over NDJSON, pins model/thinking/default mode,
   # rejects every permission request, and validates the final assistant text
-  # against the configured schema. Kimi's own stderr is discarded inside the
-  # client; this outer redirect also withholds safe-but-unnecessary diagnostics
-  # from the workflow transport.
+  # against the configured schema. HOME/KIMI_CODE_HOME point at the ephemeral
+  # runtime so ambient user config never loads. Kimi's own stderr is discarded
+  # inside the client; this outer redirect also withholds diagnostics from the
+  # workflow transport.
   local rc=0
+  HOME="$TMP_KIMI_HOME" \
+  KIMI_CODE_HOME="$TMP_KIMI_HOME/.kimi-code" \
+  KIMI_DISABLE_TELEMETRY=1 \
+  KIMI_CODE_NO_AUTO_UPDATE=1 \
+  KIMI_CLI_NO_AUTO_UPDATE=1 \
+  KIMI_CODE_BACKGROUND_KEEP_ALIVE_ON_EXIT=0 \
+  KIMI_DISABLE_CRON=1 \
   sandboxed kimi python3 "$KIMI_ACP_CLIENT" \
       --prompt-file "$prompt_path" \
       --schema "$schema" \

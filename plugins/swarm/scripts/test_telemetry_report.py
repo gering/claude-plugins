@@ -92,7 +92,7 @@ check("a timeout names the lost coverage", "reviewed without grok" in r.stdout)
 r = run([write([REC_NEVER_RAN, REC_REJECTED])])
 check("null backend rc means the backend never ran", "never reached the backend" in r.stdout)
 check("zero backend rc plus adapter failure means response rejected",
-      "backend response rejected" in r.stdout)
+      "adapter rejected the response" in r.stdout)
 
 # The wall is configurable, and the percentages must follow it: with a 1200s
 # wall the same 374s call is only 31% and must NOT be flagged.

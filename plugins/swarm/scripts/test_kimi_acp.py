@@ -27,8 +27,9 @@ state = {"model": "kimi-code/other", "thinking": "high", "mode": "auto"}
 
 
 def emit(message):
-    sys.stdout.write(json.dumps(message, separators=(",", ":")) + "\n")
-    sys.stdout.flush()
+    data = json.dumps(message, separators=(",", ":"), ensure_ascii=False) + "\n"
+    sys.stdout.buffer.write(data.encode("utf-8"))
+    sys.stdout.buffer.flush()
 
 
 def log(record):
@@ -63,6 +64,10 @@ def response(request_id, result):
 
 log({"argv": sys.argv[1:]})
 for raw in sys.stdin:
+    if scenario == "bad-utf8":
+        sys.stdout.buffer.write(b"\xff\xfe not-json\n")
+        sys.stdout.buffer.flush()
+        continue
     message = json.loads(raw)
     method = message.get("method")
     request_id = message.get("id")
@@ -116,6 +121,21 @@ for raw in sys.stdin:
                     },
                 },
             })
+        elif scenario == "auto-approved-write":
+            emit({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "fake-session",
+                    "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "tool-write",
+                        "title": "Write",
+                        "kind": "edit",
+                        "status": "completed",
+                    },
+                },
+            })
         elif scenario == "orphan-completed-update":
             emit({
                 "jsonrpc": "2.0",
@@ -138,6 +158,18 @@ for raw in sys.stdin:
             answer = '{"findings":[{"file":"x","line":1}]}'
         elif scenario == "no-output":
             answer = ""
+        elif scenario == "unicode":
+            answer = json.dumps({
+                "findings": [{
+                    "file": "café.py",
+                    "line": 1,
+                    "severity": "warning",
+                    "summary": "[security] naïve 日本語 round-trip",
+                    "failure_scenario": "locale C must keep café",
+                    "confidence": "high",
+                    "recommendation": "keep utf-8",
+                }]
+            }, ensure_ascii=False)
         else:
             answer = '{"findings":[]}'
         if answer:
@@ -161,7 +193,8 @@ for raw in sys.stdin:
 
 
 class KimiAcpTests(unittest.TestCase):
-    def run_helper(self, scenario: str = "valid", *, schema: Path = SCHEMA):
+    def run_helper(self, scenario: str = "valid", *, schema: Path = SCHEMA,
+                   env_extra: dict | None = None):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
@@ -177,6 +210,8 @@ class KimiAcpTests(unittest.TestCase):
             "FAKE_SCENARIO": scenario,
             "FAKE_LOG": str(log),
         })
+        if env_extra:
+            env.update(env_extra)
         result = subprocess.run(
             [
                 sys.executable,
@@ -254,6 +289,33 @@ class KimiAcpTests(unittest.TestCase):
         result, _ = self.run_helper("unsafe-completed")
         self.assertEqual(result.returncode, 13)
         self.assertIn("unsafe tool completed", result.stderr)
+
+    def test_auto_approved_write_fails_review(self):
+        result, _ = self.run_helper("auto-approved-write")
+        self.assertEqual(result.returncode, 13)
+        self.assertIn("unsafe tool completed", result.stderr)
+        self.assertIn("edit", result.stderr)
+
+    def test_unicode_round_trips_under_ascii_locale(self):
+        ascii_env = {
+            "LC_ALL": "C",
+            "LANG": "C",
+            "PYTHONUTF8": "0",
+            "PYTHONCOERCECLOCALE": "0",
+            "PYTHONIOENCODING": "ascii",
+        }
+        result, _ = self.run_helper("unicode", env_extra=ascii_env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["findings"][0]["file"], "café.py")
+        self.assertIn("naïve 日本語", payload["findings"][0]["summary"])
+        self.assertTrue(result.stdout.isascii())
+
+    def test_invalid_utf8_frame_is_protocol_error(self):
+        result, _ = self.run_helper("bad-utf8")
+        self.assertEqual(result.returncode, 12)
+        self.assertIn("not valid UTF-8", result.stderr)
+        self.assertEqual(result.stdout, "")
 
     def test_completed_tool_update_without_known_kind_fails_review(self):
         result, _ = self.run_helper("orphan-completed-update")

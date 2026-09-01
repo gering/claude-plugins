@@ -149,7 +149,7 @@ truth** — every voice's fan-out units come from it, Claude and externals alike
   agreeing with itself is one vote, not a cross-check" stays the load-bearing
   invariant the day a second same-vendor voice returns.
 - **Security is intentionally minimal** (user directive: no cannons-at-sparrows).
-  The P1 adapter floor stays (secret-jail sandbox, jailed read+web externals
+  The P1 adapter floor stays (secret-jail + repo immutability, jailed read+web externals
   since 0.6.0 — see [[swarm-backend-adapter]], secret scrub, env filter,
   caps); P2 adds only three cheap things — **fencing** the diff as data
   (deterministic Bash, not an LLM step that could be steered into dropping it),

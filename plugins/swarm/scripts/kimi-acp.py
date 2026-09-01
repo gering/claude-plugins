@@ -7,9 +7,9 @@ review prompts exceed it. ACP v1 carries the complete prompt as NDJSON over
 stdio instead, preserving the adapter's out-of-band transport.
 
 The ACP session stays in manual-approval mode and this client rejects every
-approval request. Read/search/fetch tools remain available; write/edit/shell
-calls cannot execute. The outer agents.sh sandbox still provides the hard
-secret-read boundary.
+approval request. Read/search/fetch tools remain available; a completed
+mutating tool fails the review. That is defense-in-depth only: the outer
+agents.sh jail is the hard secret-read and repository-write boundary.
 """
 from __future__ import annotations
 
@@ -203,6 +203,8 @@ class AcpClient:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
+                encoding="utf-8",
+                errors="strict",
                 bufsize=1,
                 start_new_session=True,
             )
@@ -244,7 +246,10 @@ class AcpClient:
         process = self.process
         if process is None or process.stdout is None:
             raise BackendError("ACP process is not running")
-        line = process.stdout.readline()
+        try:
+            line = process.stdout.readline()
+        except UnicodeDecodeError as exc:
+            raise ProtocolError("ACP frame is not valid UTF-8") from exc
         if not line:
             rc = process.poll()
             raise BackendError(f"Kimi closed the ACP output stream (rc={rc})")
@@ -520,7 +525,7 @@ def main(argv: list[str]) -> int:
                 f"assistant text is invalid JSON ({len(response_text.encode('utf-8'))} bytes; content withheld)"
             ) from exc
         _validate_instance(response, schema)
-        json.dump(response, sys.stdout, separators=(",", ":"), ensure_ascii=False)
+        json.dump(response, sys.stdout, separators=(",", ":"), ensure_ascii=True)
         sys.stdout.write("\n")
         return 0
     except BackendError as exc:
