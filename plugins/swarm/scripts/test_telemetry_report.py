@@ -114,6 +114,24 @@ check("mixed run: exactly the over-threshold record flags", r.stdout.count("тЪая
 check("mixed run: the fallback keeps the other record quiet",
       "374s" in r.stdout and "62%" not in r.stdout)
 
+# A call the backend ANSWERED but the adapter then rejected (empty output, schema
+# validation) must not read as "never reached the backend": that sends the
+# operator after a config problem instead of a malformed response, and hides that
+# the run burned real wall-clock.
+REC_POST = '{"backend":"codex","unit":"reach","effort":"high","model":"m","prompt_bytes":2048,"seconds":97,"timeout_seconds":540,"backend_rc":0,"adapter_rc":1,"timed_out":false}'
+r = run([write([REC_POST])])
+check("a post-call rejection names the backend as having returned",
+      "adapter rejected the response" in r.stdout)
+check("a post-call rejection reports the time it spent", "97s" in r.stdout)
+check("a post-call rejection is not 'never reached the backend'",
+      "never reached" not in r.stdout)
+
+# The pre-call abort keeps its own wording (backend_rc absent).
+REC_PRE = '{"backend":"grok","unit":"reach","effort":"high","model":"m","prompt_bytes":2048,"seconds":0,"adapter_rc":2,"timed_out":false}'
+r = run([write([REC_PRE])])
+check("a pre-call abort still says the backend was never reached",
+      "never reached the backend" in r.stdout)
+
 # --- usage ------------------------------------------------------------------
 check("no args is a usage error", run([]).returncode == 2)
 check("bad --timeout-seconds is a usage error",

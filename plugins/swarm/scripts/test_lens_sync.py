@@ -205,8 +205,17 @@ check("skill: EXTERNALS_OVERSIZE decided in shell against the adapter threshold"
 # SWARM_TIMEOUT look useless in the first place.
 check(
     "workflow: sets SWARM_TIMEOUT on the transport command",
-    re.search(r"cmd: `SWARM_TIMEOUT=\$\{EFFECTIVE_TIMEOUT_S\} bash ", js),
+    re.search(r"cmd: `SWARM_TIMEOUT=\$\{EFFECTIVE_TIMEOUT_S\} ", js),
 )
+# The prompt cap travels the same way, and for the same reason: the skill decides
+# the oversize skip from the adapter-reported cap, so the adapter process must
+# enforce THAT value. Left to environment inheritance, a subagent shell with a
+# different env would put the two halves of one gate back out of sync.
+check(
+    "workflow: pins SWARM_MAX_PROMPT_BYTES on the transport command",
+    re.search(r"SWARM_MAX_PROMPT_BYTES=\$\{MAX_PROMPT_BYTES\} bash ", js),
+)
+check("skill: passes maxPromptBytes to the workflow", "maxPromptBytes:" in skill)
 check(
     "workflow: the Bash window is derived, not a second hard-coded literal",
     re.search(r"Bash tool \(timeout \$\{BASH_TIMEOUT_MS\}\)", js)
@@ -400,6 +409,41 @@ check("adapter: config reports probe_budget_seconds",
       "probe_budget_seconds=" in sh and "SWARM_MAX_PROBES_PER_RUN" in sh)
 check("adapter: probe budget is derived from the ceiling + kill grace",
       re.search(r"SWARM_MAX_PROBES_PER_RUN \* \(SWARM_PROBE_TIMEOUT_MAX \+ TIMEOUT_KILL_GRACE\)", sh))
+# SWARM_MAX_PROBES_PER_RUN is hand-maintained, and it is the ONLY link between
+# "how much pre-timer work exists" and the margin the workflow derives from it. A
+# new _bounded_probe call site that nobody counted is invisible to that margin —
+# exactly how 0.10.0 overran it.
+#
+# The call sites and the constant are NOT equal on purpose: the constant is the
+# worst case for ONE backend (grok: --version, models, --help), while the sites
+# include codex's login-status probe that grok never runs. So pin the site COUNT
+# itself — adding one forces this number to be touched, and touching it forces a
+# decision about whether the worst case moved too.
+_probe_sites = len([l for l in sh.splitlines()
+                    if "_bounded_probe " in l and not l.lstrip().startswith("#")])
+_declared = re.search(r"SWARM_MAX_PROBES_PER_RUN=(\d+)", sh)
+# A comment inside a `\`-continued command silently truncates it: the shell ends
+# the logical line at the `#`, so every remaining argument disappears while
+# `bash -n` still reports valid syntax. Adding a note above `--prompt-file` this
+# way turned the grok invocation into a bare `--prompt-file …` (rc=127) — caught
+# only because test_sandbox_deny.py asserts on the built argv. Cheap to check
+# mechanically, invisible to review otherwise.
+_cont = []
+_sh_lines = sh.splitlines()
+for _i, _l in enumerate(_sh_lines[:-1]):
+    if _l.rstrip().endswith("\\") and _sh_lines[_i + 1].lstrip().startswith("#"):
+        _cont.append(f"{_i + 2}: {_sh_lines[_i + 1].strip()[:50]}")
+check(f"adapter: no comment inside a line continuation ({_cont})", not _cont)
+
+check("adapter: SWARM_MAX_PROBES_PER_RUN is declared", _declared)
+check(f"adapter: _bounded_probe call sites still number 4 (got {_probe_sites}) — "
+      f"if you added one, re-derive SWARM_MAX_PROBES_PER_RUN "
+      f"(currently {_declared.group(1) if _declared else '?'}, the worst case for a "
+      f"single backend) and update this pin",
+      _probe_sites == 4)
+check("adapter: the declared worst case covers grok's three probes",
+      bool(_declared) and int(_declared.group(1)) >= 3)
+
 check("adapter: the --help capability probe is memoized",
       "_grok_help_done" in sh and "_grok_help_rc" in sh)
 check("skill: the probe budget is echoed for the workflow",

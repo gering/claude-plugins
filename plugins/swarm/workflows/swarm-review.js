@@ -72,6 +72,16 @@ const BASH_TIMEOUT_MS = 600000
 // `agents.sh config` and asserts this literal still equals the reported
 // probe_budget_seconds — without that pin it is the same hand-copy that already
 // overran the margin once.
+// Pinned onto the adapter command line rather than inherited from the
+// environment. The skill asks the adapter for the cap and decides the oversize
+// skip from it; if the adapter process then read a DIFFERENT value (a subagent
+// shell with its own env, an export between the two calls), the two halves of
+// that one gate would disagree again — the whole point of the `config`
+// handshake. Passing it explicitly makes the value the skill used the value the
+// adapter enforces.
+const MAX_PROMPT_BYTES = Number.isInteger(INPUT.maxPromptBytes) && INPUT.maxPromptBytes > 0
+  ? INPUT.maxPromptBytes
+  : 524288
 const PROBE_BUDGET_FALLBACK_S = 69
 // Bounded on BOTH sides: an unbounded budget would drive MAX_INNER_S negative and
 // hand `SWARM_TIMEOUT=-N` to the adapter, which rejects it — every voice failing
@@ -631,7 +641,7 @@ const externalVoiceSpecs = liveExternals
     // caching was declined in 0.9.4 — a cached 'model absent' would outlive the CLI
     // upgrade that fixes it — and the probes are bounded and counted in
     // probe_budget_seconds, so the cost is paid in parallel, not against the margin.
-    cmd: `SWARM_TIMEOUT=${EFFECTIVE_TIMEOUT_S} bash ${shQuote(ADAPTER)} run ${b.backend} ${b.flags} --lens-instr ${shQuote(instrFor(u))} --lens-instr-sum ${utf8Checksum(instrFor(u))} --prompt-file ${shQuote(EXTERNAL_PROMPT)}` +
+    cmd: `SWARM_TIMEOUT=${EFFECTIVE_TIMEOUT_S} SWARM_MAX_PROMPT_BYTES=${MAX_PROMPT_BYTES} bash ${shQuote(ADAPTER)} run ${b.backend} ${b.flags} --lens-instr ${shQuote(instrFor(u))} --lens-instr-sum ${utf8Checksum(instrFor(u))} --prompt-file ${shQuote(EXTERNAL_PROMPT)}` +
       // Appended, not interpolated into the base string, so a run without a
       // telemetry sink produces the exact command it always did.
       // shQuote BOTH values. This string is executed as a shell command by the

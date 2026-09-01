@@ -385,19 +385,23 @@ Workflow({
     telemetryFile: "<TELEMETRY>",
     findingNonce: "<FINDING_NONCE>",
     probeBudgetSeconds: <SWARM_PROBE_BUDGET_S>,
+    maxPromptBytes: <SWARM_MAX_BYTES>,
     externalVoices: [<the live voices from step 1>]
   }
 })
 ```
 
 Fill `<DIFF>`/`<PROMPT>`/`<TELEMETRY>`/`<FINDING_NONCE>` from the echoed values,
-and pass `probeBudgetSeconds: <SWARM_PROBE_BUDGET_S>` (a bare number) so the
-workflow sizes its timeout margin from what the adapter reports rather than from
-a literal that has to be kept in sync by hand.
-**Only if** the block echoed `SWARM_TIMEOUT_S` (it does so solely when the user
-set `SWARM_TIMEOUT`), add `timeoutSeconds: <SWARM_TIMEOUT_S>` — a bare number,
-not a string. Omit the field entirely otherwise, so the workflow applies its own
-derived default rather than being handed one that it must then cap. Add `max: true` to `args` when
+and pass `probeBudgetSeconds: <SWARM_PROBE_BUDGET_S>` plus
+`maxPromptBytes: <SWARM_MAX_BYTES>` (both bare numbers) so the workflow sizes its
+timeout margin from what the adapter reports, and pins the same prompt cap onto
+every adapter call instead of trusting environment inheritance.
+**Only if** the block echoed `SWARM_TIMEOUT_S`, add `timeoutSeconds:
+<SWARM_TIMEOUT_S>` — a bare number, not a string. Omit the field entirely
+otherwise, so the workflow applies its own derived default rather than being
+handed one it must then cap. **The block already decided this** — it emits the
+line solely when the user set `SWARM_TIMEOUT` — so read the presence of the line,
+never re-evaluate the condition from your own memory of the environment. Add `max: true` to `args` when
 `--max` was given (step 1 stripped it) — the deepest-effort profile. Add
 `claude: false` to `args`
 for an **external-only control run** (codex + grok, no Claude finder
@@ -493,7 +497,15 @@ Lenses:  <gate.run joined>  —  gated-out: <gate.skip lenses>
 Then, when present:
 - **Family coverage** — print this IMMEDIATELY under the `Bilanz:` line, before
   anything else in this list, whenever `balance.familiesLost` is non-empty **OR**
-  `balance.consensusReachable` is false. The two conditions are independent: a
+  `balance.consensusReachable` is false **OR** `balance.unitsDegraded` is
+  non-empty. **Say which of the three it is — they mean different things:**
+  `familiesLost` = that family reviewed nothing all run; `unitsDegraded` = named
+  clusters where fewer than two families returned, so findings *in those clusters*
+  fall back to solo+verifier while the rest of the run is unaffected; only
+  `familiesPresent < 2` means no finding anywhere can reach consensus. Report a
+  degraded cluster as scoped to that cluster — claiming the whole run lost
+  consensus overstates the damage exactly as badly as staying silent understates
+  it. The two conditions are independent: a
   run that only ever had ONE family (externals unavailable, or `claude: false`
   with a single backend) loses nothing yet still cannot form consensus, and
   nesting the second warning inside the first meant that run printed nothing at

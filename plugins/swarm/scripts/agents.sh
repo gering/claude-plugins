@@ -171,7 +171,21 @@ _json_escape() {
   local out="" ch i
   for (( i = 0; i < ${#v}; i++ )); do
     ch="${v:i:1}"
-    if [[ "$ch" < $'\x20' ]]; then
+    # LC_ALL=C: `<` inside [[ ]] compares by the CURRENT LOCALE's collation, where
+    # a control character can sort AFTER a space (glibc's en_US.UTF-8 ignores most
+    # of them at the primary level). The test would then quietly stop firing and
+    # emit a raw control byte — a record the reader discards as malformed, which
+    # reads as "that voice never ran". Byte order is what this needs.
+    # Numeric, not `[[ "$ch" < $'\x20' ]]`: `<` compares by the current locale's
+    # COLLATION, where a control character can sort after a space and the test
+    # quietly stops firing — emitting a raw control byte, i.e. a record the reader
+    # discards as malformed, which reads as "that voice never ran".
+    # `code >= 0` is load-bearing: for a multi-byte character printf yields the
+    # code point (>= 128) or a NEGATIVE first byte depending on locale, and
+    # treating that as "below 0x20" would mangle every non-ASCII cluster name into
+    # \uffffffffffffffc3 garbage. Control characters are 0..31, always positive.
+    local code; code=$(LC_ALL=C printf '%d' "'$ch" 2>/dev/null || echo 32)
+    if (( code >= 0 && code < 32 )); then
       printf -v ch '\\u%04x' "'$ch"
     fi
     out+="$ch"
@@ -686,9 +700,17 @@ available_version() {
   # Best-effort output: once `command -v` confirmed the CLI, a non-zero exit, a
   # timeout, or a SIGPIPE from head() must NOT flip an installed backend to
   # "unavailable".
-  timeout_bin
-  probe_timeout
-  _bounded_probe "$backend" --version 2>/dev/null | head -1 || true
+  # Bounded WHEN POSSIBLE, unbounded otherwise — the same contract with_timeout
+  # documents a few hundred lines up ("run bare, but say so once"). Denying the
+  # version instead would blank the VERSION column on any host without coreutils
+  # (stock macOS), and `_bounded_probe` cannot make that choice itself: it runs
+  # inside $(...) where it can neither warn once nor set a flag.
+  _probe_setup_lenient
+  if [[ -n "$_timeout_bin" ]]; then
+    _bounded_probe "$backend" --version 2>/dev/null | head -1 || true
+  else
+    "$backend" --version 2>/dev/null | head -1 || true
+  fi
   return 0
 }
 
@@ -745,6 +767,35 @@ _probe_degraded() {
 # coreutils — and the adapter then trusted auth and skipped the model check. 127
 # (the previous sentinel) collides with "command not found" the same way. No exit
 # code is free, so the question moves out of band.
+# A probe timeout for the DISPLAY paths (`list`, `available`, `ready`), which must
+# never die on a knob they only pass through. `run` and `config` still refuse a bad
+# value — they apply it — but a malformed SWARM_PROBE_TIMEOUT in a shell profile
+# must not make `list --json` report an installed, authenticated CLI as "not
+# installed", which is exactly what the strict resolver did from inside
+# available_version's command substitution (the exit died there and was read as
+# "absent"). Degrade loudly, once.
+_probe_timeout_warned=""
+probe_timeout_lenient() {
+  [[ -n "$_probe_timeout" ]] && return 0
+  local v
+  if v="$(_resolve_int SWARM_PROBE_TIMEOUT "${SWARM_PROBE_TIMEOUT:-}" 10 1 "$SWARM_PROBE_TIMEOUT_MAX" 2>/dev/null)"; then
+    _probe_timeout="$v"
+    return 0
+  fi
+  _probe_timeout=10
+  if [[ -z "$_probe_timeout_warned" ]]; then
+    _probe_timeout_warned=1
+    echo "warning: ignoring invalid SWARM_PROBE_TIMEOUT='${SWARM_PROBE_TIMEOUT:-}' for this listing — probing with ${_probe_timeout}s (\`run\` and \`config\` still refuse it)" >&2
+  fi
+}
+
+# The two preludes every _bounded_probe caller must run FIRST, in the main shell.
+# Named because the pair was duplicated at four call sites and enforced only by a
+# comment — and a missed call silently disables bounding (the memo and any exit
+# die inside the $(...) that invokes the probe).
+_probe_setup_strict()  { timeout_bin; probe_timeout; }
+_probe_setup_lenient() { timeout_bin; probe_timeout_lenient; }
+
 _timeout_bin_done=""
 _timeout_bin=""
 timeout_bin() {
@@ -757,9 +808,12 @@ timeout_bin() {
 }
 _bounded_probe() {
   # Run a LOCAL probe under the probe bound and print its stdout. Returns the
-  # command's rc. Whether a wrapper EXISTS is asked separately (timeout_bin),
-  # never encoded in the rc — every candidate code collides with something a
-  # probed command can legitimately return.
+  # command's rc, or 1 if it could not be bounded at all. Whether a wrapper EXISTS
+  # is asked separately (timeout_bin) and MUST be checked by the caller before
+  # calling: every candidate sentinel rc (126, 127) collides with something a
+  # probed command legitimately returns, so "could not bound" is not answerable
+  # from the rc — and a caller that skips the check reads it as "the probe
+  # failed", which is how 0.10.3 dropped codex on hosts without coreutils.
   #
   # Extracted because this prelude existed three times and had already drifted:
   # one copy checked rc before trusting the output, another swallowed it with
@@ -773,10 +827,12 @@ _bounded_probe() {
   # when the command it was given does not exist, so a missing backend binary and
   # a missing timeout binary would be indistinguishable — and the callers treat
   # the two differently (assume-capability vs. degrade-and-report).
-  # Callers MUST have called timeout_bin + probe_timeout in the main shell first
-  # (see the note on probe_timeout): this function is always invoked as $(...),
-  # so anything it memoizes dies with the subshell and any exit it takes is
-  # swallowed by the substitution.
+  # Callers MUST run _probe_setup_strict or _probe_setup_lenient in the main shell
+  # first, and MUST decide for themselves what an empty $_timeout_bin means (skip
+  # the probe, or run the command unbounded). This function is invoked as $(...)
+  # by every caller, so anything it memoizes dies with the subshell and any exit
+  # it takes is swallowed by the substitution — it cannot warn, degrade, or fail
+  # loudly on its own behalf.
   [[ -n "$_timeout_bin" ]] || return 1
   "$_timeout_bin" -k "$TIMEOUT_KILL_GRACE" "$_probe_timeout" "$@" </dev/null 2>/dev/null
 }
@@ -803,8 +859,7 @@ grok_model_fetch() {
   # the memoization dies with the subshell (the next caller re-resolves, and the
   # message below printed an empty "after s") and the exit never leaves it, so a
   # malformed SWARM_PROBE_TIMEOUT degraded both probes and still reported ready.
-  timeout_bin
-  probe_timeout
+  _probe_setup_lenient
   if [[ -z "$_timeout_bin" ]]; then
     # `ready`/`list` were purely local before this probe, so it must never be the
     # thing that hangs them: with no way to bound the call, skip it rather than
@@ -993,7 +1048,18 @@ ready_check() {
     # BOUNDED for the same reason as available_version: this is a NETWORK call on
     # the pre-timer path, and a captive portal or dead proxy turns it into a stall
     # the timeout margin never budgeted for.
-    codex)  timeout_bin; probe_timeout; _bounded_probe codex login status >/dev/null 2>&1 ;;
+    # Bounded when possible (it is a NETWORK call on the pre-timer path, so a
+    # captive portal or dead proxy would otherwise stall past the timeout margin),
+    # but a host without coreutils must NOT lose the whole codex family: an
+    # unbounded probe is what every other path does there, and reporting
+    # "not ready — run: codex login" to an already-authenticated user while
+    # silently dropping the openai family from the ensemble is far worse than an
+    # unbounded local call.
+    codex)
+      _probe_setup_lenient
+      if [[ -n "$_timeout_bin" ]]; then _bounded_probe codex login status >/dev/null 2>&1
+      else codex login status >/dev/null 2>&1; fi
+      ;;
     # Model-aware: auth alone would advertise grok even when the CLI no longer
     # offers the one model the adapter can drive (grok drops/renames models
     # between releases — 0.2.101 removed grok-composer-2.5-fast).
@@ -1314,15 +1380,20 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
     (( nbytes > max_bytes )) && { echo "Prompt too large with lens instruction ($nbytes bytes > $max_bytes) — narrow the diff range, or raise SWARM_MAX_PROMPT_BYTES" >&2; exit 2; }
   fi
 
-  require_usable "$backend"
-  # Resolve the wall HERE, in the main shell, before any subshell runs. The
-  # backend call happens inside `raw="$(sandboxed …)"`, so a resolution that
-  # first happens in with_timeout would memoize into that subshell and die with
-  # it: the "timed out after Ns" message would print an empty N, and
-  # _write_telemetry — running in the EXIT trap of the main shell — would record
-  # timeout_seconds:0, i.e. "no cap was in force" for a call that was capped.
-  # This is also where a malformed SWARM_TIMEOUT must fail the run loudly.
+  # Resolve BOTH knobs here, in the main shell, and BEFORE require_usable — its
+  # readiness probes take the lenient path, so a bad value resolved there first
+  # would fill the memo with the fallback and this run would never see the error
+  # it is supposed to refuse.
+  # Main shell, because the backend call happens inside `raw="$(sandboxed …)"`: a
+  # resolution that first happened in with_timeout would memoize into that
+  # subshell and die with it — the "timed out after Ns" message would print an
+  # empty N, and _write_telemetry, running in the EXIT trap of the main shell,
+  # would record timeout_seconds:0 for a call that was in fact capped.
+  # Strict, because `run` APPLIES both values: a malformed knob is an error here,
+  # not something to degrade around.
   adapter_timeout
+  probe_timeout
+  require_usable "$backend"
   require_python3
 
   # Start the clock as late as possible: readiness probes and validation are
@@ -1466,8 +1537,7 @@ _grok_has_prompt_file() {
   # telemetry record. Exactly the diagnosis this branch exists to preserve.
   if [[ -n "$_grok_help_done" ]]; then return "$_grok_help_rc"; fi
   _grok_help_done=1
-  timeout_bin
-  probe_timeout
+  _probe_setup_lenient
   local help="" rc=0
   help="$(_bounded_probe grok --help)" || rc=$?
   if (( rc != 0 )); then
@@ -1556,6 +1626,12 @@ run_grok() {
     tool_args=(--tools "" --disable-web-search)
   fi
 
+  # The prompt file must stay READABLE INSIDE THE JAIL. The denylist covers HOME
+  # secret stores and repo-root secrets, not TMPDIR, so the default path is fine —
+  # but a custom SWARM_DENY_PATHS covering $TMPDIR would make this read fail, and
+  # under bwrap a masked path reads as EMPTY rather than erroring: the backend
+  # would then review an empty prompt and return "no findings" from a call that
+  # looks perfectly healthy. Never add TMPDIR to the denylist.
   local raw rc=0
   raw="$(sandboxed grok grok -m "$grok_model" --effort "$effort" \
       ${tool_args[@]+"${tool_args[@]}"} \

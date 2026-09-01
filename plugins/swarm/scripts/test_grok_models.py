@@ -241,7 +241,7 @@ check("empty model list keeps the pin", sel == PIN)
 
 # An explicit override wins over discovery — but the run_grok preflight still
 # gates it on the verified table (asserted live elsewhere).
-m, _ = select(LIVE_CATALOG, override="grok-4.5")
+sel, _ = select(LIVE_CATALOG, override="grok-4.5")
 check("explicit override beats discovery", sel == "grok-4.5")
 
 # --- readiness must agree with what would actually RUN ------------------------
