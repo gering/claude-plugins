@@ -95,7 +95,9 @@ class TestSandboxDenyPaths(unittest.TestCase):
 
     def test_own_backend_cred_dir_stays_readable(self):
         home = os.path.expanduser("~")
-        # Each backend keeps only its own credential directory readable.
+        # Codex/Grok keep only their own credential directory readable. Kimi's
+        # ambient store is always denied; run_kimi copies credentials into an
+        # ephemeral HOME instead of exposing hooks/MCP/sessions.
         codex_paths = _bash_deny_paths("codex")
         self.assertNotIn(f"{home}/.codex", codex_paths)
         self.assertIn(f"{home}/.grok", codex_paths)
@@ -107,7 +109,7 @@ class TestSandboxDenyPaths(unittest.TestCase):
         self.assertIn(f"{home}/.kimi-code", grok_paths)
 
         kimi_paths = _bash_deny_paths("kimi")
-        self.assertNotIn(f"{home}/.kimi-code", kimi_paths)
+        self.assertIn(f"{home}/.kimi-code", kimi_paths)
         self.assertIn(f"{home}/.codex", kimi_paths)
         self.assertIn(f"{home}/.grok", kimi_paths)
 
@@ -277,6 +279,56 @@ class TestSandboxE2E(unittest.TestCase):
                 f"secret marker leaked through sandboxed cat:\n{combined!r}",
             )
 
+    def test_sandboxed_repo_write_blocked_temp_write_allowed(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            outside = Path(td) / "outside"
+            repo.mkdir()
+            outside.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            pwned = repo / "pwned.txt"
+            ok_file = outside / "ok.txt"
+            r = _source(
+                "sandboxed codex sh -c 'printf %s \"$GIT_OPTIONAL_LOCKS\"'",
+                f'sandboxed codex sh -c "echo PWNED > \\"{pwned}\\"" || true',
+                f'sandboxed codex sh -c "echo OK > \\"{ok_file}\\""',
+                cwd=repo,
+            )
+            combined = r.stdout + r.stderr
+            self.assertEqual(
+                r.returncode, 0,
+                f"sandbox harness failed (rc={r.returncode}):\n{combined!r}",
+            )
+            self.assertIn(
+                "0", r.stdout,
+                f"GIT_OPTIONAL_LOCKS=0 missing inside the jail:\n{combined!r}",
+            )
+            self.assertFalse(
+                pwned.exists(),
+                f"jail allowed a repository write: {pwned} exists\n{combined!r}",
+            )
+            self.assertTrue(
+                ok_file.exists() and ok_file.read_text().strip() == "OK",
+                f"jail blocked a write outside the repo:\n{combined!r}",
+            )
+
+    def test_sandbox_profile_denies_repo_writes(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            r = _source(
+                '_init_sandbox codex',
+                'printf "%s\\n" "${SANDBOX_CMD[@]}"',
+                cwd=repo,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("deny file-write*", r.stdout)
+            resolved = os.path.realpath(repo)
+            self.assertTrue(
+                resolved in r.stdout or str(repo) in r.stdout,
+                f"write-deny profile omitted the repo root; got {r.stdout!r}",
+            )
+
 
 SCHEMA = HERE / "schema" / "finding.schema.json"
 
@@ -306,7 +358,8 @@ class TestFailClosedDegrade(unittest.TestCase):
 
     def _argv(self, backend: str, jail: bool) -> str:
         with tempfile.NamedTemporaryFile("r", suffix=".argv") as tf, \
-                tempfile.NamedTemporaryFile("w", suffix=".prompt") as pf:
+                tempfile.NamedTemporaryFile("w", suffix=".prompt") as pf, \
+                tempfile.NamedTemporaryFile("w", suffix=".cred") as cred:
             # run_codex/run_grok take the prompt as a PATH, not as text: the
             # prompt reaches the backend out-of-band (codex stdin redirect, grok
             # --prompt-file) so it never hits exec's argv limit. codex's stdin
@@ -314,6 +367,8 @@ class TestFailClosedDegrade(unittest.TestCase):
             # has to hand over a real file.
             pf.write("prompt text\n")
             pf.flush()
+            cred.write("{}\n")
+            cred.flush()
             jail_fn = "_jail_available() { return 0; }" if jail \
                 else "_jail_available() { return 1; }"
             r = _source(
@@ -323,9 +378,10 @@ class TestFailClosedDegrade(unittest.TestCase):
                 # being installed (CI has none). The probe's own behaviour is not
                 # what this test covers.
                 "_grok_has_prompt_file() { return 0; }",
+                "_assert_prompt_readable_in_jail() { return 0; }",
                 _RECORD_SANDBOXED,
                 f'( run_{backend} "{pf.name}" high "" "{SCHEMA}" ) >/dev/null 2>&1 || true',
-                env_extra={"ARGV": tf.name},
+                env_extra={"ARGV": tf.name, "KIMI_CREDENTIALS_FILE": cred.name},
             )
             self.assertEqual(r.returncode, 0, f"harness failed: {r.stderr!r}")
             return Path(tf.name).read_text()
@@ -366,15 +422,21 @@ class TestFailClosedDegrade(unittest.TestCase):
         self.assertIn("--effort\nhigh", argv, f"effective ACP effort missing; argv:\n{argv}")
 
     def test_kimi_sigkill_is_reported_as_timeout(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".prompt") as pf:
+        with tempfile.NamedTemporaryFile("w", suffix=".prompt") as pf, \
+                tempfile.NamedTemporaryFile("w", suffix=".cred") as cred:
             pf.write("prompt text\n")
             pf.flush()
+            cred.write("{}\n")
+            cred.flush()
             r = _source(
                 "_read_web_safe() { return 0; }",
-                "_repo_root() { pwd; }",
+                "_assert_prompt_readable_in_jail() { return 0; }",
                 "sandboxed() { return 137; }",
                 "_adapter_timeout=17",
+                "_timeout_bin=timeout",
+                "_enforced_wall=17",
                 f'( run_kimi "{pf.name}" high "" "{SCHEMA}" )',
+                env_extra={"KIMI_CREDENTIALS_FILE": cred.name},
             )
         self.assertEqual(r.returncode, 1, f"Kimi timeout must fail the voice: {r.stderr!r}")
         self.assertIn("timed out after 17s", r.stderr,
@@ -382,16 +444,42 @@ class TestFailClosedDegrade(unittest.TestCase):
         self.assertNotIn("failed (rc=137)", r.stderr,
                          f"rc=137 must not look like a generic backend failure: {r.stderr!r}")
 
-    def _kimi_gate_rc(self, helper_rc: int):
-        with tempfile.NamedTemporaryFile("w", suffix=".prompt") as pf:
+    def test_kimi_sigkill_without_wrapper_is_not_a_timeout(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".prompt") as pf, \
+                tempfile.NamedTemporaryFile("w", suffix=".cred") as cred:
             pf.write("prompt text\n")
             pf.flush()
+            cred.write("{}\n")
+            cred.flush()
+            r = _source(
+                "_read_web_safe() { return 0; }",
+                "_assert_prompt_readable_in_jail() { return 0; }",
+                "sandboxed() { return 137; }",
+                "_adapter_timeout=17",
+                "_timeout_bin=",
+                f'( run_kimi "{pf.name}" high "" "{SCHEMA}" )',
+                env_extra={"KIMI_CREDENTIALS_FILE": cred.name},
+            )
+        self.assertEqual(r.returncode, 1, f"bare SIGKILL must still fail the voice: {r.stderr!r}")
+        self.assertNotIn("timed out", r.stderr,
+                         f"rc=137 without a timeout wrapper is not a wall hit: {r.stderr!r}")
+        self.assertIn("failed (rc=137)", r.stderr,
+                      f"bare SIGKILL must stay a generic backend failure: {r.stderr!r}")
+
+    def _kimi_gate_rc(self, helper_rc: int):
+        with tempfile.NamedTemporaryFile("w", suffix=".prompt") as pf, \
+                tempfile.NamedTemporaryFile("w", suffix=".cred") as cred:
+            pf.write("prompt text\n")
+            pf.flush()
+            cred.write("{}\n")
+            cred.flush()
             return _source(
                 "_read_web_safe() { return 0; }",
-                "_repo_root() { pwd; }",
+                "_assert_prompt_readable_in_jail() { return 0; }",
                 f"sandboxed() {{ return {helper_rc}; }}",
                 "trap 'printf \"telemetry=%s\\n\" \"${TELEMETRY_RC-null}\" >&2' EXIT",
                 f'run_kimi "{pf.name}" high "" "{SCHEMA}"',
+                env_extra={"KIMI_CREDENTIALS_FILE": cred.name},
             )
 
     def test_kimi_preprompt_protocol_failure_has_no_backend_rc(self):
@@ -450,6 +538,96 @@ class TestPromptTransport(unittest.TestCase):
         for backend in ("codex", "grok", "kimi"):
             with self.subTest(backend=backend):
                 self.assertNotIn("prompt text", self._argv(backend))
+
+
+class TestProtectedRootsAndIsolation(unittest.TestCase):
+    def test_protected_roots_cover_worktree_main_and_git_dirs(self):
+        env = {**os.environ,
+               "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        with tempfile.TemporaryDirectory() as td:
+            main = Path(td) / "main"
+            main.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=main, check=True)
+            subprocess.run(
+                ["git", "-C", str(main), "commit", "--allow-empty", "-m", "x", "-q"],
+                check=True, env=env)
+            wt = Path(td) / "wt"
+            subprocess.run(
+                ["git", "-C", str(main), "worktree", "add", "-q", str(wt)],
+                check=True, env=env)
+            r = _source("_repo_protected_roots", cwd=wt)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            roots = [os.path.realpath(p) for p in r.stdout.splitlines() if p.strip()]
+            self.assertIn(os.path.realpath(wt), roots)
+            self.assertIn(os.path.realpath(main), roots)
+            gitdir = subprocess.check_output(
+                ["git", "-C", str(wt), "rev-parse", "--git-dir"], text=True
+            ).strip()
+            if not gitdir.startswith("/"):
+                gitdir = str(wt / gitdir)
+            self.assertIn(os.path.realpath(gitdir), roots)
+
+    def test_bwrap_applies_secret_masks_before_remount_ro(self):
+        src = AGENTS.read_text(encoding="utf-8")
+        bind = src.find('args+=(--bind "$p" "$p")')
+        secrets = src.find('args+=(--tmpfs "$q")')
+        remount = src.find('args+=(--remount-ro "$p")')
+        self.assertGreater(bind, 0)
+        self.assertGreater(secrets, bind)
+        self.assertGreater(remount, secrets)
+
+    def test_kimi_runtime_copies_only_credentials_and_disables_side_channels(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".prompt") as pf, \
+                tempfile.NamedTemporaryFile("w", suffix=".cred") as cred, \
+                tempfile.NamedTemporaryFile("r", suffix=".iso") as iso:
+            pf.write("prompt text\n")
+            pf.flush()
+            cred.write('{"token":"dummy"}\n')
+            cred.flush()
+            r = _source(
+                "_read_web_safe() { return 0; }",
+                "_assert_prompt_readable_in_jail() { return 0; }",
+                r'''
+sandboxed() {
+  shift
+  python3 -c "
+import os, pathlib
+home = os.environ['HOME']
+khome = os.environ['KIMI_CODE_HOME']
+root = pathlib.Path(khome)
+files = sorted(str(p.relative_to(root)) for p in root.rglob('*') if p.is_file())
+print('HOME=' + home)
+print('KIMI_CODE_HOME=' + khome)
+print('TEL=' + os.environ.get('KIMI_DISABLE_TELEMETRY', ''))
+print('NOUPD=' + os.environ.get('KIMI_CODE_NO_AUTO_UPDATE', ''))
+print('KEEP=' + os.environ.get('KIMI_CODE_BACKGROUND_KEEP_ALIVE_ON_EXIT', ''))
+print('CRON=' + os.environ.get('KIMI_DISABLE_CRON', ''))
+print('files=' + ','.join(files))
+print('mode=' + oct(pathlib.Path(home).stat().st_mode & 0o777))
+print('under_host=' + str(home.startswith(os.environ.get('SWARM_HOST_HOME', '\0'))))
+" > "$ISO"
+  printf '{"findings":[]}'
+}
+''',
+                f'( run_kimi "{pf.name}" high "" "{SCHEMA}" ) >/dev/null',
+                env_extra={
+                    "KIMI_CREDENTIALS_FILE": cred.name,
+                    "ISO": iso.name,
+                },
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            info = Path(iso.name).read_text()
+            self.assertIn("TEL=1", info)
+            self.assertIn("NOUPD=1", info)
+            self.assertIn("KEEP=0", info)
+            self.assertIn("CRON=1", info)
+            self.assertIn("files=credentials/kimi-code.json", info)
+            self.assertIn("mode=0o700", info)
+            self.assertIn("under_host=False", info)
+            self.assertNotIn("config.toml", info)
+            self.assertNotIn("hooks", info)
+            self.assertNotIn("sessions", info)
 
 
 if __name__ == "__main__":

@@ -32,8 +32,9 @@ const EXTERNAL_PROMPT = INPUT.externalPromptFile
 const TELEMETRY = INPUT.telemetryFile
 
 // TWO timeouts guard every external call, and they must not race:
-//   inner — the adapter's `timeout` wrapper, yielding a clean rc=124 that the
-//           error path and the telemetry line both key on;
+//   inner — the adapter's `timeout` wrapper, yielding a clean rc=124 (SIGTERM)
+//           or rc=137 (SIGKILL after `-k`) that `_is_timeout_rc` and telemetry
+//           both key on — but 137 only when a wrapper actually enforced a wall;
 //   outer — the Bash tool the transport agent runs the command with, whose
 //           maximum is a HARD 600000 ms.
 // Both defaulted to 600 s, so which one fired first was undefined — and when the

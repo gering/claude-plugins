@@ -19,6 +19,23 @@ def check(name: str, condition: bool) -> None:
         FAILS.append(name)
 
 
+_PROBE_STUB = r'''
+_fake_probe() {
+  if [[ "$*" == *"acp --help"* ]]; then
+    printf '%s' "$FAKE_HELP"
+    return "$FAKE_HELP_RC"
+  fi
+  if [[ "$*" == *"provider list --json"* ]]; then
+    printf '%s' "$FAKE_MODELS"
+    return "$FAKE_MODELS_RC"
+  fi
+  return 99
+}
+_bounded_probe() { _fake_probe "$@"; }
+_probe_or_bare() { _fake_probe "$@"; }
+'''
+
+
 def run_ready(*, help_text: str, models: str, help_rc: int = 0,
               models_rc: int = 0, credentials: bool = True,
               requested_model: str = ""):
@@ -37,18 +54,8 @@ def run_ready(*, help_text: str, models: str, help_rc: int = 0,
         })
         script = f'''set -euo pipefail
 source {str(AGENTS)!r}
-_bounded_probe() {{
-  if [[ "$*" == *"acp --help"* ]]; then
-    printf '%s' "$FAKE_HELP"
-    return "$FAKE_HELP_RC"
-  fi
-  if [[ "$*" == *"provider list --json"* ]]; then
-    printf '%s' "$FAKE_MODELS"
-    return "$FAKE_MODELS_RC"
-  fi
-  return 99
-}}
-if ready_check kimi "$FAKE_REQUESTED_MODEL"; then printf 'ready\n'; else printf 'not-ready\n'; fi
+{_PROBE_STUB}
+if ready_check kimi "$FAKE_REQUESTED_MODEL"; then printf 'ready\\n'; else printf 'not-ready\\n'; fi
 '''
         return subprocess.run(
             ["bash", "-c", script],
@@ -75,6 +82,7 @@ def run_install_gate(*, display_version: bool):
 source {str(AGENTS)!r}
 ready_check() {{ return 0; }}
 _bounded_probe() {{ printf 'bounded:%s\\n' "$*" >>"$FAKE_LOG"; "$@"; }}
+_probe_or_bare() {{ _bounded_probe "$@"; }}
 {action}
 '''
         result = subprocess.run(
@@ -148,7 +156,7 @@ check(
 # named oauth/ path can stay empty while logged in) and a qualified model alias.
 script = f'''set -euo pipefail
 source {str(AGENTS)!r}
-printf '%s\n%s\n' "$KIMI_CREDENTIALS_FILE" "$KIMI_DEFAULT_MODEL"
+printf '%s\\n%s\\n' "$KIMI_CREDENTIALS_FILE" "$KIMI_DEFAULT_MODEL"
 '''
 env = os.environ.copy()
 env.pop("KIMI_CREDENTIALS_FILE", None)

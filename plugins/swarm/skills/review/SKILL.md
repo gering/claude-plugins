@@ -956,18 +956,21 @@ post. Do **not** re-implement the sanitize/gate/post logic inline.
   methodological-lens consensus not tagged by a Claude voice that checked the
   claim still go through the verifier.
 - **Security floor** (adapter + this pipeline): the diff is fenced as data;
-  external CLIs run **read+web** under an OS secret-jail (HOME secret stores +
+  external CLIs run **read+web** under an OS jail (HOME secret stores +
   root-level `.env*`/`data/`/key/cred files denied — reviewed root AND, in a
   linked worktree, the main checkout; root-level only, nested secrets via
-  `SWARM_DENY_PATHS`; no working jail → fail closed **per voice**: grok
-  tool-less/no-web, codex web hard-off with its own read-only sandbox's read
-  surface, Kimi omitted entirely because ACP has no safe jail-less tier) —
-  no write/shell tools. A prompt **egress guard** (outside the diff fence)
-  forbids putting repo content into web queries; it is model-cooperation-
-  dependent, not transport-enforced — the jail is the hard boundary.
-  `scrub_secrets` + a final **output gate** re-scrub findings at the adapter
-  boundary (output only, not mid-run queries). See `docs/pipeline-blueprint.md`
-  § Security for the threat model and residual risk.
+  `SWARM_DENY_PATHS`; repository/Git paths write-denied; no working jail →
+  fail closed **per voice**: grok tool-less/no-web, codex web hard-off with
+  its own read-only sandbox's read surface, Kimi omitted entirely because
+  ACP has no safe jail-less tier). Kimi additionally uses an isolated HOME
+  with a credentials copy only; ACP rejection is defense-in-depth. A prompt
+  **egress guard** (outside the diff fence) forbids putting repo content into
+  web queries; it is model-cooperation-dependent, not transport-enforced —
+  the jail is the hard boundary. Arbitrary subprocess execution remains a
+  documented residual. `scrub_secrets` + a final **output gate** re-scrub
+  findings at the adapter boundary (output only, not mid-run queries). See
+  `docs/pipeline-blueprint.md` § Security for the threat model and residual
+  risk.
 - **Acting on findings** (`--fix` / `--loop`): without a flag the review is
   read-only. With one, swarm acts **only** on ✅-agree + 🟨-partial findings —
   **Claude** applies every edit (external agents stay review-only under the

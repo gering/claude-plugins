@@ -224,13 +224,17 @@ credential mid-review) converged on these non-negotiable mitigations:
    -c tools.web_search=true` (web works under read-only; never
    `workspace-write` / `--add-dir`); Kimi via ACP with no client FS/terminal
    capability, every permission request rejected, and completed mutating tool
-   kinds treated as policy failure; **an OS-level read-deny jail**
+   kinds treated as policy failure (defense-in-depth); **an OS-level jail**
    (`sandbox-exec`/`bwrap`) around every call, denying HOME secret stores
    **per-backend** (a backend keeps its own cred dir but not its siblings' —
-   verified: codex can't read `~/.grok`) **plus repo-root** `.env*` / `data/` /
+   verified: codex can't read `~/.grok`; Kimi's ambient `~/.kimi-code` is
+   always denied because credentials are copied into an ephemeral HOME)
+   **plus repo-root** `.env*` / `data/` /
    `*.pem` / SSH id keys (`id_rsa*`/`id_ed25519*`/…) / `*.key` / `.npmrc` /
    `.pypirc` / `credentials.json` (root-level only — nested secrets via
-   `SWARM_DENY_PATHS`; in a linked worktree the **main checkout's** root too).
+   `SWARM_DENY_PATHS`; in a linked worktree the **main checkout's** root too)
+   **and repository/Git write-deny** (`sandbox-exec` `file-write*` /
+   `bwrap --remount-ro`, `GIT_OPTIONAL_LOCKS=0`).
    No working jail → **fail closed per voice** (grok tool-less/no-web, codex web
    hard-off, Kimi omitted/refused because ACP has no safe jail-less tier); **an
    env filter** stripping secret-shaped vars (the jail blocks
@@ -238,8 +242,9 @@ credential mid-review) converged on these non-negotiable mitigations:
    global/system config so a denied `~/.gitconfig` never breaks git. A prompt
    **egress guard** (outside the untrusted-diff fence) forbids putting repository
    content into web queries — it is **model-cooperation-dependent**, not
-   transport-enforced; the kept+extended secret-jail is the hard boundary that
-   bounds blast radius.
+   transport-enforced; the secret-read jail plus repository immutability are
+   the hard boundaries. Arbitrary child-process execution is a documented
+   residual.
    *Denylist, not allowlist, by necessity:* the node/bun-based CLIs load runtime
    from all over `$HOME`, so a deny-`$HOME`-allowlist jail breaks them (tested:
    codex's node loader dies).

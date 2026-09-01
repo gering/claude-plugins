@@ -104,20 +104,23 @@ applicability — externals can still share a hallucination).
 random nonce at both hops — the diff going into the backends, and the finding
 text they send back into the merge/verify prompts (closing second-order
 injection). External CLIs run **read+web** (file-read to find out-of-diff bugs;
-web for external knowledge only) under an OS secret-jail that denies HOME secret
+web for external knowledge only) under an OS jail that (1) denies HOME secret
 stores and repo-root `.env*`/`data/`/key/cred files (root-level; nested via
-`SWARM_DENY_PATHS`; the main checkout too in a linked worktree) — no write/shell
-tools. On a host with no working sandbox the adapter **fails closed per voice**
-(grok tool-less/no-web, codex web hard-off) rather than running read+web bare. A
+`SWARM_DENY_PATHS`; the main checkout too in a linked worktree) and (2) makes
+the reviewed repository and Git directories **immutable** (`sandbox-exec`
+file-write deny / `bwrap` remount-ro, plus `GIT_OPTIONAL_LOCKS=0`). On a host
+with no working sandbox the adapter **fails closed per voice** (grok
+tool-less/no-web, codex web hard-off) rather than running read+web bare. A
 prompt egress guard forbids putting repo content into web queries (model-
 cooperation-dependent; the jail is the hard boundary). A secret scrub at the
 adapter boundary plus a final **output gate** re-scrub findings before they reach you.
-Kimi runs only when this OS jail is available: its ACP client denies every
-permission-gated operation, refuses successful mutating tool calls, and never
-falls back to an unjailed mode. Findings are advisory by default; `--fix` /
-`--loop` act only on the ones you agreed with, and **only Claude** applies edits
-— external agents stay review-only. The full threat model lives in
-`docs/pipeline-blueprint.md` § Security.
+Kimi runs only when this OS jail is available, with an ephemeral HOME that
+holds only a private copy of its managed-provider credentials. ACP permission
+rejection and mutating-tool detection are defense-in-depth, not the write
+boundary; arbitrary child-process execution remains a documented residual.
+Findings are advisory by default; `--fix` / `--loop` act only on the ones you
+agreed with, and **only Claude** applies edits — external agents stay
+review-only. The full threat model lives in `docs/pipeline-blueprint.md` § Security.
 
 ## Architecture
 
@@ -157,7 +160,7 @@ Backends:
 | `claude` | probe-only | reviews run in-session via the Agent tool |
 | `codex` | external reviewer | `codex exec -s read-only -C <repo> -c tools.web_search=true --output-schema` (model `gpt-5.6-terra`), prompt on stdin (`-- -`); file-read + web under read-only; auth via `codex login status` |
 | `grok` | external reviewer | headless `--prompt-file` with inline `--json-schema`; the model is **discovered** — the newest canonical id whose schema enforcement is verified (the current set lives in `GROK_SCHEMA_VERIFIED` in `agents.sh`), never a silent upgrade to an unverified one. Strict `--tools` allowlist (`read_file,list_dir,grep,web_search,web_fetch`) + `--cwd <repo>` — no write/shell. Readiness is model-aware: auth, `--prompt-file` support, **and** a verified model on offer in `grok models`. `ready` answers usable/not-usable plus a hint; the concrete id is selected at `run` time and appears in that call's telemetry line. |
-| `kimi` | external reviewer | ACP v1 over stdio (`kimi acp`), pinned to `kimi-code/k3-256k`; the complete prompt is an ACP content block, not argv. The client advertises no FS/terminal capability, rejects permission requests, allows approval-free read/search/web tools, and strictly validates the final response against the shared schema. Invalid output or policy/protocol drift is a visible backend error, never an empty review. Requires auth, ACP, the pinned model, and a working OS jail. |
+| `kimi` | external reviewer | ACP v1 over stdio (`kimi acp`), pinned to `kimi-code/k3-256k`; the complete prompt is an ACP content block, not argv. Isolated HOME/KIMI_CODE_HOME with a private credentials copy. The client advertises no FS/terminal capability and rejects permission requests as defense-in-depth; repository immutability is OS-enforced. Invalid output or policy/protocol drift is a visible backend error, never an empty review. Requires auth, ACP, the pinned model, and a working OS jail. |
 
 The prompt always reaches a backend **out-of-band** — never as an argv word — so
 the diff is bounded by model context rather than `exec`'s `MAX_ARG_STRLEN`:
