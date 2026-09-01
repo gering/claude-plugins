@@ -212,7 +212,9 @@ coordinate that separately, do not duplicate transport work here.
   `grok-composer-2.5-fast`, which swarm had shipped as a second grok voice; the
   auth-only probe kept reporting it Ready until it failed mid-review with
   `Invalid params: "unknown model id"`. `ready`/`list` now also require
-  grok-4.5 in `grok models` (grok is the one backend with a usable model-list
+  a schema-verified model in `grok models` (originally the pinned `grok-4.5`;
+  since the discovery rework it is "any verified id on offer" — see the
+  discovery section below, which supersedes the pin described here) (grok is the one backend with a usable model-list
   command; codex has none, so its model is trusted). The gotchas, all live-
   verified:
   - **Parse the bullet list by SHAPE, not position — and match the id

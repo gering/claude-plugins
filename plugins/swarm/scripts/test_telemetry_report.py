@@ -132,6 +132,29 @@ r = run([write([REC_PRE])])
 check("a pre-call abort still says the backend was never reached",
       "never reached the backend" in r.stdout)
 
+# A large prompt answered in seconds is the shape of a call that never received
+# it (masked prompt file, empty transport). The out-of-band transport removed the
+# old size/exec error, so this is the only place that smell is visible.
+REC_FAST_BIG = '{"backend":"grok","unit":"breakage","effort":"high","model":"grok-4.6","prompt_bytes":204800,"seconds":3,"timeout_seconds":540,"backend_rc":0,"adapter_rc":0,"timed_out":false}'
+r = run([write([REC_FAST_BIG])])
+check("an implausibly fast large-prompt call is flagged",
+      "verify the backend actually received the prompt" in r.stdout)
+# A small prompt answered fast is normal — the smell is size-relative.
+REC_FAST_SMALL = '{"backend":"grok","unit":"reach","effort":"high","model":"grok-4.6","prompt_bytes":1024,"seconds":3,"timeout_seconds":540,"backend_rc":0,"adapter_rc":0,"timed_out":false}'
+r = run([write([REC_FAST_SMALL])])
+check("a fast SMALL call is not flagged", "⚠️" not in r.stdout)
+
+# The concrete model belongs in the report: the balance line only carries the
+# family, so an unrendered model field left "which model reviewed this?"
+# answerable only from the raw jsonl.
+r = run([write([REC_FAST_SMALL])])
+check("the record's model is rendered", "grok-4.6" in r.stdout)
+
+# A wall is a duration; 0 or negative made every percentage nonsense.
+check("a non-positive --timeout-seconds is a usage error",
+      run([write([REC_FAST]), "--timeout-seconds", "0"]).returncode == 2
+      and run([write([REC_FAST]), "--timeout-seconds", "-600"]).returncode == 2)
+
 # --- usage ------------------------------------------------------------------
 check("no args is a usage error", run([]).returncode == 2)
 check("bad --timeout-seconds is a usage error",

@@ -15,7 +15,7 @@ P2 turns the blueprint into a working review: a **Workflow-tool script**
 (`plugins/swarm/workflows/swarm-review.js`) launched by the `/swarm:review`
 skill. Shape: `scope+gate → fan-out (3 voices) → merge (file,mechanism) →
 verify solos + design clusters → output-gated synthesis`. Three voices: Claude
-lenses ∥ codex ∥ grok-4.5 (see [swarm-backend-adapter](swarm-backend-adapter.md)).
+lenses ∥ codex ∥ grok (model discovered, not pinned — see [swarm-backend-adapter](swarm-backend-adapter.md)).
 A fourth, `grok-composer-2.5-fast`, was removed in swarm 0.4.3 — the grok CLI
 dropped the model.
 

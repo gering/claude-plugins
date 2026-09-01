@@ -242,7 +242,18 @@ check(
 )
 check(
     "skill: renders the reduced-consensus warning",
-    "balance.familiesLost" in skill and "Konsens-Basis reduziert" in skill,
+    "coverageNotes" in skill and "Konsens-Basis reduziert" in skill,
+)
+# The scoped/global distinction is DECIDED in the workflow now: prose that
+# re-derives it from the three raw flags is what got the scoping wrong (a single
+# degraded cluster reported as a run-wide loss of consensus).
+check(
+    "workflow: emits the coverage sentences itself",
+    "const coverageNotes = []" in js and "coverageNotes," in js,
+)
+check(
+    "workflow: consensusReachable is the GLOBAL question only",
+    re.search(r"const consensusReachable = familiesPresent\.length >= 2\s*$", js, re.M),
 )
 
 # Sharing the env knob means sharing its CONTRACT. The adapter refuses a
@@ -420,7 +431,9 @@ check("adapter: probe budget is derived from the ceiling + kill grace",
 # itself — adding one forces this number to be touched, and touching it forces a
 # decision about whether the worst case moved too.
 _probe_sites = len([l for l in sh.splitlines()
-                    if "_bounded_probe " in l and not l.lstrip().startswith("#")])
+                    if ("_bounded_probe " in l or "_probe_or_bare " in l)
+                    and not l.lstrip().startswith("#")
+                    and "_probe_or_bare() {" not in l])
 _declared = re.search(r"SWARM_MAX_PROBES_PER_RUN=(\d+)", sh)
 # A comment inside a `\`-continued command silently truncates it: the shell ends
 # the logical line at the `#`, so every remaining argument disappears while
@@ -436,11 +449,11 @@ for _i, _l in enumerate(_sh_lines[:-1]):
 check(f"adapter: no comment inside a line continuation ({_cont})", not _cont)
 
 check("adapter: SWARM_MAX_PROBES_PER_RUN is declared", _declared)
-check(f"adapter: _bounded_probe call sites still number 4 (got {_probe_sites}) — "
+check(f"adapter: pre-timer probe call sites still number 5 (got {_probe_sites}) — "
       f"if you added one, re-derive SWARM_MAX_PROBES_PER_RUN "
       f"(currently {_declared.group(1) if _declared else '?'}, the worst case for a "
       f"single backend) and update this pin",
-      _probe_sites == 4)
+      _probe_sites == 5)
 check("adapter: the declared worst case covers grok's three probes",
       bool(_declared) and int(_declared.group(1)) >= 3)
 
@@ -467,6 +480,20 @@ for _line in _cfg.stdout.splitlines():
         _reported = _line.split("=", 1)[1].strip()
 _fb = re.search(r"const PROBE_BUDGET_FALLBACK_S = (\d+)", js)
 check("workflow: a named fallback constant exists", _fb)
+_cap_reported = ""
+for _line in _cfg.stdout.splitlines():
+    if _line.startswith("max_prompt_bytes="):
+        _cap_reported = _line.split("=", 1)[1].strip()
+_cap_fb = re.search(r"const MAX_PROMPT_BYTES_FALLBACK = (\d+)", js)
+check("workflow: a named prompt-cap fallback exists", _cap_fb)
+check(f"workflow cap fallback == adapter max_prompt_bytes "
+      f"(js={_cap_fb.group(1) if _cap_fb else '?'} adapter={_cap_reported or '?'})",
+      bool(_cap_fb) and bool(_cap_reported) and _cap_fb.group(1) == _cap_reported)
+# The workflow pins this value onto every adapter call, so its bounds must be the
+# adapter's bounds — validating only "> 0" let a refused value through and killed
+# every external voice at launch.
+check("workflow: the prompt cap is bounded on both sides",
+      "MAX_PROMPT_BYTES_MIN" in js and "MAX_PROMPT_BYTES_MAX" in js)
 check(f"workflow fallback == adapter probe_budget_seconds "
       f"(js={_fb.group(1) if _fb else '?'} adapter={_reported or '?'})",
       bool(_fb) and bool(_reported) and _fb.group(1) == _reported)

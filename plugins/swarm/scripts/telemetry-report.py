@@ -30,6 +30,11 @@ import sys
 # — so the band above ~60% is where a normal run already sits close enough that
 # ordinary variance reaches the wall.
 WARN_FRACTION = 0.6
+# "Too fast to be real" thresholds. Deliberately conservative: the fastest healthy
+# call measured on this project was 7s for ~199 KiB on a fully cached cluster, so
+# these fire only well below anything observed doing actual work.
+FAST_MIN_KIB = 50
+FAST_MAX_S = 5
 
 
 def load(path):
@@ -89,6 +94,13 @@ def render(records, timeout_seconds):
     for rec in ordered:
         secs = _secs(rec)
         limit = wall(rec, timeout_seconds)
+        # Tolerate a non-numeric value rather than raising: this script's whole
+        # contract is that diagnostics never turn a completed review into a
+        # failed one, and a single malformed field must not take the report down.
+        try:
+            kib = float(rec.get("prompt_bytes") or 0) / 1024
+        except (TypeError, ValueError):
+            kib = 0.0
         pct = (secs / limit * 100) if limit else 0
         if rec.get("timed_out"):
             mark = (f"  ✗ TIMED OUT at the {limit}s wall" if limit
@@ -110,19 +122,29 @@ def render(records, timeout_seconds):
                         f"after {secs}s (adapter rc={rec.get('adapter_rc')})")
             else:
                 mark = f"  ✗ never reached the backend (adapter rc={rec.get('adapter_rc')})"
+        elif kib >= FAST_MIN_KIB and secs <= FAST_MAX_S:
+            # A large prompt answered in seconds is the shape of a call that never
+            # received it: the out-of-band transport removed the old size/exec
+            # error, so a masked or empty prompt now returns schema-valid
+            # "no findings" from a call that looks perfectly healthy — and the
+            # pipeline counts that family as having reviewed. Cheap to spot here,
+            # invisible everywhere else.
+            mark = (f"  ⚠️  only {secs}s for {kib:.0f} KiB — verify the backend "
+                    f"actually received the prompt")
         elif limit and secs >= limit * WARN_FRACTION:
             mark = f"  ⚠️  {pct:.0f}% of the {limit}s wall"
         else:
             mark = ""
         effort = rec.get("effort") or "?"
-        # Tolerate a non-numeric value rather than raising: this script's whole
-        # contract is that diagnostics never turn a completed review into a
-        # failed one, and a single malformed field must not take the report down.
-        try:
-            kib = float(rec.get("prompt_bytes") or 0) / 1024
-        except (TypeError, ValueError):
-            kib = 0.0
-        lines.append(f"  {label(rec):<28} {secs:>4}s  {effort:<6} {kib:>6.1f} KiB{mark}")
+        # The report is where the concrete model belongs: the balance line shows
+        # the FAMILY (grok, gpt), deliberately, since discovery means the exact id
+        # can differ per host and per run. Recorded but never rendered, it was
+        # visible nowhere at all — so "which model actually reviewed this?" had no
+        # answer outside the raw jsonl.
+        model = rec.get("model") or "?"
+        lines.append(
+            f"  {label(rec):<28} {secs:>4}s  {effort:<6} {model:<10} "
+            f"{kib:>6.1f} KiB{mark}")
     return lines
 
 
@@ -146,6 +168,13 @@ def main(argv):
                 timeout_seconds = int(rest[1])
             except ValueError:
                 sys.stderr.write(f"invalid --timeout-seconds: {rest[1]}\n")
+                return 2
+            # A wall is a duration. Accepting 0 or a negative made every
+            # percentage nonsense (a 374s call reported as -62% of a -600s wall)
+            # instead of saying the input was wrong.
+            if timeout_seconds <= 0:
+                sys.stderr.write(
+                    f"invalid --timeout-seconds: {rest[1]} (must be > 0)\n")
                 return 2
             rest = rest[2:]
         else:

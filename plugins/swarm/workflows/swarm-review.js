@@ -79,9 +79,20 @@ const BASH_TIMEOUT_MS = 600000
 // that one gate would disagree again — the whole point of the `config`
 // handshake. Passing it explicitly makes the value the skill used the value the
 // adapter enforces.
-const MAX_PROMPT_BYTES = Number.isInteger(INPUT.maxPromptBytes) && INPUT.maxPromptBytes > 0
-  ? INPUT.maxPromptBytes
-  : 524288
+// Bounds mirror the adapter's own resolver (floor = its lens-instruction
+// headroom + 1, ceiling = its sanity rail). Validating only "> 0" let a value the
+// adapter REFUSES be pinned onto every call, so all external voices died at
+// launch with "Invalid SWARM_MAX_PROMPT_BYTES" — a config typo turning into a
+// silent Claude-only review. The fallback is pinned against `agents.sh config` in
+// test_lens_sync.py, like PROBE_BUDGET_FALLBACK_S.
+const MAX_PROMPT_BYTES_FALLBACK = 524288
+const MAX_PROMPT_BYTES_MIN = 4097
+const MAX_PROMPT_BYTES_MAX = 1073741824
+const _capIn = Number.isInteger(INPUT.maxPromptBytes) ? INPUT.maxPromptBytes : MAX_PROMPT_BYTES_FALLBACK
+const MAX_PROMPT_BYTES = Math.min(Math.max(_capIn, MAX_PROMPT_BYTES_MIN), MAX_PROMPT_BYTES_MAX)
+if (_capIn !== MAX_PROMPT_BYTES) {
+  log(`maxPromptBytes=${_capIn} is outside what the adapter accepts — using ${MAX_PROMPT_BYTES}`)
+}
 const PROBE_BUDGET_FALLBACK_S = 69
 // Bounded on BOTH sides: an unbounded budget would drive MAX_INNER_S negative and
 // hand `SWARM_TIMEOUT=-N` to the adapter, which rejects it — every voice failing
@@ -731,10 +742,22 @@ const unitsDegraded = Array.from(unitsByName.entries())
 // one becomes a solo. That is a different review, not a degraded log line.
 // Global reachability is necessary but not sufficient: claim it only when EVERY
 // unit could also reach it, so the balance line cannot overstate the review.
-const consensusReachable = familiesPresent.length >= 2 && unitsDegraded.length === 0
+// TWO questions, two flags. Collapsing them made a single degraded cluster read
+// as "no finding in this run can reach consensus" — false for every healthy
+// cluster, and printed next to a header stating full family coverage.
+const consensusReachable = familiesPresent.length >= 2
 if (familiesLost.length) {
   log(`Family coverage: lost ${familiesLost.join(', ')} — ${familiesPresent.length} of ${familiesExpected.length} families reviewed` +
       (familiesPresent.length >= 2 ? '' : '; consensus is UNREACHABLE this run, every finding falls back to solo + verifier'))
+}
+const coverageNotes = []
+if (familiesLost.length) {
+  coverageNotes.push(`${familiesLost.join(', ')} contributed nothing this run — ${familiesPresent.length} of ${familiesExpected.length} model families reviewed.`)
+}
+if (!consensusReachable) {
+  coverageNotes.push(`Fewer than 2 model families returned, so NO finding in this run can reach consensus — every one falls back to solo + adversarial verifier.`)
+} else if (unitsDegraded.length) {
+  coverageNotes.push(`Clusters ${unitsDegraded.join(', ')} had fewer than 2 families return: findings THERE fall back to solo + verifier. The remaining clusters are unaffected.`)
 }
 if (unitsDegraded.length) {
   log(`Cluster coverage: ${unitsDegraded.join(', ')} had fewer than 2 families return — findings there cannot reach consensus and fall back to solo + verifier`)
@@ -1116,6 +1139,10 @@ return {
     familiesLost,
     unitsDegraded,
     consensusReachable,
+    // The exact sentence(s) to print, built here so the presenter cannot
+    // generalize a scoped degradation into a run-wide claim (it did) and cannot
+    // drift from these semantics in prose.
+    coverageNotes,
     backendErrors: scrubbedErrors,
     rawPerLens,
     survivingPerLens,

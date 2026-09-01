@@ -495,39 +495,25 @@ Lenses:  <gate.run joined>  —  gated-out: <gate.skip lenses>
 ```
 
 Then, when present:
-- **Family coverage** — print this IMMEDIATELY under the `Bilanz:` line, before
-  anything else in this list, whenever `balance.familiesLost` is non-empty **OR**
-  `balance.consensusReachable` is false **OR** `balance.unitsDegraded` is
-  non-empty. **Say which of the three it is — they mean different things:**
-  `familiesLost` = that family reviewed nothing all run; `unitsDegraded` = named
-  clusters where fewer than two families returned, so findings *in those clusters*
-  fall back to solo+verifier while the rest of the run is unaffected; only
-  `familiesPresent < 2` means no finding anywhere can reach consensus. Report a
-  degraded cluster as scoped to that cluster — claiming the whole run lost
-  consensus overstates the damage exactly as badly as staying silent understates
-  it. The two conditions are independent: a
-  run that only ever had ONE family (externals unavailable, or `claude: false`
-  with a single backend) loses nothing yet still cannot form consensus, and
-  nesting the second warning inside the first meant that run printed nothing at
-  all — the quietest possible failure of the exact guarantee this block exists
-  to state:
+- **Family coverage** — when `balance.coverageNotes` is non-empty, print this
+  IMMEDIATELY under the `Bilanz:` line, before anything else in this list:
 
   ```
   ⚠️  Konsens-Basis reduziert: <familiesPresent.length> von <familiesExpected.length> Modellfamilien
       — „Konsens" heißt in diesem Lauf Übereinstimmung von <familiesPresent joined>.
   ```
 
-  Append `(ausgefallen: <familiesLost joined>)` to the first line **only when
-  `familiesLost` is non-empty** — in the consensus-unreachable-but-nothing-lost
-  case (a run that only ever had one family) the list is empty and printing an
-  empty parenthesis reads like a rendering bug in the very warning that is
-  supposed to be the trustworthy part of the report.
-
-  If `balance.consensusReachable` is false, add: **kein Finding kann in diesem
-  Lauf Konsens erreichen — alle laufen als Solo durch den Verifier.**
+  then **each `coverageNotes` entry verbatim** (translated, not reinterpreted).
+  **The workflow decides what these say** — which of the three situations holds,
+  and whether the damage is run-wide or scoped to named clusters. Do not re-derive
+  it from `familiesLost` / `unitsDegraded` / `consensusReachable` yourself: the
+  three mean different things, the conditional prose that used to live here got
+  the scoping wrong (one degraded cluster was reported as "no finding in this run
+  can reach consensus", next to a header stating full coverage), and a rule this
+  fiddly cannot survive in prose that no test can check.
 
   Why it belongs *here* and not only under backend errors: consensus is defined
-  as ≥2 agreeing families, so a lost family changes what every `CONSENSUS` and
+  as ≥2 agreeing families, so reduced coverage changes what every `CONSENSUS` and
   every solo in the table above MEANS — a finding that would have been
   corroborated is instead routed through the adversarial verifier. The numbers
   look identical to a healthy run; only this line distinguishes them. Never omit
@@ -776,7 +762,7 @@ post. Do **not** re-implement the sanitize/gate/post logic inline.
      ],
      "has_quelle": true,
      "balance": "<the step-3 balance block, verbatim>",
-     "notes": ["<redaction / backend-error / fence-degraded lines from step 3, if any>"],
+     "notes": ["<every extra line from step 3, if any: coverage notes, redaction, backend errors, fence-degraded>"],
      "empty": false
    }
    ```

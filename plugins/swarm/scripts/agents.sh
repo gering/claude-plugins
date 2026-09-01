@@ -168,23 +168,28 @@ _json_escape() {
   # malformed — and a silently dropped record reads as "that voice never ran",
   # the exact misreading this telemetry exists to prevent. Anything still
   # remaining in that range becomes \u00XX.
-  local out="" ch i
+  # Fast path: the overwhelming majority of fields (cluster names, model ids)
+  # contain no control characters at all, and the loop below is per-character.
+  # [[:cntrl:]] is a POSIX class, not a collation range, so it does not carry the
+  # locale hazard the loop guards against.
+  if [[ ! "$v" =~ [[:cntrl:]] ]]; then
+    printf '%s' "$v"
+    return 0
+  fi
+  local out="" ch i code
   for (( i = 0; i < ${#v}; i++ )); do
     ch="${v:i:1}"
-    # LC_ALL=C: `<` inside [[ ]] compares by the CURRENT LOCALE's collation, where
-    # a control character can sort AFTER a space (glibc's en_US.UTF-8 ignores most
-    # of them at the primary level). The test would then quietly stop firing and
-    # emit a raw control byte — a record the reader discards as malformed, which
-    # reads as "that voice never ran". Byte order is what this needs.
     # Numeric, not `[[ "$ch" < $'\x20' ]]`: `<` compares by the current locale's
     # COLLATION, where a control character can sort after a space and the test
     # quietly stops firing — emitting a raw control byte, i.e. a record the reader
     # discards as malformed, which reads as "that voice never ran".
     # `code >= 0` is load-bearing: for a multi-byte character printf yields the
     # code point (>= 128) or a NEGATIVE first byte depending on locale, and
-    # treating that as "below 0x20" would mangle every non-ASCII cluster name into
+    # treating that as "below 0x20" would mangle every non-ASCII name into
     # \uffffffffffffffc3 garbage. Control characters are 0..31, always positive.
-    local code; code=$(LC_ALL=C printf '%d' "'$ch" 2>/dev/null || echo 32)
+    # `printf -v` is the BUILTIN form: `code=$(printf …)` forked a subshell for
+    # every character of every escaped field.
+    printf -v code '%d' "'$ch" 2>/dev/null || code=32
     if (( code >= 0 && code < 32 )); then
       printf -v ch '\\u%04x' "'$ch"
     fi
@@ -334,7 +339,13 @@ _is_timeout_rc() {
   # `kill -9`. Only claim a wall hit when a wall was actually in force; with the
   # cap disabled (SWARM_TIMEOUT=0) or unresolved, a 137 is somebody else's kill
   # and "timed out after 0s" would be a plain lie.
-  (( $1 == 137 )) && [[ -n "${_adapter_timeout:-}" && "${_adapter_timeout:-0}" != "0" ]]
+  # Both conditions matter: a wall must have been in force AND a wrapper must have
+  # existed to enforce it. With no timeout binary the call ran bare, so nothing
+  # here could have sent SIGKILL — a 137 is then an OOM kill or an outside
+  # `kill -9`, and calling it a timeout points the operator at the wrong cause.
+  (( $1 == 137 )) \
+    && [[ -n "${_adapter_timeout:-}" && "${_adapter_timeout:-0}" != "0" ]] \
+    && [[ -n "${_timeout_bin:-}" ]]
 }
 
 # Resolved LAZILY, on first use. Resolving at top level meant a bad value in a
@@ -363,8 +374,11 @@ with_timeout() {
   # so there is no "timed out after Ns" line and no telemetry record. That lost
   # diagnosis is the thing this branch exists to prevent, and _bounded_probe
   # already used -k for the same reason.
-  if command -v timeout >/dev/null; then timeout -k "$TIMEOUT_KILL_GRACE" "$ADAPTER_TIMEOUT" "$@"
-  elif command -v gtimeout >/dev/null; then gtimeout -k "$TIMEOUT_KILL_GRACE" "$ADAPTER_TIMEOUT" "$@"
+  # Same discovery the probes use — open-coding it here meant two `command -v`
+  # sweeps per process and two places to keep in step.
+  timeout_bin
+  if [[ -n "$_timeout_bin" ]]; then
+    "$_timeout_bin" -k "$TIMEOUT_KILL_GRACE" "$ADAPTER_TIMEOUT" "$@"
   else
     # No coreutils timeout: run bare, but say so once — otherwise the documented
     # cap silently never applies (e.g. stock macOS) and a hung backend blocks.
@@ -383,6 +397,25 @@ with_timeout() {
 # readable (verified: ~/.aws blocked, ~/.codex readable). macOS: sandbox-exec;
 # Linux: bwrap; else passthrough (scrub_secrets + backend flags remain).
 # Extra deny paths via SWARM_DENY_PATHS (colon-separated absolute paths).
+_assert_prompt_readable_in_jail() {
+  # grok reads the prompt from a PATH, inside the jail. A deny entry covering that
+  # path does not error under bwrap — it masks the file, which reads as EMPTY. The
+  # backend then reviews nothing, returns schema-valid `{"findings":[]}` in
+  # seconds, and the pipeline counts it as a family that reviewed and found
+  # nothing. Prose ("never deny TMPDIR") cannot stop that; a check can.
+  # Refuse when any deny entry is a path PREFIX of the prompt file. Fail closed:
+  # an unreviewable run must be loud, never a quiet clean bill of health.
+  local prompt="$1" d
+  for d in $(_sandbox_deny_paths "${TELEMETRY_BACKEND:-grok}"); do
+    [[ -n "$d" ]] || continue
+    case "$prompt/" in
+      "$d"/*|"${d%/}"/*)
+        echo "refusing to run: the prompt file ($prompt) is inside a denied path ($d) — inside the jail it would read as EMPTY and the backend would return 'no findings' from a call that never saw the diff. Move TMPDIR outside SWARM_DENY_PATHS." >&2
+        exit 2 ;;
+    esac
+  done
+}
+
 _sandbox_deny_paths() {
   # $1 = the calling backend (its OWN credential dir stays readable — it needs
   # it to authenticate; the OTHER backends' cred dirs are denied so an injected
@@ -706,11 +739,7 @@ available_version() {
   # (stock macOS), and `_bounded_probe` cannot make that choice itself: it runs
   # inside $(...) where it can neither warn once nor set a flag.
   _probe_setup_lenient
-  if [[ -n "$_timeout_bin" ]]; then
-    _bounded_probe "$backend" --version 2>/dev/null | head -1 || true
-  else
-    "$backend" --version 2>/dev/null | head -1 || true
-  fi
+  _probe_or_bare "$backend" --version 2>/dev/null | head -1 || true
   return 0
 }
 
@@ -806,6 +835,16 @@ timeout_bin() {
   else _timeout_bin=""
   fi
 }
+_probe_or_bare() {
+  # Run bounded when a wrapper exists, unbounded otherwise — the degrade contract
+  # `with_timeout` has always documented, for the call sites where losing the
+  # answer is worse than losing the bound (a version string, a local auth check).
+  # Callers that must NOT run unbounded (the network-reaching `grok models`) test
+  # $_timeout_bin themselves and skip instead. Extracted because the if/else was
+  # written out twice and the two copies are what a third call site would clone.
+  if [[ -n "$_timeout_bin" ]]; then _bounded_probe "$@"; else "$@"; fi
+}
+
 _bounded_probe() {
   # Run a LOCAL probe under the probe bound and print its stdout. Returns the
   # command's rc, or 1 if it could not be bounded at all. Whether a wrapper EXISTS
@@ -1057,8 +1096,7 @@ ready_check() {
     # unbounded local call.
     codex)
       _probe_setup_lenient
-      if [[ -n "$_timeout_bin" ]]; then _bounded_probe codex login status >/dev/null 2>&1
-      else codex login status >/dev/null 2>&1; fi
+      _probe_or_bare codex login status >/dev/null 2>&1
       ;;
     # Model-aware: auth alone would advertise grok even when the CLI no longer
     # offers the one model the adapter can drive (grok drops/renames models
@@ -1099,7 +1137,16 @@ ready_hint() {
 
 # ---------- subcommands ----------
 
+# Every display verb resolves the probe knob HERE, before the command
+# substitutions in print_rows/available_version. Left to the lenient resolver
+# inside those subshells, the "warn once" flag was set in a shell that exits
+# immediately: the warning printed once per backend row (or not at all, when the
+# subshell's stderr was captured), and the memo never reached the parent — so the
+# value was re-resolved for every probe. Third variant of the same subshell bug.
+_display_setup() { _probe_setup_lenient; }
+
 subcmd_available() {
+  _display_setup
   local backend="${1:-}"
   [[ -z "$backend" ]] && usage
   validate_backend "$backend"
@@ -1120,6 +1167,7 @@ require_usable() {
 }
 
 subcmd_ready() {
+  _display_setup
   local backend="${1:-}"
   [[ -z "$backend" ]] && usage
   validate_backend "$backend"
@@ -1147,6 +1195,7 @@ print_rows() {
 }
 
 subcmd_list() {
+  _display_setup
   case "${1:-}" in
     --json)
       require_python3
@@ -1300,7 +1349,10 @@ subcmd_run() {
     # means the input was larger than the cap.
     head -c "$(( max_bytes + 1 ))" > "$TMP_PROMPT"
     nbytes=$(wc -c < "$TMP_PROMPT" | tr -d "[:space:]")
-    (( nbytes > max_bytes )) && { echo "Prompt too large ($nbytes bytes > $max_bytes) — narrow the diff range, or raise SWARM_MAX_PROMPT_BYTES" >&2; exit 2; }
+    # Report ">" and not an exact figure: the copy stopped at cap+1, so that IS
+    # the count here — printing it as the prompt's size states a number the input
+    # never had, and one that contradicts the PROMPT_BYTES the skill measured.
+    (( nbytes > max_bytes )) && { echo "Prompt too large (over $max_bytes bytes) — narrow the diff range, or raise SWARM_MAX_PROMPT_BYTES" >&2; exit 2; }
     prompt_path="$TMP_PROMPT"
   fi
   # A byte count alone is WEAKER than the guard this replaced: before the
@@ -1626,6 +1678,7 @@ run_grok() {
     tool_args=(--tools "" --disable-web-search)
   fi
 
+  _assert_prompt_readable_in_jail "$prompt_path"
   # The prompt file must stay READABLE INSIDE THE JAIL. The denylist covers HOME
   # secret stores and repo-root secrets, not TMPDIR, so the default path is fine —
   # but a custom SWARM_DENY_PATHS covering $TMPDIR would make this read fail, and
