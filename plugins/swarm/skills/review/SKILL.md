@@ -290,10 +290,29 @@ echo "PROMPT_BYTES=$PROMPT_BYTES"
 SWARM_CFG="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" config 2>&1)" || {
   echo "SWARM_CFG_ERR=$(printf '%s' "$SWARM_CFG" | head -1)"; rm -rf "$TMPD"; exit 0
 }
-OVERSIZE_THRESHOLD=$(printf '%s\n' "$SWARM_CFG" | sed -n 's/^oversize_threshold=//p')
-case "$OVERSIZE_THRESHOLD" in
-  ''|*[!0-9]*) echo "SWARM_CFG_ERR=adapter config did not report a usable oversize_threshold"; rm -rf "$TMPD"; exit 0 ;;
-esac
+# Read every key in ONE pass and require all of them. The previous form piped the
+# same output through four separate seds, and a key the adapter stopped printing
+# (renamed, dropped) produced an EMPTY variable that silently reached a numeric
+# comparison or a bare JS literal — the failure mode this whole `config` handshake
+# exists to remove. A here-doc, not a pipe: a `while read` on the right side of a
+# pipe runs in a subshell and its assignments would be lost.
+CFG_MAX=""; CFG_THRESH=""; CFG_TO=""; CFG_PROBE=""
+while IFS='=' read -r _k _v; do
+  case "$_k" in
+    max_prompt_bytes)     CFG_MAX="$_v" ;;
+    oversize_threshold)   CFG_THRESH="$_v" ;;
+    timeout_seconds)      CFG_TO="$_v" ;;
+    probe_budget_seconds) CFG_PROBE="$_v" ;;
+  esac
+done <<CFGEOF
+$SWARM_CFG
+CFGEOF
+for _pair in "oversize_threshold=$CFG_THRESH" "max_prompt_bytes=$CFG_MAX" "timeout_seconds=$CFG_TO" "probe_budget_seconds=$CFG_PROBE"; do
+  case "${_pair#*=}" in
+    ''|*[!0-9]*) echo "SWARM_CFG_ERR=adapter config did not report a usable ${_pair%%=*}"; rm -rf "$TMPD"; exit 0 ;;
+  esac
+done
+OVERSIZE_THRESHOLD="$CFG_THRESH"
 if [ "$PROMPT_BYTES" -gt "$OVERSIZE_THRESHOLD" ]; then echo "EXTERNALS_OVERSIZE=1"; else echo "EXTERNALS_OVERSIZE=0"; fi
 # Pass the timeout on ONLY when the user actually set it: the workflow derives
 # its own default from the Bash-tool ceiling minus the margin, and handing it a
@@ -303,10 +322,10 @@ if [ "$PROMPT_BYTES" -gt "$OVERSIZE_THRESHOLD" ]; then echo "EXTERNALS_OVERSIZE=
 # where a leading zero would be legacy octal (0600 = 384) or a strict-mode
 # SyntaxError.
 if [ -n "${SWARM_TIMEOUT:-}" ]; then
-  printf '%s\n' "$SWARM_CFG" | sed -n 's/^timeout_seconds=/SWARM_TIMEOUT_S=/p'
+  echo "SWARM_TIMEOUT_S=$CFG_TO"
 fi
-printf '%s\n' "$SWARM_CFG" | sed -n 's/^max_prompt_bytes=/SWARM_MAX_BYTES=/p'
-printf '%s\n' "$SWARM_CFG" | sed -n 's/^probe_budget_seconds=/SWARM_PROBE_BUDGET_S=/p'
+echo "SWARM_MAX_BYTES=$CFG_MAX"
+echo "SWARM_PROBE_BUDGET_S=$CFG_PROBE"
 echo "JAIL=$JAIL"
 echo "LIVE_JSON=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json | tr -d '\n')"
 ```
@@ -525,6 +544,11 @@ Then, when present:
   that text, single quotes do not. The workflow already quotes the same paths
   for the same reason. This is placeholder hygiene, not a property of one
   command: apply it to `<DIFF>`, `<PROMPT>` and `<TELEMETRY>` alike.
+  **Single quotes are not sufficient on their own:** a `'` inside the path ends
+  the quoting, so if a substituted value contains a single quote, escape each one
+  as `'\''` (what the workflow's `shQuote` does) — or, simpler, refuse to run the
+  command and say the path is unusable. A `$TMPDIR` containing a quote is
+  pathological, not impossible.
 
   It reports how long each external voice took and flags any call at ≥60% of the
   wall **that call actually ran under** — the script reads that per record, so do

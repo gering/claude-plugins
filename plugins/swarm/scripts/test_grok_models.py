@@ -135,9 +135,15 @@ def run_bash(*lines, models=None, env=None):
     memo flag) keeps these tests hermetic and lets us assert on catalogs that do
     not exist yet — which is the whole point of a discovery mechanism.
     """
-    pre = []
+    # Stub BOTH memoized probes. Faking only the model list left the
+    # `--prompt-file` capability probe live, so `grok_model_offered` shelled out
+    # to whatever `grok` happened to be on the host's PATH: green on a machine
+    # with a current CLI, red on one without, and a network call inside a test
+    # that advertises itself as hermetic. Pre-setting the memo flags is the same
+    # mechanism the adapter uses, so nothing is monkey-patched.
+    pre = ['_grok_help_done=1', '_grok_help_rc=0']
     if models is not None:
-        pre = [f'_grok_models_done=1', f'_grok_models={_q(models)}']
+        pre += [f'_grok_models_done=1', f'_grok_models={_q(models)}']
     harness = "set -euo pipefail\nsource '%s'\n%s\n" % (
         ADAPTER, "\n".join(pre + list(lines)))
     e = os.environ.copy()
@@ -206,37 +212,37 @@ def select(models, override=""):
     return model, note
 
 
-m, note = select(LIVE_CATALOG)
-check("selects the newest VERIFIED model", m == "grok-4.6")
+sel, note = select(LIVE_CATALOG)
+check("selects the newest VERIFIED model", sel == "grok-4.6")
 check("nothing to report when the newest is verified", note == "")
 
 # The upgrade prompt: a newer canonical model appears that nobody has verified.
 # It must be NAMED but never selected — silently adopting it is what burns a
 # review on structuredOutput:null.
-m, note = select("grok-7\n" + LIVE_CATALOG)
-check("an unverified newer model is NOT selected", m == "grok-4.6")
+sel, note = select("grok-7\n" + LIVE_CATALOG)
+check("an unverified newer model is NOT selected", sel == "grok-4.6")
 check("an unverified newer model IS reported", "grok-7" in note)
 
 # Only older verified models on offer → take the newest of those, no note.
-m, note = select("grok-4.5\ngrok-4.3")
-check("falls back to the newest verified model on offer", m == "grok-4.5")
+sel, note = select("grok-4.5\ngrok-4.3")
+check("falls back to the newest verified model on offer", sel == "grok-4.5")
 check("no note when nothing newer exists", note == "")
 
 # Canonical models exist but none verified → keep the pin and say so, rather than
 # run something unproven.
-m, note = select("grok-9\ngrok-8")
-check("no verified model → keeps the pin", m == PIN)
+sel, note = select("grok-9\ngrok-8")
+check("no verified model → keeps the pin", sel == PIN)
 check("no verified model → reports why", "no schema-verified model" in note)
 
 # An empty/unusable list must keep the pin: dropping grok entirely is worse than
 # running the known-good model (grok_model_fetch already reported the degrade).
-m, note = select("")
-check("empty model list keeps the pin", m == PIN)
+sel, note = select("")
+check("empty model list keeps the pin", sel == PIN)
 
 # An explicit override wins over discovery — but the run_grok preflight still
 # gates it on the verified table (asserted live elsewhere).
 m, _ = select(LIVE_CATALOG, override="grok-4.5")
-check("explicit override beats discovery", m == "grok-4.5")
+check("explicit override beats discovery", sel == "grok-4.5")
 
 # --- readiness must agree with what would actually RUN ------------------------
 # The 1.0.3 regression: readiness said "grok-4.5 not offered" for a CLI that

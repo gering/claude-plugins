@@ -314,7 +314,14 @@ TIMEOUT_KILL_GRACE=3
 # made that path print "check that the CLI offers model X" and record
 # timed_out:false — sending the operator to inspect a model list over a wall hit,
 # with the telemetry denying the timeout happened.
-_is_timeout_rc() { (( $1 == 124 || $1 == 137 )); }
+_is_timeout_rc() {
+  (( $1 == 124 )) && return 0
+  # 137 is 128+SIGKILL — OUR `-k` escalation, but also an OOM kill or any outside
+  # `kill -9`. Only claim a wall hit when a wall was actually in force; with the
+  # cap disabled (SWARM_TIMEOUT=0) or unresolved, a 137 is somebody else's kill
+  # and "timed out after 0s" would be a plain lie.
+  (( $1 == 137 )) && [[ -n "${_adapter_timeout:-}" && "${_adapter_timeout:-0}" != "0" ]]
+}
 
 # Resolved LAZILY, on first use. Resolving at top level meant a bad value in a
 # shell profile (SWARM_TIMEOUT=600s) exited 2 from EVERY subcommand — `--help`,
@@ -670,19 +677,29 @@ available_version() {
     return 0
   fi
   command -v "$backend" >/dev/null || return 1
-  # Best-effort version string. `|| true` + explicit `return 0`: once
-  # `command -v` confirmed the CLI, a non-zero `--version` exit or a SIGPIPE
-  # from head() (under pipefail) must NOT flip an installed backend to
+  # BOUNDED like every other pre-timer call. `<backend> --version` looks trivial
+  # but runs before TELEMETRY_START on the `run` path, and a CLI wedged on a stale
+  # leader socket or a hung PATH entry blocks here forever — wall clock the
+  # workflow's margin believes it has already accounted for. Unbounded, it lets
+  # the OUTER Bash window kill the adapter before the inner cap fires: no rc=124,
+  # no EXIT trap, no telemetry record.
+  # Best-effort output: once `command -v` confirmed the CLI, a non-zero exit, a
+  # timeout, or a SIGPIPE from head() must NOT flip an installed backend to
   # "unavailable".
-  "$backend" --version 2>/dev/null | head -1 || true
+  timeout_bin
+  probe_timeout
+  _bounded_probe "$backend" --version 2>/dev/null | head -1 || true
   return 0
 }
 
 # Wall-clock bound for the readiness probe. Deliberately NOT SWARM_TIMEOUT: that
 # caps a full review (600s default) and may be disabled with 0, neither of which
-# suits a probe that `list`/`ready` block on. Override with SWARM_PROBE_TIMEOUT;
-# a malformed or 0 value falls back to 10 (never uncapped, never a `timeout`
-# usage error that would read as "model missing").
+# suits a probe that `list`/`ready` block on. Override with SWARM_PROBE_TIMEOUT. A
+# malformed value, 0, or anything above the ceiling is REFUSED (exit 2) rather
+# than quietly normalized: the old silent fallback meant an operator who set 300
+# got 10 and never learned the knob had no effect. `run` and `config` fail loudly
+# on a bad value, and since the skill runs `config` first that surfaces as one
+# clear SWARM_CFG_ERR instead of N per-call failures.
 # Bounded at 20s deliberately. The workflow sizes its timeout margin from the
 # assumption that pre-timer probe work fits inside it; an unbounded value here
 # (SWARM_PROBE_TIMEOUT=300) would push two probes past that margin and let the
@@ -699,12 +716,15 @@ probe_timeout() {
     || exit $?
 }
 # How many bounded probes a single `run` may perform before the timed backend
-# call starts. Both are memoized per process, so the worst case is one
-# `grok models` plus one `grok --help`. The workflow's timeout margin must cover
-# this, and it now READS the number instead of re-deriving it by hand — that
-# hand-derivation is what let 0.10.0 add a third probe and silently overrun the
-# margin.
-SWARM_MAX_PROBES_PER_RUN=2
+# call starts. Every one is memoized per process, so this is the worst case for
+# the heaviest backend (grok): `--version`, `grok models`, `grok --help`. codex
+# needs two (`--version`, `login status`).
+# CHANGE THIS WHENEVER A PRE-TIMER PROBE IS ADDED. The workflow reads the derived
+# budget instead of re-deriving it, so this constant is the single place the
+# arithmetic lives — but it only stays honest if a new probe is counted here. An
+# uncounted probe is invisible to the margin, which is exactly how 0.10.0 overran
+# it.
+SWARM_MAX_PROBES_PER_RUN=3
 
 # grok's model list, memoized for the process (`grok models` is a network call —
 # fetch at most once).
@@ -718,9 +738,28 @@ _probe_degraded() {
   # routes is the runtime-lie this branch removes.
   echo "warning: grok model probe unavailable ($1) — readiness falls back to auth alone; the schema-verified-model check did not run" >&2
 }
+# Which timeout wrapper exists, resolved once. Availability is a property of the
+# HOST, so asking it through a probe's exit code was always a category error: 126
+# is also what `timeout` returns for "command found but cannot be invoked", so a
+# grok wrapper that execs a non-executable helper looked exactly like a missing
+# coreutils — and the adapter then trusted auth and skipped the model check. 127
+# (the previous sentinel) collides with "command not found" the same way. No exit
+# code is free, so the question moves out of band.
+_timeout_bin_done=""
+_timeout_bin=""
+timeout_bin() {
+  [[ -n "$_timeout_bin_done" ]] && return 0
+  _timeout_bin_done=1
+  if command -v timeout >/dev/null; then _timeout_bin="timeout"
+  elif command -v gtimeout >/dev/null; then _timeout_bin="gtimeout"
+  else _timeout_bin=""
+  fi
+}
 _bounded_probe() {
   # Run a LOCAL probe under the probe bound and print its stdout. Returns the
-  # command's rc, or 126 when no timeout binary exists to bound it with.
+  # command's rc. Whether a wrapper EXISTS is asked separately (timeout_bin),
+  # never encoded in the rc — every candidate code collides with something a
+  # probed command can legitimately return.
   #
   # Extracted because this prelude existed three times and had already drifted:
   # one copy checked rc before trusting the output, another swallowed it with
@@ -734,13 +773,12 @@ _bounded_probe() {
   # when the command it was given does not exist, so a missing backend binary and
   # a missing timeout binary would be indistinguishable — and the callers treat
   # the two differently (assume-capability vs. degrade-and-report).
-  local to=""
-  if command -v timeout >/dev/null; then to="timeout"
-  elif command -v gtimeout >/dev/null; then to="gtimeout"
-  else return 126
-  fi
-  probe_timeout
-  "$to" -k "$TIMEOUT_KILL_GRACE" "$_probe_timeout" "$@" </dev/null 2>/dev/null
+  # Callers MUST have called timeout_bin + probe_timeout in the main shell first
+  # (see the note on probe_timeout): this function is always invoked as $(...),
+  # so anything it memoizes dies with the subshell and any exit it takes is
+  # swallowed by the substitution.
+  [[ -n "$_timeout_bin" ]] || return 1
+  "$_timeout_bin" -k "$TIMEOUT_KILL_GRACE" "$_probe_timeout" "$@" </dev/null 2>/dev/null
 }
 
 grok_model_fetch() {
@@ -760,14 +798,21 @@ grok_model_fetch() {
   # grok that ignores SIGTERM, or forks a stdout-inheriting child, would keep the
   # `$(...)` substitution blocking past the timeout — the "must never hang" hole.
   local raw rc=0
-  raw="$(_bounded_probe grok models)" || rc=$?
-  if (( rc == 126 )); then
+  # Resolve BOTH knobs in this shell, before the substitution below. probe_timeout
+  # memoizes into a global and _resolve_int exits on a bad value — inside $(...)
+  # the memoization dies with the subshell (the next caller re-resolves, and the
+  # message below printed an empty "after s") and the exit never leaves it, so a
+  # malformed SWARM_PROBE_TIMEOUT degraded both probes and still reported ready.
+  timeout_bin
+  probe_timeout
+  if [[ -z "$_timeout_bin" ]]; then
     # `ready`/`list` were purely local before this probe, so it must never be the
     # thing that hangs them: with no way to bound the call, skip it rather than
     # run it uncapped.
     _probe_degraded "no timeout/gtimeout on PATH — install coreutils to restore it"
     return 0
   fi
+  raw="$(_bounded_probe grok models)" || rc=$?
   # Check rc BEFORE looking at the output, and discard whatever arrived: a probe
   # killed mid-stream (timeout) or erroring late can still have flushed a PARTIAL
   # list. Reading that as authoritative is worse than not probing — a truncated
@@ -818,15 +863,18 @@ grok_model_fetch() {
   fi
 }
 
-_grok_schema_verified() {
-  # Is $1 in GROK_SCHEMA_VERIFIED? Newline-fenced substring match, not `grep -q`:
-  # an early-exiting grep can SIGPIPE the writer and pipefail would then report
-  # failure even on a hit (same reason as grok_model_offered below).
-  case $'\n'"$GROK_SCHEMA_VERIFIED"$'\n' in
+_line_in_list() {
+  # Is line $1 present in the newline-separated list $2? Newline-fenced substring
+  # match, not `grep -q`: an early-exiting grep can SIGPIPE the writer and
+  # pipefail would then report failure even on a hit. Named once because the
+  # idiom is subtle enough that a re-typed copy is where the next bug goes.
+  case $'\n'"$2"$'\n' in
     *$'\n'"$1"$'\n'*) return 0 ;;
     *) return 1 ;;
   esac
 }
+
+_grok_schema_verified() { _line_in_list "$1" "$GROK_SCHEMA_VERIFIED"; }
 
 _grok_version_newer() {
   # Is $1 strictly newer than $2? Both are canonical ids sharing the `grok-`
@@ -942,7 +990,10 @@ ready_check() {
   local backend="$1"
   case "$backend" in
     claude) return 0 ;;  # in-session, no separate auth
-    codex)  codex login status >/dev/null 2>&1 ;;
+    # BOUNDED for the same reason as available_version: this is a NETWORK call on
+    # the pre-timer path, and a captive portal or dead proxy turns it into a stall
+    # the timeout margin never budgeted for.
+    codex)  timeout_bin; probe_timeout; _bounded_probe codex login status >/dev/null 2>&1 ;;
     # Model-aware: auth alone would advertise grok even when the CLI no longer
     # offers the one model the adapter can drive (grok drops/renames models
     # between releases — 0.2.101 removed grok-composer-2.5-fast).
@@ -1415,11 +1466,13 @@ _grok_has_prompt_file() {
   # telemetry record. Exactly the diagnosis this branch exists to preserve.
   if [[ -n "$_grok_help_done" ]]; then return "$_grok_help_rc"; fi
   _grok_help_done=1
+  timeout_bin
+  probe_timeout
   local help="" rc=0
   help="$(_bounded_probe grok --help)" || rc=$?
   if (( rc != 0 )); then
     _grok_help_rc=0
-    (( rc != 126 )) && echo "warning: \`grok --help\` probe did not complete (rc=$rc) — assuming --prompt-file is supported" >&2
+    [[ -n "$_timeout_bin" ]] && echo "warning: \`grok --help\` probe did not complete (rc=$rc) — assuming --prompt-file is supported" >&2
     return 0
   fi
   case "$help" in
@@ -1458,10 +1511,8 @@ run_grok() {
   if [[ -n "$model" ]]; then
     grok_model_fetch
     if [[ -n "$_grok_models" ]]; then
-      case $'\n'"$_grok_models"$'\n' in
-        *$'\n'"$grok_model"$'\n'*) ;;
-        *) echo "grok model '$grok_model' is not offered by this CLI (see: grok models)" >&2; exit 2 ;;
-      esac
+      _line_in_list "$grok_model" "$_grok_models" \
+        || { echo "grok model '$grok_model' is not offered by this CLI (see: grok models)" >&2; exit 2; }
     fi
   fi
   if ! _grok_schema_verified "$grok_model"; then

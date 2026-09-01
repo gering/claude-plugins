@@ -411,6 +411,22 @@ check("workflow: the margin is built from the reported budget, not a literal",
 check("workflow: probeBudgetSeconds is read from INPUT",
       "INPUT.probeBudgetSeconds" in js)
 
+# The workflow keeps ONE hand-copied number: the fallback used when it runs
+# without the skill in front of it. Pin it against what the adapter actually
+# reports — an unpinned copy of `max_probes x (ceiling + grace)` is the same
+# split-brain that already overran the margin once, and a comment cannot fail CI.
+_cfg = subprocess.run(["bash", str(ADAPTER), "config"], capture_output=True, text=True)
+check("adapter: config runs for the fallback pin", _cfg.returncode == 0)
+_reported = ""
+for _line in _cfg.stdout.splitlines():
+    if _line.startswith("probe_budget_seconds="):
+        _reported = _line.split("=", 1)[1].strip()
+_fb = re.search(r"const PROBE_BUDGET_FALLBACK_S = (\d+)", js)
+check("workflow: a named fallback constant exists", _fb)
+check(f"workflow fallback == adapter probe_budget_seconds "
+      f"(js={_fb.group(1) if _fb else '?'} adapter={_reported or '?'})",
+      bool(_fb) and bool(_reported) and _fb.group(1) == _reported)
+
 # --- the presenter must not restate a configurable byte count ----------------
 # The prep block asks the adapter for the real threshold; prose that still says
 # "512 KiB (524288-byte)" tells the user the wrong number in the one message they

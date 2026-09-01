@@ -150,7 +150,7 @@ Backends:
 |---------|------|-----------|
 | `claude` | probe-only | reviews run in-session via the Agent tool |
 | `codex` | external reviewer | `codex exec -s read-only -C <repo> -c tools.web_search=true --output-schema` (model `gpt-5.6-terra`), prompt on stdin (`-- -`); file-read + web under read-only; auth via `codex login status` |
-| `grok` | external reviewer | headless `--prompt-file` with inline `--json-schema`; the model is **discovered** — the newest canonical id (`grok-4.6` today) whose schema enforcement is verified, never a silent upgrade to an unverified one. Strict `--tools` allowlist (`read_file,list_dir,grep,web_search,web_fetch`) + `--cwd <repo>` — no write/shell. Readiness is model-aware: auth **and** a verified model on offer in `grok models`. |
+| `grok` | external reviewer | headless `--prompt-file` with inline `--json-schema`; the model is **discovered** — the newest canonical id whose schema enforcement is verified (the current set lives in `GROK_SCHEMA_VERIFIED` in `agents.sh`; `agents.sh ready grok` names the one in use), never a silent upgrade to an unverified one. Strict `--tools` allowlist (`read_file,list_dir,grep,web_search,web_fetch`) + `--cwd <repo>` — no write/shell. Readiness is model-aware: auth **and** a verified model on offer in `grok models`. |
 
 The prompt always reaches a backend **out-of-band** — never as an argv word — so
 the diff is bounded by model context rather than `exec`'s `MAX_ARG_STRLEN`.

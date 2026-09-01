@@ -67,9 +67,23 @@ const BASH_TIMEOUT_MS = 600000
 // rc=124 + telemetry evidence this whole branch exists to preserve. Reading the
 // number instead of restating it means adding a probe can no longer silently
 // overrun the margin.
-const PROBE_BUDGET_S = Number.isInteger(INPUT.probeBudgetSeconds) && INPUT.probeBudgetSeconds >= 0
+// The fallback is a LAST RESORT for a direct workflow invocation with no skill in
+// front of it. It restates the adapter's arithmetic, so test_lens_sync.py runs
+// `agents.sh config` and asserts this literal still equals the reported
+// probe_budget_seconds — without that pin it is the same hand-copy that already
+// overran the margin once.
+const PROBE_BUDGET_FALLBACK_S = 69
+// Bounded on BOTH sides: an unbounded budget would drive MAX_INNER_S negative and
+// hand `SWARM_TIMEOUT=-N` to the adapter, which rejects it — every voice failing
+// at launch instead of one clear error here.
+const PROBE_BUDGET_MAX_S = BASH_TIMEOUT_MS / 1000 / 2
+const _probeBudgetIn = Number.isInteger(INPUT.probeBudgetSeconds) && INPUT.probeBudgetSeconds >= 0
   ? INPUT.probeBudgetSeconds
-  : 46
+  : PROBE_BUDGET_FALLBACK_S
+const PROBE_BUDGET_S = Math.min(_probeBudgetIn, PROBE_BUDGET_MAX_S)
+if (_probeBudgetIn > PROBE_BUDGET_MAX_S) {
+  log(`probeBudgetSeconds=${_probeBudgetIn} exceeds half the Bash window — capped to ${PROBE_BUDGET_S}s so the inner timeout stays positive`)
+}
 // Slack on top of the probe budget for the untimed remainder (jail construction,
 // prompt assembly, JSON validation). Small, fixed, and ours — not a mirror of
 // anything in the adapter.
@@ -80,10 +94,10 @@ const TIMEOUT_MARGIN_S = PROBE_BUDGET_S + TIMEOUT_SLACK_S
 // "you asked for more than one Bash call can hold" on every single default run.
 // A warning that fires unconditionally is noise, and it hid the case worth
 // hearing about (a user who really did set a too-large value).
+const MAX_INNER_S = BASH_TIMEOUT_MS / 1000 - TIMEOUT_MARGIN_S
 const REQUESTED_TIMEOUT_S = Number.isInteger(INPUT.timeoutSeconds) && INPUT.timeoutSeconds >= 0
   ? INPUT.timeoutSeconds
-  : BASH_TIMEOUT_MS / 1000 - TIMEOUT_MARGIN_S
-const MAX_INNER_S = BASH_TIMEOUT_MS / 1000 - TIMEOUT_MARGIN_S
+  : MAX_INNER_S
 // 0 means "no adapter cap" and is passed through rather than overridden — but it
 // hands the kill to the outer window, i.e. exactly the unhelpful error above.
 const EFFECTIVE_TIMEOUT_S = REQUESTED_TIMEOUT_S === 0 ? 0 : Math.min(REQUESTED_TIMEOUT_S, MAX_INNER_S)
@@ -135,7 +149,7 @@ if (!ADAPTER || !DIFF_FILE || !EXTERNAL_PROMPT) {
   return {
     error: 'swarm-review requires args.adapter, args.diffFile, args.externalPromptFile',
     gate: null, findings: [], refuted: [], backendErrors: [], fenceDegraded: false,
-    balance: { total: 0, design: 0, consensus: 0, solo: 0, refuted: 0, redactions: 0, fenceDegraded: false, voices: 0, agents: [], backendErrors: [], rawPerLens: {}, survivingPerLens: {}, familiesExpected: [], familiesPresent: [], familiesLost: [], consensusReachable: false },
+    balance: { total: 0, design: 0, consensus: 0, solo: 0, refuted: 0, redactions: 0, fenceDegraded: false, voices: 0, agents: [], backendErrors: [], rawPerLens: {}, survivingPerLens: {}, familiesExpected: [], familiesPresent: [], familiesLost: [], unitsDegraded: [], consensusReachable: false },
   }
 }
 
@@ -612,6 +626,11 @@ const externalVoiceSpecs = liveExternals
     // ${...} inside them. ADAPTER and EXTERNAL_PROMPT come from the same
     // TMPDIR-derived paths the note below calls attacker-influencable, so
     // quoting only --unit/--telemetry left the gap open on the same line.
+    // ACCEPTED COST: one adapter process per gated cluster, so each backend repeats
+    // its memoized probes per unit (grok: --version, models, --help). Cross-process
+    // caching was declined in 0.9.4 — a cached 'model absent' would outlive the CLI
+    // upgrade that fixes it — and the probes are bounded and counted in
+    // probe_budget_seconds, so the cost is paid in parallel, not against the margin.
     cmd: `SWARM_TIMEOUT=${EFFECTIVE_TIMEOUT_S} bash ${shQuote(ADAPTER)} run ${b.backend} ${b.flags} --lens-instr ${shQuote(instrFor(u))} --lens-instr-sum ${utf8Checksum(instrFor(u))} --prompt-file ${shQuote(EXTERNAL_PROMPT)}` +
       // Appended, not interpolated into the base string, so a run without a
       // telemetry sink produces the exact command it always did.
@@ -678,12 +697,37 @@ const familiesPresent = Array.from(new Set(
   voices.filter((v) => v.ok !== false).map((v) => familyOf(v.backend))
 )).sort()
 const familiesLost = familiesExpected.filter((f) => !familiesPresent.includes(f))
+// Run-global presence is NOT the whole story, because consensus is decided per
+// (file, mechanism) — i.e. inside a cluster. A family that survived in one
+// cluster and timed out in three is "present" globally while three quarters of
+// the review could not reach consensus at all. That is exactly what happened on
+// this branch: grok returned only its consistency voice, contributed zero
+// findings, and the balance still said every family was present and consensus
+// reachable. So compute coverage PER UNIT as well, and let the weakest unit
+// decide what we claim.
+const unitsByName = new Map()
+for (const v of voices) {
+  const key = v.unit || '-'
+  if (!unitsByName.has(key)) unitsByName.set(key, new Set())
+  if (v.ok !== false) unitsByName.get(key).add(familyOf(v.backend))
+}
+// A unit where fewer than 2 families returned cannot produce a consensus finding,
+// no matter how many voices spoke in other units.
+const unitsDegraded = Array.from(unitsByName.entries())
+  .filter(([, fams]) => fams.size < 2)
+  .map(([unit]) => unit)
+  .sort()
 // <2 families means NO finding in this run can reach consensus at all — every
 // one becomes a solo. That is a different review, not a degraded log line.
-const consensusReachable = familiesPresent.length >= 2
+// Global reachability is necessary but not sufficient: claim it only when EVERY
+// unit could also reach it, so the balance line cannot overstate the review.
+const consensusReachable = familiesPresent.length >= 2 && unitsDegraded.length === 0
 if (familiesLost.length) {
   log(`Family coverage: lost ${familiesLost.join(', ')} — ${familiesPresent.length} of ${familiesExpected.length} families reviewed` +
-      (consensusReachable ? '' : '; consensus is UNREACHABLE this run, every finding falls back to solo + verifier'))
+      (familiesPresent.length >= 2 ? '' : '; consensus is UNREACHABLE this run, every finding falls back to solo + verifier'))
+}
+if (unitsDegraded.length) {
+  log(`Cluster coverage: ${unitsDegraded.join(', ')} had fewer than 2 families return — findings there cannot reach consensus and fall back to solo + verifier`)
 }
 
 const pool = []
@@ -1060,6 +1104,7 @@ return {
     familiesExpected,
     familiesPresent,
     familiesLost,
+    unitsDegraded,
     consensusReachable,
     backendErrors: scrubbedErrors,
     rawPerLens,
