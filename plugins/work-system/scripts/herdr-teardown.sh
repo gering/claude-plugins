@@ -260,9 +260,15 @@ def session_name(a):
     # symbol+space here too (the working spinner: ◐/◑/✳ …). The space is required, so
     # a name that genuinely starts with punctuation (e.g. /habemus-event) keeps it; a
     # wrong strip costs only the offer (no ListAgents match), never a misdirected message.
-    t = a.get("terminal_title_stripped") or a.get("terminal_title") or a.get("name") or ""
-    t = re.sub(r"^[^\w\s]\s+", "", str(t).strip())
-    t = re.sub(r"[\t\r\n]+", " ", t).strip()
+    t = str(a.get("terminal_title_stripped") or a.get("terminal_title") or a.get("name") or "")
+    # Blank EVERY control/format char first (Cc/Cf, plus surrogates/private use):
+    # newlines and tabs would forge extra output lines, and ANSI escapes or a bidi
+    # override (U+202E) could make the printed name read differently than it matches.
+    # A mangled name simply fails the caller ListAgents match — fail closed, as intended.
+    t = "".join(" " if unicodedata.category(c) in ("Cc", "Cf", "Cs", "Co") else c for c in t)
+    # Then drop ONE leading symbol+space (the herdr/claude spinner glyph) and collapse.
+    t = re.sub(r"^[^\w\s]\s+", "", t.strip())
+    t = re.sub(r"\s+", " ", t).strip()
     return "" if len(t) > 200 else t
 
 root, wtdir = match_roots(main)
@@ -401,7 +407,7 @@ case "$cmd" in
     if [ -z "$SCRIPT_DIR" ] || [ ! -f "$SCRIPT_DIR/herdr-agent.sh" ]; then echo unverified; exit 0; fi
     # shellcheck source=herdr-agent.sh
     . "$SCRIPT_DIR/herdr-agent.sh"
-    command -v python3 >/dev/null 2>&1 || { echo unverified; exit 0; }
+    # No python3 guard here: ha_list fails (code 3) when either tool is missing.
     agents_json="$(ha_list)" || { echo unverified; exit 0; }
     out="$(printf '%s' "$agents_json" | PYTHONUTF8=1 python3 -c "$HERDR_MATCH_PRELUDE
 $extract_manager" "$3" "$2" 2>/dev/null || true)"

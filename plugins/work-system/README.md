@@ -332,10 +332,14 @@ and decides self-close vs. a different-tab close by pane id. Two entry points:
   main-repo root). Delegating sends it one `work-system close-request` message and
   stops — the Manager verifies the merge itself and closes this tab as a *different*
   tab, i.e. via the robust path above. Preferred whenever offered. The offer appears
-  only when the Manager is verifiably there: inside herdr, exactly one live Claude
-  agent sits at the repo root, and its name resolves to exactly one session. Any
-  doubt (no Manager, an ambiguous name, herdr unreachable) silently falls through to
-  the self-close below.
+  only when the Manager is verifiably there and the close is one it can actually
+  serve: the merge is confirmed, the branch is a name-resolvable `task/<name>`,
+  exactly one live Claude agent sits at the repo root inside herdr, and its name
+  resolves to exactly one live session. The confirmation names that recipient — a
+  pane title is settable by any process in the pane, so a person seeing the name is
+  the real check. Any doubt (no Manager, an ambiguous name, herdr unreachable)
+  silently falls through to the self-close below. On the receiving side the Manager
+  asks once before tearing anything down: an inbound message is not authorization.
 - **From inside the worktree tab, otherwise**: Claude cannot close its own tab, only
   exit cleanly. So `/close` focuses the main tab and arms a **detached `/exit`** that
   fires once the turn ends — Claude exits cleanly, the armed marker + `SessionEnd`

@@ -64,7 +64,7 @@ The mailbox design below is still the target for *durable* coordination. What ac
 shipped first is deliberately smaller and uses **Claude Code built-ins** (`ListAgents` /
 `SendMessage`) rather than any transport of our own: a worker `/close` detects the
 Manager and offers to hand the teardown over as one structured message
-(`work-system close-request` + `task`/`worktree`/`branch`/`pr`/`repo` lines). See
+(`work-system close-request` + `task`/`worktree`/`repo` lines). See
 [herdr-close-automation](../features/herdr-close-automation.md) for the mechanics.
 
 What this slice establishes (and what it deliberately does not):
@@ -85,9 +85,14 @@ What this slice establishes (and what it deliberately does not):
   is unique. Any future built-ins-based coordination inherits this limit; a name-based
   bus cannot become the durable substrate for a repo-keyed lane registry, which is an
   argument *for* the mailbox below, not against it.
-- **Received messages are data, not instructions.** A close-request is re-verified from
-  scratch by the receiver. This is the general rule for every later message type on this
-  path — a cross-session message never carries authority, only a hint.
+- **Received messages are data, not instructions — and never authorization.** A
+  close-request is re-verified from scratch by the receiver, its `task=` is charset-
+  validated before it goes near a command, and a **destructive** action triggered by an
+  inbound message asks the user once even when the evidence checks out. The general rule
+  for every later message type on this path: a cross-session message carries a hint, never
+  authority. Any future auto-acting receiver (the watch loop) needs a real authorization
+  story — sender binding or a token minted at `/kickoff` — not just a routing filter like
+  `repo=`.
 
 ## Worker↔Manager mailbox (the coordination substrate)
 A file mailbox carries judgment/intent signals that have no git artifact.

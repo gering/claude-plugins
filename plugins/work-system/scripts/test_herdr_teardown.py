@@ -173,6 +173,13 @@ check("scoping disambiguates two root agents", out(r) == "name=mine")
 r = run([agent(ROOT, title="Manager\nnone")])
 check("newline in the title is scrubbed", out(r) == "name=Manager none")
 check("output stays a single line", len(r.stdout.strip().splitlines()) == 1)
+# ANSI escapes and bidi overrides are control/format chars too: they must never
+# reach the printed line (they could reorder or repaint what the reader sees).
+r = run([agent(ROOT, title="\x1b[31mManager\x1b[0m")])
+check("ANSI escape stripped from the name", "\x1b" not in r.stdout)
+r = run([agent(ROOT, title="Man\u202eager")])
+check("bidi override stripped from the name", "\u202e" not in r.stdout)
+check("bidi case still yields a single line", len(r.stdout.strip().splitlines()) == 1)
 
 # --- argument guards ------------------------------------------------------- #
 r = run([agent(ROOT)], main="")
