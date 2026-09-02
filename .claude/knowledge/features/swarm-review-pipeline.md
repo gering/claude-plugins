@@ -113,10 +113,30 @@ truth** — every voice's fan-out units come from it, Claude and externals alike
   `let INPUT = typeof args === 'string' ? JSON.parse(args) : (args || {})`.
   This cost a run to discover (the first smoke test tripped the input guard with
   0 agents). Always parse-if-string at the top of a plugin workflow.
+- **Workflow's `scriptPath` gate is stricter than Read/Bash** (0.10.15). An
+  installed plugin-cache file is readable through those tools yet still refused
+  by Workflow unless its directory was granted with `/add-dir`, so pointing
+  `scriptPath` at `${CLAUDE_PLUGIN_ROOT}/workflows/…` made `/swarm:review` fail
+  outright for every user with the plugin installed. The prep block now splits
+  its scratch **by sensitivity**: review DATA (diff, prompt, telemetry) stays in
+  `$TMPD`, while the workflow SCRIPT — already-versioned code, no review content
+  — is copied into a cwd-local `.swarm-workflow.XXXXXX` and run by path. An
+  interrupted run therefore strands at most a copy of a committed file. Three
+  consequences that all bit in testing: the staged dir is untracked and under
+  cwd, so the untracked sweep must skip it (else a review inlines its own
+  workflow copy); every early exit must remove BOTH dirs (`WORKDIR` is declared
+  empty before the first guard so that is safe); and `$PWD` is
+  environment-derived exactly like `$TMPDIR`, so it carries the same
+  `SWARM_TMPD_ERR` metacharacter verdict. **Rejected alternative:** passing the
+  source through Workflow's inline `script`. It avoids the checkout entirely but
+  re-transmits the whole script (tens of KB, and growing) through the model's
+  context every `--loop` round, has
+  nothing verifying the emitted text against disk, and puts executed code on the
+  same untrusted-data path as the diff.
 - **`${CLAUDE_PLUGIN_ROOT}` is NOT substituted inside a `.js` file** (only in
   SKILL.md/markdown). So the adapter path and the temp-file paths must be passed
   **via `args`** from the skill (which *does* get the substitution), e.g.
-  `Workflow({scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/swarm-review.js", args: {…}})`.
+  `Workflow({scriptPath: "<the staged copy>", args: {adapter: "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh", …}})`.
   The shipped skill passes `adapter`, `diffFile`, `externalPromptFile`,
   `telemetryFile`, `findingNonce`, `externalVoices`, and — since 0.10.12 — the
   whole numeric config as ONE opaque token, `config: "<SWARM_CFG_LINE>"`
