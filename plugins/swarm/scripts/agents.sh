@@ -790,7 +790,13 @@ sys.stdout.write("(version 1)(allow default)(deny file-read* %s)" % " ".join(rul
   # failure treat the host as jail-less (audibly) — _jail_available then
   # reports false and run_codex/run_grok degrade.
   if ((${#SANDBOX_CMD[@]} > 0)); then
-    if ! "${SANDBOX_CMD[@]}" true >/dev/null 2>&1; then
+    # BOUNDED: this is pre-timer work the timeout margin does not measure, and a
+    # bwrap that stalls creating a user namespace blocks here for as long as the
+    # kernel takes — wall clock the workflow already believes it has spent. The
+    # 14s slack the workflow reserves for jail construction covers a bounded
+    # probe; it cannot cover an unbounded one.
+    _probe_setup_lenient
+    if ! _probe_or_bare "${SANDBOX_CMD[@]}" true >/dev/null 2>&1; then
       echo "warning: ${SANDBOX_CMD[0]} is installed but not functional here — treating host as jail-less; externals fail closed" >&2
       SANDBOX_CMD=()
     fi
@@ -892,8 +898,15 @@ available_version() {
     # Capture separately (not `… || echo in-session`): a SIGPIPE from head()
     # under pipefail would otherwise run BOTH the real version and the
     # fallback, printing two lines.
+    # BOUNDED like every other probe. It is only a nicer version string — the
+    # backend exists by definition in-session — but `list --json` calls this
+    # FIRST, from the review skill-s own prep block, so a `claude` wedged on a
+    # hung mount or a blocked IPC socket stalled the whole review before any
+    # voice started: the unbounded-probe hang this branch exists to remove,
+    # surviving in the one branch that returned early before reaching the bound.
     local cver
-    cver="$(claude --version 2>/dev/null | head -1 || true)"
+    _probe_setup_lenient
+    cver="$(_probe_or_bare claude --version | head -1 || true)"
     echo "${cver:-in-session}"
     return 0
   fi
@@ -1079,11 +1092,15 @@ _bounded_bg() {
   # STRICTLY GREATER: the first tick can arrive milliseconds after the launch, and
   # `>=` would expire a 1s probe almost immediately. This fires between secs and
   # secs+1 — never early, at most a second late.
-  # Can `sleep` take a fraction? POSIX only guarantees integers. Probed ONCE, here
-  # rather than per iteration, and the 100ms it costs is overlapped with the
-  # child-s own startup. Both loops below need the answer.
+  # Can `sleep` take a fraction? POSIX only guarantees integers, so it has to be
+  # tried — and trying it costs the 100ms it sleeps.
+  # Only worth paying for a SHORT bound. Fine granularity exists for the ~40ms
+  # readiness probes; a bound of minutes is watched by a test with 1s granularity
+  # anyway, so paying 100ms per backend call (x2 backends x5 clusters) to learn
+  # something that path cannot use was pure pre-timer waste — charged against the
+  # very budget this function helps keep honest.
   local frac=0
-  sleep 0.1 2>/dev/null && frac=1
+  if (( secs <= 20 )); then sleep 0.1 2>/dev/null && frac=1; fi
   t0=$SECONDS
   local elapsed=0
   while kill -0 "$pid" 2>/dev/null; do
@@ -1671,6 +1688,20 @@ subcmd_config() {
   # onto the adapter command line the same way it pins SWARM_TIMEOUT — the value
   # budgeted here is the value the adapter will enforce.
   echo "probe_budget_seconds=$(( SWARM_MAX_PROBES_PER_RUN * (_probe_timeout + TIMEOUT_EXPIRY_SLOP + TIMEOUT_KILL_GRACE) ))"
+  # The RAILS, not just the resolved values. The workflow validates and clamps
+  # what it pins onto every adapter call, and it used to do that against
+  # hand-copied literals with a CI pin each — so raising a bound here meant
+  # editing the mirror, its pin and its comment, and a direct (skill-less)
+  # invocation clamped against whatever the mirror last said. Reporting them
+  # costs nothing now that the whole config travels as ONE token: the reason the
+  # copies existed (every value was a separate placeholder a model had to
+  # transcribe) is gone. The workflow keeps them only as last-resort fallbacks.
+  echo "max_prompt_bytes_min=$(( SWARM_CAP_HEADROOM + 1 ))"
+  echo "max_prompt_bytes_max=$SWARM_MAX_PROMPT_BYTES_MAX"
+  echo "probe_timeout_max_seconds=$SWARM_PROBE_TIMEOUT_MAX"
+  echo "max_probes_per_run=$SWARM_MAX_PROBES_PER_RUN"
+  echo "kill_grace_seconds=$TIMEOUT_KILL_GRACE"
+  echo "expiry_slop_seconds=$TIMEOUT_EXPIRY_SLOP"
 }
 
 subcmd_run() {

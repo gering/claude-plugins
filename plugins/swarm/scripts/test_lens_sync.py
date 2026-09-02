@@ -227,7 +227,7 @@ check(
 # what has to be pinned is that the token is built from the adapter's own config
 # and carried into the call — not four separate placeholder names.
 check("skill: builds the config token from the adapter's config",
-      re.search(r'SWARM_CFG_LINE="max_prompt_bytes=\$CFG_MAX;probe_timeout_seconds=\$CFG_PROBE_TO;probe_budget_seconds=\$CFG_PROBE"', skill))
+      re.search(r'SWARM_CFG_LINE="max_prompt_bytes=\$CFG_MAX;probe_timeout_seconds=\$CFG_PROBE_TO;probe_budget_seconds=\$CFG_PROBE\$CFG_RAILS"', skill))
 check("skill: appends timeout_seconds only when the user set SWARM_TIMEOUT",
       "SWARM_CFG_LINE;timeout_seconds=$CFG_TO" in skill)
 check("skill: reads probe_timeout_seconds from the adapter config",
@@ -546,11 +546,11 @@ check(f"adapter: no function both prints and caches into a global ({_bad_memo})"
       not _bad_memo)
 
 check("adapter: SWARM_MAX_PROBES_PER_RUN is declared", _declared)
-check(f"adapter: pre-timer probe call sites still number 5 (got {_probe_sites}) — "
+check(f"adapter: pre-timer probe call sites still number 7 (got {_probe_sites}) — "
       f"if you added one, re-derive SWARM_MAX_PROBES_PER_RUN "
       f"(currently {_declared.group(1) if _declared else '?'}, the worst case for a "
       f"single backend) and update this pin",
-      _probe_sites == 5)
+      _probe_sites == 7)
 check("adapter: the declared worst case covers grok's three probes",
       bool(_declared) and int(_declared.group(1)) >= 3)
 
@@ -567,11 +567,6 @@ check("workflow: the margin reserves the backend call's own overshoot",
       re.search(r"const WALL_OVERSHOOT_S = EXPIRY_SLOP_S \+ KILL_GRACE_S", js))
 check("workflow: the probe budget is read from the config token",
       "cfgPick('probe_budget_seconds', 'probeBudgetSeconds')" in js)
-# The expiry slop is a copy of the adapter's, like every other rail here.
-_es_sh = re.search(r"TIMEOUT_EXPIRY_SLOP=(\d+)", sh)
-_es_js = re.search(r"const EXPIRY_SLOP_S = (\d+)", js)
-check("adapter+workflow: expiry slop matches",
-      all([_es_sh, _es_js]) and _es_sh.group(1) == _es_js.group(1))
 
 # The workflow keeps ONE hand-copied number: the fallback used when it runs
 # without the skill in front of it. Pin it against what the adapter actually
@@ -611,14 +606,19 @@ check("workflow: the prompt cap is bounded on both sides",
 # Those two rails are COPIES of the adapter's (it cannot run shell), so pin them —
 # an unchecked copy of a bound is the same split-brain as an unchecked copy of a
 # default, and this branch has paid for that lesson repeatedly.
+# The floor the ADAPTER reports must still be headroom + 1 — that relationship is
+# the reason the floor exists (a cap at or below the headroom makes the oversize
+# threshold zero and drops every external voice silently), and `config` is now
+# where it is computed.
 _hdr = re.search(r"SWARM_CAP_HEADROOM=(\d+)", sh)
-_capmax = re.search(r"SWARM_MAX_PROMPT_BYTES_MAX=(\d+)", sh)
-_jsmin = re.search(r"const MAX_PROMPT_BYTES_MIN = (\d+)", js)
-_jsmax = re.search(r"const MAX_PROMPT_BYTES_MAX = (\d+)", js)
-check("adapter+workflow: prompt-cap floor matches (headroom + 1)",
-      all([_hdr, _jsmin]) and int(_jsmin.group(1)) == int(_hdr.group(1)) + 1)
-check("adapter+workflow: prompt-cap ceiling matches",
-      all([_capmax, _jsmax]) and _jsmax.group(1) == _capmax.group(1))
+check("adapter: the reported prompt-cap floor is headroom + 1",
+      bool(_hdr) and "max_prompt_bytes_min=$(( SWARM_CAP_HEADROOM + 1 ))" in sh)
+_cfg_min = ""
+for _line in _cfg.stdout.splitlines():
+    if _line.startswith("max_prompt_bytes_min="):
+        _cfg_min = _line.split("=", 1)[1].strip()
+check(f"adapter: config reports a usable prompt-cap floor (got {_cfg_min or '?'})",
+      bool(_hdr) and _cfg_min == str(int(_hdr.group(1)) + 1))
 # Same pin for the probe bound the workflow now pins onto every call: its
 # fallback must be the adapter's resolved default and its ceiling the adapter's
 # rail, or a direct workflow invocation pins a value the adapter refuses.
@@ -632,18 +632,16 @@ _pt_max_sh = re.search(r"SWARM_PROBE_TIMEOUT_MAX=(\d+)", sh)
 check(f"workflow probe-timeout fallback == adapter probe_timeout_seconds "
       f"(js={_pt_fb.group(1) if _pt_fb else '?'} adapter={_pt_reported or '?'})",
       bool(_pt_fb) and bool(_pt_reported) and _pt_fb.group(1) == _pt_reported)
-# The workflow checks the probe pair against these two, so a drift here would let
-# an inconsistent pair through — the overrun the check exists to catch.
-_mp_sh = re.search(r"SWARM_MAX_PROBES_PER_RUN=(\d+)", sh)
-_mp_js = re.search(r"const MAX_PROBES = (\d+)", js)
-_kg_sh = re.search(r"TIMEOUT_KILL_GRACE=(\d+)", sh)
-_kg_js = re.search(r"const KILL_GRACE_S = (\d+)", js)
-check("adapter+workflow: max-probes matches",
-      all([_mp_sh, _mp_js]) and _mp_sh.group(1) == _mp_js.group(1))
-check("adapter+workflow: kill grace matches",
-      all([_kg_sh, _kg_js]) and _kg_sh.group(1) == _kg_js.group(1))
-check("adapter+workflow: probe-timeout ceiling matches",
-      all([_pt_max_js, _pt_max_sh]) and _pt_max_js.group(1) == _pt_max_sh.group(1))
+# The rails are no longer mirrored — the adapter REPORTS them inside the config
+# token and the workflow clamps against what it was told, keeping its literals
+# only for a skill-less invocation. So what has to hold is that the reporting and
+# the reading are both in place; the values themselves cannot drift apart.
+for _k in ("max_prompt_bytes_min", "max_prompt_bytes_max", "probe_timeout_max_seconds",
+           "max_probes_per_run", "kill_grace_seconds", "expiry_slop_seconds"):
+    check(f"adapter: config reports {_k}", f'echo "{_k}=' in sh)
+    check(f"workflow: clamps against the reported {_k}", f"rail('{_k}'" in js)
+check("skill: forwards the adapter's rails in the config token",
+      "CFG_RAILS" in skill and "$CFG_RAILS" in skill)
 check(f"workflow fallback == adapter probe_budget_seconds "
       f"(js={_fb.group(1) if _fb else '?'} adapter={_reported or '?'})",
       bool(_fb) and bool(_reported) and _fb.group(1) == _reported)

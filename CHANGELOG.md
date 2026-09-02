@@ -274,6 +274,17 @@ entries are grouped per plugin, newest first.
 
 ## swarm
 
+### 0.10.13 — 2026-09-02
+Loop round 9 — no criticals. One real regression from round 8, one probe that had been missed for nine rounds, and the end of the hand-copied-constant class.
+
+- **The `$TMPD` guard rejected legitimate paths.** An allowlist over the whole path is not the property that matters: `/Users/Jörg/tmp` and `/Volumes/Build Cache/tmp` contain nothing dangerous, yet the prep block hard-stopped and `/swarm:review` became unusable on those hosts. It is a denylist now — quotes, `$`, backticks, backslash, `;|&<>` and newlines — which is exactly what can break out of a quoted string and execute. Spaces and non-ASCII pass (every consumer quotes); all three injection shapes are still refused, verified.
+- **`claude --version` was the one unbounded probe left.** `list --json` calls it FIRST, from the review skill's own prep block, so a `claude` wedged on a hung mount stalled the whole review before any voice started — the exact hang the rest of the branch removes, surviving in the branch that returned early before reaching the bound. The sandbox wrapper probe (`bwrap true`, which can stall creating a user namespace) is bounded now too.
+- **The adapter reports its own rails, and the workflow clamps against them.** Six constants were hand-copied into the workflow with a CI pin each; raising a bound in `agents.sh` meant editing the mirror, its pin and its comment, and a skill-less invocation clamped against whatever the mirror last said. The reason those copies existed — every value was a separate placeholder a model had to transcribe — disappeared when the config became one token, so the rails now ride along in it. Verified: raising `SWARM_PROBE_TIMEOUT_MAX` to 30 and passing a 25 s bound is honoured with no code change.
+- **The probe-pair check now runs on the clamped bound.** `probe_timeout_seconds=0` with a 12 s budget passed the raw check, then the bound was clamped *up* to 1 while the 12 s budget was kept — three 1 s probes can spend 15 s, and the overrun the check exists to catch walked straight through it.
+- **The fractional-sleep probe is skipped for long bounds.** It cost 100 ms per bounded call to learn something a minutes-long deadline cannot use — paid per backend, per cluster, out of the pre-timer budget this function exists to keep honest.
+- **Docs match again**, including the rc-126 flip: `/swarm:agents` and the knowledge entry both still described the fail-open that round 8 removed, and the knowledge entry told maintainers not to revisit it. The reason it is fail-closed — 126 is *also* the shell's "found but cannot be invoked" — is recorded with it.
+- Deferred, with the reasoning in place: having the adapter emit the finished config token (`config --token`). It would remove real duplication, but the skill still owns the oversize gate, so it would still parse — worth revisiting when a second consumer of the token appears.
+
 ### 0.10.12 — 2026-09-02
 Loop round 8 — no criticals, and half the findings of round 7. Two of them were guards that answered "safe" without having checked.
 

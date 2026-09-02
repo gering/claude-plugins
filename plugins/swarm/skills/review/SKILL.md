@@ -97,11 +97,20 @@ TMPD="$(mktemp -d "${TMPDIR:-/tmp}/swarm-review.XXXXXX")"
 # quote is not a boundary: $TMPDIR is environment-derived and writable by whoever
 # controls the profile or the CI runner, so `/tmp/a'"'"'$(cmd)'"'"'` would close the
 # mandated quotes and execute. Decide it HERE instead, mechanically and before
-# anything is echoed: a conservative allowlist over the whole path, refused loudly
-# rather than sanitized (a sanitized path points somewhere the caller did not ask
-# for). Everything under TMPD inherits the guarantee, since we append the rest.
+# anything is echoed, refusing loudly rather than sanitizing (a sanitized path
+# points somewhere the caller did not ask for). Everything under TMPD inherits
+# the verdict, since we only ever append to it.
+# A DENYLIST, not an allowlist. The property that matters is "cannot break out of
+# a quoted string and execute", which is this metacharacter set plus newlines. An
+# allowlist over the whole path also rejected spaces and non-ASCII — /Users/Joerg
+# with an umlaut, /Volumes/Build Cache — and hard-stopped the entire skill on
+# hosts where nothing was ever wrong: a guard whose false positives cost more
+# than the case it guards. Spaces stay legal because every consumer quotes; a
+# quote or a `$` is what turns a path into code.
 case "$TMPD" in
-  *[!A-Za-z0-9._/-]*|"") echo "SWARM_TMPD_ERR=refusing to run: the temp dir path contains characters that are unsafe to interpolate into a shell command ($TMPD) — set TMPDIR to a plain path"; rm -rf "$TMPD"; exit 0 ;;
+  ""|*[\'\"\`\$\\]*|*';'*|*'|'*|*'&'*|*'<'*|*'>'*|*'
+'*)
+    echo "SWARM_TMPD_ERR=refusing to run: the temp dir path contains a shell metacharacter and cannot be safely interpolated into a command ($TMPD) — set TMPDIR to a path without quotes, \$, backticks or newlines"; rm -rf "$TMPD"; exit 0 ;;
 esac
 DIFF="$TMPD/diff.txt"; PROMPT="$TMPD/external-prompt.txt"; TELEMETRY="$TMPD/telemetry.jsonl"
 
@@ -307,7 +316,17 @@ SWARM_CFG="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" config 2>&1)" || {
 # comparison or a bare JS literal — the failure mode this whole `config` handshake
 # exists to remove. A here-doc, not a pipe: a `while read` on the right side of a
 # pipe runs in a subshell and its assignments would be lost.
+# CONSIDERED and deferred: having the adapter emit the finished token itself
+# (`agents.sh config --token`) and deleting this loop. It would remove real
+# duplication, but the skill still needs `oversize_threshold` as its OWN gate —
+# that decision is the skill's, not the adapter's — so it would still parse, and
+# the loud "a key the adapter stopped reporting is a hard stop" property below
+# would move into a verb whose other callers do not want it. Worth revisiting if
+# a second consumer of the token appears.
 CFG_MAX=""; CFG_THRESH=""; CFG_TO=""; CFG_PROBE=""; CFG_PROBE_TO=""
+# The adapter's own rails, forwarded verbatim so the workflow validates against
+# what this adapter accepts instead of a hand-copied mirror of it.
+CFG_RAILS=""
 while IFS='=' read -r _k _v; do
   case "$_k" in
     max_prompt_bytes)     CFG_MAX="$_v" ;;
@@ -315,6 +334,11 @@ while IFS='=' read -r _k _v; do
     timeout_seconds)      CFG_TO="$_v" ;;
     probe_budget_seconds) CFG_PROBE="$_v" ;;
     probe_timeout_seconds) CFG_PROBE_TO="$_v" ;;
+    max_prompt_bytes_min|max_prompt_bytes_max|probe_timeout_max_seconds|max_probes_per_run|kill_grace_seconds|expiry_slop_seconds)
+      case "$_v" in
+        ''|*[!0-9]*) echo "SWARM_CFG_ERR=adapter config reported a non-numeric $_k"; rm -rf "$TMPD"; exit 0 ;;
+      esac
+      CFG_RAILS="$CFG_RAILS;$_k=$_v" ;;
   esac
 done <<CFGEOF
 $SWARM_CFG
@@ -326,13 +350,6 @@ for _pair in "oversize_threshold=$CFG_THRESH" "max_prompt_bytes=$CFG_MAX" "timeo
 done
 OVERSIZE_THRESHOLD="$CFG_THRESH"
 if [ "$PROMPT_BYTES" -gt "$OVERSIZE_THRESHOLD" ]; then echo "EXTERNALS_OVERSIZE=1"; else echo "EXTERNALS_OVERSIZE=0"; fi
-# Pass the timeout on ONLY when the user actually set it: the workflow derives
-# its own default from the Bash-tool ceiling minus the margin, and handing it a
-# value it will then cap made every stock run log "you asked for more than one
-# Bash call can hold". The value itself comes from `config` above, already
-# validated and decimal-forced — it lands in a BARE JavaScript numeric literal,
-# where a leading zero would be legacy octal (0600 = 384) or a strict-mode
-# SyntaxError.
 # ONE token carrying the whole resolved config, because the workflow receives
 # these numbers only by being TRANSCRIBED out of this prose. Four separate
 # placeholders meant four chances to drop one, and a dropped knob does not fail —
@@ -340,11 +357,12 @@ if [ "$PROMPT_BYTES" -gt "$OVERSIZE_THRESHOLD" ]; then echo "EXTERNALS_OVERSIZE=
 # user-raised SWARM_MAX_PROMPT_BYTES turning into N "Prompt file too large"
 # errors and a Claude-only review; a bound pinned behind a margin sized for a
 # different one). A single opaque token cannot be half-copied.
-SWARM_CFG_LINE="max_prompt_bytes=$CFG_MAX;probe_timeout_seconds=$CFG_PROBE_TO;probe_budget_seconds=$CFG_PROBE"
+SWARM_CFG_LINE="max_prompt_bytes=$CFG_MAX;probe_timeout_seconds=$CFG_PROBE_TO;probe_budget_seconds=$CFG_PROBE$CFG_RAILS"
 # Appended only when the user actually set SWARM_TIMEOUT: the workflow derives its
 # own default from the Bash-tool ceiling minus the margin, and handing it a value
 # it will then cap made every stock run log "you asked for more than one Bash call
-# can hold".
+# can hold". The value comes from `config` above, already validated and
+# decimal-forced, so it cannot arrive as legacy octal (0600 = 384).
 if [ -n "${SWARM_TIMEOUT:-}" ]; then
   SWARM_CFG_LINE="$SWARM_CFG_LINE;timeout_seconds=$CFG_TO"
 fi

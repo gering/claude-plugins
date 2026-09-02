@@ -117,20 +117,20 @@ truth** — every voice's fan-out units come from it, Claude and externals alike
   SKILL.md/markdown). So the adapter path and the temp-file paths must be passed
   **via `args`** from the skill (which *does* get the substitution), e.g.
   `Workflow({scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/swarm-review.js", args: {…}})`.
-  The shipped skill passes these fields (no count — a count is the part that
-  goes stale first), and each absent one degrades silently rather than loudly,
-  which is why the list is worth stating in full:
-  `adapter`, `diffFile`, `externalPromptFile`, `externalVoices` (the originals),
-  plus `findingNonce` (absent → the second-order finding fence is disabled,
-  `fenceDegraded`), `telemetryFile` (absent → no `--telemetry/--unit`, so the
-  report's voice-timing section silently prints nothing), and
-  `probeBudgetSeconds` / `probeTimeoutSeconds` / `maxPromptBytes` (absent → a
-  "config handshake" warning plus a fallback, so the workflow's margin and cap
-  can disagree with the skill's oversize gate) — the probe bound and budget are
-  taken as a PAIR, so supplying one without the other makes BOTH fall back.
-  Two more are conditional: `timeoutSeconds` only when the user set
-  `SWARM_TIMEOUT`, and `max: true` only for `--max`. Re-deriving the call from
-  this entry is the documented use, so an out-of-date list here *is* the bug.
+  The shipped skill passes `adapter`, `diffFile`, `externalPromptFile`,
+  `telemetryFile`, `findingNonce`, `externalVoices`, and — since 0.10.12 — the
+  whole numeric config as ONE opaque token, `config: "<SWARM_CFG_LINE>"`
+  (`k=v;k=v;…`: the prompt cap, the probe bound and budget, the adapter's own
+  rails, and `timeout_seconds` only when the user set `SWARM_TIMEOUT`). Two more
+  are conditional: `max: true` for `--max`, `claude: false` for an external-only
+  control run.
+  **Why one token:** these values reach the workflow only by being *transcribed*
+  out of SKILL.md prose by the model. As separate placeholders, a dropped one did
+  not fail — it substituted a fallback that was then pinned onto every adapter
+  call, so a raised `SWARM_MAX_PROMPT_BYTES` became N per-call "Prompt file too
+  large" errors and a Claude-only review. A single token cannot be half-copied,
+  and it made carrying the adapter's rails free, which retired six hand-copied
+  mirrors and their CI pins.
 - **Workflow JS has no Bash/filesystem access**, so the diff never enters the
   script. The **skill** builds three temp files in deterministic Bash — the raw
   diff (Claude finders `Read` it) and a **fenced external prompt** (review
@@ -173,7 +173,8 @@ truth** — every voice's fan-out units come from it, Claude and externals alike
   the delimiter); the workflow only collision-checks it against the returned
   findings and extends it deterministically (`nonce-1`, `-2`…) on collision.
 
-- **`args.claude: false`** runs an **external-only control** (codex + grok-4.5,
+- **`args.claude: false`** runs an **external-only control** (codex + grok — the
+  grok model is discovered at run time, never a pinned id,
   no Claude finder lenses, no gate; merge/verify still in-session).
   Proven useful: a control run found real bugs the with-Claude run missed (an
   `aws_secret_access_key` scrub-list drift, `git diff` omitting untracked files)

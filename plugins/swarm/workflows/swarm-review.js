@@ -57,12 +57,13 @@ const BASH_TIMEOUT_MS = 600000
 // probes plus their kill grace, jail construction, and output validation.
 //
 // The probe part is REPORTED by the adapter (`agents.sh config` →
-// probe_budget_seconds = max_probes x (probe_ceiling + kill_grace)), passed in by
+// probe_budget_seconds = max_probes x (resolved probe timeout + expiry slop +
+// kill_grace)), passed in by
 // the skill, and only defaulted here. It used to be a hand-derived literal that
 // re-stated the adapter's constants in a comment — the same split-brain the
 // `config` verb exists to end, and it bit exactly as predicted: 0.10.0 added a
 // third bounded probe (the --prompt-file capability check moving into readiness)
-// without touching this number, so worst-case pre-timer work became 3 x 23 = 69s
+// without touching this number, so worst-case pre-timer work outgrew the margin
 // against a 60s margin. The outer window would then win the race and destroy the
 // rc=124 + telemetry evidence this whole branch exists to preserve. Reading the
 // number instead of restating it means adding a probe can no longer silently
@@ -85,21 +86,6 @@ const BASH_TIMEOUT_MS = 600000
 // launch with "Invalid SWARM_MAX_PROMPT_BYTES" — a config typo turning into a
 // silent Claude-only review. The fallback is pinned against `agents.sh config` in
 // test_lens_sync.py, like PROBE_BUDGET_FALLBACK_S.
-const MAX_PROMPT_BYTES_FALLBACK = 524288
-// Mirrors of the adapter's own rails (SWARM_CAP_HEADROOM + 1, and
-// SWARM_MAX_PROMPT_BYTES_MAX). They are copies because this file cannot run
-// shell — so test_lens_sync.py pins both against agents.sh, the same way the two
-// fallbacks are pinned. A copy nobody checks is what this whole branch keeps
-// paying for.
-// Considered and DECLINED: having `config` report its own bounds and clamping
-// against those instead. Every value here reaches the workflow as a placeholder
-// a MODEL transcribes out of prose in SKILL.md — that transport is the weak
-// link (it is why the probe bound and budget must now arrive as a pair), so
-// three more placeholders would buy freshness by adding the failure mode we are
-// already defending against. A CI pin costs one test and cannot be mis-typed at
-// runtime. Revisit if the args ever travel as one structured value.
-const MAX_PROMPT_BYTES_MIN = 4097
-const MAX_PROMPT_BYTES_MAX = 1073741824
 // Coerce a numeric STRING too ("524288"), and log whenever the handshake did not
 // deliver a usable value — not only when the result differs from the fallback.
 // Silently substituting the fallback re-opens the exact skill↔adapter split-brain
@@ -126,6 +112,30 @@ if (typeof INPUT.config === 'string') {
   }
 }
 const cfgPick = (key, argName) => (CFG[key] !== undefined ? CFG[key] : INPUT[argName])
+// Last-resort fallbacks only. The adapter reports its own rails inside the config
+// token now, and `rail()` prefers those — so raising a bound in agents.sh no
+// longer means editing a mirror here, its CI pin and its comment, and a direct
+// (skill-less) invocation no longer clamps against whatever the mirror last said.
+// They remain for exactly that skill-less case.
+const rail = (key, fallback) => {
+  const n = _num(CFG[key])
+  return Number.isInteger(n) && n > 0 ? n : fallback
+}
+const MAX_PROMPT_BYTES_FALLBACK = 524288
+// Mirrors of the adapter's own rails (SWARM_CAP_HEADROOM + 1, and
+// SWARM_MAX_PROMPT_BYTES_MAX). They are copies because this file cannot run
+// shell — so test_lens_sync.py pins both against agents.sh, the same way the two
+// fallbacks are pinned. A copy nobody checks is what this whole branch keeps
+// paying for.
+// Considered and DECLINED: having `config` report its own bounds and clamping
+// against those instead. Every value here reaches the workflow as a placeholder
+// a MODEL transcribes out of prose in SKILL.md — that transport is the weak
+// link (it is why the probe bound and budget must now arrive as a pair), so
+// three more placeholders would buy freshness by adding the failure mode we are
+// already defending against. A CI pin costs one test and cannot be mis-typed at
+// runtime. Revisit if the args ever travel as one structured value.
+const MAX_PROMPT_BYTES_MIN = rail('max_prompt_bytes_min', 4097)
+const MAX_PROMPT_BYTES_MAX = rail('max_prompt_bytes_max', 1073741824)
 // ONE coercion for every numeric value the config handshake delivers. The
 // coerce -> validate -> log -> fall back -> clamp sequence was written out once
 // per knob, and the copies had already drifted apart: maxPromptBytes validated
@@ -165,7 +175,7 @@ const MAX_PROMPT_BYTES = handshakeInt('maxPromptBytes', cfgPick('max_prompt_byte
 // Rails mirror the adapter's (default 10, SWARM_PROBE_TIMEOUT_MAX); both are
 // pinned against `agents.sh config` in test_lens_sync.py.
 const PROBE_TIMEOUT_FALLBACK_S = 10
-const PROBE_TIMEOUT_MAX_S = 20
+const PROBE_TIMEOUT_MAX_S = rail('probe_timeout_max_seconds', 20)
 // Restates the adapter's arithmetic for a direct workflow invocation with no
 // skill in front of it: max_probes x (resolved probe timeout + expiry slop +
 // kill grace), i.e. 3 x (10 + 1 + 3). Declared HERE, next to the bound it is
@@ -185,19 +195,19 @@ const PROBE_BUDGET_MAX_S = BASH_TIMEOUT_MS / 1000 / 2
 // to preserve. They are two placeholders a model fills in from prose, so "one
 // arrives, the other does not" is a routine outcome, not an exotic one.
 // So: take them as a PAIR. If either is missing or malformed, both fall back —
-// and the fallback pair is internally consistent (39 = 3 x (10 + 3)) and pinned
+// and the fallback pair is internally consistent (42 = 3 x (10 + 1 + 3)) and pinned
 // against `agents.sh config` by test_lens_sync.py. Never mix a supplied value
 // with a defaulted one.
 // Copies of the adapter's SWARM_MAX_PROBES_PER_RUN and TIMEOUT_KILL_GRACE,
 // pinned against agents.sh by test_lens_sync.py like every other rail here. They
 // are used ONLY to check the pair below, never to derive the budget — the
 // adapter stays the one place that computes it.
-const MAX_PROBES = 3
-const KILL_GRACE_S = 3
+const MAX_PROBES = rail('max_probes_per_run', 3)
+const KILL_GRACE_S = rail('kill_grace_seconds', 3)
 // The adapter's TIMEOUT_EXPIRY_SLOP: its wrapper-free watchdog measures with a
 // 1s-granularity clock, so a bounded call may return up to a second past its
 // nominal bound (never before it).
-const EXPIRY_SLOP_S = 1
+const EXPIRY_SLOP_S = rail('expiry_slop_seconds', 1)
 const _ptRaw = _num(cfgPick('probe_timeout_seconds', 'probeTimeoutSeconds'))
 const _pbRaw = _num(cfgPick('probe_budget_seconds', 'probeBudgetSeconds'))
 const _probeNumericOk = [_ptRaw, _pbRaw].every((n) => Number.isInteger(n) && n >= 0)
@@ -205,16 +215,21 @@ const _probeNumericOk = [_ptRaw, _pbRaw].every((n) => Number.isInteger(n) && n >
 // budget COVERS the bound being pinned: the adapter may spend
 // MAX_PROBES x (bound + grace) before the timed call even starts, and the margin
 // is what keeps that plus the inner wall inside the outer Bash window. A caller
-// passing 20 with a budget of 39 satisfies both type checks and still overruns
-// (3 x 23 + 547 = 616 > 600) — the outer window then kills the adapter and takes
+// passing a 20s bound with the default budget satisfies both type checks and
+// still overruns — the outer window then kills the adapter and takes
 // rc=124, the timeout message and the telemetry record with it.
-const _probeCoversOk = _probeNumericOk && _pbRaw >= MAX_PROBES * (_ptRaw + EXPIRY_SLOP_S + KILL_GRACE_S)
+// Check the CLAMPED bound, not the raw one: `probe_timeout_seconds=0` with a 12s
+// budget satisfied the raw check, then the bound was clamped UP to the adapter's
+// floor of 1 while the 12s budget was kept — three 1s probes can spend 15s, and
+// the overrun the check exists to catch walks straight through it.
+const _ptClamped = Math.min(Math.max(_ptRaw, 1), PROBE_TIMEOUT_MAX_S)
+const _probeCoversOk = _probeNumericOk && _pbRaw >= MAX_PROBES * (_ptClamped + EXPIRY_SLOP_S + KILL_GRACE_S)
 const _probePairOk = _probeNumericOk && _probeCoversOk
 if (!_probePairOk && (cfgPick('probe_timeout_seconds', 'probeTimeoutSeconds') !== undefined || cfgPick('probe_budget_seconds', 'probeBudgetSeconds') !== undefined)) {
   log(`config handshake: probeTimeoutSeconds/probeBudgetSeconds ` +
       `(${JSON.stringify(cfgPick('probe_timeout_seconds', 'probeTimeoutSeconds'))} / ${JSON.stringify(cfgPick('probe_budget_seconds', 'probeBudgetSeconds'))}) ` +
       (_probeNumericOk
-        ? `do not hold: a ${_ptRaw}s bound needs at least ${MAX_PROBES * (_ptRaw + EXPIRY_SLOP_S + KILL_GRACE_S)}s of margin`
+        ? `do not hold: a ${_ptClamped}s bound needs at least ${MAX_PROBES * (_ptClamped + EXPIRY_SLOP_S + KILL_GRACE_S)}s of margin`
         : `did not both arrive as numbers`) +
       ` — using BOTH defaults (${PROBE_TIMEOUT_FALLBACK_S}s bound, ${PROBE_BUDGET_FALLBACK_S}s margin), which do`)
 }

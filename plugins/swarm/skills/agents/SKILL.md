@@ -41,8 +41,9 @@ user_invocable: true
   status`, bounded — and since that probe IS the auth question and reaches the
   same network the review needs, a probe that hits the wall is reported
   **not-ready**: a wedged CLI otherwise burns the full wall once per gated
-  cluster. Only "the probe could not be bounded at all" falls back to
-  credentials-present. The hint names which of the two happened).
+  cluster. *Any* non-zero probe rc is not-ready — there is no fail-open branch,
+  because the one rc that carried it (126) is also the shell's "found but cannot
+  be invoked". The hint names which case it was).
   So grok can show Ready yet fail at review time
   on a stale token; treat it as "credentials present" and let the run surface a
   real auth error. A not-ready hint naming the model list is NOT an auth problem,
