@@ -335,9 +335,35 @@ each voice pays an extra round-trip.
     the auth question and reaches the same network the review call needs, so a
     wall hit there is an honest **not-ready**: calling it ready costs one adapter
     process per gated cluster, each re-running the hanging probe and burning the
-    full inner wall — five dead voices instead of one clean skip. Only rc 126
-    ("could not be bounded at all") trusts auth. This flipped between 0.10.9 and
-    0.10.10; the asymmetry above is the reason, so it does not need flipping again.
+    full inner wall — five dead voices instead of one clean skip. This flipped
+    between 0.10.9 and 0.10.10; the asymmetry above is the reason, so it does not
+    need flipping again.
+  - **A fail-open needs an rc the probed command cannot produce, and there is
+    none.** 0.10.11 kept one branch — rc 126, the adapter`s "could not bound
+    this" sentinel — as trust-auth. But 126 is also what a shell returns for
+    "found but cannot be invoked": a broken node shim or a noexec mount was
+    therefore reported READY, and the workflow spawned one adapter process per
+    gated cluster to rediscover it. 0.10.12 removed it — every non-zero readiness
+    rc is not-ready, and the HINT (not the verdict) carries which case it was.
+    The same dual meaning bites the RUN path: `timeout` returns 126 for "found
+    but could not be executed" too, so a message naming only TMPDIR points at a
+    directory that was never involved.
+  - **One dispatch, or the two halves drift.** "Wrapper if present, watchdog
+    otherwise" was written out twice — once for probes, once for the backend
+    call — so a change to the grace, the flags or the rc semantics had to be made
+    in both. `_bounded_call` is the only place that decides now; callers supply
+    their own redirections (probes close stdin and discard stderr, the backend
+    call inherits both).
+  - **Every bounded pre-timer probe must be COUNTED, not just bounded.**
+    `SWARM_MAX_PROBES_PER_RUN` is what `config` derives the budget from, and
+    bounding the sandbox smoke test without incrementing it made the reported
+    budget under-report the real worst case — so the outer window could win
+    again. The current worst case is grok`s three: `grok models`, `grok --help`,
+    the sandbox `true`. `--version` is deliberately NOT among them: the `run`
+    gate asks `command -v`, and the probe that prints a version string only runs
+    where that string is shown (`available`, `list`). The fix for an uncounted
+    probe was to REMOVE one that could not affect any verdict, not to raise the
+    number.
   - **Memoize by call convention, not by wishing.** `list="$(grok_model_list)"`
     runs the function in a *subshell*, so its cache-global assignments vanish
     and every caller silently re-pays the network call. The cache only works if

@@ -451,7 +451,7 @@ check("adapter: probe budget is derived from the resolved bound + slop + kill gr
       re.search(r"SWARM_MAX_PROBES_PER_RUN \* \(_probe_timeout \+ TIMEOUT_EXPIRY_SLOP \+ TIMEOUT_KILL_GRACE\)", sh))
 # SWARM_MAX_PROBES_PER_RUN is hand-maintained, and it is the ONLY link between
 # "how much pre-timer work exists" and the margin the workflow derives from it. A
-# new _bounded_probe call site that nobody counted is invisible to that margin —
+# new _probe_or_bare call site that nobody counted is invisible to that margin —
 # exactly how 0.10.0 overran it.
 #
 # The call sites and the constant are NOT equal on purpose: the constant is the
@@ -463,7 +463,7 @@ check("adapter: probe budget is derived from the resolved bound + slop + kill gr
 # already excludes them — an extra `"_probe_or_bare() {" not in l` clause could
 # never fire and only suggested the opposite.
 _probe_sites = len([l for l in sh.splitlines()
-                    if ("_bounded_probe " in l or "_probe_or_bare " in l)
+                    if "_probe_or_bare " in l
                     and not l.lstrip().startswith("#")])
 _declared = re.search(r"SWARM_MAX_PROBES_PER_RUN=(\d+)", sh)
 # A comment inside a `\`-continued command silently truncates it: the shell ends
@@ -546,11 +546,11 @@ check(f"adapter: no function both prints and caches into a global ({_bad_memo})"
       not _bad_memo)
 
 check("adapter: SWARM_MAX_PROBES_PER_RUN is declared", _declared)
-check(f"adapter: pre-timer probe call sites still number 7 (got {_probe_sites}) — "
+check(f"adapter: pre-timer probe call sites still number 6 (got {_probe_sites}) — "
       f"if you added one, re-derive SWARM_MAX_PROBES_PER_RUN "
       f"(currently {_declared.group(1) if _declared else '?'}, the worst case for a "
       f"single backend) and update this pin",
-      _probe_sites == 7)
+      _probe_sites == 6)
 check("adapter: the declared worst case covers grok's three probes",
       bool(_declared) and int(_declared.group(1)) >= 3)
 

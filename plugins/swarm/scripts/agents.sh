@@ -434,14 +434,12 @@ with_timeout() {
   # command substitution blocking past the deadline. The outer Bash window then
   # kills the whole adapter instead: rc is never 124, the EXIT trap never runs,
   # so there is no "timed out after Ns" line and no telemetry record. That lost
-  # diagnosis is the thing this branch exists to prevent, and _bounded_probe
+  # diagnosis is the thing this branch exists to prevent, and the probe path
   # already used -k for the same reason.
   # Same discovery the probes use — open-coding it here meant two `command -v`
   # sweeps per process and two places to keep in step.
   timeout_bin
-  if [[ -n "$_timeout_bin" ]]; then
-    "$_timeout_bin" -k "$TIMEOUT_KILL_GRACE" "$ADAPTER_TIMEOUT" "$@"
-  else
+  if [[ -z "$_timeout_bin" ]]; then
     # No coreutils timeout: bound it OURSELVES rather than running bare. The bare
     # branch made the documented cap silently inapplicable on stock macOS — the
     # common host, not an exotic one — so `_enforced_wall` stayed 0, rc 124/137
@@ -456,8 +454,9 @@ with_timeout() {
       echo "warning: no timeout/gtimeout on PATH — external calls are bounded by the adapter's own polling watchdog instead (install coreutils for the cheaper wrapper; SWARM_TIMEOUT=0 disables the cap)" >&2
       _timeout_warned=1
     fi
-    _bounded_bg "$ADAPTER_TIMEOUT" "$@"
   fi
+  # Same dispatch as every probe — see _bounded_call.
+  _bounded_call "$ADAPTER_TIMEOUT" "$@"
 }
 
 # OS-level read-deny jail for external CLI calls. Both voices may now read
@@ -923,7 +922,7 @@ available_version() {
   # Bounded WHEN POSSIBLE, unbounded otherwise — the same contract with_timeout
   # documents a few hundred lines up ("run bare, but say so once"). Denying the
   # version instead would blank the VERSION column on any host without coreutils
-  # (stock macOS), and `_bounded_probe` cannot make that choice itself: it runs
+  # (stock macOS), and the bounded call cannot make that choice itself: it runs
   # inside $(...) where it can neither warn once nor set a flag.
   _probe_setup_lenient
   _probe_or_bare "$backend" --version 2>/dev/null | head -1 || true
@@ -957,8 +956,11 @@ probe_timeout() {
 }
 # How many bounded probes a single `run` may perform before the timed backend
 # call starts. Every one is memoized per process, so this is the worst case for
-# the heaviest backend (grok): `--version`, `grok models`, `grok --help`. codex
-# needs two (`--version`, `login status`).
+# the heaviest backend (grok): `grok models`, `grok --help`, and the sandbox
+# smoke test (`<wrapper> true`, bounded since 0.10.13). codex needs two
+# (`login status`, the same sandbox test).
+# `--version` is NOT among them: the `run` gate asks `command -v`, and the probe
+# that prints a version string only runs where that string is shown.
 # CHANGE THIS WHENEVER A PRE-TIMER PROBE IS ADDED. The workflow reads the derived
 # budget instead of re-deriving it, so this constant is the single place the
 # arithmetic lives — but it only stays honest if a new probe is counted here. An
@@ -1008,12 +1010,28 @@ probe_timeout_lenient() {
   fi
 }
 
-# The two preludes every _bounded_probe caller must run FIRST, in the main shell.
+# The two preludes every _probe_or_bare caller must run FIRST, in the main shell.
 # Named because the pair was duplicated at four call sites and enforced only by a
 # comment — and a missed call silently disables bounding (the memo and any exit
 # die inside the $(...) that invokes the probe).
-_probe_setup_strict()  { timeout_bin; probe_timeout; }
-_probe_setup_lenient() { timeout_bin; probe_timeout_lenient; }
+_probe_setup_strict()  { timeout_bin; probe_timeout; frac_sleep_probe; }
+_probe_setup_lenient() { timeout_bin; probe_timeout_lenient; frac_sleep_probe; }
+
+# Does `sleep` accept a fraction? POSIX only guarantees integers, so it has to be
+# tried — and trying it costs the 100ms it sleeps. A HOST property, resolved once
+# here in the main shell like $_timeout_bin: _bounded_bg runs inside `$( )` on the
+# grok path, so a memo written there dies with the subshell and every probe re-paid
+# the 100ms out of the pre-timer budget it exists to keep honest.
+# Unset (a direct call that skipped the prelude) reads as 0 — whole-second polling,
+# correct but coarse. Never wrong, only slower.
+_frac_sleep_done=""
+_frac_sleep=0
+frac_sleep_probe() {
+  [[ -n "$_frac_sleep_done" ]] && return 0
+  _frac_sleep_done=1
+  sleep 0.1 2>/dev/null && _frac_sleep=1
+  return 0
+}
 
 _timeout_bin_done=""
 _timeout_bin=""
@@ -1040,7 +1058,7 @@ timeout_bin() {
 #
 # stdout is captured and replayed; stdin and stderr are whatever the CALLER
 # redirects — probes close stdin and discard stderr at their own call site
-# (_watchdog_run), while the backend call inherits both (it streams the CLI-s
+# (_probe_or_bare), while the backend call inherits both (it streams the CLI-s
 # error output, and codex reads its prompt on stdin).
 _bounded_bg() {
   local secs="$1"; shift
@@ -1092,15 +1110,12 @@ _bounded_bg() {
   # STRICTLY GREATER: the first tick can arrive milliseconds after the launch, and
   # `>=` would expire a 1s probe almost immediately. This fires between secs and
   # secs+1 — never early, at most a second late.
-  # Can `sleep` take a fraction? POSIX only guarantees integers, so it has to be
-  # tried — and trying it costs the 100ms it sleeps.
-  # Only worth paying for a SHORT bound. Fine granularity exists for the ~40ms
-  # readiness probes; a bound of minutes is watched by a test with 1s granularity
-  # anyway, so paying 100ms per backend call (x2 backends x5 clusters) to learn
-  # something that path cannot use was pure pre-timer waste — charged against the
-  # very budget this function helps keep honest.
+  # Resolved once per process by frac_sleep_probe (see it for why not here), and
+  # only USED for a short bound: fine granularity exists for the ~40ms readiness
+  # probes, while a bound of minutes is watched by a test with 1s granularity
+  # anyway.
   local frac=0
-  if (( secs <= 20 )); then sleep 0.1 2>/dev/null && frac=1; fi
+  if (( secs <= 20 )); then frac="${_frac_sleep:-0}"; fi
   t0=$SECONDS
   local elapsed=0
   while kill -0 "$pid" 2>/dev/null; do
@@ -1152,60 +1167,31 @@ _bounded_bg() {
   return "$rc"
 }
 
-# The PROBE flavour: stdin closed (a CLI reading stdin would hang the probe that
-# must never hang) and stderr discarded, matching _bounded_probe exactly so a
-# caller cannot tell the two paths apart from the outside.
-_watchdog_run() {
-  _bounded_bg "$@" </dev/null 2>/dev/null
-}
-
-_probe_or_bare() {
-  # Bounded EITHER WAY: by the coreutils wrapper when one exists, by the polling
-  # watchdog when it does not. Callers that must not even attempt the call (the
-  # network-reaching `grok models`) still test $_timeout_bin themselves and skip.
-  # Extracted because the if/else was written out twice and the two copies are
-  # what a third call site would clone.
-  # `</dev/null` on BOTH branches: a probe that reads stdin would otherwise block
-  # forever on an interactive shell — a probe that must never hang, hanging.
+# THE dispatch: wrapper if one exists, polling watchdog otherwise. One place, so
+# the grace, the flags and the rc semantics cannot drift between "how a probe is
+# bounded" and "how the backend call is bounded" — the two used to open the same
+# if/else independently, and every "these two must agree" split on this branch
+# has cost a round. The CALLER supplies redirections; this only decides HOW.
+_bounded_call() {
+  local secs="$1"; shift
   if [[ -n "$_timeout_bin" ]]; then
-    _bounded_probe "$@"
+    "$_timeout_bin" -k "$TIMEOUT_KILL_GRACE" "$secs" "$@"
   else
-    _watchdog_run "${_probe_timeout:-10}" "$@"
+    _bounded_bg "$secs" "$@"
   fi
 }
 
-_bounded_probe() {
-  # Run a LOCAL probe under the probe bound and print its stdout. Returns the
-  # command's rc, or 1 if it could not be bounded at all. Whether a wrapper EXISTS
-  # is asked separately (timeout_bin) and MUST be checked by the caller before
-  # calling: every candidate sentinel rc (126, 127) collides with something a
-  # probed command legitimately returns, so "could not bound" is not answerable
-  # from the rc — and a caller that skips the check reads it as "the probe
-  # failed", which is how 0.10.3 dropped codex on hosts without coreutils.
-  #
-  # Extracted because this prelude existed three times and had already drifted:
-  # one copy checked rc before trusting the output, another swallowed it with
-  # `|| true` and read an empty result as a definite answer — which turned a
-  # hung CLI into "that flag is missing, upgrade your install". The contract
-  # lives here now: `-k` is what actually enforces the bound (a CLI ignoring
-  # SIGTERM, or forking a stdout-inheriting child, keeps `$(...)` blocking past
-  # the deadline), and the CALLER decides what a non-zero rc means — it must
-  # never be conflated with a successful negative answer.
-  # 126 as the "cannot bound this" sentinel, NOT 127: `timeout` itself exits 127
-  # when the command it was given does not exist, so a missing backend binary and
-  # a missing timeout binary would be indistinguishable — and the callers treat
-  # the two differently (assume-capability vs. degrade-and-report).
-  # PRIVATE: call `_probe_or_bare`, never this. It dispatches here only when a
-  # wrapper exists and routes the no-wrapper case to the watchdog, so the
-  # `[[ -n "$_timeout_bin" ]] || return 1` guard that used to sit here could not
-  # fire — while the prose around it still invited a new call site to come
-  # straight in and read that rc=1 as "the probe failed", which is precisely how
-  # 0.10.3 dropped codex on a coreutils-less host.
-  # Callers still run _probe_setup_strict or _probe_setup_lenient in the main
-  # shell first: this is invoked as $(...), so anything memoized here dies with
-  # the subshell and any exit is swallowed by the substitution.
-  "$_timeout_bin" -k "$TIMEOUT_KILL_GRACE" "$_probe_timeout" "$@" </dev/null 2>/dev/null
+# The PROBE entry point — call this, never _bounded_call directly. Bounded either
+# way (wrapper or watchdog), stdin closed and stderr discarded: a probe that reads
+# stdin would block forever on an interactive shell (a probe that must never hang,
+# hanging), and probe noise must not reach the adapter-s own stderr.
+# Callers MUST run _probe_setup_strict or _probe_setup_lenient in the main shell
+# first: this is invoked as $(...), so anything resolved here dies with the
+# subshell and any exit is swallowed by the substitution.
+_probe_or_bare() {
+  _bounded_call "${_probe_timeout:-10}" "$@" </dev/null 2>/dev/null
 }
+
 
 # The parser as its OWN function, reading the raw listing on stdin. It used to be
 # inlined in the assignment below, which forced both test files to SCRAPE it back
@@ -1291,7 +1277,7 @@ grok_model_fetch() {
   # message below printed an empty "after s") and the exit never leaves it, so a
   # malformed SWARM_PROBE_TIMEOUT degraded both probes and still reported ready.
   _probe_setup_lenient
-  # `_probe_or_bare`, not `_bounded_probe`, and no coreutils special case: with
+  # `_probe_or_bare`, and no coreutils special case: with
   # the polling watchdog the call is bounded on every host, so skipping it there
   # is no longer the cautious choice — it is the dangerous one. Skipping left the
   # model list EMPTY, which reads as the trust-auth degrade: readiness passes,
@@ -1576,7 +1562,14 @@ subcmd_available() {
 require_usable() {
   # Shared installed+ready gate for `ready` and `run`.
   local backend="$1"
-  if ! available_version "$backend" >/dev/null; then
+  # `command -v`, not available_version: the gate asks "is it installed", and
+  # available_version answers a different question — it PRINTS a version string
+  # and returns 0 regardless of what the probe did, so its result could never
+  # fail this check. It still cost a bounded probe on every `run`, charged to
+  # probe_budget_seconds and therefore subtracted from the backend-s own wall.
+  # The version string is worth a probe where it is SHOWN (`available`, `list`),
+  # not where it is discarded.
+  if [[ "$backend" != "claude" ]] && ! command -v "$backend" >/dev/null; then
     echo "$backend: not installed" >&2
     exit 1
   fi
@@ -1878,8 +1871,17 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
     # place) also keeps a caller-owned --prompt-file untouched — the workflow
     # hands the SAME prompt file to every voice, so mutating it would corrupt
     # the sibling calls running concurrently.
-    local assembled
-    assembled="$(mktemp)" || { echo "Could not create a temp file for the assembled prompt" >&2; exit 2; }
+    local assembled prompt_dir
+    # NEXT TO the caller-s prompt file, not in bare $TMPDIR. The skill creates its
+    # own scratch dir and removes it with `rm -rf`, but a bare mktemp lands in
+    # $TMPDIR as a SIBLING of that dir — so the one failure this branch is about
+    # (the outer window SIGKILLs the adapter, no trap runs) left a full copy of
+    # the reviewed diff on disk that neither cleanup could reach. Deriving the
+    # directory from the prompt path needs no new flag: the caller already told
+    # us where its scratch space is by handing us a file inside it.
+    prompt_dir="$(dirname "$prompt_path")"
+    assembled="$(mktemp "$prompt_dir/swarm-assembled.XXXXXX" 2>/dev/null || mktemp)" \
+      || { echo "Could not create a temp file for the assembled prompt" >&2; exit 2; }
     chmod 600 "$assembled"
     # Hand the file to the trap BEFORE any content lands in it. Assigning
     # TMP_PROMPT only after the write left a window in which the file already
@@ -2006,7 +2008,12 @@ run_codex() {
   TELEMETRY_RC="$rc"
   if (( rc != 0 )); then
     if _is_timeout_rc "$rc"; then echo "codex exec timed out after ${_adapter_timeout}s" >&2
-    elif (( rc == 126 )); then echo "codex exec could not be bounded — the adapter could not create a scratch file for its watchdog (check TMPDIR); refused rather than run uncapped" >&2
+    # 126 has TWO causes here and the message must not pick one: `timeout` uses it
+    # for "found but could not be executed" (noexec mount, wrong-arch binary,
+    # broken shim, a sandbox wrapper that failed to exec), and the watchdog uses
+    # it for "could not create a scratch file". Naming only TMPDIR sent operators
+    # to a temp dir that was never involved. ready_hint words it the same way.
+    elif (( rc == 126 )); then echo "codex exec could not be run: either the command was found but could not be executed (noexec mount, wrong architecture, broken shim, failed sandbox wrapper) or the adapter could not create a scratch file to bound it (check TMPDIR)" >&2
     else echo "codex exec failed" >&2; fi
     exit 1
   fi
@@ -2069,7 +2076,7 @@ _grok_has_prompt_file() {
   if [[ -n "$_grok_help_done" ]]; then return "$_grok_help_rc"; fi
   _grok_help_done=1
   _probe_setup_lenient
-  # `_probe_or_bare`, not `_bounded_probe`: the question must be ANSWERED on a
+  # `_probe_or_bare`: the question must be ANSWERED on a
   # host with no coreutils too. Assuming the capability there reported an OLD CLI
   # without --prompt-file as READY, and every gated cluster then failed
   # identically at launch. `_probe_or_bare` now bounds that answer either way
@@ -2202,7 +2209,7 @@ run_grok() {
     # 126 = the adapter refused to launch it unbounded, so grok never ran. Its own
     # warning is written to the stderr this call discards, and without this branch
     # the operator was sent to inspect a model list for a temp-dir failure.
-    elif (( rc == 126 )); then echo "grok could not be bounded — the adapter could not create a scratch file for its watchdog (check TMPDIR); refused rather than run uncapped" >&2
+    elif (( rc == 126 )); then echo "grok could not be run: either the command was found but could not be executed (noexec mount, wrong architecture, broken shim, failed sandbox wrapper) or the adapter could not create a scratch file to bound it (check TMPDIR)" >&2
     else echo "grok failed — check that the installed grok CLI offers model '$grok_model' (see: grok models)" >&2
     fi
     exit 1

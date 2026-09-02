@@ -274,6 +274,17 @@ entries are grouped per plugin, newest first.
 
 ## swarm
 
+### 0.10.14 — 2026-09-02
+Loop round 10 (the cap). One critical, and it was round 9's own fix: bounding a probe without counting it.
+
+- **`SWARM_MAX_PROBES_PER_RUN` did not include the sandbox smoke test.** Round 9 bounded it — correctly — but the constant `config` derives `probe_budget_seconds` from still enumerated three CLI probes, so the reported budget under-reported the real pre-timer wall and the outer 600 s window could win the race the margin exists to lose. Exactly the class the constant exists to prevent, walked into by the fix that made the probe safe.
+- **The fix was to remove a probe, not to raise the number.** `require_usable` called `available_version` to answer "is it installed" — but that function *prints a version string and returns 0 regardless*, so its result could never fail the gate, while still costing a bounded probe on every `run` that was charged to the budget and therefore subtracted from the backend's own wall. The gate asks `command -v` now; the version probe runs where the string is actually shown. Worst case is back to three, and the constant's comment enumerates them: `grok models`, `grok --help`, the sandbox `true`.
+- **One dispatch for "wrapper if present, watchdog otherwise".** It was written out twice — once for probes, once for the backend call — so a change to the grace, the flags or the rc semantics had to land in both. `_bounded_call` is the only place that decides; callers supply their own redirections. Every "these two must agree" split on this branch has cost a round.
+- **rc 126 has two causes on the run path, and the message named one.** `timeout` uses it for "found but could not be executed" (noexec mount, wrong arch, broken shim, a sandbox wrapper that failed to exec); the watchdog uses it for "could not create a scratch file". Naming only TMPDIR sent operators to a directory that was never involved — the readiness hint already worded it for both.
+- **The assembled prompt lands in the caller's scratch dir.** A bare `mktemp` put the instruction+diff in `$TMPDIR` as a *sibling* of the skill's managed directory, so the one failure this branch is about — the outer window SIGKILLs the adapter, no trap runs — left a full copy of the reviewed diff where neither cleanup could reach it. The directory is derived from the prompt path, so it needs no new flag: the caller already said where its scratch space is.
+- **The fractional-sleep capability is resolved once per process**, like `$_timeout_bin`. Probing it inside `_bounded_bg` re-paid 100 ms per probe out of the pre-timer budget, because that function runs inside a command substitution on the grok path and a memo written there dies with the subshell.
+- Also: round 9's knowledge correction for the rc-126 flip did not actually land (a failed assertion in the edit, no write) — the entry still recorded the removed fail-open as settled design, with a note not to revisit it. Corrected, along with the run-path variant of the same dual meaning.
+
 ### 0.10.13 — 2026-09-02
 Loop round 9 — no criticals. One real regression from round 8, one probe that had been missed for nine rounds, and the end of the hand-copied-constant class.
 
