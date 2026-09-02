@@ -223,10 +223,17 @@ check(
     "workflow: pins SWARM_PROBE_TIMEOUT on the transport command",
     re.search(r"SWARM_PROBE_TIMEOUT=\$\{PROBE_TIMEOUT_S\} bash ", js),
 )
-check("skill: passes probeTimeoutSeconds to the workflow", "probeTimeoutSeconds:" in skill)
+# The four numeric knobs travel as ONE opaque token the model copies verbatim, so
+# what has to be pinned is that the token is built from the adapter's own config
+# and carried into the call — not four separate placeholder names.
+check("skill: builds the config token from the adapter's config",
+      re.search(r'SWARM_CFG_LINE="max_prompt_bytes=\$CFG_MAX;probe_timeout_seconds=\$CFG_PROBE_TO;probe_budget_seconds=\$CFG_PROBE"', skill))
+check("skill: appends timeout_seconds only when the user set SWARM_TIMEOUT",
+      "SWARM_CFG_LINE;timeout_seconds=$CFG_TO" in skill)
 check("skill: reads probe_timeout_seconds from the adapter config",
       "probe_timeout_seconds)" in skill)
-check("skill: passes maxPromptBytes to the workflow", "maxPromptBytes:" in skill)
+check("skill: the workflow call carries the config token",
+      'config: "<SWARM_CFG_LINE>"' in skill)
 check(
     "workflow: the Bash window is derived, not a second hard-coded literal",
     re.search(r"Bash tool \(timeout \$\{BASH_TIMEOUT_MS\}\)", js)
@@ -440,8 +447,8 @@ check("adapter: config reports probe_budget_seconds",
 # From the RESOLVED probe timeout, not its ceiling: budgeting the ceiling charged
 # every run for probes twice as long as the ones it actually enforces, and the
 # workflow handed that margin back as lost wall time on every external call.
-check("adapter: probe budget is derived from the resolved bound + kill grace",
-      re.search(r"SWARM_MAX_PROBES_PER_RUN \* \(_probe_timeout \+ TIMEOUT_KILL_GRACE\)", sh))
+check("adapter: probe budget is derived from the resolved bound + slop + kill grace",
+      re.search(r"SWARM_MAX_PROBES_PER_RUN \* \(_probe_timeout \+ TIMEOUT_EXPIRY_SLOP \+ TIMEOUT_KILL_GRACE\)", sh))
 # SWARM_MAX_PROBES_PER_RUN is hand-maintained, and it is the ONLY link between
 # "how much pre-timer work exists" and the margin the workflow derives from it. A
 # new _bounded_probe call site that nobody counted is invisible to that margin —
@@ -550,13 +557,21 @@ check("adapter: the declared worst case covers grok's three probes",
 check("adapter: the --help capability probe is memoized",
       "_grok_help_done" in sh and "_grok_help_rc" in sh)
 check("skill: the probe budget is echoed for the workflow",
-      "SWARM_PROBE_BUDGET_S" in skill)
-check("skill: the workflow call passes probeBudgetSeconds",
-      "probeBudgetSeconds:" in skill)
+      "probe_budget_seconds=$CFG_PROBE" in skill)
 check("workflow: the margin is built from the reported budget, not a literal",
-      re.search(r"const TIMEOUT_MARGIN_S = PROBE_BUDGET_S \+ TIMEOUT_SLACK_S", js))
-check("workflow: probeBudgetSeconds is read from INPUT",
-      "INPUT.probeBudgetSeconds" in js)
+      re.search(r"const TIMEOUT_MARGIN_S = PROBE_BUDGET_S \+ TIMEOUT_SLACK_S \+ WALL_OVERSHOOT_S", js))
+# The backend call runs under the same bound as a probe, so its own overshoot must
+# be reserved too — leaving it to the slack put the worst case within seconds of
+# the outer window.
+check("workflow: the margin reserves the backend call's own overshoot",
+      re.search(r"const WALL_OVERSHOOT_S = EXPIRY_SLOP_S \+ KILL_GRACE_S", js))
+check("workflow: the probe budget is read from the config token",
+      "cfgPick('probe_budget_seconds', 'probeBudgetSeconds')" in js)
+# The expiry slop is a copy of the adapter's, like every other rail here.
+_es_sh = re.search(r"TIMEOUT_EXPIRY_SLOP=(\d+)", sh)
+_es_js = re.search(r"const EXPIRY_SLOP_S = (\d+)", js)
+check("adapter+workflow: expiry slop matches",
+      all([_es_sh, _es_js]) and _es_sh.group(1) == _es_js.group(1))
 
 # The workflow keeps ONE hand-copied number: the fallback used when it runs
 # without the skill in front of it. Pin it against what the adapter actually

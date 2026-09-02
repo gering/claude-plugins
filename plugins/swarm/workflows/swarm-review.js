@@ -108,6 +108,24 @@ const MAX_PROMPT_BYTES_MAX = 1073741824
 // one and dies with "Prompt file too large" — N per-call errors and nothing
 // saying the two sides disagreed.
 const _num = (v) => (typeof v === 'number' ? v : (typeof v === 'string' && /^\d+$/.test(v.trim()) ? Number(v) : NaN))
+// The whole resolved config as ONE token the skill echoes and the model copies
+// verbatim (`k=v;k=v;…`), instead of four separate numeric placeholders it fills
+// in from prose. Transcription is the weak link in this handshake — every knob
+// dropped in transit becomes a fallback pinned onto every adapter call, which is
+// how a user-raised SWARM_MAX_PROMPT_BYTES turned into N "Prompt file too large"
+// errors and a Claude-only review, and why the probe bound and budget had to be
+// made a pair. One token cannot be half-copied.
+// Individual args still win nothing but still WORK: a direct workflow invocation
+// (no skill in front) may pass either shape, and the per-knob validation below is
+// identical for both.
+const CFG = {}
+if (typeof INPUT.config === 'string') {
+  for (const pair of INPUT.config.split(';')) {
+    const i = pair.indexOf('=')
+    if (i > 0) CFG[pair.slice(0, i).trim()] = pair.slice(i + 1).trim()
+  }
+}
+const cfgPick = (key, argName) => (CFG[key] !== undefined ? CFG[key] : INPUT[argName])
 // ONE coercion for every numeric value the config handshake delivers. The
 // coerce -> validate -> log -> fall back -> clamp sequence was written out once
 // per knob, and the copies had already drifted apart: maxPromptBytes validated
@@ -133,7 +151,7 @@ const handshakeInt = (name, raw, { fallback, min, max, optional = false, clampNo
   }
   return clamped
 }
-const MAX_PROMPT_BYTES = handshakeInt('maxPromptBytes', INPUT.maxPromptBytes, {
+const MAX_PROMPT_BYTES = handshakeInt('maxPromptBytes', cfgPick('max_prompt_bytes', 'maxPromptBytes'), {
   fallback: MAX_PROMPT_BYTES_FALLBACK, min: MAX_PROMPT_BYTES_MIN, max: MAX_PROMPT_BYTES_MAX,
 })
 // The probe bound the adapter will enforce. Pinned onto the command line for the
@@ -149,11 +167,12 @@ const MAX_PROMPT_BYTES = handshakeInt('maxPromptBytes', INPUT.maxPromptBytes, {
 const PROBE_TIMEOUT_FALLBACK_S = 10
 const PROBE_TIMEOUT_MAX_S = 20
 // Restates the adapter's arithmetic for a direct workflow invocation with no
-// skill in front of it: max_probes x (resolved probe timeout + kill grace), i.e.
-// 3 x (10 + 3). Declared HERE, next to the bound it is derived from, because the
-// pair check below reads both — and a `const` referenced above its declaration
-// is a runtime ReferenceError, not a hoisted undefined.
-const PROBE_BUDGET_FALLBACK_S = 39
+// skill in front of it: max_probes x (resolved probe timeout + expiry slop +
+// kill grace), i.e. 3 x (10 + 1 + 3). Declared HERE, next to the bound it is
+// derived from, because the pair check below reads both — and a `const`
+// referenced above its declaration is a runtime ReferenceError, not a hoisted
+// undefined.
+const PROBE_BUDGET_FALLBACK_S = 42
 // Bounded on BOTH sides: an unbounded budget would drive MAX_INNER_S negative and
 // hand `SWARM_TIMEOUT=-N` to the adapter, which rejects it — every voice failing
 // at launch instead of one clear error here.
@@ -175,8 +194,12 @@ const PROBE_BUDGET_MAX_S = BASH_TIMEOUT_MS / 1000 / 2
 // adapter stays the one place that computes it.
 const MAX_PROBES = 3
 const KILL_GRACE_S = 3
-const _ptRaw = _num(INPUT.probeTimeoutSeconds)
-const _pbRaw = _num(INPUT.probeBudgetSeconds)
+// The adapter's TIMEOUT_EXPIRY_SLOP: its wrapper-free watchdog measures with a
+// 1s-granularity clock, so a bounded call may return up to a second past its
+// nominal bound (never before it).
+const EXPIRY_SLOP_S = 1
+const _ptRaw = _num(cfgPick('probe_timeout_seconds', 'probeTimeoutSeconds'))
+const _pbRaw = _num(cfgPick('probe_budget_seconds', 'probeBudgetSeconds'))
 const _probeNumericOk = [_ptRaw, _pbRaw].every((n) => Number.isInteger(n) && n >= 0)
 // "Both are numbers" is not consistency. The invariant that matters is that the
 // budget COVERS the bound being pinned: the adapter may spend
@@ -185,20 +208,20 @@ const _probeNumericOk = [_ptRaw, _pbRaw].every((n) => Number.isInteger(n) && n >
 // passing 20 with a budget of 39 satisfies both type checks and still overruns
 // (3 x 23 + 547 = 616 > 600) — the outer window then kills the adapter and takes
 // rc=124, the timeout message and the telemetry record with it.
-const _probeCoversOk = _probeNumericOk && _pbRaw >= MAX_PROBES * (_ptRaw + KILL_GRACE_S)
+const _probeCoversOk = _probeNumericOk && _pbRaw >= MAX_PROBES * (_ptRaw + EXPIRY_SLOP_S + KILL_GRACE_S)
 const _probePairOk = _probeNumericOk && _probeCoversOk
-if (!_probePairOk && (INPUT.probeTimeoutSeconds !== undefined || INPUT.probeBudgetSeconds !== undefined)) {
+if (!_probePairOk && (cfgPick('probe_timeout_seconds', 'probeTimeoutSeconds') !== undefined || cfgPick('probe_budget_seconds', 'probeBudgetSeconds') !== undefined)) {
   log(`config handshake: probeTimeoutSeconds/probeBudgetSeconds ` +
-      `(${JSON.stringify(INPUT.probeTimeoutSeconds)} / ${JSON.stringify(INPUT.probeBudgetSeconds)}) ` +
+      `(${JSON.stringify(cfgPick('probe_timeout_seconds', 'probeTimeoutSeconds'))} / ${JSON.stringify(cfgPick('probe_budget_seconds', 'probeBudgetSeconds'))}) ` +
       (_probeNumericOk
-        ? `do not hold: a ${_ptRaw}s bound needs at least ${MAX_PROBES * (_ptRaw + KILL_GRACE_S)}s of margin`
+        ? `do not hold: a ${_ptRaw}s bound needs at least ${MAX_PROBES * (_ptRaw + EXPIRY_SLOP_S + KILL_GRACE_S)}s of margin`
         : `did not both arrive as numbers`) +
       ` — using BOTH defaults (${PROBE_TIMEOUT_FALLBACK_S}s bound, ${PROBE_BUDGET_FALLBACK_S}s margin), which do`)
 }
-const PROBE_TIMEOUT_S = handshakeInt('probeTimeoutSeconds', _probePairOk ? INPUT.probeTimeoutSeconds : undefined, {
+const PROBE_TIMEOUT_S = handshakeInt('probeTimeoutSeconds', _probePairOk ? cfgPick('probe_timeout_seconds', 'probeTimeoutSeconds') : undefined, {
   fallback: PROBE_TIMEOUT_FALLBACK_S, min: 1, max: PROBE_TIMEOUT_MAX_S, optional: true,
 })
-const PROBE_BUDGET_S = handshakeInt('probeBudgetSeconds', _probePairOk ? INPUT.probeBudgetSeconds : undefined, {
+const PROBE_BUDGET_S = handshakeInt('probeBudgetSeconds', _probePairOk ? cfgPick('probe_budget_seconds', 'probeBudgetSeconds') : undefined, {
   optional: true,
   fallback: PROBE_BUDGET_FALLBACK_S, min: 0, max: PROBE_BUDGET_MAX_S,
   clampNote: (v, c) => `probeBudgetSeconds=${v} exceeds half the Bash window — capped to ${c}s so the inner timeout stays positive`,
@@ -207,7 +230,13 @@ const PROBE_BUDGET_S = handshakeInt('probeBudgetSeconds', _probePairOk ? INPUT.p
 // prompt assembly, JSON validation). Small, fixed, and ours — not a mirror of
 // anything in the adapter.
 const TIMEOUT_SLACK_S = 14
-const TIMEOUT_MARGIN_S = PROBE_BUDGET_S + TIMEOUT_SLACK_S
+// The BACKEND call has the same overshoot as a probe — it runs under the same
+// bound — and reserving it only for the probes left the difference to be paid
+// out of the slack: on a coreutils-less host the worst case reached ~593s of the
+// 600s window, i.e. the outer kill could still win the race the margin exists to
+// lose. Reserved explicitly instead of hidden in the slack.
+const WALL_OVERSHOOT_S = EXPIRY_SLOP_S + KILL_GRACE_S
+const TIMEOUT_MARGIN_S = PROBE_BUDGET_S + TIMEOUT_SLACK_S + WALL_OVERSHOOT_S
 // Default to the derived ceiling, not to 600: the inner cap must stay BELOW the
 // Bash window, so a default of 600 was always capped to 570 — and announced as
 // "you asked for more than one Bash call can hold" on every single default run.
@@ -216,7 +245,7 @@ const TIMEOUT_MARGIN_S = PROBE_BUDGET_S + TIMEOUT_SLACK_S
 const MAX_INNER_S = BASH_TIMEOUT_MS / 1000 - TIMEOUT_MARGIN_S
 // Unclamped here on purpose: 0 ("no adapter cap") and the Bash-window ceiling
 // are both handled below, with their own messages.
-const REQUESTED_TIMEOUT_S = handshakeInt('timeoutSeconds', INPUT.timeoutSeconds, {
+const REQUESTED_TIMEOUT_S = handshakeInt('timeoutSeconds', cfgPick('timeout_seconds', 'timeoutSeconds'), {
   fallback: MAX_INNER_S, min: 0, max: Number.MAX_SAFE_INTEGER, optional: true,
 })
 // 0 means "no adapter cap" and is passed through rather than overridden — but it
@@ -836,7 +865,12 @@ for (const v of voices) {
 }
 // A unit where fewer than 2 families returned cannot produce a consensus finding,
 // no matter how many voices spoke in other units.
-const unitsDegraded = Array.from(unitsByName.entries())
+// EMPTY when fewer than 2 families were ever expected: with a single family
+// configured every unit trivially has "fewer than 2", so this listed all five
+// clusters as degraded on a stock Claude-only install that ran exactly as
+// intended — and the value is exported in `balance`, so every presenter reading
+// it repeated the claim. Degradation means "lost something", not "never had it".
+const unitsDegraded = familiesExpected.length < 2 ? [] : Array.from(unitsByName.entries())
   .filter(([, fams]) => fams.size < 2)
   .map(([unit]) => unit)
   .sort()
@@ -880,7 +914,12 @@ if (!consensusReachable && familiesExpected.length >= 2) {
 } else if (unitsDegraded.length) {
   coverageNotes.push(`Cluster ${unitsDegraded.join(', ')}: weniger als 2 Familien haben geliefert — Findings DORT fallen auf solo + Verifier zurück. Die übrigen Cluster sind unberührt.`)
 }
-if (unitsDegraded.length) {
+// Gated on consensus being reachable AT ALL, like the notes above: with a single
+// family configured every cluster trivially has "fewer than 2 families", so this
+// announced a five-way degradation for a stock Claude-only install that ran
+// exactly as intended — and `balance.unitsDegraded` carried the same claim to any
+// presenter reading it.
+if (consensusReachable && unitsDegraded.length) {
   log(`Cluster coverage: ${unitsDegraded.join(', ')} had fewer than 2 families return — findings there cannot reach consensus and fall back to solo + verifier`)
 }
 

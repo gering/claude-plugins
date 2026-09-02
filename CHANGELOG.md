@@ -274,6 +274,19 @@ entries are grouped per plugin, newest first.
 
 ## swarm
 
+### 0.10.12 — 2026-09-02
+Loop round 8 — no criticals, and half the findings of round 7. Two of them were guards that answered "safe" without having checked.
+
+- **The bounded call now stays inside the budget it advertises.** The watchdog fires in `(secs, secs+1]` and then sleeps the full kill grace unconditionally, so a `SWARM_TIMEOUT=3` call returned after 7 s and telemetry-report printed percentages above 100 — and on a coreutils-less host the worst case reached ~593 s of the 600 s window, leaving the outer kill able to win the race the margin exists to lose. The grace is *polled* now (a backend that honours SIGTERM pays ~100 ms, not 3 s), and the residual 1 s of clock granularity is **budgeted** rather than ignored: `probe_budget_seconds` includes it, and the workflow reserves the backend call's own overshoot instead of taking it out of the slack. Measured: a 5 s cap returns in 6 s.
+- **The containment guard failed open.** `2>/dev/null || true` turned any failure of the deny-list build or the python comparison into an empty result, which the test below read as "not denied" — a safety check answering "safe" when it could not answer at all, guarding a failure mode that is invisible by construction (a masked prompt reads as empty and the backend returns a schema-valid "no findings"). It aborts with a diagnostic now.
+- **Deny paths are normalized once, at the source.** The sandbox-exec builder and the preflight both stripped whitespace; the bwrap builder did not, and masked the untrimmed string — so a deny entry with a trailing space was masked by the jail and invisible to the check meant to catch exactly that. Trimming happens where `SWARM_DENY_PATHS` is split, and every consumer takes the bytes verbatim.
+- **An empty `grok --help` no longer means "flag absent".** A CLI that prints usage to stderr exits 0 with empty stdout — probe helpers discard stderr by design — and the capability match then reported an up-to-date CLI as too old, dropping the whole grok family behind an upgrade-your-install message. Empty output is inconclusive, like a non-zero rc.
+- **`grep` exiting 2 is a tooling fault, not an empty prompt.** Negating the rc reported a demonstrably non-empty prompt as empty and pointed the operator at the diff.
+- **No fail-open on rc 126 in codex readiness.** It is the adapter's "could not bound" sentinel, but also the shell's "found but cannot be invoked" — so a broken shim or noexec mount was reported ready and rediscovered once per gated cluster. Any non-zero rc is not-ready; the hint names which case.
+- **`unitsDegraded` no longer flags a single-family install.** With one family configured every cluster trivially has "fewer than 2", so a stock Claude-only run was reported as degraded in all five clusters — in the log and in `balance`, which any presenter repeats.
+- **The four numeric knobs travel as one opaque token.** They reached the workflow only by being transcribed out of prose, and a dropped one does not fail — it substitutes a fallback that is then pinned onto every adapter call (a raised `SWARM_MAX_PROMPT_BYTES` becoming N "Prompt file too large" errors and a Claude-only review). One token cannot be half-copied; per-knob args still work for a direct invocation.
+- Also: the poll backs off to 1 s after the first few seconds (a full-wall call forked `/bin/sleep` ~5,500 times to watch a deadline with 1 s granularity); `_bounded_probe` is marked private and its unreachable guard removed, since the prose around it invited exactly the direct call that dropped codex in 0.10.3.
+
 ### 0.10.11 — 2026-09-02
 Loop round 7 — no criticals. Two real defects in the new bound, and a documentation round: four of the ten warnings were docs I wrote in 0.10.9 and then contradicted with the reversal in 0.10.10.
 

@@ -344,6 +344,13 @@ SWARM_TIMEOUT_MAX=86400
 SWARM_CAP_HEADROOM=4096
 # Grace between SIGTERM and SIGKILL for every bounded call.
 TIMEOUT_KILL_GRACE=3
+# How far past its nominal bound a bounded call may return, before the grace.
+# `timeout` is precise; the wrapper-free watchdog measures with `SECONDS`, whose
+# 1s granularity means it fires in (secs, secs+1] — deliberately never early.
+# Budgeted rather than ignored: the difference between the advertised budget and
+# the real worst case is exactly what lets the outer window win the race the
+# margin exists to lose.
+TIMEOUT_EXPIRY_SLOP=1
 
 # Did this rc come from hitting the wall? `timeout` reports 124 when SIGTERM
 # expired the command — but with `-k` a backend that IGNORES SIGTERM is SIGKILLed
@@ -504,14 +511,23 @@ _assert_prompt_readable_in_jail() {
 import os, sys
 prompt = os.path.realpath(sys.argv[1])
 for line in sys.stdin:
-    d = line.strip()
+    d = line.rstrip("\n")
     if not d:
         continue
     rd = os.path.realpath(d)
     if prompt == rd or prompt.startswith(rd.rstrip("/") + "/"):
         print(d)
         break
-' "$1" 2>/dev/null || true)"
+' "$1" 2>/dev/null)" || {
+    # FAIL CLOSED. `|| true` here turned any failure of the deny-list build or of
+    # python into an EMPTY result, which the test below reads as "not denied" —
+    # a safety check that answers "safe" when it could not answer at all. The
+    # thing it guards against is invisible by construction (a masked prompt reads
+    # as empty and the backend returns a schema-valid "no findings"), so the one
+    # unacceptable outcome is passing without having checked.
+    echo "refusing to run: could not verify that the prompt file is readable inside the jail (the deny-path check failed) — rerun with SWARM_DENY_PATHS unset to narrow it down" >&2
+    exit 2
+  }
 
   if [[ -n "$hit" ]]; then
     echo "refusing to run: the prompt file ($1) is inside a denied path ($hit) — inside the jail it would read as EMPTY and the backend would return 'no findings' from a call that never saw the diff. Move TMPDIR outside SWARM_DENY_PATHS." >&2
@@ -624,7 +640,22 @@ _sandbox_deny_paths_build() {
   local extra="${SWARM_DENY_PATHS:-}"
   # if-form, not `[[ … ]] && …`: the latter returns 1 when extra is empty, and
   # under set -e that aborts the `profile="$(…)"` assignment that calls this.
-  if [[ -n "$extra" ]]; then printf '%s\n' "${extra//:/$'\n'}"; fi
+  # Trim each user-supplied entry HERE, once, so every consumer downstream can
+  # take the bytes verbatim. They did not agree before: the sandbox-exec profile
+  # builder and the containment preflight both `.strip()`, while the bwrap
+  # builder reads with `IFS= read -r` and masks the untrimmed string. A deny
+  # entry with a trailing space was therefore MASKED by bwrap but invisible to
+  # the preflight — the prompt file would read as empty inside the jail and grok
+  # would return schema-valid "no findings" from a call that saw no diff, which
+  # is the exact silence that check exists to prevent.
+  if [[ -n "$extra" ]]; then
+    local e
+    while IFS= read -r e; do
+      e="${e#"${e%%[![:space:]]*}"}"   # leading whitespace
+      e="${e%"${e##*[![:space:]]}"}"   # trailing whitespace
+      [[ -n "$e" ]] && printf '%s\n' "$e"
+    done <<< "${extra//:/$'\n'}"
+  fi
   return 0
 }
 
@@ -718,7 +749,7 @@ _init_sandbox() {
 import os, sys
 rules = []
 for line in sys.stdin:
-    p = line.strip()
+    p = line.rstrip("\n")
     if not p:
         continue
     rp = os.path.realpath(p)
@@ -1048,16 +1079,34 @@ _bounded_bg() {
   # STRICTLY GREATER: the first tick can arrive milliseconds after the launch, and
   # `>=` would expire a 1s probe almost immediately. This fires between secs and
   # secs+1 — never early, at most a second late.
+  # Can `sleep` take a fraction? POSIX only guarantees integers. Probed ONCE, here
+  # rather than per iteration, and the 100ms it costs is overlapped with the
+  # child-s own startup. Both loops below need the answer.
+  local frac=0
+  sleep 0.1 2>/dev/null && frac=1
   t0=$SECONDS
+  local elapsed=0
   while kill -0 "$pid" 2>/dev/null; do
-    if (( SECONDS - t0 > secs )); then
+    elapsed=$(( SECONDS - t0 ))
+    if (( elapsed > secs )); then
       # Signal the GROUP (negated pgid), falling back to the child if the group
       # does not exist — then escalate, exactly like `timeout -k`.
       # Wrapped in a stderr-silenced block: with monitor mode on for the launch,
       # bash prints its own "Terminated: 15" job notice when it reaps the job,
       # which would land in the adapter-s stderr and be reported as backend output.
       { kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
-        sleep "$TIMEOUT_KILL_GRACE"
+        # POLL the grace, do not sleep it out. An unconditional
+        # `sleep $TIMEOUT_KILL_GRACE` charged every timeout the full grace even
+        # when the backend died on the first SIGTERM — the common case — so the
+        # measured wall of a bounded call ran systematically over its own budget
+        # (SWARM_TIMEOUT=3 returned after 7s, and telemetry-report then printed
+        # percentages above 100).
+        local ticks=0 max_ticks="$TIMEOUT_KILL_GRACE"
+        (( frac )) && max_ticks=$(( TIMEOUT_KILL_GRACE * 10 ))
+        while (( ticks < max_ticks )) && kill -0 "$pid" 2>/dev/null; do
+          if (( frac )); then sleep 0.1; else sleep 1; fi
+          ticks=$(( ticks + 1 ))
+        done
         if kill -0 "$pid" 2>/dev/null; then
           kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
           wait "$pid" 2>/dev/null || true
@@ -1070,10 +1119,13 @@ _bounded_bg() {
       cat "$out"; rm -f "$out"; TMP_BOUNDED=""
       return "$rc"
     fi
-    # 100ms where a fractional sleep works (a probe documented at ~40ms must not
-    # be rounded up to a full second, paid per probe, per backend, per gated
-    # cluster), whole seconds where POSIX-minimal `sleep` rejects the fraction.
-    sleep 0.1 2>/dev/null || sleep 1
+    # Adaptive: 100ms for the first few seconds, then whole seconds. The fine
+    # step exists for the ~40ms readiness probes (rounding those up to a second
+    # is paid per probe, per backend, per gated cluster); the backend call runs
+    # for minutes, and polling it at 10 Hz forked /bin/sleep ~5,500 times per
+    # call — bash 3.2 has no sleep builtin — to watch a deadline whose own test
+    # has 1-second granularity anyway.
+    if (( elapsed < 3 && frac )); then sleep 0.1; else sleep 1; fi
   done
   # `|| rc=$?` and not a bare `wait`: under `set -e` a non-zero rc would exit the
   # whole adapter here instead of reaching the caller that has to interpret it.
@@ -1126,13 +1178,15 @@ _bounded_probe() {
   # when the command it was given does not exist, so a missing backend binary and
   # a missing timeout binary would be indistinguishable — and the callers treat
   # the two differently (assume-capability vs. degrade-and-report).
-  # Callers MUST run _probe_setup_strict or _probe_setup_lenient in the main shell
-  # first, and MUST decide for themselves what an empty $_timeout_bin means (skip
-  # the probe, or run the command unbounded). This function is invoked as $(...)
-  # by every caller, so anything it memoizes dies with the subshell and any exit
-  # it takes is swallowed by the substitution — it cannot warn, degrade, or fail
-  # loudly on its own behalf.
-  [[ -n "$_timeout_bin" ]] || return 1
+  # PRIVATE: call `_probe_or_bare`, never this. It dispatches here only when a
+  # wrapper exists and routes the no-wrapper case to the watchdog, so the
+  # `[[ -n "$_timeout_bin" ]] || return 1` guard that used to sit here could not
+  # fire — while the prose around it still invited a new call site to come
+  # straight in and read that rc=1 as "the probe failed", which is precisely how
+  # 0.10.3 dropped codex on a coreutils-less host.
+  # Callers still run _probe_setup_strict or _probe_setup_lenient in the main
+  # shell first: this is invoked as $(...), so anything memoized here dies with
+  # the subshell and any exit is swallowed by the substitution.
   "$_timeout_bin" -k "$TIMEOUT_KILL_GRACE" "$_probe_timeout" "$@" </dev/null 2>/dev/null
 }
 
@@ -1425,19 +1479,22 @@ ready_check() {
     # ~547s inner wall: five dead voices instead of one clean skip. The hint says
     # what happened, so this is a reported skip, not a silent family loss.
     #
-    # 126 is the one rc that still degrades: it means the call could not be
-    # BOUNDED at all (no scratch file), so nothing was learned about codex.
+    # NO fail-open branch. 126 was one: it is the adapter-s "could not bound this"
+    # sentinel, but 126 is also what a shell returns for "found but cannot be
+    # invoked" — a broken node shim, a noexec mount, a wrong-arch binary. Reading
+    # that as "trust auth" reported a codex that CANNOT RUN as ready, and the
+    # workflow then spawned one adapter process per gated cluster to rediscover
+    # it. And "could not create a scratch file" is not a reason to proceed
+    # anyway: the review call needs the same temp dir. Any non-zero rc is
+    # not-ready; the hint says which case it was.
     codex)
       _probe_setup_lenient
       local codex_rc=0
       _probe_or_bare codex login status >/dev/null 2>&1 || codex_rc=$?
       # Remembered for ready_hint: it must tell "not logged in" apart from "the
-      # probe hit the wall", and the rc is the only thing that knows.
+      # probe hit the wall" or "the adapter could not bound it", and the rc is
+      # the only thing that knows.
       _codex_probe_rc="$codex_rc"
-      if (( codex_rc == 126 )); then
-        echo "warning: \`codex login status\` could not be bounded — readiness falls back to auth alone; the login check did not run" >&2
-        return 0
-      fi
       return "$codex_rc"
       ;;
     # Model-aware: auth alone would advertise grok even when the CLI no longer
@@ -1457,6 +1514,8 @@ ready_hint() {
       # wrong thing, so name both and let the message say which is which.
       if (( ${_codex_probe_rc:-0} == 124 || ${_codex_probe_rc:-0} == 137 )); then
         echo "\`codex login status\` did not answer within ${_probe_timeout:-10}s — the CLI is wedged or the network is unreachable; if it is only slow, raise SWARM_PROBE_TIMEOUT (max ${SWARM_PROBE_TIMEOUT_MAX}s)"
+      elif (( ${_codex_probe_rc:-0} == 126 )); then
+        echo "\`codex login status\` could not be run under a bound — either the codex binary cannot be invoked (broken shim, noexec mount, wrong arch) or the adapter could not create a scratch file (check TMPDIR)"
       else
         echo "run: codex login"
       fi
@@ -1611,7 +1670,7 @@ subcmd_config() {
   # nothing could spend. Safe only because the workflow pins SWARM_PROBE_TIMEOUT
   # onto the adapter command line the same way it pins SWARM_TIMEOUT — the value
   # budgeted here is the value the adapter will enforce.
-  echo "probe_budget_seconds=$(( SWARM_MAX_PROBES_PER_RUN * (_probe_timeout + TIMEOUT_KILL_GRACE) ))"
+  echo "probe_budget_seconds=$(( SWARM_MAX_PROBES_PER_RUN * (_probe_timeout + TIMEOUT_EXPIRY_SLOP + TIMEOUT_KILL_GRACE) ))"
 }
 
 subcmd_run() {
@@ -1725,8 +1784,16 @@ subcmd_run() {
   # after command substitution rejected whitespace-only input too (substitution
   # strips trailing newlines). Reviewing a prompt of blank lines wastes a full
   # backend call and returns nothing useful, so check for non-whitespace content.
-  if ! LC_ALL=C grep -q '[^[:space:]]' "$prompt_path"; then
+  # Branch on grep-s rc, do not just negate it: 1 is "no match" (a genuinely
+  # blank prompt) but 2 is "grep could not do its job" (unreadable file, broken
+  # wrapper). Collapsing them reported a demonstrably non-empty prompt as empty
+  # and sent the operator to inspect the diff instead of the tooling.
+  local _grep_rc=0
+  LC_ALL=C grep -q '[^[:space:]]' "$prompt_path" || _grep_rc=$?
+  if (( _grep_rc == 1 )); then
     echo "Empty prompt (use --prompt-file or stdin)" >&2; exit 2
+  elif (( _grep_rc > 1 )); then
+    echo "Could not read the prompt file ($prompt_path) — grep exited $_grep_rc; this is a tooling or permission fault, not an empty prompt" >&2; exit 2
   fi
 
   # Per-cluster external voices: the WORKFLOW owns LENS_BRIEF (single source of
@@ -1985,6 +2052,19 @@ _grok_has_prompt_file() {
     # "ran unbounded, cannot have timed out" case the old $_timeout_bin gate
     # silenced.
     echo "warning: \`grok --help\` probe did not complete (rc=$rc) — assuming --prompt-file is supported" >&2
+    return 0
+  fi
+  # An EMPTY capture is not a negative answer either — same rule as a non-zero rc
+  # above: a probe that produced nothing did not tell us the flag is missing.
+  # It happens for real: a CLI that prints its usage to STDERR exits 0 with empty
+  # stdout, and the probe helpers discard stderr by design (probe noise must not
+  # reach the adapter-s own). Falling through to the `case` reported an
+  # up-to-date CLI as too old and dropped the whole grok family behind an
+  # upgrade-your-install message. Assume the capability and let the real call
+  # report the truth, loudly.
+  if [[ -z "$help" ]]; then
+    _grok_help_rc=0
+    echo "warning: \`grok --help\` produced no output — assuming --prompt-file is supported" >&2
     return 0
   fi
   case "$help" in

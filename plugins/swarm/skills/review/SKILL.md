@@ -333,12 +333,22 @@ if [ "$PROMPT_BYTES" -gt "$OVERSIZE_THRESHOLD" ]; then echo "EXTERNALS_OVERSIZE=
 # validated and decimal-forced — it lands in a BARE JavaScript numeric literal,
 # where a leading zero would be legacy octal (0600 = 384) or a strict-mode
 # SyntaxError.
+# ONE token carrying the whole resolved config, because the workflow receives
+# these numbers only by being TRANSCRIBED out of this prose. Four separate
+# placeholders meant four chances to drop one, and a dropped knob does not fail —
+# it silently becomes a fallback that is then pinned onto every adapter call (a
+# user-raised SWARM_MAX_PROMPT_BYTES turning into N "Prompt file too large"
+# errors and a Claude-only review; a bound pinned behind a margin sized for a
+# different one). A single opaque token cannot be half-copied.
+SWARM_CFG_LINE="max_prompt_bytes=$CFG_MAX;probe_timeout_seconds=$CFG_PROBE_TO;probe_budget_seconds=$CFG_PROBE"
+# Appended only when the user actually set SWARM_TIMEOUT: the workflow derives its
+# own default from the Bash-tool ceiling minus the margin, and handing it a value
+# it will then cap made every stock run log "you asked for more than one Bash call
+# can hold".
 if [ -n "${SWARM_TIMEOUT:-}" ]; then
-  echo "SWARM_TIMEOUT_S=$CFG_TO"
+  SWARM_CFG_LINE="$SWARM_CFG_LINE;timeout_seconds=$CFG_TO"
 fi
-echo "SWARM_MAX_BYTES=$CFG_MAX"
-echo "SWARM_PROBE_BUDGET_S=$CFG_PROBE"
-echo "SWARM_PROBE_TIMEOUT_S=$CFG_PROBE_TO"
+echo "SWARM_CFG_LINE=$SWARM_CFG_LINE"
 echo "JAIL=$JAIL"
 echo "LIVE_JSON=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json | tr -d '\n')"
 ```
@@ -377,8 +387,8 @@ echo "LIVE_JSON=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json | t
   narrowing the range (or raising `SWARM_MAX_PROMPT_BYTES`). Do NOT pass live
   voices the adapter would only reject — one clean skip beats N per-call backend
   errors. **The block decides this, not you**: read the flag, never re-derive it
-  from `PROMPT_BYTES`. **Quote `SWARM_MAX_BYTES` / `PROMPT_BYTES` from the block,
-  never a literal byte count** — the cap is configurable, so a hard-coded size
+  from `PROMPT_BYTES`. **Quote the cap from the block's config line (or
+  `PROMPT_BYTES`), never a literal byte count** — the cap is configurable, so a hard-coded size
   states the wrong number in the one message the user acts on, and points them
   away from the override that actually fired. The threshold sits a lens-instruction
   headroom *under* the cap because the workflow prepends a per-cluster instruction
@@ -400,29 +410,24 @@ Workflow({
     externalPromptFile: "<PROMPT>",
     telemetryFile: "<TELEMETRY>",
     findingNonce: "<FINDING_NONCE>",
-    probeBudgetSeconds: <SWARM_PROBE_BUDGET_S>,
-    probeTimeoutSeconds: <SWARM_PROBE_TIMEOUT_S>,
-    maxPromptBytes: <SWARM_MAX_BYTES>,
+    config: "<SWARM_CFG_LINE>",
     externalVoices: [<the live voices from step 1>]
   }
 })
 ```
 
 Fill `<DIFF>`/`<PROMPT>`/`<TELEMETRY>`/`<FINDING_NONCE>` from the echoed values,
-and pass `probeBudgetSeconds: <SWARM_PROBE_BUDGET_S>`,
-`probeTimeoutSeconds: <SWARM_PROBE_TIMEOUT_S>` and
-`maxPromptBytes: <SWARM_MAX_BYTES>` (all bare numbers) so the workflow sizes its
-timeout margin from what the adapter reports, and pins the same prompt cap and
-probe bound onto every adapter call instead of trusting environment inheritance.
-The probe bound is load-bearing, not cosmetic: the adapter derives the probe
-budget from the value it resolves, so a run that budgets one number and enforces
-another re-opens the race the margin exists to win.
-**Only if** the block echoed `SWARM_TIMEOUT_S`, add `timeoutSeconds:
-<SWARM_TIMEOUT_S>` — a bare number, not a string. Omit the field entirely
-otherwise, so the workflow applies its own derived default rather than being
-handed one it must then cap. **The block already decided this** — it emits the
-line solely when the user set `SWARM_TIMEOUT` — so read the presence of the line,
-never re-evaluate the condition from your own memory of the environment. Add `max: true` to `args` when
+and copy `<SWARM_CFG_LINE>` **verbatim, as one quoted string** — do not split it,
+reorder it, drop a pair, or convert its numbers. It carries the whole resolved
+adapter config (prompt cap, probe bound, probe budget, and `timeout_seconds` only
+when the user set `SWARM_TIMEOUT`), and the workflow sizes its timeout margin
+from it and pins the same values onto every adapter call instead of trusting
+environment inheritance. It is one token precisely because these numbers used to
+be four separate placeholders: dropping one does not fail loudly, it silently
+substitutes a fallback that then disagrees with what the block already decided —
+which is how a raised `SWARM_MAX_PROMPT_BYTES` became N per-call "Prompt file too
+large" errors and a Claude-only review. **The block decides the contents, you only
+carry them.** Add `max: true` to `args` when
 `--max` was given (step 1 stripped it) — the deepest-effort profile. Add
 `claude: false` to `args`
 for an **external-only control run** (codex + grok, no Claude finder
