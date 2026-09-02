@@ -52,6 +52,9 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.12.1 — 2026-09-02
+- Fix `herdr-agent.sh ha_wait`: emit herdr 0.8's `--until S` instead of the drifted `--status` flag (unknown option; a real caller would see it forwarded as a "timeout"). Leftover `--status` (flag or value position), `--until=S` (herdr 0.8 unknown option), and a dangling `--until` (would steal the injected `--timeout` as STATUS) are rejected (exit 2), never silently translated or forwarded. When the caller passes no state, inject herdr's documented default (`idle`/`done`/`blocked`). Flag vocabulary is herdr-version-coupled — no version-detection layer.
+
 ### 1.12.0 — 2026-08-16
 - `/kickoff` offers **cc-harness foreign agents** when a `cc-harness-agents` helper is on `PATH`: full Claude Code sessions driven by a foreign model (e.g. `cc-harness:grok`, `cc-harness:kimi`, `cc-harness:sol`) via a local gateway. Auto-detected — one `command -v`; helper absent → no change from today. The plugin is a pure consumer of a small contract (`list` / `exec`); it hardcodes no gateway, no models, no agent table — whatever `list` prints becomes a picker entry (covered by a mock that returns a name the plugin has never heard of).
 - `agent-registry.sh` merges the helper's 4-column TSV (`name/model/available/note`, name already namespaced) into its 5-column list as `cli=cc-harness`, maps only literal `available=yes` to available (fail-closed on `unknown`), and resolves `cc-harness:<id>` to `cc-harness-agents exec <id> -- claude [-n <session>] /work-system:continue` — no `--model` (the helper sets it via env before `exec`ing into claude, so the herdr pane roots at claude and agent_status + `/close` stay intact). Exit 3 from the helper ("capability absent") is a silent degrade, distinct from a listed-but-unavailable provider (exit 3 from resolve, with the helper's fix hint).

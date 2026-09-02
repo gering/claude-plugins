@@ -2,9 +2,9 @@
 title: "Manager/Worker Orchestration (design)"
 createdAt: 2026-07-18
 createdFrom: "session: design-manager-worker-orchestration 2026-07-18"
-updatedAt: 2026-08-19
-updatedFrom: "session: 2026-08-19 (task/offer-cc-harness-agents-at-kickoff)"
-pluginVersion: 1.12.0
+updatedAt: 2026-09-02
+updatedFrom: "session: 2026-09-02 (task/fix-ha-wait-until-flag)"
+pluginVersion: 1.12.1
 prime: false
 ---
 
@@ -35,7 +35,7 @@ implementation is spawned across tasks `add-lane-registry`, `spike-agent-mail-su
 - An `agent start`-launched tab **does** expose a pollable `agent_status` ∈
   `idle|working|blocked|done|unknown`. `blocked` (worker on an input/permission
   prompt) is the primary "needs the Manager" signal. Poll via `agent list`/`agent
-  get`; **bounded** block-wait via `agent wait --status … --timeout` (no busy loop).
+  get`; **bounded** block-wait via `agent wait --until … --timeout` (no busy loop).
 - Status is produced by **installed hook integrations** merged with a TUI-scrape
   rule engine (`agent explain`), NOT self-reported by the agent.
 - `agent read --source recent` returns clean text incl. Claude's `※ recap:` line +
