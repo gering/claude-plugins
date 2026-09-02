@@ -1,9 +1,9 @@
 ---
 title: "Swarm Backend Adapter Layer"
 createdAt: 2026-07-03
-updatedAt: 2026-07-23
+updatedAt: 2026-09-02
 createdFrom: "PR #21"
-updatedFrom: "open-swarm-external-exploration"
+updatedFrom: "fix-swarm-timeout-ceiling"
 pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
@@ -14,7 +14,7 @@ reindexedAt: 2026-07-12
 The `swarm` plugin reviews locally with a mixture-of-agents ensemble: Claude
 subagents plus the external `codex` and `grok` CLIs. All deterministic backend
 logic lives in one script — `plugins/swarm/scripts/agents.sh` (verbs: `list`,
-`available`, `ready`, `jail`, `run`) — so skills never call an external CLI
+`available`, `ready`, `jail`, `config`, `run`) — so skills never call an external CLI
 directly. `jail` prints `jail=yes|no` (a working OS sandbox?) — the
 `/swarm:review` skill reads it to brand the run-start notice and the external
 prompt's capability lines honestly on a jail-less host (transport discards the
@@ -125,12 +125,39 @@ inlined diff (callers, config, types, library/CVE knowledge).
    IS OS-enforced. Accepted residual, documented so nobody assumes the jail
    blocks writes.
 
-The 120-KiB inline-diff cap is **unchanged** in 0.6.0; file-read now makes a
-future reduction of inlining possible (have the agent read the file itself) —
-coordinate that separately, do not duplicate transport work here.
+The 120-KiB inline-diff cap described above was **removed in 0.8.0** (see the
+out-of-band transport section): the prompt no longer travels on argv, so the cap
+is now model context (`SWARM_MAX_PROMPT_BYTES`, 512 KiB default). Letting the
+agent read the diff file itself was considered there and REJECTED — delivery
+stops being verifiable, the untrusted diff arrives outside the nonce fence, and
+each voice pays an extra round-trip.
 
-## Verified CLI facts (codex 0.144.6 / grok 0.2.103, 2026-07)
+## Verified CLI facts (codex 0.147.0 / grok 1.0.13, 2026-07..09)
 
+- **The prompt travels OUT-OF-BAND, never on argv** — codex reads it from stdin
+  (`-- -`; the help states an omitted or `-` PROMPT reads stdin), grok takes
+  `--prompt-file <path>` (present on 0.2.112; the introducing release is not
+  documented, so the adapter probes `grok --help` for the flag rather than
+  parsing a version). *Why it matters:* on argv the binding limit is
+  `MAX_ARG_STRLEN` (128 KiB on Linux), which forced a 120 KiB prompt cap — and
+  above that cap `/swarm:review` dropped **every** external voice, i.e. the same
+  damage as a backend timeout, from a size limit that was never inherent to the
+  backends. What remains is a model-context sanity cap
+  (`SWARM_MAX_PROMPT_BYTES`, default 512 KiB), read by the adapter AND the
+  skill's oversize guard from the same env knob so an override reaches both.
+  Verified end-to-end at 164 KiB through both backends (2026-08-05).
+  - **Do not "solve" a size limit by having the backend read the diff file
+    itself.** Both voices have file-read, so it looks equivalent — it is not:
+    delivery stops being verifiable (a model that reads only the file's head
+    silently loses coverage), the untrusted diff arrives as a tool result
+    instead of inside the nonce fence, and every voice pays an extra
+    round-trip. Out-of-band transport keeps the fence and the delivery
+    guarantee intact.
+  - grok reads that file from **inside the OS jail**, so it must be
+    jail-readable — `TMPDIR` is (the denylist covers credential paths). The
+    adapter's own temp prompt is `chmod 600` before content lands and is removed
+    by the EXIT trap on every path, including errors: it holds the untrusted
+    diff.
 - **Uniform findings JSON** is achievable from both CLIs: `codex exec
   --output-schema <file>` and `grok --json-schema '<inline>'` both enforce a
   JSON Schema on the final answer. One bundled schema
@@ -142,13 +169,37 @@ coordinate that separately, do not duplicate transport work here.
   `--output-last-message <file>` (stdout carries the agent transcript,
   stderr the progress log); grok prints a response **envelope** on stdout —
   the validated object is its `.structuredOutput` field.
-- **The adapter pins `-m grok-4.5`** — the schema-capable model, and since
-  swarm 0.4.3 the *only* grok model it supports. grok 0.2.101 renamed it from
-  `grok-build` (same upstream pin-rename class as codex's `gpt-5.6-terra`;
-  verified drop-in: identical envelope/`structuredOutput` shape, `--single`
-  unchanged). Any other `--model` is preflight-rejected with a usage error —
-  only grok-4.5 enforces `--json-schema`, and an unlisted model fails late with
-  `structuredOutput: null` after burning a full review.
+- **The grok model is DISCOVERED, not pinned** (0.9.2). The adapter selects the
+  newest canonical id the CLI lists whose `--json-schema` enforcement is
+  *verified*; `GROK_DEFAULT_MODEL` is only the fallback floor. Ported from
+  `~/dotfiles`' `cc-harness-agents`, which tracks the same provider, with one
+  gate substituted: that helper withholds an upgrade until a model's context
+  window is known, the adapter until its SCHEMA ENFORCEMENT is known — a model
+  that merely accepts the flag and returns `structuredOutput: null` fails late,
+  after a full review is paid for.
+  - `GROK_CANONICAL_RE` accepts only **bare version ids, major ≥ 4**. A provider
+    catalog mixes canonical releases with non-substitutes: dated snapshots,
+    reasoning/non-reasoning splits, multi-agent, build, composer, image/video.
+    Major ≥ 4 keeps a catalog that regresses to `grok-3*` from pulling the
+    ensemble backwards.
+  - Version order is **component-wise**, so `grok-4.20` beats `grok-4.6` — as a
+    decimal fraction it would lose, but the provider means the 20th minor
+    release and already ships 4.20-derived ids.
+  - `GROK_SCHEMA_VERIFIED` is the hard gate and the upgrade ritual: a newer
+    canonical model is **named on stderr, never selected**, so adopting it is a
+    one-line edit after a hand check. Verified 2026-08-16 on CLI 1.0.3:
+    grok-4.5 and grok-4.6 both return an envelope whose `.structuredOutput`
+    carries the schema's `findings`.
+  - Readiness asks "is ANY verified model on offer", matching what the run would
+    actually select. The old "is THIS id listed" form is what let the 1.0.3
+    marker change drop grok from every review.
+- **`grok models` output format has changed twice — parse it defensively.**
+  0.2.101 renamed `grok-build` → `grok-4.5`; **1.0.3 changed the bullet marker**
+  so only the DEFAULT keeps `*` and the rest use `-`. The `*`-only matcher then
+  reported "this CLI does not offer grok-4.5" for a CLI that offered it, and
+  grok — the third model family — vanished from every review, silently and with
+  no timeout involved. `test_grok_models.py` pins both formats against the
+  shipped awk program.
 - **Effort ladders**: grok is `low|medium|high` since 0.2.101 (the `max` tier
   is gone) → the adapter maps `xhigh`/`max`→`high`; codex has no `max` tier →
   map `max`→`xhigh` (`-c model_reasoning_effort=…`). Both mappings degrade a
@@ -164,35 +215,50 @@ coordinate that separately, do not duplicate transport work here.
   `grok-composer-2.5-fast`, which swarm had shipped as a second grok voice; the
   auth-only probe kept reporting it Ready until it failed mid-review with
   `Invalid params: "unknown model id"`. `ready`/`list` now also require
-  grok-4.5 in `grok models` (grok is the one backend with a usable model-list
+  a schema-verified model in `grok models` (originally the pinned `grok-4.5`;
+  since the discovery rework it is "any verified id on offer" — see the
+  discovery notes in this section, which supersede the pin described here) (grok is the one backend with a usable model-list
   command; codex has none, so its model is trusted). The gotchas, all live-
   verified:
-  - **Parse the bullet list by SHAPE, not position — and match the id
-    SUBSTRING, not the field.** Lines read `  * grok-4.5 (default)`, but keying
-    on `$2` turns a reworded line (`  * default: grok-4.5`) into garbage tokens
-    that read as "the model is gone" and fail closed. Matching whole
-    whitespace-fields starting `grok-` fixes that but still drags glued-on
-    punctuation along (`grok-4.5,`, `` `grok-4.5` ``, ANSI codes), which breaks
-    the exact-match the same way. Extract with a pattern ending on
-    alphanumerics (`grok-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*`); a line with no
-    id-shaped token then contributes nothing, landing in the trust-auth degrade.
+  - **Parse the bullet list by SHAPE — and pick the failure direction on
+    purpose.** Lines read `  * grok-4.5 (default)`, but 1.0.3 marks only the
+    default with `*`, so a `*`-only matcher loses every other model. The shipped
+    rule (`grok_parse_models`, its own function since 0.10.9 so both test files
+    drive it instead of scraping it): a `*` or `-` bullet, the id as the FIRST
+    token, then either nothing or a BRACKETED annotation, id matched whole
+    (`grok-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*`) with backticks and trailing
+    punctuation stripped. Two ways to lose the family, and they are NOT
+    symmetric: harvesting prose ("- grok-4.6 reaches end of life on …") makes
+    discovery select an id the CLI refuses and every call dies at launch,
+    silently; rejecting an unfamiliar annotation empties the list and lands in
+    the trust-auth degrade, which WARNS. So when the two cannot be told apart
+    syntactically, prefer the loud one. An annotation that states the model is
+    withdrawn (`[retired]`, `(deprecated)`, `coming soon`, …) is rejected
+    explicitly — it satisfies the bracket rule but names a model that is not on
+    offer, which is the silent direction.
   - **Match without a pipe to `grep -q`**: an early-exiting `grep -q` can
     SIGPIPE the writer, and under `set -o pipefail` a *hit* would then report
     failure. Newline-fence the list and use a `case` substring match.
   - **An empty model list must NOT fail closed.** Offline, a timeout, or a
     future CLI renaming the subcommand would otherwise silently drop grok from
     every fan-out. Empty/unparseable → trust auth and let `run_grok` surface the
-    explicit error; a non-empty list *without* grok-4.5 → an honest "not ready"
-    plus an update-the-CLI hint.
+    explicit error; a non-empty list offering no schema-verified canonical id →
+    an honest "not ready" plus a hint that names WHICH of the three causes it is
+    (no `--prompt-file`, no canonical model, or canonical-but-unverified). The
+    rule was once "does it offer the pinned grok-4.5"; discovery replaced that
+    with "any verified id on offer", or a CLI newer than the adapter would be
+    rejected for offering only ids this file has not seen yet.
   - **A probe added to a local path must not make it hang — and must not lie
     when it can't run.** `ready`/`list` were purely local (stat the auth file)
     before this; the probe puts a network call in every `/swarm:agents` and
-    review start. With no coreutils `timeout`/`gtimeout` to bound it (stock
-    macOS), the probe is **skipped** rather than run uncapped, degrading to
-    trust-auth in ~25ms — but it **warns on stderr**, because a silent skip
-    would make the documented model-aware guarantee false on that host: the
-    same "promise that doesn't hold at runtime" bug the composer removal exists
-    to fix.
+    review start. It was once *skipped* where no coreutils `timeout` existed, on
+    the reasoning that an unbounded call was worse — 0.10.10 removed that: with
+    the watchdog it is bounded on every host, and skipping had become the
+    dangerous branch, because an empty list reads as trust-auth, so readiness
+    passed and discovery fell back to `GROK_DEFAULT_MODEL` — an id the CLI may
+    have withdrawn, killing every cluster at launch. Whatever the degrade, it
+    **warns on stderr**: a silent one makes the documented model-aware guarantee
+    false at runtime, the same bug class the composer removal exists to fix.
   - **Route every degrade through ONE audible exit.** This one spot was fixed
     across FIVE consecutive swarm rounds, each catching the previous round's
     miss: (1) the no-timeout branch ran uncapped; (2) it was capped but skipped
@@ -230,12 +296,74 @@ coordinate that separately, do not duplicate transport work here.
     three vanished when the jail came back out). The probe runs grok directly.
   - **Bound it with `timeout -k`, its own knob.** `SWARM_TIMEOUT` caps a
     *review* (600s, `0` disables) — useless for a probe that `list` blocks on;
-    `SWARM_PROBE_TIMEOUT` (10s) is separate and a malformed/`0` value falls back
-    to 10, never uncapped. Plain `timeout` only SIGTERMs, so a grok that ignores
+    `SWARM_PROBE_TIMEOUT` (10s, ceiling `SWARM_PROBE_TIMEOUT_MAX`=20) is
+    separate. Since 0.10.x it is **validated fail-closed** on the `run`/`config`
+    paths: a malformed, `0` or over-ceiling value exits 2 rather than being
+    quietly normalized, which surfaces to the review skill as `SWARM_CFG_ERR`
+    and aborts the run with the adapter's own wording. (`list`/`ready` still
+    degrade to 10 with a warning — a bad knob must not make *listing* impossible.)
+    The workflow pins the resolved value onto every adapter call, because
+    `config` now derives `probe_budget_seconds` from the *resolved* bound rather
+    than from the ceiling. Plain `timeout` only SIGTERMs, so a grok that ignores
     SIGTERM (or forks a stdout-inheriting child) keeps the `$(...)` substitution
     blocking past the deadline — the "must never hang" hole. `-k <grace>` sends
     SIGKILL after the grace period; treat both rc 124 (SIGTERM) and 137
-    (SIGKILL) as "timed out".
+    (SIGKILL) as "timed out" — but only when a wall was actually **in force**
+    (`_enforced_wall`), or a backend that exits 124 on its own is reported as an
+    adapter timeout with `timeout_seconds:0`.
+  - **"No coreutils, so run bare" is not a bound.** Stock macOS has no
+    `timeout`/`gtimeout`, i.e. the unbounded path was the *common* one, and
+    `config` meanwhile advertised a probe budget the run could not enforce. The
+    dilemma (lose the bound, or lose the answer and drop a whole family — 0.10.3
+    did the latter) was false: `_watchdog_run` runs the probe in the background,
+    polls at 100ms where a fractional `sleep` works and escalates TERM→KILL,
+    reporting `timeout(1)`'s own 124
+    and 137, in its own process group so a CLI's spawned helpers die with it, and
+    measuring the wall from a real clock (counting fixed sleep increments drifted
+    systematically long, since each iteration costs more than it counts).
+    Verified against success, expiry, rc passthrough, a SIGTERM-ignoring child,
+    orphaned grandchildren, stdin passthrough and a real call per backend.
+  - **`<&0` when backgrounding, or the child gets `/dev/null`.** POSIX assigns an
+    asynchronous command's stdin to `/dev/null` *before* explicit redirections —
+    and codex reads its whole prompt on stdin, so the bound would have handed
+    every codex voice an empty prompt and counted the resulting
+    `{"findings":[]}` as a family that reviewed. Found by testing the passthrough,
+    not by reading the code.
+  - **Which way a bounded probe should fail depends on what it asks.** grok's
+    model probe asks a *second* question (which ids are offered), so a timeout
+    degrades to trust-auth and keeps a usable backend. `codex login status` IS
+    the auth question and reaches the same network the review call needs, so a
+    wall hit there is an honest **not-ready**: calling it ready costs one adapter
+    process per gated cluster, each re-running the hanging probe and burning the
+    full inner wall — five dead voices instead of one clean skip. This flipped
+    between 0.10.9 and 0.10.10; the asymmetry above is the reason, so it does not
+    need flipping again.
+  - **A fail-open needs an rc the probed command cannot produce, and there is
+    none.** 0.10.11 kept one branch — rc 126, the adapter`s "could not bound
+    this" sentinel — as trust-auth. But 126 is also what a shell returns for
+    "found but cannot be invoked": a broken node shim or a noexec mount was
+    therefore reported READY, and the workflow spawned one adapter process per
+    gated cluster to rediscover it. 0.10.12 removed it — every non-zero readiness
+    rc is not-ready, and the HINT (not the verdict) carries which case it was.
+    The same dual meaning bites the RUN path: `timeout` returns 126 for "found
+    but could not be executed" too, so a message naming only TMPDIR points at a
+    directory that was never involved.
+  - **One dispatch, or the two halves drift.** "Wrapper if present, watchdog
+    otherwise" was written out twice — once for probes, once for the backend
+    call — so a change to the grace, the flags or the rc semantics had to be made
+    in both. `_bounded_call` is the only place that decides now; callers supply
+    their own redirections (probes close stdin and discard stderr, the backend
+    call inherits both).
+  - **Every bounded pre-timer probe must be COUNTED, not just bounded.**
+    `SWARM_MAX_PROBES_PER_RUN` is what `config` derives the budget from, and
+    bounding the sandbox smoke test without incrementing it made the reported
+    budget under-report the real worst case — so the outer window could win
+    again. The current worst case is grok`s three: `grok models`, `grok --help`,
+    the sandbox `true`. `--version` is deliberately NOT among them: the `run`
+    gate asks `command -v`, and the probe that prints a version string only runs
+    where that string is shown (`available`, `list`). The fix for an uncounted
+    probe was to REMOVE one that could not affect any verdict, not to raise the
+    number.
   - **Memoize by call convention, not by wishing.** `list="$(grok_model_list)"`
     runs the function in a *subshell*, so its cache-global assignments vanish
     and every caller silently re-pays the network call. The cache only works if
@@ -258,12 +386,124 @@ coordinate that separately, do not duplicate transport work here.
   Re-verify the pinned ids when bumping the tested CLI version. Never fall
   back to a broad denylist that could admit a mutating tool.
 
+## What actually drives external-call runtime (measured 2026-08-11)
+
+The `grok × breakage` timeouts were long blamed on prompt size. **Measured, they
+are not.** Same 42 KB diff, same adapter, one variable at a time:
+
+| Backend | Effort | Cluster | Duration | Findings |
+|---------|--------|---------|----------|----------|
+| grok | high | breakage | **374 s** | 4 |
+| grok | low | breakage | **161 s** | 4 |
+| grok | high | consistency (style) | **28 s** | 6 |
+| codex | high | breakage | **104 s** | 2 |
+
+Control: a **164 KiB** prompt at `low` with no lens instruction returned in
+**20 s** (grok) / **8.6 s** (codex). Four times the bytes, a twentieth of the
+time.
+
+- **The cluster dominates — by 13x.** breakage vs. consistency at identical
+  effort: 374 s → 28 s. `breakage` holds `cross-file-trace` ("read the
+  neighboring repo files, not just the diff") and `removed-behavior`; both
+  *require* exploration, and the tool loop is the cost. Prompt bytes are noise
+  next to it.
+- **Effort is secondary — 2.3x** (374 s → 161 s) and in this sample it bought
+  **zero extra findings** (4 either way). Lowering grok's effort for the
+  breakage cluster is cheap headroom, not a quality trade — but on its own it
+  only moves 62% of the wall to 27%, it does not remove the wall.
+- **Backends are not interchangeable — 3.6x.** codex ran the same breakage
+  prompt in 104 s where grok took 374 s. That is *why* grok is the one that
+  reproducibly dies and codex never has: it is the slow voice on the expensive
+  cluster.
+- **Consequence for any fix:** chunking the *diff* addresses the one variable
+  measurement rules out. Splitting by *lens* was shipped in 0.9.0 as the `reach`
+  cluster — but measure what it actually bought before repeating the reasoning:
+  it bounds a timeout's cost to one lens instead of three and fixes real lens
+  crowd-out, yet the longest call only fell 374 s → 313 s (see
+  [[swarm-review-pipeline]] § lens set). **The two-lens `breakage` cluster still
+  costs 313 s**, so `cross-file-trace` is the priciest lens but nowhere near the
+  whole bill — no single lens split clears the 600 s wall on its own.
+- **Still the largest untried lever for RUNTIME: effort.** 374 s → 161 s (2.3x)
+  for the identical 4 findings. It does not isolate failures the way the split
+  does, but for pure headroom under the wall nothing else measured comes close.
+- **`grok --max-turns N` was measured and REJECTED — do not reach for it.** It
+  caps the tool loop, but the useful range is a cliff, not a dial:
+
+  | `--max-turns` | duration | findings |
+  |---|---|---|
+  | 10 | 10 s | **0** |
+  | 20 | 279 s | 4 |
+  | (unset) | 374 s | 4 |
+
+  At 20 it saves 25%; at 10 it returns nothing at all. Worse, the truncated run
+  exits **rc=0 with an empty findings array** — so the adapter and the whole
+  pipeline read it as "reviewed cleanly, found nothing" rather than as a
+  failure. A timeout at least lands in `backendErrors`; this silently deletes a
+  voice's coverage while the report still counts it as a voice that ran. The
+  safe N is also diff-dependent (what needs 20 here may need 30 elsewhere), so
+  any fixed value eventually lands on the wrong side of that cliff. If this is
+  ever revisited, it MUST be paired with an empty-findings-under-turn-cap check
+  that converts the truncation into a loud backend error.
+
+`agents.sh run --telemetry <file> --unit <name>` records this per call
+(duration, effective effort/model, prompt bytes, backend rc, `timed_out`, and
+the wall the call actually ran under), written from the EXIT trap so a timeout
+is recorded too. `scripts/telemetry-report.py` renders it and flags any
+**surviving** call at ≥60% of its wall — the case `backendErrors` structurally
+cannot show, because a voice that finished at 550 s and one that finished at
+20 s are both just "ok".
+
+## One parser for the numeric knobs (`agents.sh config`, 0.10.x)
+
+`SWARM_MAX_PROMPT_BYTES`, `SWARM_TIMEOUT` and `SWARM_PROBE_TIMEOUT` are read by
+BOTH the adapter and `/swarm:review`'s prep block, and for a while each side
+parsed them itself. **Three consecutive review rounds found three instances of
+one bug class** — the two sides deriving DIFFERENT numbers from the same string:
+
+| round | the half that was fixed | the half that was not |
+|---|---|---|
+| 1 | — | fallback pin raised to the newest verified model |
+| 2 | `10#` decimal forcing for the cap, in the skill | …not in the adapter |
+| 3 | `10#` for `SWARM_TIMEOUT`, in the skill | …not in the adapter |
+
+Each was silent and asymmetric in the worst way: the SKILL decides whether the
+external voices run at all, the ADAPTER decides whether each call is accepted. A
+disagreement therefore turns one clean "externals skipped" into N per-call
+backend errors, or lets a value through that every call then rejects.
+
+**The fix was structural, not another patch.** `_resolve_int` in `agents.sh` is
+the only place that parses these values — digits-only, `10#`-forced, range-checked
+*after* conversion, with an upper bound so a huge value cannot wrap in 64-bit
+arithmetic. `agents.sh config` prints the resolved set
+(`max_prompt_bytes`, `cap_headroom`, `oversize_threshold`, `timeout_seconds`,
+`probe_timeout_seconds`, `probe_budget_seconds`) and the skill READS it —
+`probe_budget_seconds` is what the workflow sizes its timeout margin from, so a
+new pre-timer probe must be counted in `SWARM_MAX_PROBES_PER_RUN` or the margin
+silently stops covering the worst case. `test_lens_sync.py` fails if a
+parse reappears on the skill side.
+
+Rules that came out of it, worth applying beyond this file:
+- **When a fix touches one half of a pair, check the other half in the same
+  edit.** Every critical finding in rounds 1–3 was introduced by the previous
+  round's fix, never by the original feature code.
+- **Range-check after normalization, never before**: `00` passes a `!= 0` test
+  and then behaves as `0`.
+- **A shared knob needs a shared parser**, not two implementations that agree
+  today.
+- `SWARM_PROBE_TIMEOUT` is capped (20 s) because the workflow's timeout margin is
+  sized from it — raising one without the other lets the outer Bash window kill a
+  call before the inner cap fires, which loses `rc=124` and the telemetry record.
+
 ## Gotchas (found in E2E testing, fixed in the adapter)
 
-- **codex hangs on inherited stdin.** With an open non-TTY stdin, `codex exec`
-  waits for "additional input from stdin" *in addition to* the positional
-  prompt — in a background shell this hangs forever. Always call it with
-  `</dev/null` (the adapter does).
+- **codex hangs on inherited stdin *when the prompt is on argv*.** With a
+  positional prompt AND an open non-TTY stdin, `codex exec` waits for
+  "additional input from stdin" (it appends it as a `<stdin>` block) — in a
+  background shell that hangs forever. The rule is "never leave stdin dangling",
+  NOT "always `</dev/null`": since the prompt-transport rework the adapter
+  deliberately feeds the prompt ON stdin (`-- -`) and closes the dangling case
+  by construction — stdin is the prompt and hits EOF. Any call that keeps a
+  positional prompt still needs `</dev/null`.
 - **`set -u` + EXIT trap + `local`**: a trap like `trap 'rm -f "$out"' EXIT`
   referencing a function-`local` variable fires after the function returned —
   under `set -u` the script then dies with "unbound variable" and **exit 1
@@ -272,3 +512,52 @@ coordinate that separately, do not duplicate transport work here.
 - **Exit-code discipline matters** because the ensemble treats non-zero `run`
   as "backend dropped": stdout must stay pure findings-JSON (all CLI noise to
   stderr or /dev/null), and success must exit 0.
+
+## Bash traps this adapter keeps paying for (2026-09, from 8 review rounds)
+
+Each of these produced a real, silent failure here, each was found by review
+rather than by reading, and each is now checked mechanically in
+`test_lens_sync.py` — because reading the code failed every time.
+
+**A function may print a result OR cache into a global — never both.** Every call
+site in this file is `$(...)`, so a global assigned inside dies with the subshell.
+Five instances: `adapter_timeout`, `probe_timeout`, `_enforced_wall`,
+`_grok_highest_canonical`'s memo, `_repo_root`. The damage is not just a missed
+optimization — `_write_telemetry` runs in the EXIT trap of the PARENT, so a value
+memoized in a subshell made every grok record claim `timeout_seconds:0`, i.e.
+"no cap was in force" for a call that was capped. Resolve in the main shell before
+the substitution, or split into a void setter plus direct reads.
+
+**No apostrophe anywhere inside `awk '…'`, comments included.** One ends the shell
+quoting and corrupts the parser. `bash -n` stays happy; the only symptom is
+`grok models` "returned no model ids", i.e. a silently lost model family. Happened
+twice in one sitting — once in code, once in the comment explaining that code.
+
+**No comment inside a `\`-continued command.** The shell ends the logical line at
+the `#` and every remaining argument vanishes. A note added above `--prompt-file`
+turned the grok invocation into a bare `--prompt-file …` (rc=127), with valid
+syntax throughout.
+
+**Stock macOS is bash 3.2 — no `declare -A`.** An associative-array cache broke
+`source agents.sh` outright there.
+
+**Prefer the LOUD failure when two cases are syntactically indistinguishable.**
+In the `grok models` parser, prose (`- grok-4.6 reaches end of life…`) and an
+annotation (`- grok-4.5 Fast reasoning model`) cannot be told apart. Harvesting
+prose makes discovery select an unoffered id and every call dies at launch with
+nothing saying why; rejecting an unknown annotation empties the list and lands in
+the trust-auth degrade, which WARNS on stderr. So the parser admits only bracketed
+annotations and rejects bare words.
+
+**A guard that fails open is worse than no guard.** The prompt-in-denied-path
+preflight iterated `$(_sandbox_deny_paths …)` unquoted, so a deny path containing
+a space word-split into non-matching entries — while the jail builders, reading
+the same list line-wise, still masked the file. Read line-wise; canonicalize both
+sides (macOS `$TMPDIR` is a symlink, and BSD `realpath` has no `-m`, so try
+python3 first).
+
+**Verify a new guard by reintroducing the bug.** Three guards written during these
+rounds were vacuously green on the first attempt (a regex that stopped at the
+offending character, a `local` filter that missed multi-name declarations, a
+`printf` matcher anchored to line start). A guard nobody has seen fail is a guard
+nobody has tested.

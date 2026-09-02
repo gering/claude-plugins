@@ -1,9 +1,9 @@
 ---
 title: "Swarm Review Pipeline (/swarm:review)"
 createdAt: 2026-07-08
-updatedAt: 2026-07-27
+updatedAt: 2026-09-02
 createdFrom: "PR #24"
-updatedFrom: "swarm-per-lens-externals"
+updatedFrom: "fix-swarm-timeout-ceiling"
 pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
@@ -15,11 +15,11 @@ P2 turns the blueprint into a working review: a **Workflow-tool script**
 (`plugins/swarm/workflows/swarm-review.js`) launched by the `/swarm:review`
 skill. Shape: `scope+gate → fan-out (3 voices) → merge (file,mechanism) →
 verify solos + design clusters → output-gated synthesis`. Three voices: Claude
-lenses ∥ codex ∥ grok-4.5 (see [swarm-backend-adapter](swarm-backend-adapter.md)).
+lenses ∥ codex ∥ grok (model discovered, not pinned — see [swarm-backend-adapter](swarm-backend-adapter.md)).
 A fourth, `grok-composer-2.5-fast`, was removed in swarm 0.4.3 — the grok CLI
 dropped the model.
 
-## Lens set: 11 lenses in 4 clusters (swarm 0.5.0)
+## Lens set: 11 lenses in 5 clusters (0.5.0; `reach` split off 0.9.0)
 
 Grown from 5 topical lenses by importing `/code-review`'s other two
 decomposition axes — methodological (HOW to look) and design quality — all
@@ -29,13 +29,35 @@ truth** — every voice's fan-out units come from it, Claude and externals alike
 
 | cluster | lenses | guiding question |
 |---|---|---|
-| `breakage` | correctness, removed-behavior, cross-file-trace | what breaks? |
+| `breakage` | correctness, removed-behavior | what breaks? |
+| `reach` | cross-file-trace | what else does this touch? |
 | `threat` | security, adversarial | what's exploitable / which assumption fails? |
 | `design` | reuse, simplification, efficiency, altitude | is this good, maintainable code? |
 | `consistency` | style, conventions | does it fit the codebase? |
 
+- **`reach` is a deliberate ONE-lens cluster** (0.9.0), split out of `breakage`
+  on measurement. The reason is **lens crowd-out**, NOT runtime — the split was
+  proposed as a speed fix and the measurement corrected that:
+
+  | run | duration | findings |
+  |---|---|---|
+  | old: one 3-lens `breakage` call | 374 s | 4 — **three of them `cross-file-trace`** |
+  | new: `breakage` (correctness, removed-behavior) | 313 s | 4 — *none* of which the combined call reported |
+  | new: `reach` (cross-file-trace) | 126 s | 4 — ≈ the combined call's cross-file set |
+
+  One lens was consuming the call's attention while the diff-local lenses barely
+  reported; splitting recovered four findings (three confirmed real against this
+  repo, incl. a silent config-validation gap). **What it does not buy: speed.**
+  The longest single call drops only 374 → 313 s (16%) and TOTAL work rises to
+  439 s, so `cross-file-trace` is the most exploration-heavy lens but not the
+  sole cost — this alone does not clear the 600 s wall. Two further effects,
+  neither reachable by lowering effort: a timeout now costs ONE lens instead of
+  three (`correctness`/`removed-behavior` survive it), and — carrying no
+  MANDATORY lens — the gate may prune the whole call on a diff with no
+  cross-file surface, where the old layout kept it alive because `correctness`
+  held the cluster open. Cost when kept: one extra call per live backend.
 - **The cluster is the fan-out unit for EVERY voice** since 0.7.0 — Claude
-  finders (≤4) *and* codex/grok (one CLI call per gated cluster each);
+  finders (≤5) *and* codex/grok (one CLI call per gated cluster each);
   `--max` splits all of them to one call per lens (≤11 units → ≤22 external
   calls) — the granularity ladder is `--quick` (future) =
   one broad pass → default = per-cluster → `--max` = per-lens. The **gate
@@ -94,12 +116,29 @@ truth** — every voice's fan-out units come from it, Claude and externals alike
 - **`${CLAUDE_PLUGIN_ROOT}` is NOT substituted inside a `.js` file** (only in
   SKILL.md/markdown). So the adapter path and the temp-file paths must be passed
   **via `args`** from the skill (which *does* get the substitution), e.g.
-  `Workflow({scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/swarm-review.js", args: {adapter, diffFile, externalPromptFile, externalVoices}})`.
+  `Workflow({scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/swarm-review.js", args: {…}})`.
+  The shipped skill passes `adapter`, `diffFile`, `externalPromptFile`,
+  `telemetryFile`, `findingNonce`, `externalVoices`, and — since 0.10.12 — the
+  whole numeric config as ONE opaque token, `config: "<SWARM_CFG_LINE>"`
+  (`k=v;k=v;…`: the prompt cap, the probe bound and budget, the adapter's own
+  rails, and `timeout_seconds` only when the user set `SWARM_TIMEOUT`). Two more
+  are conditional: `max: true` for `--max`, `claude: false` for an external-only
+  control run.
+  **Why one token:** these values reach the workflow only by being *transcribed*
+  out of SKILL.md prose by the model. As separate placeholders, a dropped one did
+  not fail — it substituted a fallback that was then pinned onto every adapter
+  call, so a raised `SWARM_MAX_PROMPT_BYTES` became N per-call "Prompt file too
+  large" errors and a Claude-only review. A single token cannot be half-copied,
+  and it made carrying the adapter's rails free, which retired six hand-copied
+  mirrors and their CI pins.
 - **Workflow JS has no Bash/filesystem access**, so the diff never enters the
-  script. The **skill** builds two temp files in deterministic Bash — the raw
+  script. The **skill** builds three temp files in deterministic Bash — the raw
   diff (Claude finders `Read` it) and a **fenced external prompt** (review
-  instructions + the diff wrapped in untrusted-data markers) — and passes their
-  paths. The external CLIs get the fenced prompt via `agents.sh run … --prompt-file`.
+  instructions + the diff wrapped in untrusted-data markers), plus the telemetry
+  sink each adapter call appends to — and passes their paths. Their common
+  parent is validated against a character allowlist before anything is echoed,
+  because those paths end up interpolated into shell commands by the model as
+  well as by the workflow. The external CLIs get the fenced prompt via `agents.sh run … --prompt-file`.
 - The skill invoking `Workflow` is the explicit **opt-in** the Workflow tool
   requires; a plugin skill may not otherwise trigger it.
 
@@ -134,7 +173,8 @@ truth** — every voice's fan-out units come from it, Claude and externals alike
   the delimiter); the workflow only collision-checks it against the returned
   findings and extends it deterministically (`nonce-1`, `-2`…) on collision.
 
-- **`args.claude: false`** runs an **external-only control** (codex + grok-4.5,
+- **`args.claude: false`** runs an **external-only control** (codex + grok — the
+  grok model is discovered at run time, never a pinned id,
   no Claude finder lenses, no gate; merge/verify still in-session).
   Proven useful: a control run found real bugs the with-Claude run missed (an
   `aws_secret_access_key` scrub-list drift, `git diff` omitting untracked files)
@@ -264,7 +304,7 @@ filled* — `gh pr diff <n>` (bare `--pr` resolves the current branch's PR via
 Externals no longer run ONE broad multi-lens review each: codex and grok fan out
 over the **same gated clusters** as the Claude finders (`unitsFor()` builds the
 units once; `externalUnits` reuses `finderUnits` whenever a gate ran, so the two
-sides cannot drift). Cost is `live-backends × units` — ≤2×4 default, ≤2×11 under
+sides cannot drift). Cost is `live-backends × units` — ≤2×5 default, ≤2×11 under
 `--max` — logged at fan-out, never silently capped.
 
 Decisions worth keeping:

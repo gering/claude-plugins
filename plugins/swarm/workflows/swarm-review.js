@@ -23,6 +23,254 @@ INPUT = INPUT || {}
 const ADAPTER = INPUT.adapter
 const DIFF_FILE = INPUT.diffFile
 const EXTERNAL_PROMPT = INPUT.externalPromptFile
+// Optional per-call telemetry sink (one JSON line per external call: backend,
+// unit, effort, model, seconds, rc, timed_out). OPTIONAL by design — a missing
+// path just means no telemetry, never a failed review. The workflow cannot time
+// the calls itself (Date.now() throws in the sandbox) and the transport agent's
+// stderr is discarded, so the adapter is the only place that can honestly
+// measure a call; the skill reads the file back after the workflow returns.
+const TELEMETRY = INPUT.telemetryFile
+
+// TWO timeouts guard every external call, and they must not race:
+//   inner — the adapter's `timeout` wrapper, yielding a clean rc=124 that the
+//           error path and the telemetry line both key on;
+//   outer — the Bash tool the transport agent runs the command with, whose
+//           maximum is a HARD 600000 ms.
+// Both defaulted to 600 s, so which one fired first was undefined — and when the
+// OUTER one won, the diagnosis degraded: no rc=124, no "timed out after Ns", just
+// a killed command. Raising SWARM_TIMEOUT made that worse rather than better,
+// which is why the env var looked useless.
+// Fix: derive both from ONE value and keep the inner one strictly below the outer
+// window, so the adapter always reports the timeout itself. This does NOT raise
+// the ceiling — only an async transport can (see the async-poll-external-voices
+// task); it makes the ceiling say what it is.
+// Hard maximum of the Bash tool — not a choice. ACCEPTED RESIDUAL: this value is
+// only *requested* of the transport subagent in prose below; nothing here can
+// verify it actually passed it. If a future harness silently lowers the ceiling,
+// or the agent omits the argument, the ordering guarantee this file derives
+// (inner cap strictly below the outer window) is void and a timeout again
+// surfaces as a generic failure. Removing the assumption needs the async
+// transport (tasks/async-poll-external-voices.md), not a bigger margin.
+const BASH_TIMEOUT_MS = 600000
+// The inner cap must lose the race deterministically, so the margin has to cover
+// everything the adapter spends OUTSIDE the timed backend call: its bounded
+// probes plus their kill grace, jail construction, and output validation.
+//
+// The probe part is REPORTED by the adapter (`agents.sh config` →
+// probe_budget_seconds = max_probes x (resolved probe timeout + expiry slop +
+// kill_grace)), passed in by
+// the skill, and only defaulted here. It used to be a hand-derived literal that
+// re-stated the adapter's constants in a comment — the same split-brain the
+// `config` verb exists to end, and it bit exactly as predicted: 0.10.0 added a
+// third bounded probe (the --prompt-file capability check moving into readiness)
+// without touching this number, so worst-case pre-timer work outgrew the margin
+// against a 60s margin. The outer window would then win the race and destroy the
+// rc=124 + telemetry evidence this whole branch exists to preserve. Reading the
+// number instead of restating it means adding a probe can no longer silently
+// overrun the margin.
+// The fallback is a LAST RESORT for a direct workflow invocation with no skill in
+// front of it. It restates the adapter's arithmetic, so test_lens_sync.py runs
+// `agents.sh config` and asserts this literal still equals the reported
+// probe_budget_seconds — without that pin it is the same hand-copy that already
+// overran the margin once.
+// Pinned onto the adapter command line rather than inherited from the
+// environment. The skill asks the adapter for the cap and decides the oversize
+// skip from it; if the adapter process then read a DIFFERENT value (a subagent
+// shell with its own env, an export between the two calls), the two halves of
+// that one gate would disagree again — the whole point of the `config`
+// handshake. Passing it explicitly makes the value the skill used the value the
+// adapter enforces.
+// Bounds mirror the adapter's own resolver (floor = its lens-instruction
+// headroom + 1, ceiling = its sanity rail). Validating only "> 0" let a value the
+// adapter REFUSES be pinned onto every call, so all external voices died at
+// launch with "Invalid SWARM_MAX_PROMPT_BYTES" — a config typo turning into a
+// silent Claude-only review. The fallback is pinned against `agents.sh config` in
+// test_lens_sync.py, like PROBE_BUDGET_FALLBACK_S.
+// Coerce a numeric STRING too ("524288"), and log whenever the handshake did not
+// deliver a usable value — not only when the result differs from the fallback.
+// Silently substituting the fallback re-opens the exact skill↔adapter split-brain
+// the `config` handshake exists to close: the skill gates the oversize skip on
+// the adapter-reported cap, then every adapter call is pinned with a DIFFERENT
+// one and dies with "Prompt file too large" — N per-call errors and nothing
+// saying the two sides disagreed.
+const _num = (v) => (typeof v === 'number' ? v : (typeof v === 'string' && /^\d+$/.test(v.trim()) ? Number(v) : NaN))
+// The whole resolved config as ONE token the skill echoes and the model copies
+// verbatim (`k=v;k=v;…`), instead of four separate numeric placeholders it fills
+// in from prose. Transcription is the weak link in this handshake — every knob
+// dropped in transit becomes a fallback pinned onto every adapter call, which is
+// how a user-raised SWARM_MAX_PROMPT_BYTES turned into N "Prompt file too large"
+// errors and a Claude-only review, and why the probe bound and budget had to be
+// made a pair. One token cannot be half-copied.
+// Individual args still win nothing but still WORK: a direct workflow invocation
+// (no skill in front) may pass either shape, and the per-knob validation below is
+// identical for both.
+const CFG = {}
+if (typeof INPUT.config === 'string') {
+  for (const pair of INPUT.config.split(';')) {
+    const i = pair.indexOf('=')
+    if (i > 0) CFG[pair.slice(0, i).trim()] = pair.slice(i + 1).trim()
+  }
+}
+const cfgPick = (key, argName) => (CFG[key] !== undefined ? CFG[key] : INPUT[argName])
+// Last-resort fallbacks only. The adapter reports its own rails inside the config
+// token now, and `rail()` prefers those — so raising a bound in agents.sh no
+// longer means editing a mirror here, its CI pin and its comment, and a direct
+// (skill-less) invocation no longer clamps against whatever the mirror last said.
+// They remain for exactly that skill-less case.
+const rail = (key, fallback) => {
+  const n = _num(CFG[key])
+  return Number.isInteger(n) && n > 0 ? n : fallback
+}
+const MAX_PROMPT_BYTES_FALLBACK = 524288
+// Mirrors of the adapter's own rails (SWARM_CAP_HEADROOM + 1, and
+// SWARM_MAX_PROMPT_BYTES_MAX). They are copies because this file cannot run
+// shell — so test_lens_sync.py pins both against agents.sh, the same way the two
+// fallbacks are pinned. A copy nobody checks is what this whole branch keeps
+// paying for.
+// Considered and DECLINED: having `config` report its own bounds and clamping
+// against those instead. Every value here reaches the workflow as a placeholder
+// a MODEL transcribes out of prose in SKILL.md — that transport is the weak
+// link (it is why the probe bound and budget must now arrive as a pair), so
+// three more placeholders would buy freshness by adding the failure mode we are
+// already defending against. A CI pin costs one test and cannot be mis-typed at
+// runtime. Revisit if the args ever travel as one structured value.
+const MAX_PROMPT_BYTES_MIN = rail('max_prompt_bytes_min', 4097)
+const MAX_PROMPT_BYTES_MAX = rail('max_prompt_bytes_max', 1073741824)
+// ONE coercion for every numeric value the config handshake delivers. The
+// coerce -> validate -> log -> fall back -> clamp sequence was written out once
+// per knob, and the copies had already drifted apart: maxPromptBytes validated
+// on Number.isInteger ALONE, so a negative value took the *valid* branch — no
+// "config handshake" diagnostic, silently clamped to the floor, and every
+// external voice then died with "Prompt file too large" while the identical
+// probeBudgetSeconds input did print the line that would have named the cause.
+// A single rule cannot drift from itself.
+//   optional  — the input may legitimately be absent (the workflow derives its
+//               own value); only a PRESENT-but-bad value is worth a warning.
+//   clampNote — the knob-specific sentence for a value outside the rails; the
+//               generic one is fine for a plain cap.
+const handshakeInt = (name, raw, { fallback, min, max, optional = false, clampNote = null }) => {
+  const n = _num(raw)
+  const ok = Number.isInteger(n) && n >= 0
+  if (!ok && !(optional && raw === undefined)) {
+    log(`config handshake: ${name} missing or not a number (${JSON.stringify(raw)}) — falling back to ${fallback}`)
+  }
+  const v = ok ? n : fallback
+  const clamped = Math.min(Math.max(v, min), max)
+  if (clamped !== v) {
+    log(clampNote ? clampNote(v, clamped) : `${name}=${v} is outside what the adapter accepts — using ${clamped}`)
+  }
+  return clamped
+}
+const MAX_PROMPT_BYTES = handshakeInt('maxPromptBytes', cfgPick('max_prompt_bytes', 'maxPromptBytes'), {
+  fallback: MAX_PROMPT_BYTES_FALLBACK, min: MAX_PROMPT_BYTES_MIN, max: MAX_PROMPT_BYTES_MAX,
+})
+// The probe bound the adapter will enforce. Pinned onto the command line for the
+// same reason SWARM_TIMEOUT is (the transport subagent's environment is not ours
+// to rely on) — and now load-bearing: the adapter derives probe_budget_seconds
+// from the RESOLVED probe timeout, so the margin sized below is only honest if
+// the adapter resolves the same value this run budgeted for. Left unpinned, a
+// SWARM_PROBE_TIMEOUT present only in the transport env also made every voice
+// exit 2 with "must be <= 20" — N identical per-call errors instead of the one
+// clean SWARM_CFG_ERR the handshake exists to produce.
+// Rails mirror the adapter's (default 10, SWARM_PROBE_TIMEOUT_MAX); both are
+// pinned against `agents.sh config` in test_lens_sync.py.
+const PROBE_TIMEOUT_FALLBACK_S = 10
+const PROBE_TIMEOUT_MAX_S = rail('probe_timeout_max_seconds', 20)
+// Restates the adapter's arithmetic for a direct workflow invocation with no
+// skill in front of it: max_probes x (resolved probe timeout + expiry slop +
+// kill grace), i.e. 3 x (10 + 1 + 3). Declared HERE, next to the bound it is
+// derived from, because the pair check below reads both — and a `const`
+// referenced above its declaration is a runtime ReferenceError, not a hoisted
+// undefined.
+const PROBE_BUDGET_FALLBACK_S = 42
+// Bounded on BOTH sides: an unbounded budget would drive MAX_INNER_S negative and
+// hand `SWARM_TIMEOUT=-N` to the adapter, which rejects it — every voice failing
+// at launch instead of one clear error here.
+const PROBE_BUDGET_MAX_S = BASH_TIMEOUT_MS / 1000 / 2
+// The probe bound and the probe budget are ONE fact reported twice: the adapter
+// derives the budget from the bound it resolves. Accepting them as independent
+// arguments let a run pin one and fall back on the other — a margin sized for
+// 10s probes while 20s probes are pinned reaches 616s inside a 600s window, and
+// the outer kill destroys exactly the rc + telemetry evidence the margin exists
+// to preserve. They are two placeholders a model fills in from prose, so "one
+// arrives, the other does not" is a routine outcome, not an exotic one.
+// So: take them as a PAIR. If either is missing or malformed, both fall back —
+// and the fallback pair is internally consistent (42 = 3 x (10 + 1 + 3)) and pinned
+// against `agents.sh config` by test_lens_sync.py. Never mix a supplied value
+// with a defaulted one.
+// Copies of the adapter's SWARM_MAX_PROBES_PER_RUN and TIMEOUT_KILL_GRACE,
+// pinned against agents.sh by test_lens_sync.py like every other rail here. They
+// are used ONLY to check the pair below, never to derive the budget — the
+// adapter stays the one place that computes it.
+const MAX_PROBES = rail('max_probes_per_run', 3)
+const KILL_GRACE_S = rail('kill_grace_seconds', 3)
+// The adapter's TIMEOUT_EXPIRY_SLOP: its wrapper-free watchdog measures with a
+// 1s-granularity clock, so a bounded call may return up to a second past its
+// nominal bound (never before it).
+const EXPIRY_SLOP_S = rail('expiry_slop_seconds', 1)
+const _ptRaw = _num(cfgPick('probe_timeout_seconds', 'probeTimeoutSeconds'))
+const _pbRaw = _num(cfgPick('probe_budget_seconds', 'probeBudgetSeconds'))
+const _probeNumericOk = [_ptRaw, _pbRaw].every((n) => Number.isInteger(n) && n >= 0)
+// "Both are numbers" is not consistency. The invariant that matters is that the
+// budget COVERS the bound being pinned: the adapter may spend
+// MAX_PROBES x (bound + grace) before the timed call even starts, and the margin
+// is what keeps that plus the inner wall inside the outer Bash window. A caller
+// passing a 20s bound with the default budget satisfies both type checks and
+// still overruns — the outer window then kills the adapter and takes
+// rc=124, the timeout message and the telemetry record with it.
+// Check the CLAMPED bound, not the raw one: `probe_timeout_seconds=0` with a 12s
+// budget satisfied the raw check, then the bound was clamped UP to the adapter's
+// floor of 1 while the 12s budget was kept — three 1s probes can spend 15s, and
+// the overrun the check exists to catch walks straight through it.
+const _ptClamped = Math.min(Math.max(_ptRaw, 1), PROBE_TIMEOUT_MAX_S)
+const _probeCoversOk = _probeNumericOk && _pbRaw >= MAX_PROBES * (_ptClamped + EXPIRY_SLOP_S + KILL_GRACE_S)
+const _probePairOk = _probeNumericOk && _probeCoversOk
+if (!_probePairOk && (cfgPick('probe_timeout_seconds', 'probeTimeoutSeconds') !== undefined || cfgPick('probe_budget_seconds', 'probeBudgetSeconds') !== undefined)) {
+  log(`config handshake: probeTimeoutSeconds/probeBudgetSeconds ` +
+      `(${JSON.stringify(cfgPick('probe_timeout_seconds', 'probeTimeoutSeconds'))} / ${JSON.stringify(cfgPick('probe_budget_seconds', 'probeBudgetSeconds'))}) ` +
+      (_probeNumericOk
+        ? `do not hold: a ${_ptClamped}s bound needs at least ${MAX_PROBES * (_ptClamped + EXPIRY_SLOP_S + KILL_GRACE_S)}s of margin`
+        : `did not both arrive as numbers`) +
+      ` — using BOTH defaults (${PROBE_TIMEOUT_FALLBACK_S}s bound, ${PROBE_BUDGET_FALLBACK_S}s margin), which do`)
+}
+const PROBE_TIMEOUT_S = handshakeInt('probeTimeoutSeconds', _probePairOk ? cfgPick('probe_timeout_seconds', 'probeTimeoutSeconds') : undefined, {
+  fallback: PROBE_TIMEOUT_FALLBACK_S, min: 1, max: PROBE_TIMEOUT_MAX_S, optional: true,
+})
+const PROBE_BUDGET_S = handshakeInt('probeBudgetSeconds', _probePairOk ? cfgPick('probe_budget_seconds', 'probeBudgetSeconds') : undefined, {
+  optional: true,
+  fallback: PROBE_BUDGET_FALLBACK_S, min: 0, max: PROBE_BUDGET_MAX_S,
+  clampNote: (v, c) => `probeBudgetSeconds=${v} exceeds half the Bash window — capped to ${c}s so the inner timeout stays positive`,
+})
+// Slack on top of the probe budget for the untimed remainder (jail construction,
+// prompt assembly, JSON validation). Small, fixed, and ours — not a mirror of
+// anything in the adapter.
+const TIMEOUT_SLACK_S = 14
+// The BACKEND call has the same overshoot as a probe — it runs under the same
+// bound — and reserving it only for the probes left the difference to be paid
+// out of the slack: on a coreutils-less host the worst case reached ~593s of the
+// 600s window, i.e. the outer kill could still win the race the margin exists to
+// lose. Reserved explicitly instead of hidden in the slack.
+const WALL_OVERSHOOT_S = EXPIRY_SLOP_S + KILL_GRACE_S
+const TIMEOUT_MARGIN_S = PROBE_BUDGET_S + TIMEOUT_SLACK_S + WALL_OVERSHOOT_S
+// Default to the derived ceiling, not to 600: the inner cap must stay BELOW the
+// Bash window, so a default of 600 was always capped to 570 — and announced as
+// "you asked for more than one Bash call can hold" on every single default run.
+// A warning that fires unconditionally is noise, and it hid the case worth
+// hearing about (a user who really did set a too-large value).
+const MAX_INNER_S = BASH_TIMEOUT_MS / 1000 - TIMEOUT_MARGIN_S
+// Unclamped here on purpose: 0 ("no adapter cap") and the Bash-window ceiling
+// are both handled below, with their own messages.
+const REQUESTED_TIMEOUT_S = handshakeInt('timeoutSeconds', cfgPick('timeout_seconds', 'timeoutSeconds'), {
+  fallback: MAX_INNER_S, min: 0, max: Number.MAX_SAFE_INTEGER, optional: true,
+})
+// 0 means "no adapter cap" and is passed through rather than overridden — but it
+// hands the kill to the outer window, i.e. exactly the unhelpful error above.
+const EFFECTIVE_TIMEOUT_S = REQUESTED_TIMEOUT_S === 0 ? 0 : Math.min(REQUESTED_TIMEOUT_S, MAX_INNER_S)
+if (REQUESTED_TIMEOUT_S === 0) {
+  log(`SWARM_TIMEOUT=0: the adapter cap is disabled, but the Bash tool still kills at ${BASH_TIMEOUT_MS / 1000}s — a voice that hits it reports a generic failure, not a timeout`)
+} else if (EFFECTIVE_TIMEOUT_S < REQUESTED_TIMEOUT_S) {
+  log(`SWARM_TIMEOUT=${REQUESTED_TIMEOUT_S}s exceeds what one Bash call can hold — capped to ${EFFECTIVE_TIMEOUT_S}s (the tool's hard ${BASH_TIMEOUT_MS / 1000}s ceiling, minus margin)`)
+}
 // Finding-fence nonce: real entropy generated by the skill's Bash prep
 // (secrets.token_hex) and deliberately NOT written into the external prompt, so
 // the backends never see it and cannot forge the delimiter. The sandbox has no
@@ -66,7 +314,7 @@ if (!ADAPTER || !DIFF_FILE || !EXTERNAL_PROMPT) {
   return {
     error: 'swarm-review requires args.adapter, args.diffFile, args.externalPromptFile',
     gate: null, findings: [], refuted: [], backendErrors: [], fenceDegraded: false,
-    balance: { total: 0, design: 0, consensus: 0, solo: 0, refuted: 0, redactions: 0, fenceDegraded: false, voices: 0, agents: [], backendErrors: [], rawPerLens: {}, survivingPerLens: {} },
+    balance: { total: 0, design: 0, consensus: 0, solo: 0, refuted: 0, redactions: 0, fenceDegraded: false, voices: 0, agents: [], backendErrors: [], rawPerLens: {}, survivingPerLens: {}, familiesExpected: [], familiesPresent: [], familiesLost: [], unitsDegraded: [], consensusReachable: false, coverageNotes: [] },
   }
 }
 
@@ -96,8 +344,31 @@ if (!FINDING_NONCE) {
 // is deliberately LENS-FREE and must stay that way — do NOT re-add a lens list
 // there (test_lens_sync.py fails on it, and a broad "cover everything" line
 // would contradict the per-cluster "review ONLY these" instruction at run time).
+// `reach` is deliberately a ONE-lens cluster, split out of `breakage` in 0.9.0.
+// The reason is LENS CROWD-OUT, measured — not runtime, which the split barely
+// moves (be precise here; the first draft of this comment got it wrong):
+//   old: one 3-lens call    374s → 4 findings, THREE of them cross-file-trace
+//   new: breakage (2 lens)  313s → 4 findings the combined call missed entirely
+//        reach   (1 lens)   126s → 4 findings, ~the combined call's cross-file set
+// So the combined call was not splitting its attention evenly — one lens
+// consumed it and `correctness`/`removed-behavior` barely reported. Splitting
+// recovered four diff-local findings (three confirmed real against this repo).
+// What the split does NOT buy: throughput. The longest single call drops only
+// 374s → 313s (16%), and TOTAL work rises to 439s. `cross-file-trace` is the
+// most exploration-heavy lens, but it is not the sole cost — the remaining
+// two-lens cluster still runs 313s, so this alone does not clear the 600s wall.
+// Two further effects, neither reachable by lowering effort:
+//   1. A timeout costs ONE lens instead of three — `correctness` and
+//      `removed-behavior` no longer die alongside it. That was the family-critical
+//      failure: grok is the only third-family voice, so one rc=124 removed the
+//      whole cluster's third opinion.
+//   2. `reach` carries no MANDATORY lens, so the gate may prune it away
+//      ENTIRELY on a diff with no cross-file surface — where the old layout
+//      still spawned the expensive call because `correctness` held the cluster open.
+// Cost when the gate keeps it: one extra call per live backend.
 const LENS_CLUSTERS = {
-  breakage: ['correctness', 'removed-behavior', 'cross-file-trace'], // what breaks?
+  breakage: ['correctness', 'removed-behavior'],                     // what breaks?
+  reach: ['cross-file-trace'],                                       // what else does this touch? (exploration-heavy — see above)
   threat: ['security', 'adversarial'],                               // what's exploitable / which assumption fails?
   design: ['reuse', 'simplification', 'efficiency', 'altitude'],     // is this good, maintainable code?
   consistency: ['style', 'conventions'],                             // does it fit the codebase?
@@ -141,8 +412,8 @@ for (const l of CANDIDATE_LENSES) {
 // that get the applicability verify + their own report section; all other
 // lenses (incl. the methodological two) are factual defects.
 const lensKind = (lens) => (LENS_CLUSTERS.design.includes(lens) ? 'design' : 'defect')
-// Methodological lenses (the non-topical members of the breakage cluster) assert
-// REPO-WIDE facts. Externals may now read project files (0.6.0), but a
+// Methodological lenses (the non-topical members of the fact-asserting clusters
+// `breakage` + `reach`) assert REPO-WIDE facts. Externals may now read project files (0.6.0), but a
 // cross-family methodological consensus is still verified (needsVerify below)
 // UNLESS a Claude voice tagged the same lens — correlated hallucination on a
 // reuse/stale-caller claim remains real. test_lens_sync.py pins these names to
@@ -160,10 +431,15 @@ const METHODOLOGICAL_LENSES = ['removed-behavior', 'cross-file-trace']
 // SPAWN, so a doc-only diff still pays 2 clusters × live voices.
 // KNOWN LIMIT (be precise — an earlier version of this comment overstated it):
 // the floor guarantees CLUSTER SPAWN, not full lens coverage. Within `breakage`
-// the gate may still prune `removed-behavior` / `cross-file-trace`, leaving that
-// unit running with lenses:['correctness'] for every voice. Those pruned lenses
-// are forced into the report's gated-out column, so the loss is disclosed rather
-// than silent — but "breakage ran" does not mean "deletions were reviewed".
+// the gate may still prune `removed-behavior`, leaving that unit running with
+// lenses:['correctness'] for every voice. Those pruned lenses are forced into the
+// report's gated-out column, so the loss is disclosed rather than silent — but
+// "breakage ran" does not mean "deletions were reviewed". Since 0.9.0 the same
+// applies MORE sharply to `reach`: holding no mandatory lens, a pruned
+// `cross-file-trace` means that cluster spawns for nobody. That is the intended
+// saving on a diff with no cross-file surface, but it is a real coverage
+// decision made by a haiku gate — read the gated-out column, do not assume
+// cross-file was looked at.
 // Deliberately NOT derived from LENS_CLUSTERS.threat: which lenses are
 // non-negotiable is a judgement call, not a consequence of cluster membership —
 // adding a lens to `threat` must not silently make it mandatory. The subset
@@ -387,7 +663,7 @@ if (gate && gateRun !== null) {
 // ============================================================================
 phase('Fan-out')
 // Claude fan-out granularity ladder: `--quick` (future flag surface) = one broad
-// pass, default = one finder per CLUSTER (≤4 agents — lenses in a cluster share
+// pass, default = one finder per CLUSTER (≤5 agents — lenses in a cluster share
 // a mental mode, so one agent covers them without splitting context), `--max` =
 // one finder per LENS (≤11 agents — the depth profile). Design lenses run at the
 // SAME effort as defect lenses (xhigh under --max): depth applies to design
@@ -437,7 +713,7 @@ const claudeThunks = finderUnits.map((u) => () =>
 // self-tagging from a broad prompt). Both backends read files + research since
 // 0.6.0, so neither needs a diff-only brief variant.
 // Cost: `live-backends × units` calls, each re-sending the fenced diff and
-// paying CLI startup — ≤2×4 by default, ≤2×11 under --max (the explicitly
+// paying CLI startup — ≤2×5 by default, ≤2×11 under --max (the explicitly
 // ordered ceiling). Logged below; never silently capped.
 const shQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
 // Single LINE by construction: this string is embedded in a command the transport
@@ -506,7 +782,32 @@ const externalVoiceSpecs = liveExternals
     // lenses it was never told to review — quietly hollowing out the "the voice
     // IS its cluster" guarantee. 8 hex chars survive a retype far more reliably
     // than 1 KB of prose, and the adapter refuses to run without them.
-    cmd: `bash "${ADAPTER}" run ${b.backend} ${b.flags} --lens-instr ${shQuote(instrFor(u))} --lens-instr-sum ${utf8Checksum(instrFor(u))} --prompt-file "${EXTERNAL_PROMPT}"`,
+    // All THREE strictly-validated knobs are set ON the command rather than
+    // inherited: the transport subagent's environment is not ours to rely on,
+    // and the whole point is that the handshake decides them once. Leaving one
+    // unpinned is how a value the adapter refuses reaches every call as N
+    // identical per-call errors instead of one clean handshake failure.
+    // EVERY interpolated path is shQuoted, not just the appended ones. Double
+    // quotes in this string do NOT protect anything: the transport agent runs
+    // the whole line through Bash, which still expands $(...), backticks and
+    // ${...} inside them. ADAPTER and EXTERNAL_PROMPT come from the same
+    // TMPDIR-derived paths the note below calls attacker-influencable, so
+    // quoting only --unit/--telemetry left the gap open on the same line.
+    // ACCEPTED COST: one adapter process per gated cluster, so each backend repeats
+    // its memoized probes per unit (grok: --version, models, --help). Cross-process
+    // caching was declined in 0.9.4 — a cached 'model absent' would outlive the CLI
+    // upgrade that fixes it — and the probes are bounded and counted in
+    // probe_budget_seconds, so the cost is paid in parallel, not against the margin.
+    cmd: `SWARM_TIMEOUT=${EFFECTIVE_TIMEOUT_S} SWARM_MAX_PROMPT_BYTES=${MAX_PROMPT_BYTES} SWARM_PROBE_TIMEOUT=${PROBE_TIMEOUT_S} bash ${shQuote(ADAPTER)} run ${b.backend} ${b.flags} --lens-instr ${shQuote(instrFor(u))} --lens-instr-sum ${utf8Checksum(instrFor(u))} --prompt-file ${shQuote(EXTERNAL_PROMPT)}` +
+      // Appended, not interpolated into the base string, so a run without a
+      // telemetry sink produces the exact command it always did.
+      // shQuote BOTH values. This string is executed as a shell command by the
+      // transport agent, so a path or unit name carrying `"`, `$(...)`, a
+      // backtick or whitespace would close the argument and run as code — the
+      // neighbouring --lens-instr value is quoted for exactly this reason, and
+      // leaving these two raw was an inconsistency, not a judgement that they
+      // are safe. TMPDIR is attacker-influencable on a shared host.
+      (TELEMETRY ? ` --unit ${shQuote(u.name)} --telemetry ${shQuote(TELEMETRY)}` : ''),
   })))
 if (externalVoiceSpecs.length) {
   log(`External fan-out: ${externalVoiceSpecs.length} call(s) — ${liveBackends.join(' + ')} ` +
@@ -519,7 +820,7 @@ if (externalVoiceSpecs.length) {
 }
 const externalThunks = externalVoiceSpecs.map((v) => () =>
   agent(
-    `You are a thin transport wrapper — do NOT review the code yourself, do NOT modify the command. Run EXACTLY this with the Bash tool (timeout 600000) and wait for it to finish:\n\n` +
+    `You are a thin transport wrapper — do NOT review the code yourself, do NOT modify the command. Run EXACTLY this with the Bash tool (timeout ${BASH_TIMEOUT_MS}) and wait for it to finish:\n\n` +
     `${v.cmd}\n\n` +
     // The --lens-instr value is one long single-quoted argv word. A reflowed or
     // reworded copy would change the review's lens scope (or break the quoting
@@ -544,6 +845,98 @@ const voices = (await parallel([...claudeThunks, ...externalThunks])).filter(Boo
 // needs to know a threat-cluster call died, not just that codex had a bad day.
 const backendErrors = voices.filter((v) => v.ok === false)
   .map((v) => ({ backend: v.backend, unit: v.unit || '', lenses: v.lenses || [], error: v.error }))
+
+// FAMILY COVERAGE. `backendErrors` records that calls died; it does not say what
+// that cost the VERDICTS, and that is the damage this whole timeout investigation
+// started from: consensus is defined as ">=2 distinct families agreeing", so when
+// a family drops out the meaning of every CONSENSUS and every solo silently
+// changes — a finding that would have been corroborated is now routed through the
+// adversarial verifier instead. Same findings, weaker review, no line saying so.
+// Compute it here (never in the presenter): a family counts as PRESENT if at
+// least one of its voices returned, even with zero findings — "reviewed and found
+// nothing" is participation; only an errored voice is absence.
+const familyOf = (backend) => FAMILY[backend] || backend
+const familiesExpected = Array.from(new Set([
+  ...(runClaude ? ['claude'] : []),
+  ...liveExternals.map((b) => familyOf(b.backend)),
+])).sort()
+const familiesPresent = Array.from(new Set(
+  voices.filter((v) => v.ok !== false).map((v) => familyOf(v.backend))
+)).sort()
+const familiesLost = familiesExpected.filter((f) => !familiesPresent.includes(f))
+// Run-global presence is NOT the whole story, because consensus is decided per
+// (file, mechanism) — i.e. inside a cluster. A family that survived in one
+// cluster and timed out in three is "present" globally while three quarters of
+// the review could not reach consensus at all. That is exactly what happened on
+// this branch: grok returned only its consistency voice, contributed zero
+// findings, and the balance still said every family was present and consensus
+// reachable. So compute coverage PER UNIT as well, and let the weakest unit
+// decide what we claim.
+const unitsByName = new Map()
+for (const v of voices) {
+  const key = v.unit || '-'
+  if (!unitsByName.has(key)) unitsByName.set(key, new Set())
+  if (v.ok !== false) unitsByName.get(key).add(familyOf(v.backend))
+}
+// A unit where fewer than 2 families returned cannot produce a consensus finding,
+// no matter how many voices spoke in other units.
+// EMPTY when fewer than 2 families were ever expected: with a single family
+// configured every unit trivially has "fewer than 2", so this listed all five
+// clusters as degraded on a stock Claude-only install that ran exactly as
+// intended — and the value is exported in `balance`, so every presenter reading
+// it repeated the claim. Degradation means "lost something", not "never had it".
+const unitsDegraded = familiesExpected.length < 2 ? [] : Array.from(unitsByName.entries())
+  .filter(([, fams]) => fams.size < 2)
+  .map(([unit]) => unit)
+  .sort()
+// <2 families means NO finding in this run can reach consensus at all — every
+// one becomes a solo. That is a different review, not a degraded log line.
+// Global reachability is necessary but not sufficient: claim it only when EVERY
+// unit could also reach it, so the balance line cannot overstate the review.
+// TWO questions, two flags. This one is GLOBAL only: can any finding in this run
+// reach consensus at all? Per-cluster degradation is `unitsDegraded`, and the
+// sentences that describe either case are built once in `coverageNotes` below.
+// Collapsing them made a single degraded cluster read as "no finding in this run
+// can reach consensus" — false for every healthy cluster, printed next to a
+// header stating full family coverage.
+const consensusReachable = familiesPresent.length >= 2
+if (familiesLost.length) {
+  log(`Family coverage: lost ${familiesLost.join(', ')} — ${familiesPresent.length} of ${familiesExpected.length} families reviewed` +
+      (familiesPresent.length >= 2 ? '' : '; consensus is UNREACHABLE this run, every finding falls back to solo + verifier'))
+}
+const coverageNotes = []
+// The HEADER is emitted here as well, not templated in the skill: gated there on
+// "coverageNotes is non-empty" it fired for a single-family run and announced
+// "reduziert: 1 von 1 Modellfamilien" — and for a cluster-only degradation
+// "2 von 2". The X-von-Y line only says something when a family was actually
+// lost, so only that case produces it.
+if (familiesLost.length) {
+  // ONE sentence, not two: the previous pair stated the same "N of M families"
+  // fact twice (once in German, once in English) and the skill printed both.
+  coverageNotes.push(`Konsens-Basis reduziert: ${familiesLost.join(', ')} lieferte nichts — ${familiesPresent.length} von ${familiesExpected.length} Modellfamilien haben reviewt, "Konsens" heißt in diesem Lauf Übereinstimmung von ${familiesPresent.join(', ')}.`)
+}
+// Scoped to actual LOSS, and worded for what happened. Gated on
+// `!consensusReachable` alone this fired on a stock Claude-only install — where
+// nothing was lost and there was never a second family to agree with — and the
+// skill prints every entry verbatim as a ⚠️ that it is told never to soften. So
+// a review that ran exactly as configured was reported as degraded, in the one
+// English sentence of an otherwise German block. Same mis-scoping the header one
+// branch up was fixed for in 0.10.6.
+if (!consensusReachable && familiesExpected.length >= 2) {
+  coverageNotes.push(`Weniger als 2 Modellfamilien haben geliefert — kein Finding in diesem Lauf kann Konsens erreichen; jedes fällt auf solo + adversarialen Verifier zurück.`)
+} else if (!consensusReachable) {
+  coverageNotes.push(`Nur eine Modellfamilie (${familiesPresent.join(', ')}) ist in diesem Lauf konfiguriert — Konsens ist per Definition nicht anwendbar; jedes Finding läuft über solo + adversarialen Verifier.`)
+} else if (unitsDegraded.length) {
+  coverageNotes.push(`Cluster ${unitsDegraded.join(', ')}: weniger als 2 Familien haben geliefert — Findings DORT fallen auf solo + Verifier zurück. Die übrigen Cluster sind unberührt.`)
+}
+// Gated on consensus being reachable AT ALL, like the notes above: with a single
+// family configured every cluster trivially has "fewer than 2 families", so this
+// announced a five-way degradation for a stock Claude-only install that ran
+// exactly as intended — and `balance.unitsDegraded` carried the same claim to any
+// presenter reading it.
+if (consensusReachable && unitsDegraded.length) {
+  log(`Cluster coverage: ${unitsDegraded.join(', ')} had fewer than 2 families return — findings there cannot reach consensus and fall back to solo + verifier`)
+}
 
 const pool = []
 for (const v of voices) {
@@ -572,7 +965,7 @@ for (const v of voices) {
     if (!CANDIDATE_LENSES.includes(lens)) {
       lens = Array.isArray(v.lenses) && v.lenses.length === 1 ? v.lenses[0] : 'unspecified'
     }
-    pool.push({ ...f, backend: v.backend, family: FAMILY[v.backend] || v.backend, lens, kind: lensKind(lens) })
+    pool.push({ ...f, backend: v.backend, family: familyOf(v.backend), lens, kind: lensKind(lens) })
   }
 }
 log(`Fan-out: ${pool.length} raw findings from ${voices.length} voices` +
@@ -853,7 +1246,12 @@ findings.forEach((c, i) => { c.num = i + 1 })
 // Per-backend rollup for the balance "Agents" line: concrete short model label
 // + voice/finding counts + whether it ran clean. Wall-time (per-agent durationMs)
 // needs a registered workflow to surface — tracked as P4 wiring.
-const MODEL_LABEL = { claude: 'opus', codex: 'gpt', grok: 'grok-4.5' }
+// Display labels for the balance line. `grok` is deliberately the FAMILY name,
+// not a version: the adapter discovers the model per run, so any id hard-coded
+// here is a claim the report cannot keep — it printed "grok-4.5" for a run that
+// executed grok-4.6. A label that says less is better than one that says
+// something false; the exact model per call lives in the telemetry record.
+const MODEL_LABEL = { claude: 'opus', codex: 'gpt', grok: 'grok' }
 const agents = {}
 for (const v of voices) {
   const a = agents[v.backend] || (agents[v.backend] = { backend: v.backend, model: MODEL_LABEL[v.backend] || v.backend, voices: 0, failedVoices: 0, findings: 0, ok: true })
@@ -911,6 +1309,15 @@ return {
     fenceDegraded,
     voices: voices.length,
     agents: Object.values(agents),
+    familiesExpected,
+    familiesPresent,
+    familiesLost,
+    unitsDegraded,
+    consensusReachable,
+    // The exact sentence(s) to print, built here so the presenter cannot
+    // generalize a scoped degradation into a run-wide claim (it did) and cannot
+    // drift from these semantics in prose.
+    coverageNotes,
     backendErrors: scrubbedErrors,
     rawPerLens,
     survivingPerLens,

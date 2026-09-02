@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+"""Tests for the `grok models` list parser in agents.sh.
+
+WHY THIS EXISTS: the parser reads a HUMAN-FORMATTED CLI listing, and that format
+has already changed twice — 0.2.101 renamed the model, 1.0.3 changed the bullet
+marker so only the DEFAULT keeps `*`. The second change made the parser report
+"this CLI does not offer grok-4.5" for a CLI that offers it, dropping grok from
+every review: the third model family gone, silently, which is the exact failure
+mode the swarm timeout work exists to prevent. A format the parser mis-reads
+costs a whole voice and looks like nothing at all, so pin the shapes.
+
+The parser is the shipped `grok_parse_models` function, sourced from agents.sh
+and driven directly — never re-typed here, and no longer scraped out with a
+regex anchor that a reformat can silently break.
+"""
+import os
+import pathlib
+import subprocess
+import sys
+
+HERE = pathlib.Path(__file__).resolve().parent
+ADAPTER = HERE / "agents.sh"
+
+FAILS = []
+
+
+def check(name, cond):
+    if not cond:
+        FAILS.append(name)
+
+
+# Drive the SHIPPED function, do not scrape it. Both test files used to pull the
+# awk program out of agents.sh with their own regex anchor, and the two anchors
+# differed in strictness: a reformat of the assignment (moving the printf, a
+# here-string, an added pipe stage) kept one matching and left this file exiting
+# 1 with "could not extract" — 20+ format regressions off, silently, until
+# someone repaired the anchor. Its own function needs no anchor at all.
+_HAVE_FN = subprocess.run(
+    ["bash", "-c", f'source "{ADAPTER}"; declare -f grok_parse_models >/dev/null'],
+    capture_output=True, text=True,
+)
+if _HAVE_FN.returncode != 0:
+    print("grok-models tests FAILED:\n  - agents.sh does not define grok_parse_models "
+          "(the parser moved or was renamed — fix this test, do not ignore it)")
+    sys.exit(1)
+
+
+def parse(listing):
+    """Run the shipped parser over a raw `grok models` listing."""
+    out = subprocess.run(
+        ["bash", "-c", f'source "{ADAPTER}"; grok_parse_models'],
+        input=listing, capture_output=True, text=True,
+    )
+    return [line for line in out.stdout.splitlines() if line.strip()]
+
+
+# --- the format that shipped before 1.0.3: every model marked with `*` --------
+OLD = """You are logged in with grok.com.
+
+Available models:
+  * grok-4.5 (default)
+  * grok-build
+"""
+check("0.2.x format: both models parsed", parse(OLD) == ["grok-4.5", "grok-build"])
+
+# --- grok 1.0.3: `*` marks ONLY the default, others use `-` ------------------
+# Verbatim shape from the installed CLI (2026-08-16). This is the regression:
+# a `*`-only matcher returns just grok-4.6, so the pinned grok-4.5 reads as
+# "not offered" and grok is dropped from the ensemble.
+NEW = """You are logged in with grok.com.
+
+Default model: grok-4.6
+
+Available models:
+  * grok-4.6 (default)
+  - grok-4.5
+"""
+check("1.0.3 format: the non-default model is seen", "grok-4.5" in parse(NEW))
+check("1.0.3 format: the default is seen too", "grok-4.6" in parse(NEW))
+check("1.0.3 format: exactly the two listed models", sorted(parse(NEW)) == ["grok-4.5", "grok-4.6"])
+
+# --- the guard the marker anchor was protecting -------------------------------
+# Only ONE id per bullet line, and prose ABOUT another model must not register it
+# as offered — otherwise a retired model reads as available and the adapter pins
+# a model the CLI will reject at launch.
+PROSE = """Available models:
+  * grok-5 (successor to grok-4.5)
+"""
+check("prose naming a retired model does not make it 'offered'", parse(PROSE) == ["grok-5"])
+
+# Non-bullet lines are not model entries; a bare mention in a header or footer
+# must not count, or "Default model: grok-4.6" alone would satisfy the check.
+NO_BULLETS = """You are logged in with grok.com.
+
+Default model: grok-4.6
+
+Some note mentioning grok-4.5 in passing.
+"""
+check("non-bullet lines are ignored", parse(NO_BULLETS) == [])
+
+# An empty/unparseable list must yield nothing, so the caller takes its documented
+# degrade path (trust auth) instead of asserting a model is gone.
+check("empty input yields no ids", parse("") == [])
+check("header-only input yields no ids", parse("Available models:\n") == [])
+
+# Punctuation glued to an id must not ride along — the exact-match downstream
+# would fail and report a present model as missing.
+PUNCT = """Available models:
+  - grok-4.5,
+  * grok-4.6.
+"""
+check("trailing punctuation is not captured", sorted(parse(PUNCT)) == ["grok-4.5", "grok-4.6"])
+
+# A hyphen inside the id must not be confused with the bullet marker.
+check("ids with dots/dashes survive", "grok-4.5" in parse("  - grok-4.5\n"))
+
+# =============================================================================
+# Canonical model discovery
+# =============================================================================
+# The parser above answers "what does the CLI list"; this half answers "which of
+# those may we RUN". Both gates are load-bearing and fail in opposite directions:
+# too strict drops grok from the ensemble (a whole model family, silently), too
+# loose picks a model that accepts --json-schema but returns structuredOutput:
+# null — which fails only AFTER a full review has been paid for.
+REPO = HERE.parents[2]
+
+
+def run_bash(*lines, models=None, env=None):
+    """Source agents.sh and run helper lines against a faked model list.
+
+    `_grok_models` is normally filled by a network call; overriding it (and the
+    memo flag) keeps these tests hermetic and lets us assert on catalogs that do
+    not exist yet — which is the whole point of a discovery mechanism.
+    """
+    # Stub BOTH memoized probes. Faking only the model list left the
+    # `--prompt-file` capability probe live, so `grok_model_offered` shelled out
+    # to whatever `grok` happened to be on the host's PATH: green on a machine
+    # with a current CLI, red on one without, and a network call inside a test
+    # that advertises itself as hermetic. Pre-setting the memo flags is the same
+    # mechanism the adapter uses, so nothing is monkey-patched.
+    pre = ['_grok_help_done=1', '_grok_help_rc=0']
+    if models is not None:
+        pre += [f'_grok_models_done=1', f'_grok_models={_q(models)}']
+    harness = "set -euo pipefail\nsource '%s'\n%s\n" % (
+        ADAPTER, "\n".join(pre + list(lines)))
+    e = os.environ.copy()
+    if env:
+        e.update(env)
+    return subprocess.run(["bash", "-c", harness], cwd=str(REPO), env=e,
+                   capture_output=True, text=True, timeout=30)
+
+
+def _q(text):
+    return "'" + text.replace("'", "'\\''") + "'"
+
+
+PIN = run_bash('printf "%s" "$GROK_DEFAULT_MODEL"').stdout.strip()
+
+
+def newer(a, b):
+    r = run_bash(f'_grok_version_newer {a} {b} && echo yes || echo no')
+    return r.stdout.strip() == "yes"
+
+
+# --- version ordering is COMPONENT-WISE, not decimal --------------------------
+# This is the subtle one: read as a fraction, 4.20 < 4.6. The provider means the
+# 20th minor release, and its catalog already ships 4.20-derived ids — so a
+# decimal comparison would pin the ensemble to an older model forever.
+check("4.20 is newer than 4.6 (component-wise, not decimal)", newer("grok-4.20", "grok-4.6"))
+check("4.6 is newer than 4.5", newer("grok-4.6", "grok-4.5"))
+check("5 is newer than 4.20 (major wins)", newer("grok-5", "grok-4.20"))
+check("4.5 is NOT newer than 4.6", not newer("grok-4.5", "grok-4.6"))
+check("a model is not newer than itself", not newer("grok-4.6", "grok-4.6"))
+check("bare major compares against a minor", newer("grok-5", "grok-4.6"))
+# A non-numeric component must read as "not newer" rather than crash the adapter
+# under `set -e` mid-review.
+check("garbage version does not abort", not newer("grok-4.x", "grok-4.6"))
+
+# --- the canonical filter: only bare version ids ------------------------------
+LIVE_CATALOG = "\n".join([
+    "grok-4.6", "grok-4.5", "grok-4.3",
+    "grok-3-mini", "grok-3-mini-fast",
+    "grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning",
+    "grok-4.20-multi-agent-0309",
+    "grok-build-0.1", "grok-composer-2.5-fast",
+    "grok-imagine-image", "grok-imagine-video-1.5-preview",
+])
+r = run_bash('_grok_highest_canonical', models=LIVE_CATALOG)
+check("live catalog: the highest canonical id wins", r.stdout.strip() == "grok-4.6")
+
+for rejected in ("grok-3-mini", "grok-4.20-0309-reasoning", "grok-4.20-multi-agent-0309",
+                 "grok-build-0.1", "grok-composer-2.5-fast", "grok-imagine-image"):
+    rr = run_bash(f'if [[ {_q(rejected)} =~ $GROK_CANONICAL_RE ]]; then echo match; else echo no; fi')
+    check(f"filter rejects {rejected}", rr.stdout.strip() == "no")
+for accepted in ("grok-4.3", "grok-4.5", "grok-4.6", "grok-5", "grok-4.20"):
+    rr = run_bash(f'if [[ {_q(accepted)} =~ $GROK_CANONICAL_RE ]]; then echo match; else echo no; fi')
+    check(f"filter accepts {accepted}", rr.stdout.strip() == "match")
+
+# A catalog that only regresses to grok-3 must not pull the adapter backwards.
+r = run_bash('_grok_highest_canonical', models="grok-3-mini\ngrok-3-mini-fast")
+check("a grok-3-only catalog yields no canonical model", r.stdout.strip() == "")
+
+# A prose bullet mentioning a model id must NOT be harvested as an offered model:
+# discovery would select it (it is schema-verified), and every call would then die
+# at launch with "unknown model id" — the whole grok family gone, silently.
+PROSE_LIST = """Available models:
+  * grok-4.5 (default)
+  - grok-4.6 reaches end of life on 2026-12-01
+"""
+check("a prose bullet is not parsed as an offered model",
+      parse(PROSE_LIST) == ["grok-4.5"])
+
+# Bracketed annotations are the convention real listings use; a future format
+# adding one must not empty the catalog (which would drop grok to the pinned
+# fallback), and a backticked id must still be read.
+ANNOTATED = """Available models:
+  * grok-4.6 [stable]
+  - `grok-4.5` (legacy)
+"""
+check("bracketed annotations and backticked ids still parse",
+      sorted(parse(ANNOTATED)) == ["grok-4.5", "grok-4.6"])
+
+# --- the schema gate: verified selects, unverified only REPORTS ---------------
+def select(models, override=""):
+    r = run_bash(f'grok_select_model {_q(override)}',
+           'printf "%s|%s" "$GROK_SELECTED_MODEL" "$GROK_SELECT_NOTE"',
+           models=models)
+    model, _, note = r.stdout.partition("|")
+    return model, note
+
+
+sel, note = select(LIVE_CATALOG)
+check("selects the newest VERIFIED model", sel == "grok-4.6")
+check("nothing to report when the newest is verified", note == "")
+
+# The upgrade prompt: a newer canonical model appears that nobody has verified.
+# It must be NAMED but never selected — silently adopting it is what burns a
+# review on structuredOutput:null.
+sel, note = select("grok-7\n" + LIVE_CATALOG)
+check("an unverified newer model is NOT selected", sel == "grok-4.6")
+check("an unverified newer model IS reported", "grok-7" in note)
+
+# Only older verified models on offer → take the newest of those, no note.
+sel, note = select("grok-4.5\ngrok-4.3")
+check("falls back to the newest verified model on offer", sel == "grok-4.5")
+check("no note when nothing newer exists", note == "")
+
+# Canonical models exist but none verified → keep the pin and say so, rather than
+# run something unproven.
+sel, note = select("grok-9\ngrok-8")
+check("no verified model → keeps the pin", sel == PIN)
+check("no verified model → reports why", "no schema-verified model" in note)
+
+# An empty/unusable list must keep the pin: dropping grok entirely is worse than
+# running the known-good model (grok_model_fetch already reported the degrade).
+sel, note = select("")
+check("empty model list keeps the pin", sel == PIN)
+
+# An explicit override wins over discovery — but the run_grok preflight still
+# gates it on the verified table (asserted live elsewhere).
+sel, _ = select(LIVE_CATALOG, override="grok-4.5")
+check("explicit override beats discovery", sel == "grok-4.5")
+
+# --- readiness must agree with what would actually RUN ------------------------
+# The 1.0.3 regression: readiness said "grok-4.5 not offered" for a CLI that
+# offered it, and grok vanished from every review. Readiness now asks whether ANY
+# verified model is on offer, which is exactly what grok_select_model resolves.
+r = run_bash('grok_model_offered && echo ready || echo not-ready', models=LIVE_CATALOG)
+check("readiness: verified model on offer → ready", r.stdout.strip() == "ready")
+r = run_bash('grok_model_offered && echo ready || echo not-ready', models="grok-9\ngrok-3-mini")
+check("readiness: no verified model → not ready", r.stdout.strip() == "not-ready")
+r = run_bash('grok_model_offered && echo ready || echo not-ready', models="")
+check("readiness: unusable list trusts auth (ready)", r.stdout.strip() == "ready")
+
+# The pin itself must be verified, or the fallback path selects a model that
+# run_grok then refuses — a self-inflicted outage on every degraded run.
+r = run_bash('_grok_schema_verified "$GROK_DEFAULT_MODEL" && echo yes || echo no')
+check("the pinned fallback model is itself schema-verified", r.stdout.strip() == "yes")
+
+# THE PIN MUST BE THE OLDEST VERIFIED ID, not the newest. It is reached ONLY when
+# discovery could not read the model list, i.e. exactly when we know least about
+# the host — and a CLI too old to offer the newest id would then be handed an
+# unknown model, reject every call, and lose the whole grok family for the run.
+# Guessing low costs a slightly older model; guessing high costs the backend.
+# (Regression: 0.9.2 briefly raised the pin to the newest verified id.)
+r = run_bash('printf "%s" "$GROK_SCHEMA_VERIFIED"')
+verified_ids = [x for x in r.stdout.split() if x]
+check("GROK_SCHEMA_VERIFIED is non-empty", bool(verified_ids))
+oldest = verified_ids[0]
+for cand in verified_ids[1:]:
+    if not newer(cand, oldest):
+        oldest = cand
+check(f"the fallback pin is the OLDEST verified id (expected {oldest})", PIN == oldest)
+
+
+# One verdict for the whole file. It has to be the LAST statement: an earlier
+# copy of this block sat between the two halves, so every discovery check below
+# it recorded failures into FAILS that nothing ever read — the exact
+# vacuously-green failure this file warns about at the top.
+if FAILS:
+    print("grok-models tests FAILED:", file=sys.stderr)
+    for f in FAILS:
+        print(f"  - {f}", file=sys.stderr)
+    sys.exit(1)
+print("grok-models: all tests passed")

@@ -13,7 +13,7 @@ Complementary to [pr-flow](../pr-flow/): pr-flow drives the GitHub-PR
 ## Status
 
 **Phase 5 of 6** — the pipeline can now **act**. `/swarm:review` fans a diff
-across three voices (Claude lenses + `codex` + `grok-4.5`), each running one
+across three voices (Claude lenses + `codex` + `grok`), each running one
 call per gated lens cluster,
 merges by mechanism, verifies solo findings + design suggestions, presents one
 ranked report, and —
@@ -46,7 +46,7 @@ presets).
 ## The pipeline (`/swarm:review`)
 
 ```
-Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok-4.5)
+Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok)
           → Merge (file, mechanism) → Verify (solos + design + unverified consensus) → Ranked synthesis
 ```
 
@@ -58,7 +58,7 @@ Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok-4.5)
    by nobody. Every pruned lens is reported as gated-out, never silently
    dropped.
 2. **Fan-out** — all voices at the **same granularity**: one Claude finder per
-   gated lens **cluster**, and `codex` + `grok-4.5` each once per gated cluster
+   gated lens **cluster**, and `codex` + `grok` each once per gated cluster
    too (per lens under `--max`). The gate prunes calls for everyone — a
    fully-gated-out cluster spawns nothing for any voice — and each finding's
    `[lens]` tag is authoritative, because the voice *is* that lens.
@@ -71,14 +71,23 @@ Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok-4.5)
    Design findings get an **applicability** prompt instead (is the reuse target
    real? is the simpler form behavior-identical?) — same three states.
 
-**11 lenses in 4 clusters** (the cluster is the fan-out unit for *every* voice):
+**11 lenses in 5 clusters** (the cluster is the fan-out unit for *every* voice):
 
 | Cluster | Lenses | Guiding question |
 |---------|--------|------------------|
-| `breakage` | correctness, removed-behavior, cross-file-trace | what breaks? |
+| `breakage` | correctness, removed-behavior | what breaks? |
+| `reach` | cross-file-trace | what else does this touch? |
 | `threat` | security, adversarial | what's exploitable / which assumption fails? |
 | `design` | reuse, simplification, efficiency, altitude | is this good, maintainable code? |
 | `consistency` | style, conventions | does it fit the codebase? |
+
+`reach` is a one-lens cluster on purpose — because of measured **lens
+crowd-out**, not speed. In a combined three-lens `breakage` call, 3 of 4 findings
+came from `cross-file-trace` alone; split apart, the remaining two lenses
+produced 4 findings the combined call had missed. Isolation also means a timeout
+there costs one lens rather than three, and the gate can prune the whole call on
+a diff with no cross-file surface. It does **not** make the review faster: the
+longest single call drops 374 s → 313 s, and total work rises.
 
 Design-lens findings carry `kind: "design"` and render in their own report
 section, so suggestions never dilute the defect ranking.
@@ -119,10 +128,14 @@ external CLIs directly:
 agents.sh list [--json]       # probe all backends → status table / JSON
 agents.sh available <backend> # installed? prints version
 agents.sh ready <backend>     # authenticated? hint on stderr if not
+agents.sh config              # resolved numeric config (caps, timeouts,
+                              # probe budget) — the ONE parser; the review
+                              # skill reads these instead of re-deriving them
 agents.sh jail                # jail=yes|no — will read+web be granted? (working
                               # OS sandbox AND a resolvable repo root)
 agents.sh run <backend> [--prompt-file f] [--lens-instr s --lens-instr-sum hex]
                         [--effort E] [--model M] [--schema f]
+                        [--telemetry f --unit name]
                               # lens prompt in → findings JSON out
                               # --lens-instr: the gated cluster's lens briefs,
                               # prepended verbatim before the prompt body. The
@@ -140,8 +153,23 @@ Backends:
 | Backend | Role | Mechanics |
 |---------|------|-----------|
 | `claude` | probe-only | reviews run in-session via the Agent tool |
-| `codex` | external reviewer | `codex exec -s read-only -C <repo> -c tools.web_search=true --output-schema` (model `gpt-5.6-terra`); file-read + web under read-only; auth via `codex login status` |
-| `grok` | external reviewer | headless `--single=` with inline `--json-schema` (model `grok-4.5`, the only supported grok model); strict `--tools` allowlist (`read_file,list_dir,grep,web_search,web_fetch`) + `--cwd <repo>` — no write/shell. Readiness is model-aware: auth **and** `grok-4.5` present in `grok models`. |
+| `codex` | external reviewer | `codex exec -s read-only -C <repo> -c tools.web_search=true --output-schema` (model `gpt-5.6-terra`), prompt on stdin (`-- -`); file-read + web under read-only; auth via `codex login status` |
+| `grok` | external reviewer | headless `--prompt-file` with inline `--json-schema`; the model is **discovered** — the newest canonical id whose schema enforcement is verified (the current set lives in `GROK_SCHEMA_VERIFIED` in `agents.sh`), never a silent upgrade to an unverified one. Strict `--tools` allowlist (`read_file,list_dir,grep,web_search,web_fetch`) + `--cwd <repo>` — no write/shell. Readiness is model-aware: auth, `--prompt-file` support, **and** a verified model on offer in `grok models`. `ready` answers usable/not-usable plus a hint; the concrete id is selected at `run` time and appears in that call's telemetry line. |
+
+The prompt always reaches a backend **out-of-band** — never as an argv word — so
+the diff is bounded by model context rather than `exec`'s `MAX_ARG_STRLEN`.
+`SWARM_MAX_PROMPT_BYTES` (default 512 KiB) is that sanity cap; above it
+`/swarm:review` cleanly skips the externals instead of letting each call fail.
+`SWARM_PROBE_TIMEOUT` (default 10 s) bounds the short readiness probes and is
+capped at 20 s — the review's timeout margin is derived from it, so a larger
+value would eat the wall it is meant to protect; `run` and `config` refuse
+anything above the ceiling rather than normalizing it.
+
+Each external call is timed (`--telemetry <file> --unit <name>`), and the report
+flags any voice that spent most of the wall **that call actually ran under** —
+recorded per record, not assumed from `SWARM_TIMEOUT`, which is overridable and
+which the workflow shrinks by its probe margin. A call that *survives* near the
+wall is invisible in the error list but is the one about to start failing.
 
 Unavailable backends drop from the ensemble — `claude` alone still works.
 `/swarm:review` reports a backend that *errored* mid-run distinctly from one

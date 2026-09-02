@@ -35,12 +35,24 @@ user_invocable: true
 - `claude` is always ready when Claude Code runs (reviews happen in-session
   via the Agent tool; the external CLIs are called through the adapter).
 - **`grok` Ready is a heuristic** — it means a non-empty `~/.grok/auth.json`
-  exists **and** that `grok models` still lists the adapter's model
-  (`grok-4.5`), NOT that the token is valid/unexpired (codex, by contrast, runs
-  a real `codex login status`). So grok can show Ready yet fail at review time
+  exists, that the CLI offers `--prompt-file` (the out-of-band prompt transport),
+  **and** that `grok models` still lists a schema-verified model, NOT that the
+  token is valid/unexpired (codex, by contrast, runs a real `codex login
+  status`, bounded — and since that probe IS the auth question and reaches the
+  same network the review needs, a probe that hits the wall is reported
+  **not-ready**: a wedged CLI otherwise burns the full wall once per gated
+  cluster. *Any* non-zero probe rc is not-ready — there is no fail-open branch,
+  because the one rc that carried it (126) is also the shell's "found but cannot
+  be invoked". The hint names which case it was).
+  So grok can show Ready yet fail at review time
   on a stale token; treat it as "credentials present" and let the run surface a
-  real auth error. Not-ready with a "does not offer grok-4.5" hint means the
-  grok CLI dropped/renamed the model — update the CLI, it is not an auth
-  problem. The model check degrades to auth-only (with a warning on stderr) when
-  the probe can't run — no coreutils `timeout` to bound it, or an unreadable
-  model list.
+  real auth error. A not-ready hint naming the model list is NOT an auth problem,
+  and it has **three different remedies** — read which one the hint states:
+  the CLI has no `--prompt-file` (too old → update it), it offers no canonical
+  model at all (also too old → update it), or it offers canonical models that are
+  not schema-verified (usually NEWER than this adapter knows → verify
+  `--json-schema` on the named id and add it to `GROK_SCHEMA_VERIFIED`). Never relay it as "update the CLI" by default; that
+  sends the second user to update an already-current install. The model probe
+  always runs (the adapter bounds it with its own watchdog where coreutils is
+  missing); it degrades to auth-only, with a warning on stderr, only when the
+  list comes back empty or unreadable.
