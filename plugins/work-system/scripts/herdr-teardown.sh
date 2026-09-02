@@ -250,6 +250,10 @@ print("gone")'
 extract_manager='import sys, json, re, unicodedata
 main = sys.argv[1] if len(sys.argv) > 1 else ""
 ws = sys.argv[2] if len(sys.argv) > 2 else ""
+# herdr 0.8 statuses: idle|working|blocked|done|unknown (the same vocabulary
+# ha_wait validates for --until). `unknown` is DELIBERATELY absent here: it means
+# herdr cannot tell, which is not a confirmed live session. Keep the two in sync by
+# hand — they are different SETS of the same vocabulary, not one shared constant.
 LIVE = ("idle", "working", "blocked", "done")
 
 def session_name(a):
@@ -260,7 +264,11 @@ def session_name(a):
     # symbol+space here too (the working spinner: ◐/◑/✳ …). The space is required, so
     # a name that genuinely starts with punctuation (e.g. /habemus-event) keeps it; a
     # wrong strip costs only the offer (no ListAgents match), never a misdirected message.
-    t = str(a.get("terminal_title_stripped") or a.get("terminal_title") or a.get("name") or "")
+    # NO fallback to herdr agent `name`: it is a launch label (verified live: agent
+    # gcp-auth-159 hosts session answer-gcp-auth-questions-buchhalter-159), so emitting
+    # it would hand the caller a string that is not an address — and a namesake in
+    # ANOTHER repo could then pass the uniqueness check. No title -> no candidate.
+    t = str(a.get("terminal_title_stripped") or a.get("terminal_title") or "")
     # Blank EVERY control/format char first (Cc/Cf, plus surrogates/private use):
     # newlines and tabs would forge extra output lines, and ANSI escapes or a bidi
     # override (U+202E) could make the printed name read differently than it matches.

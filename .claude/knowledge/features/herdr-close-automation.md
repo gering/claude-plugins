@@ -1,9 +1,9 @@
 ---
 title: "herdr /close Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-09-01
+updatedAt: 2026-09-02
 createdFrom: "PR #18"
-updatedFrom: "session: 2026-09-01 (task/delegate-worktree-close-to-manager)"
+updatedFrom: "session: 2026-09-02 (task/delegate-worktree-close-to-manager)"
 pluginVersion: 1.13.0
 prime: false
 reindexedAt: 2026-07-12

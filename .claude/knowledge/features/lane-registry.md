@@ -1,10 +1,10 @@
 ---
 title: "Lane registry: lanes.sh + herdr-agent.sh"
 createdAt: 2026-07-24
-updatedAt: 2026-07-24
+updatedAt: 2026-09-02
 createdFrom: "branch: task/add-lane-registry"
-updatedFrom: "branch: task/add-lane-registry"
-pluginVersion: 1.9.0
+updatedFrom: "session: 2026-09-02 (task/delegate-worktree-close-to-manager)"
+pluginVersion: 1.13.0
 prime: false
 ---
 
