@@ -320,7 +320,7 @@ keeps the original branch name rather than renaming it to `task/<name>`:
 Once a task is merged, `/close` runs its usual cleanup (worktree, branch, task
 file) and then closes that task's herdr **tab** too. It identifies the tab by
 matching the pane's cwd (no persisted layout file) *before* removing the worktree,
-and decides self-close vs. a different-tab close by pane id. Two entry points:
+and decides self-close vs. a different-tab close by pane id. Three entry points:
 
 - **From the main session** (the usual case): `/close <task>` closes the
   worktree's tab directly — a different tab, so nothing self-terminates. It then

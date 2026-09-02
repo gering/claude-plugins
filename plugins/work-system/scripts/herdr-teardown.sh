@@ -277,7 +277,11 @@ def session_name(a):
     # Then drop ONE leading symbol+space (the herdr/claude spinner glyph) and collapse.
     t = re.sub(r"^[^\w\s]\s+", "", t.strip())
     t = re.sub(r"\s+", " ", t).strip()
-    return "" if len(t) > 200 else t
+    # 64 chars, not 200: the value is echoed into the caller prompt (the confirmation
+    # question and the SendMessage address) BEFORE any gate runs, and a pane title is
+    # settable by any process in that pane. A real session name is short; a long one is
+    # prose, and prose in that slot is an injection surface, not an address.
+    return "" if len(t) > 64 else t
 
 root, wtdir = match_roots(main)
 try:
@@ -295,8 +299,6 @@ for a in agents:
     if not isinstance(a, dict):
         unknown = True          # a junk element may have BEEN the Manager row
         continue
-    if ws and str(a.get("workspace_id") or "") != ws:
-        continue
     cwd = a.get("cwd")
     if not cwd or not str(cwd).strip():
         unknown = True          # unreadable cwd — cannot rule out that it is the root
@@ -305,7 +307,17 @@ for a in agents:
     if kind != "main":
         continue
     # From here on the agent SITS AT THE ROOT: anything unusable about it makes the
-    # answer unverified, never a confident `none`.
+    # answer unverified, never a confident `none`. The workspace filter runs HERE, not
+    # before the cwd match: a root row whose workspace_id is missing/unreadable would
+    # otherwise be filtered away silently and let the answer read `none`, breaking the
+    # fail-closed contract. A row in a DIFFERENT workspace is a legitimate skip.
+    if ws:
+        aws = str(a.get("workspace_id") or "")
+        if not aws:
+            unknown = True      # at the root, but we cannot tell which workspace
+            continue
+        if aws != ws:
+            continue
     if str(a.get("agent") or "").lower() != "claude":
         unknown = True          # codex/grok/shell at the root: no SendMessage address
         continue

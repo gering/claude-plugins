@@ -41,8 +41,10 @@ WS = "w7"
 
 
 def agent(cwd, *, kind="claude", status="idle", title="Manager", ws=WS, **extra):
-    a = {"agent": kind, "agent_status": status, "cwd": cwd, "workspace_id": ws,
+    a = {"agent": kind, "agent_status": status, "cwd": cwd,
          "pane_id": "w7:p1", "tab_id": "w7:t1"}
+    if ws is not None:          # ws=None omits the field, as a malformed herdr row would
+        a["workspace_id"] = ws
     if title is not None:
         a["terminal_title_stripped"] = title
     a.update(extra)
@@ -139,6 +141,12 @@ r = run([agent(ROOT, title="   ", terminal_title="\u202e")])
 check("a title of only blanks/control chars → unverified", out(r) == "unverified")
 r = run([agent(ROOT, title="x" * 201)])
 check("absurdly long name → unverified", out(r) == "unverified")
+# The cap is a prompt-injection guard, not a formatting nicety: the value reaches the
+# caller prompt before any gate runs, so prose-length titles must not pass as an address.
+r = run([agent(ROOT, title="x" * 65)])
+check("title over the 64-char cap → unverified", out(r) == "unverified")
+r = run([agent(ROOT, title="x" * 64)])
+check("title at exactly 64 chars still passes", out(r) == "name=" + "x" * 64)
 
 # a live claude Manager is found in each of the four LIVE states
 for st in ("idle", "working", "blocked", "done"):
@@ -168,6 +176,12 @@ check("tools-absent still exits 0", r.returncode == 0)
 # --- workspace scoping ----------------------------------------------------- #
 r = run([agent(ROOT, ws="w9")])
 check("root agent in another workspace → none", out(r) == "none")
+# A row AT THE ROOT with no readable workspace_id must not be filtered away silently —
+# that would let the answer read `none` where the contract requires fail-closed.
+r = run([agent(ROOT, ws=None)])
+check("root agent with no workspace_id → unverified", out(r) == "unverified")
+r = run([agent(f"{WT}/alpha", title="alpha", ws=None)])
+check("non-root row with no workspace_id is irrelevant → none", out(r) == "none")
 r = run([agent(ROOT, ws="w9")], ws="")
 check("empty workspace searches all workspaces", out(r) == "name=Manager")
 r = run([agent(ROOT, ws="w9", title="other-ws"), agent(ROOT, title="mine")], ws=WS)
