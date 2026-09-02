@@ -108,11 +108,13 @@ check("glyph strip keeps inner spaces", out(r) == "name=My Repo Manager")
 r = run([agent(ROOT, title="/habemus-agentem")])
 check("punctuation-led name kept (no space → no strip)", out(r) == "name=/habemus-agentem")
 
-# fallbacks: unstripped title, then herdr's agent name
+# fallback: the unstripped title (herdr omits the stripped field on some rows)
 r = run([agent(ROOT, title=None, terminal_title="✳ From Title")])
 check("falls back to terminal_title", out(r) == "name=From Title")
+# herdr's agent `name` is a launch label, NOT the session address — it must never
+# be emitted as a candidate (a namesake in another repo would pass the caller uniqueness check).
 r = run([agent(ROOT, title=None, name="from-agent-name")])
-check("falls back to herdr agent name", out(r) == "name=from-agent-name")
+check("herdr agent name is NOT used as an address", out(r) == "unverified")
 
 # --- confident `none`: a populated, readable list with nobody at the root --- #
 r = run([agent(f"{WT}/alpha", title="alpha"), agent(f"{WT}/beta", title="beta")])
@@ -133,6 +135,8 @@ r = run([agent(ROOT, status="")])
 check("empty status at the root → unverified", out(r) == "unverified")
 r = run([agent(ROOT, title="", terminal_title="", name="")])
 check("no derivable name → unverified", out(r) == "unverified")
+r = run([agent(ROOT, title="   ", terminal_title="\u202e")])
+check("a title of only blanks/control chars → unverified", out(r) == "unverified")
 r = run([agent(ROOT, title="x" * 201)])
 check("absurdly long name → unverified", out(r) == "unverified")
 
