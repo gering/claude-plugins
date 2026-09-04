@@ -54,10 +54,14 @@ check("Kimi consensus family is Moonshot", family_map.get("kimi") == "moonshot")
 
 for backend in sorted(externals):
     check(f"skill builds {backend} from LIVE_JSON", f'`"{backend}"`' in SKILL)
-check("skill omits Kimi when jail is unavailable",
-      "include `\"kimi\"`" in SKILL and "`JAIL=jail=yes`" in SKILL)
-check("agent status applies Kimi jail gate",
-      "agents.sh\" jail" in AGENTS_SKILL and "plus `jail=yes` for Kimi" in AGENTS_SKILL)
+# The jail is part of Kimi's READINESS in the adapter (ready_check), not a rule
+# the skills re-derive in prose — a prose AND that a compaction can drop.
+check("skill does not gate Kimi on JAIL in prose",
+      "`available && ready` **and** `JAIL=jail=yes`" not in SKILL)
+check("adapter ready_check gates Kimi on the jail",
+      "&& _read_web_safe kimi" in ADAPTER)
+check("agent status does not re-derive a Kimi jail gate",
+      "plus `jail=yes` for Kimi" not in AGENTS_SKILL)
 
 kimi_backend = re.search(r"\{ backend: 'kimi', flags: ([^}]+)\}", WORKFLOW)
 check("workflow registers Kimi effort flags", bool(kimi_backend))

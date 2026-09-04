@@ -114,12 +114,18 @@ tool-less/no-web, codex web hard-off) rather than running read+web bare. A
 prompt egress guard forbids putting repo content into web queries (model-
 cooperation-dependent; the jail is the hard boundary). A secret scrub at the
 adapter boundary plus a final **output gate** re-scrub findings before they reach you.
-Kimi runs only when this OS jail is available, with an ephemeral HOME that
-holds only a private copy of its managed-provider credentials and a filtered
-projection of its config (provider/model catalogue and search services — never
-hooks or MCP). ACP permission
-rejection and mutating-tool detection are defense-in-depth, not the write
-boundary; arbitrary child-process execution remains a documented residual.
+Kimi is **ready only under this OS jail** (its `list --json` hint says so),
+and runs with an ephemeral HOME that holds only links to its managed-provider
+auth directories (a refresh must land on the host file — Moonshot rotates
+refresh tokens, and a refresh inside a private copy logged the operator out)
+and a filtered projection of its config
+(provider/model catalogue and search services — never hooks or MCP); the
+repository's own `.kimi-code/`, `.kimi/` and `.mcp.json` are denied to it as
+well. ACP permission rejection and the tool-kind allowlist (any tool outside
+read/search/fetch/think that runs kills the session on first sight) are
+defense-in-depth, not the write boundary. Documented residuals: the host HOME
+stays writable (codex/grok keep session state there) and the jail has no
+network rule; arbitrary child-process execution is not portably prevented.
 Findings are advisory by default; `--fix` / `--loop` act only on the ones you
 agreed with, and **only Claude** applies edits — external agents stay
 review-only. The full threat model lives in `docs/pipeline-blueprint.md` § Security.

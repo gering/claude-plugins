@@ -13,10 +13,10 @@ user_invocable: true
 
 ## Instructions
 
-1. Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json`
-2. Run from the current repository: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" jail`
-   and record whether it returned `jail=yes`.
-3. Render the JSON array as a table:
+1. Run from the current repository: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json`
+   (Kimi's `ready` already includes the OS jail; its `hint` names the jail when
+   that is what is missing.)
+2. Render the JSON array as a table:
 
    | Backend | Installed | Version | Ready | Notes |
    |---------|-----------|---------|-------|-------|
@@ -24,10 +24,8 @@ user_invocable: true
    - `available: false` → Installed ❌, Notes = "not installed"
    - `available: true, ready: false` → Ready ❌, Notes = the `hint` field (e.g. "run: codex login")
    - both true → ✅ ✅, Notes empty
-   - for `kimi`, when both are true but `jail=no`, keep its Ready value and set
-     Notes = "no working jail/repo root — unavailable for review"
-4. Close with one line stating which backends are live (`available && ready`,
-   plus `jail=yes` for Kimi), e.g.:
+3. Close with one line stating which backends are live (`available && ready`),
+   e.g.:
    `Live backends: claude + codex + grok + kimi — full ensemble.`
    If only claude is live, note that installing/authenticating the external
    CLIs (`codex`, `grok`, `kimi`) would widen the ensemble. Do not reference other

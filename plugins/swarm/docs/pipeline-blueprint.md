@@ -228,8 +228,9 @@ credential mid-review) converged on these non-negotiable mitigations:
    (`sandbox-exec`/`bwrap`) around every call, denying HOME secret stores
    **per-backend** (a backend keeps its own cred dir but not its siblings' —
    verified: codex can't read `~/.grok`; Kimi's ambient `~/.kimi-code` is
-   denied entry by entry — all but `bin/`, which holds the executable — because
-   credentials are copied into an ephemeral HOME)
+   denied entry by entry — all but `bin/`, which holds the executable, and
+   Kimi's own `credentials/`/`oauth/`, linked into its ephemeral HOME so a
+   rotated refresh token lands on the host file)
    **plus repo-root** `.env*` / `data/` /
    `*.pem` / SSH id keys (`id_rsa*`/`id_ed25519*`/…) / `*.key` / `.npmrc` /
    `.pypirc` / `credentials.json` (root-level only — nested secrets via

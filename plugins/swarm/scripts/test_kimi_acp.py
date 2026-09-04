@@ -37,6 +37,21 @@ def log(record):
         handle.write(json.dumps(record, separators=(",", ":")) + "\n")
 
 
+def tool_update(kind_of_update, tool_id, kind, status):
+    update = {"sessionUpdate": kind_of_update, "toolCallId": tool_id, "title": "T", "status": status}
+    if kind is not None:
+        update["kind"] = kind
+    return {"jsonrpc": "2.0", "method": "session/update",
+            "params": {"sessionId": "fake-session", "update": update}}
+
+
+def agent_text(text):
+    return {"jsonrpc": "2.0", "method": "session/update",
+            "params": {"sessionId": "fake-session",
+                       "update": {"sessionUpdate": "agent_message_chunk",
+                                  "content": {"type": "text", "text": text}}}}
+
+
 def config_options():
     models = [
         {"value": "kimi-code/other", "name": "Other"},
@@ -84,6 +99,7 @@ for raw in sys.stdin:
     elif method == "session/prompt":
         log({"prompt": params["prompt"], "state": state.copy()})
         if scenario == "permission":
+            emit(tool_update("tool_call", "tool-1", "execute", "pending"))
             emit({
                 "jsonrpc": "2.0",
                 "id": 700,
@@ -98,6 +114,23 @@ for raw in sys.stdin:
                 },
             })
             log({"permission_response": json.loads(sys.stdin.readline())})
+            emit(tool_update("tool_call_update", "tool-1", None, "failed"))
+        elif scenario == "unsafe-failed-unrejected":
+            # The command RAN and exited non-zero; nobody asked for approval.
+            emit(tool_update("tool_call", "tool-9", "execute", "pending"))
+            emit(tool_update("tool_call_update", "tool-9", None, "failed"))
+        elif scenario == "kind-rewrite":
+            # Announced as execute, "completed" as read: the unsafe kind sticks.
+            emit(tool_update("tool_call", "tool-8", "execute", "pending"))
+            emit(tool_update("tool_call_update", "tool-8", "read", "completed"))
+        elif scenario == "unsafe-in-progress":
+            emit(tool_update("tool_call", "tool-7", "execute", "in_progress"))
+            # Keep streaming: the client must NOT wait for end_turn.
+            for _ in range(50):
+                emit(agent_text("still running "))
+        elif scenario == "unknown-kind-pending":
+            # Announced with an unlisted kind and never resolved: unsettled.
+            emit(tool_update("tool_call", "tool-6", "teleport", "pending"))
         elif scenario == "unexpected-client-request":
             emit({
                 "jsonrpc": "2.0",
@@ -206,7 +239,6 @@ class KimiAcpTests(unittest.TestCase):
         log = root / "fake.log"
         env = os.environ.copy()
         env.update({
-            "SWARM_KIMI_BIN": str(fake),
             "FAKE_SCENARIO": scenario,
             "FAKE_LOG": str(log),
         })
@@ -221,6 +253,7 @@ class KimiAcpTests(unittest.TestCase):
                 "--cwd", str(root),
                 "--model", MODEL,
                 "--effort", "max",
+                "--kimi-bin", str(fake),
             ],
             capture_output=True,
             text=True,
@@ -288,13 +321,46 @@ class KimiAcpTests(unittest.TestCase):
     def test_completed_unsafe_tool_fails_review(self):
         result, _ = self.run_helper("unsafe-completed")
         self.assertEqual(result.returncode, 13)
-        self.assertIn("unsafe tool completed", result.stderr)
+        self.assertIn("unsafe tool ran", result.stderr)
 
     def test_auto_approved_write_fails_review(self):
         result, _ = self.run_helper("auto-approved-write")
         self.assertEqual(result.returncode, 13)
-        self.assertIn("unsafe tool completed", result.stderr)
+        self.assertIn("unsafe tool ran", result.stderr)
         self.assertIn("edit", result.stderr)
+
+    def test_rejected_tool_that_then_fails_is_fine(self):
+        # tool_call pending → request_permission (rejected) → failed: the
+        # legitimate reject flow must not be mistaken for a run.
+        result, records = self.run_helper("permission")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_failed_unsafe_tool_without_rejection_fails_review(self):
+        # Denylist-era gate only fired on status == completed: a shell whose
+        # command exited non-zero had run and slipped through.
+        result, _ = self.run_helper("unsafe-failed-unrejected")
+        self.assertEqual(result.returncode, 13)
+        self.assertIn("unsafe tool ran", result.stderr)
+        self.assertIn("status=failed", result.stderr)
+
+    def test_kind_rewrite_cannot_launder_an_unsafe_tool(self):
+        result, _ = self.run_helper("kind-rewrite")
+        self.assertEqual(result.returncode, 13)
+        self.assertIn("kind=execute", result.stderr)
+
+    def test_in_progress_unsafe_tool_aborts_immediately(self):
+        # The fake keeps streaming after the tool_call; the client must kill the
+        # session on first sight rather than wait for end_turn.
+        result, records = self.run_helper("unsafe-in-progress")
+        self.assertEqual(result.returncode, 13)
+        self.assertIn("status=in_progress", result.stderr)
+        self.assertFalse(any("prompt_result_consumed" in r for r in records))
+
+    def test_unknown_kind_left_pending_is_unsettled(self):
+        result, _ = self.run_helper("unknown-kind-pending")
+        self.assertEqual(result.returncode, 13)
+        self.assertIn("never rejected", result.stderr)
+        self.assertIn("teleport", result.stderr)
 
     def test_unicode_round_trips_under_ascii_locale(self):
         ascii_env = {

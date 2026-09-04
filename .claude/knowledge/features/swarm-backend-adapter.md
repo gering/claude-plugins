@@ -33,7 +33,7 @@ inlined diff (callers, config, types, library/CVE knowledge).
 |-------|-----------|-----|-------------|-------|
 | **codex** | yes (`-s read-only` already permits FS reads) | yes (`-c tools.web_search=true`; works under read-only, no sandbox loosen) | no (`-s read-only` only — never `workspace-write` / `danger-full-access`) | `-C <repo-root>` (working root; do **not** use `--add-dir`, which grants writable dirs) |
 | **grok** | yes (`read_file,list_dir,grep` in `--tools` allowlist) | yes (`web_search,web_fetch` in the same allowlist; drop `--disable-web-search`) | no (strict allowlist — never admit `write` / `search_replace` / `run_terminal_command` / …) | `--cwd <repo-root>` |
-| **kimi** | yes (approval-free ACP read/search tools) | yes (`WebSearch`/`FetchURL`, when the managed provider exposes them) | OS-immutable repo/Git; ACP rejection is defense-in-depth (Kimi 0.32 can auto-approve some in-repo writes) | ACP `session/new.cwd=<repo-root>`; isolated HOME; requires the OS jail |
+| **kimi** | yes (approval-free ACP read/search tools) | yes (`WebSearch`/`FetchURL`, when the managed provider exposes them) | OS-immutable repo/Git (every worktree); ACP tool-kind allowlist aborts on first unsafe run (Kimi 0.32 can auto-approve some in-repo writes) | ACP `session/new.cwd=<repo-root>`; isolated HOME; repo-local `.kimi-code`/`.kimi`/`.mcp.json` denied; `ready` includes the OS jail |
 
 **Security layers (do not soften or over-claim):**
 
@@ -118,12 +118,19 @@ inlined diff (callers, config, types, library/CVE knowledge).
    operator's own tree — the egress guard is doing more load-bearing work there.
    These are the accepted cost of the user's "web always on, jail-not-allowlist,
    minimal" decision — documented so nobody quietly assumes a hard boundary.
-4. **Repository/Git immutability (hard write boundary, 0.11.0).** The same
-   protected-root helper used for secret discovery (`_repo_protected_roots`)
-   feeds an OS write policy for every external: macOS `sandbox-exec` adds
-   `(deny file-write*)` literal/subpath rules; Linux `bwrap` binds those roots
-   then remounts them read-only *after* secret masks so a child tmpfs is not
-   undone. `GIT_OPTIONAL_LOCKS=0` stops git from trying to refresh the index.
+4. **Repository/Git immutability (hard REPOSITORY-write boundary, 0.11.0).** The
+   same protected-root helper used for secret discovery (`_repo_protected_roots`
+   — memoized, bash-only realpath, **sorted ancestors-first**, and covering
+   every linked worktree via `git worktree list --porcelain`, not only the
+   reviewed one) feeds an OS write policy for every external: macOS
+   `sandbox-exec` adds `(deny file-write*)` literal/subpath rules; Linux `bwrap`
+   binds those roots ancestors-first (a descendant bound first is shadowed by
+   the ancestor's recursive bind and its `--remount-ro` then aborts bwrap —
+   which the smoke probe would report as "jail-less") then remounts them
+   read-only *after* secret masks so a child tmpfs is not undone. It is a
+   repository-write boundary, not a host-write one: the host HOME stays
+   writable (codex/grok keep session state there; a HOME-wide deny breaks
+   them) and the jail has no network rule — both documented residuals. `GIT_OPTIONAL_LOCKS=0` stops git from trying to refresh the index.
    Private runtime/temp writes stay allowed. CLI-level no-write/no-shell flags
    (grok `--tools` allowlist, codex `-s read-only`) and ACP rejection remain
    defense-in-depth. **Accepted residual:** arbitrary child-process execution
@@ -155,14 +162,36 @@ violation exits non-zero and becomes a visible `backendError`, never
 `{"findings":[]}`.
 
 Security is layered. The hard boundaries are the OS secret-read jail, repository
-immutability, and an ephemeral `HOME`/`KIMI_CODE_HOME` that contains only a
-private copy of `credentials/kimi-code.json` plus a **filtered projection** of
+immutability, and an ephemeral `HOME`/`KIMI_CODE_HOME` that contains only
+**symlinks** to the host's `credentials/` and `oauth/` directories plus a
+**filtered projection** of
 `config.toml` — `default_model`, `[providers]`, `[models]`, `[services]`,
 `[thinking]`; never `[[hooks]]`, `[mcp]`, permission mode — because kimi-code
 0.32 offers a `kimi-code/*` model over ACP only when it is declared under
 `[models]` (an empty HOME fails `session/new` model selection). Telemetry,
 auto-update, cron, and background keep-alive are switched off. Ambient hooks,
-MCP, plugins, trust records, sessions, and history are not mounted. ACP is defense-in-depth:
+MCP, plugins, trust records, sessions, and history are not mounted; the
+repository's own `.kimi-code/`, `.kimi/` and `.mcp.json` (kimi-code reads
+`<cwd>/.kimi-code/` and `mcpServers: []` does not disable file-declared
+servers) are denied to the ACP session. The ephemeral HOME and the assembled
+prompt are created **next to the caller's prompt file** — inside the skill's
+scratch dir, which its `rm -rf "$TMPD"` reaches even after a SIGKILL that
+skipped the adapter's EXIT trap. **Why links, not a copy (2026-09-04):**
+Moonshot rotates refresh tokens. The first live run after isolation refreshed
+inside its private copy; the host kept the old refresh token, every later run
+failed `session/prompt` with `-32000 Authentication required`, and the host
+CLI then reported `auth.login_required` and blanked its credential file — the
+operator had to `kimi login` again. The DIRECTORY is linked (kimi refreshes by
+atomic rename inside it; a linked file would be replaced and strand the new
+token). Kimi's own auth dirs are therefore exempt from the kimi deny list —
+the same "own cred dir readable" posture codex/grok have.
+The ACP tool gate is an **allowlist** (read/search/fetch/think): an unsafe
+kind is sticky per tool id, a tool that is in progress, completed, or failed
+without this client having rejected its approval request kills the session
+on first sight (rc 13), and an unsafe tool left pending at end of turn is
+"unsettled" and fails too. The jail (`_read_web_safe`) is part of Kimi's
+`ready_check`, so `list --json` never advertises a Kimi the clusters would
+refuse. ACP is defense-in-depth:
 the client advertises neither filesystem-write nor terminal capability, rejects
 every `session/request_permission`, and fails if ACP reports a successful
 mutating tool kind (`edit`, `delete`, `move`, `execute`, `switch_mode`,
@@ -173,8 +202,8 @@ the host provider exposes them; the managed Kimi provider does. The shared
 external prompt's egress guard still applies. The ambient `~/.kimi-code` store
 is denied even to Kimi — entry by entry, sparing only `bin/` (and the resolved
 `$KIMI_BIN` directory), because the stock installer keeps the executable there
-and a whole-directory deny blocks the exec of every jailed run; codex/grok
-cannot read the rest either.
+and a whole-directory deny blocks the exec of every jailed run, plus Kimi's own
+`credentials/` and `oauth/`; codex/grok cannot read any of it.
 
 
 Readiness requires all of: binary, credentials at

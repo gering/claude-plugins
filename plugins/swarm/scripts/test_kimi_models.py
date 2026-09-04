@@ -42,7 +42,7 @@ def run_ready(*, help_text: str, models: str, help_rc: int = 0,
     with tempfile.TemporaryDirectory() as td:
         cred = Path(td) / "credentials.json"
         if credentials:
-            cred.write_text("{}\n", encoding="utf-8")
+            cred.write_text('{"access_token":"tok","refresh_token":"ref"}\n', encoding="utf-8")
         env = os.environ.copy()
         env.update({
             "KIMI_CREDENTIALS_FILE": str(cred),
@@ -55,6 +55,7 @@ def run_ready(*, help_text: str, models: str, help_rc: int = 0,
         script = f'''set -euo pipefail
 source {str(AGENTS)!r}
 {_PROBE_STUB}
+_read_web_safe() {{ return 0; }}
 if ready_check kimi "$FAKE_REQUESTED_MODEL"; then printf 'ready\\n'; else printf 'not-ready\\n'; fi
 '''
         return subprocess.run(

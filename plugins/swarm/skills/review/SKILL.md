@@ -435,13 +435,13 @@ echo "LIVE_JSON=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json | t
   the second-order fence can't be provisioned on this host and stop.
 - `SWARM_WARN=…` → surface that line: the scope narrowed to uncommitted changes
   because no default-branch ancestor was found. Then continue.
-- From `LIVE_JSON` build `externalVoices`: include `"codex"` iff codex is
-  `available && ready`; include `"grok"` iff grok is `available && ready`;
-  include `"kimi"` iff kimi is `available && ready` **and** `JAIL=jail=yes`.
-  Kimi's ACP transport keeps read/web enabled and rejects approval-gated tools,
-  but has no safe jail-less prompt fallback, so omit it once here rather than
-  spawning one identical fail-closed error per cluster. If none are live, the
-  review runs with the Claude lenses alone — say so.
+- From `LIVE_JSON` build `externalVoices`: include each of `"codex"`, `"grok"`,
+  `"kimi"` iff that backend is `available && ready` — the same rule for all
+  three. Kimi's readiness already includes the OS jail (its ACP transport keeps
+  read/web enabled and has no safe jail-less fallback, so the adapter reports
+  it not-ready with a jail hint instead of failing once per cluster); do not
+  re-derive that from `JAIL` here. If none are live, the review runs with the
+  Claude lenses alone — say so.
 - **Oversize** — `EXTERNALS_OVERSIZE=1` means the diff cannot clear the adapter's
   per-call cap: set `externalVoices` to `[]` (Claude-lens-only review), tell the
   user the external backends were skipped as *prompt too large*, and suggest

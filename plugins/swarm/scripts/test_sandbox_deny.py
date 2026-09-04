@@ -135,12 +135,20 @@ class TestSandboxDenyPaths(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             store = self._fake_kimi_store(Path(td))
             env = {"HOME": td, "SWARM_KIMI_BIN": str(store / "bin" / "kimi")}
+            (store / "oauth").mkdir()
             for backend in ("codex", "grok", "kimi"):
                 paths = _bash_deny_paths(backend, env_extra=env)
                 self.assertNotIn(str(store), paths, backend)
                 self.assertNotIn(str(store / "bin"), paths, backend)
-                for name in ("credentials", "hooks", "sessions", "config.toml", ".hidden-state"):
+                for name in ("hooks", "sessions", "config.toml", ".hidden-state"):
                     self.assertIn(str(store / name), paths, f"{backend}: {name}")
+                # Own auth state: readable to kimi (refresh must land on the
+                # host file), denied to the siblings.
+                for name in ("credentials", "oauth"):
+                    if backend == "kimi":
+                        self.assertNotIn(str(store / name), paths, f"{backend}: {name}")
+                    else:
+                        self.assertIn(str(store / name), paths, f"{backend}: {name}")
                 # No deny path may cover the resolved executable.
                 kimi = str(store / "bin" / "kimi")
                 covering = [p for p in paths if kimi == p or kimi.startswith(p.rstrip("/") + "/")]
@@ -159,7 +167,7 @@ class TestSandboxDenyPaths(unittest.TestCase):
             paths = _bash_deny_paths("kimi", env_extra=env)
             self.assertNotIn(str(store / "tools"), paths)
             self.assertNotIn(str(store / "bin"), paths)
-            self.assertIn(str(store / "credentials"), paths)
+            self.assertIn(str(store / "hooks"), paths)
 
     def test_kimi_store_absent_emits_nothing(self):
         with tempfile.TemporaryDirectory() as td:
@@ -624,6 +632,115 @@ class TestProtectedRootsAndIsolation(unittest.TestCase):
                 gitdir = str(wt / gitdir)
             self.assertIn(os.path.realpath(gitdir), roots)
 
+    def test_protected_roots_are_sorted_ancestors_first_and_cover_siblings(self):
+        # bwrap binds roots in output order; a descendant bound BEFORE its
+        # ancestor is shadowed by the ancestor's recursive bind and its later
+        # --remount-ro aborts bwrap. Sibling worktrees are the same repository.
+        env = {**os.environ,
+               "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        with tempfile.TemporaryDirectory() as td:
+            main = Path(td) / "main"
+            main.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=main, check=True)
+            subprocess.run(
+                ["git", "-C", str(main), "commit", "--allow-empty", "-m", "x", "-q"],
+                check=True, env=env)
+            nested = main / ".claude" / "worktrees" / "wt"      # the /kickoff layout
+            sibling = Path(td) / "sibling-wt"
+            for wt in (nested, sibling):
+                subprocess.run(
+                    ["git", "-C", str(main), "worktree", "add", "-q", str(wt)],
+                    check=True, env=env)
+            r = _source("_repo_protected_roots", cwd=nested)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            roots = [p for p in r.stdout.splitlines() if p.strip()]
+            self.assertEqual(roots, sorted(roots), roots)
+            real = [os.path.realpath(p) for p in roots]
+            self.assertIn(os.path.realpath(main), real)
+            self.assertIn(os.path.realpath(nested), real)
+            self.assertIn(os.path.realpath(sibling), real)
+            self.assertLess(real.index(os.path.realpath(main)), real.index(os.path.realpath(nested)))
+            self.assertEqual(len(real), len(set(real)), "duplicates")
+            # Memoized: a second call in the same shell forks nothing and agrees.
+            r2 = _source("_repo_protected_roots >/dev/null; git() { echo FORKED >&2; return 1; }; _repo_protected_roots", cwd=nested)
+            self.assertEqual(r2.returncode, 0, r2.stderr)
+            self.assertNotIn("FORKED", r2.stderr)
+            self.assertEqual(r2.stdout, r.stdout)
+
+    def test_kimi_denies_project_local_kimi_config(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            (repo / ".kimi-code").mkdir()
+            (repo / ".kimi-code" / "mcp.json").write_text("{}")
+            (repo / ".mcp.json").write_text("{}")
+            kimi_paths = _bash_deny_paths("kimi", cwd=repo)
+            self.assertIn(str(repo.resolve() / ".kimi-code"), [os.path.realpath(p) for p in kimi_paths])
+            self.assertIn(str(repo.resolve() / ".mcp.json"), [os.path.realpath(p) for p in kimi_paths])
+            codex_paths = [os.path.realpath(p) for p in _bash_deny_paths("codex", cwd=repo)]
+            self.assertNotIn(str(repo.resolve() / ".mcp.json"), codex_paths)
+
+    def test_kimi_ready_requires_the_jail(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".cred") as cred:
+            cred.write('{"access_token":"tok","refresh_token":"ref"}\n'); cred.flush()
+            stubs = ("_kimi_has_acp() { return 0; }",
+                     "kimi_model_offered() { return 0; }")
+            r = _source(*stubs, "_read_web_safe() { return 1; }",
+                        'ready_check kimi && echo READY || echo NOT-READY; ready_hint kimi',
+                        env_extra={"KIMI_CREDENTIALS_FILE": cred.name})
+            self.assertIn("NOT-READY", r.stdout, r.stderr)
+            self.assertIn("jail", r.stdout)
+            r = _source(*stubs, "_read_web_safe() { return 0; }",
+                        'ready_check kimi && echo READY || echo NOT-READY',
+                        env_extra={"KIMI_CREDENTIALS_FILE": cred.name})
+            self.assertIn("READY", r.stdout, r.stderr)
+
+    def test_kimi_blanked_credentials_are_not_ready(self):
+        # kimi-code blanks the tokens in place after a failed refresh; the
+        # file still exists, so `-s` alone advertised a dead Kimi.
+        stubs = ("_kimi_has_acp() { return 0; }", "kimi_model_offered() { return 0; }",
+                 "_read_web_safe() { return 0; }")
+        for body, expect in (('{"access_token":"","refresh_token":"","expires_at":0}', "NOT-READY"),
+                             ('{}', "NOT-READY"), ('not json', "NOT-READY"),
+                             ('{"access_token":"tok","refresh_token":"ref"}', "READY")):
+            with tempfile.NamedTemporaryFile("w", suffix=".cred") as cred:
+                cred.write(body + "\n"); cred.flush()
+                r = _source(*stubs, 'ready_check kimi && echo READY || echo NOT-READY; ready_hint kimi',
+                            env_extra={"KIMI_CREDENTIALS_FILE": cred.name})
+                self.assertIn(expect, r.stdout, (body, r.stderr))
+                if expect == "NOT-READY":
+                    self.assertIn("kimi login", r.stdout)
+
+    def test_kimi_scratch_lands_next_to_the_prompt_file(self):
+        # SIGKILL-orphaned scratch (a credential copy, the assembled diff) must
+        # sit inside the caller's scratch dir, which the skill's rm -rf reaches.
+        with tempfile.TemporaryDirectory() as td, \
+                tempfile.NamedTemporaryFile("w", suffix=".cred") as cred, \
+                tempfile.NamedTemporaryFile("r", suffix=".iso") as iso:
+            cred.write("{}\n"); cred.flush()
+            pf = Path(td) / "prompt.txt"; pf.write_text("prompt text\n")
+            # run_kimi sends the client's stderr to /dev/null — record via a file.
+            r = _source(
+                "_read_web_safe() { return 0; }",
+                "_assert_prompt_readable_in_jail() { return 0; }",
+                "sandboxed() { printf '%s\\n' \"$HOME\" \"$TMP_PROMPT\" >\"$ISO\"; printf '{\"findings\":[]}'; }",
+                f'( trap cleanup EXIT; run_kimi "{pf}" high "" "{SCHEMA}" ) >/dev/null',
+                env_extra={"KIMI_CREDENTIALS_FILE": cred.name, "ISO": iso.name},
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            home, scratch = Path(iso.name).read_text().splitlines()[:2]
+            self.assertTrue(home.startswith(td + "/swarm-kimi."), home)
+            self.assertTrue(scratch.startswith(td + "/swarm-assembled."), scratch)
+            self.assertEqual(sorted(os.listdir(td)), ["prompt.txt"], "trap must remove both")
+
+    def test_kimi_passes_resolved_binary_to_acp_client(self):
+        argv = self._argv_for("kimi")
+        self.assertIn("--kimi-bin", argv)
+
+    def _argv_for(self, backend: str) -> str:
+        return TestFailClosedDegrade._argv(self, backend, jail=True)
+
     def test_bwrap_applies_secret_masks_before_remount_ro(self):
         src = AGENTS.read_text(encoding="utf-8")
         bind = src.find('args+=(--bind "$p" "$p")')
@@ -728,7 +845,9 @@ import os, pathlib
 home = os.environ['HOME']
 khome = os.environ['KIMI_CODE_HOME']
 root = pathlib.Path(khome)
-files = sorted(str(p.relative_to(root)) for p in root.rglob('*') if p.is_file())
+files = sorted(str(p.relative_to(root)) for p in root.rglob('*') if p.is_file() and not p.is_symlink())
+links = sorted('%s->%s' % (p.name, os.path.realpath(p)) for p in root.iterdir() if p.is_symlink())
+print('links=' + ','.join(links))
 print('HOME=' + home)
 print('KIMI_CODE_HOME=' + khome)
 print('TEL=' + os.environ.get('KIMI_DISABLE_TELEMETRY', ''))
@@ -758,8 +877,10 @@ print('cfg=' + cfg.read_text().replace(chr(10), ' | '))
             self.assertIn("NOUPD=1", info)
             self.assertIn("KEEP=0", info)
             self.assertIn("CRON=1", info)
-            # Exactly two files: the credential copy and the PROJECTED config.
-            self.assertIn("files=config.toml,credentials/kimi-code.json", info)
+            # Exactly one file (the PROJECTED config); the credential dir is a
+            # LINK to the host's so a rotated refresh token lands on the host.
+            self.assertIn("files=config.toml", info)
+            self.assertIn("links=credentials->" + os.path.realpath(os.path.dirname(cred.name)), info)
             self.assertIn("mode=0o700", info)
             self.assertIn("cfgmode=0o600", info)
             self.assertIn("under_host=False", info)

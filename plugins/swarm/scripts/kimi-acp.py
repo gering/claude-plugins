@@ -7,9 +7,13 @@ review prompts exceed it. ACP v1 carries the complete prompt as NDJSON over
 stdio instead, preserving the adapter's out-of-band transport.
 
 The ACP session stays in manual-approval mode and this client rejects every
-approval request. Read/search/fetch tools remain available; a completed
-mutating tool fails the review. That is defense-in-depth only: the outer
-agents.sh jail is the hard secret-read and repository-write boundary.
+approval request. Read/search/fetch/think tools remain available; any OTHER
+tool kind (an allowlist, not a denylist) that the agent runs — in progress,
+completed, or failed without having been rejected here — kills the session on
+first sight and fails the review. That is defense-in-depth only: the outer
+agents.sh jail is the hard secret-read and REPOSITORY-write boundary (the host
+HOME stays writable and the network open — documented residuals, not
+boundaries).
 """
 from __future__ import annotations
 
@@ -27,6 +31,16 @@ EXIT_RESPONSE = 11
 EXIT_PROTOCOL = 12
 EXIT_POLICY_RESPONSE = 13
 ACP_VERSION = 1
+# ALLOWLIST of tool kinds a review may run. Everything else — edit, delete,
+# move, execute, switch_mode, other, an unknown or missing kind — is unsafe.
+# An allowlist because the denylist version was fail-open: a kind this file
+# had never heard of (or a kind rewritten to "read" on a later update) walked
+# straight through.
+SAFE_TOOL_KINDS = frozenset({"read", "search", "fetch", "think"})
+# Statuses under which an unsafe-kind tool has NOT run: still awaiting the
+# approval this client will reject, or rejected. Anything else means it ran.
+UNSTARTED_STATUSES = frozenset({"pending", None})
+REJECTED_STATUSES = frozenset({"failed", "cancelled", "pending", None})
 
 
 class BackendError(RuntimeError):
@@ -192,8 +206,12 @@ class AcpClient:
         self.output_chunks: list[str] = []
         self.unexpected_client_methods: list[str] = []
         self.protocol_violations: list[str] = []
-        self.unsafe_completed_tools: list[str] = []
-        self.tool_kinds: dict[str, str] = {}
+        # kind per tool id; an unsafe kind is STICKY (a later update cannot
+        # downgrade it to a safe one), a missing kind stays missing (= unsafe).
+        self.tool_kinds: dict[str, str | None] = {}
+        # tool ids whose approval request this client rejected: their failed /
+        # cancelled updates are the expected outcome, not evidence of a run.
+        self.rejected_tool_ids: set[str] = set()
 
     def start(self) -> None:
         try:
@@ -211,7 +229,14 @@ class AcpClient:
         except OSError as exc:
             raise BackendError(f"could not start Kimi: {exc}") from exc
 
-    def close(self) -> None:
+    def close(self, force: bool = False) -> None:
+        # force=True: SIGKILL the whole kimi process group at once. The adapter's
+        # timeout wrapper SIGTERMs this helper and SIGKILLs it TIMEOUT_KILL_GRACE
+        # (3 s) later — the same 3 s a graceful TERM→wait→KILL here would spend,
+        # so a kimi that sits on SIGTERM left the helper dead and the session
+        # alive (kimi runs in its own session precisely so killpg can reach it
+        # without hitting this helper). The signal handler and the unsafe-tool
+        # abort take this path; a normal end of turn keeps the graceful one.
         process = self.process
         if process is None:
             return
@@ -222,6 +247,8 @@ class AcpClient:
             pass
         if process.poll() is None:
             try:
+                if force:
+                    raise subprocess.TimeoutExpired(self.executable, 0)
                 os.killpg(process.pid, signal.SIGTERM)
                 process.wait(timeout=3)
             except (ProcessLookupError, subprocess.TimeoutExpired):
@@ -290,6 +317,10 @@ class AcpClient:
         if method == "session/request_permission":
             params = message.get("params")
             options = params.get("options", []) if isinstance(params, dict) else []
+            tool_call = params.get("toolCall") if isinstance(params, dict) else None
+            tool_id = tool_call.get("toolCallId") if isinstance(tool_call, dict) else None
+            if isinstance(tool_id, str) and tool_id:
+                self.rejected_tool_ids.add(tool_id)
             reject = next(
                 (
                     option
@@ -342,26 +373,51 @@ class AcpClient:
         if update_type in {"tool_call", "tool_call_update"}:
             tool_id = update.get("toolCallId")
             kind = update.get("kind")
+            status = update.get("status")
             if not isinstance(tool_id, str) or not tool_id:
                 self.protocol_violations.append("tool update has no string toolCallId")
                 return
-            if isinstance(kind, str):
-                self.tool_kinds[tool_id] = kind
-            effective_kind = self.tool_kinds.get(tool_id)
-            if update.get("status") == "completed" and effective_kind is None:
+            known = self.tool_kinds.get(tool_id)
+            if isinstance(kind, str) and (known is None or known in SAFE_TOOL_KINDS):
+                self.tool_kinds[tool_id] = kind      # first kind wins; unsafe is sticky
+            elif tool_id not in self.tool_kinds:
+                self.tool_kinds[tool_id] = None      # seen, kind unknown (= unsafe)
+            effective_kind = self.tool_kinds[tool_id]
+            if effective_kind is None and status not in UNSTARTED_STATUSES:
+                # Keep the orphan wording: an update for a tool this client never
+                # saw announced is malformed ACP, not merely an unsafe kind.
                 self.protocol_violations.append(
-                    f"completed tool update {tool_id!r} has no known kind"
+                    f"{status} tool update {tool_id!r} has no known kind"
                 )
                 return
-            if update.get("status") == "completed" and effective_kind in {
-                "edit",
-                "delete",
-                "move",
-                "execute",
-                "switch_mode",
-                "other",
-            }:
-                self.unsafe_completed_tools.append(effective_kind)
+            if effective_kind in SAFE_TOOL_KINDS or effective_kind is None:
+                return
+            # Unsafe kind. The ONLY acceptable histories: still pending (the
+            # approval request has not arrived yet — this client will reject
+            # it), or rejected by this client and then failed/cancelled. An
+            # in-progress / completed status, or a terminal status without a
+            # rejection on record, means the agent RAN it (an auto-approved
+            # in-repo write, a shell whose command exited non-zero). Abort NOW —
+            # kill the session rather than let it keep running while the model
+            # finishes composing a clean-looking answer.
+            if status in UNSTARTED_STATUSES:
+                return
+            if tool_id in self.rejected_tool_ids and status in REJECTED_STATUSES:
+                return
+            self.close(force=True)
+            raise ProtocolError(
+                f"unsafe tool ran despite approval guard: kind={effective_kind} status={status}"
+            )  # "ran", not "completed": a failed shell command ran too
+
+    def unsettled_unsafe_tools(self) -> list[str]:
+        # End-of-turn sweep: an unsafe-kind tool that was announced but never
+        # reached a status this client can vouch for (no rejection on record).
+        return sorted(
+            f"{kind or 'unknown'}:{tool_id}"
+            for tool_id, kind in self.tool_kinds.items()
+            if (kind is None or kind not in SAFE_TOOL_KINDS)
+            and tool_id not in self.rejected_tool_ids
+        )
 
 
 def _select_option(config_options: Any, config_id: str) -> dict[str, Any]:
@@ -429,7 +485,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--cwd", required=True, type=Path)
     parser.add_argument("--model", required=True)
     parser.add_argument("--effort", required=True, choices=("low", "high", "max"))
+    # The adapter resolves the executable ONCE ($KIMI_BIN, probed for readiness)
+    # and hands it over explicitly — no second env lookup with its own default
+    # here, so `ready` and `run` can never start two different binaries.
+    parser.add_argument("--kimi-bin", required=True)
     args = parser.parse_args(argv)
+    if not args.kimi_bin.strip():
+        parser.error("--kimi-bin cannot be empty")
     if not args.prompt_file.is_file():
         parser.error(f"prompt file not found: {args.prompt_file}")
     if not args.schema.is_file():
@@ -451,13 +513,14 @@ def main(argv: list[str]) -> int:
         _safe_error(str(exc))
         return 2
 
-    executable = os.environ.get("SWARM_KIMI_BIN", "kimi")
-    client = AcpClient(executable)
+    client = AcpClient(args.kimi_bin)
     prompt_started = False
     previous_handlers: dict[int, Any] = {}
 
     def stop_child(signum: int, _frame: Any) -> None:
-        client.close()
+        # The wrapper's SIGKILL follows in 3 s; a graceful close would lose
+        # that race and orphan the kimi session — kill the group outright.
+        client.close(force=True)
         raise SystemExit(128 + signum)
 
     for signum in (signal.SIGTERM, signal.SIGINT):
@@ -511,9 +574,11 @@ def main(argv: list[str]) -> int:
         if client.protocol_violations:
             violations = "; ".join(sorted(set(client.protocol_violations)))
             raise ProtocolError(f"malformed ACP tool update(s): {violations}")
-        if client.unsafe_completed_tools:
-            kinds = ", ".join(sorted(set(client.unsafe_completed_tools)))
-            raise ProtocolError(f"unsafe tool completed despite approval guard: {kinds}")
+        unsettled = client.unsettled_unsafe_tools()
+        if unsettled:
+            raise ProtocolError(
+                "unsafe tool(s) announced and never rejected: " + ", ".join(unsettled)
+            )
 
         response_text = "".join(client.output_chunks)
         if not response_text.strip():
