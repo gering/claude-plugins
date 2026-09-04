@@ -320,15 +320,28 @@ keeps the original branch name rather than renaming it to `task/<name>`:
 Once a task is merged, `/close` runs its usual cleanup (worktree, branch, task
 file) and then closes that task's herdr **tab** too. It identifies the tab by
 matching the pane's cwd (no persisted layout file) *before* removing the worktree,
-and decides self-close vs. a different-tab close by pane id. Two entry points:
+and decides self-close vs. a different-tab close by pane id. Three entry points:
 
 - **From the main session** (the usual case): `/close <task>` closes the
   worktree's tab directly — a different tab, so nothing self-terminates. It then
   **verifies** the tab is gone; if the close didn't take — or herdr couldn't be
   re-queried to confirm it — it names the tab so you can close it by hand rather
   than leaving a silent orphan.
-- **From inside the worktree tab**: Claude cannot close its own tab, only exit
-  cleanly. So `/close` focuses the main tab and arms a **detached `/exit`** that
+- **From inside the worktree tab, with a Manager session running**: `/close`
+  first offers to **delegate the whole close to the Manager** (the session at the
+  main-repo root). Delegating sends it one `work-system close-request` message and
+  stops — the Manager verifies the merge itself and closes this tab as a *different*
+  tab, i.e. via the robust path above. Preferred whenever offered. The offer appears
+  only when the Manager is verifiably there and the close is one it can actually
+  serve: the merge is confirmed, the branch is a name-resolvable `task/<name>`,
+  exactly one live Claude agent sits at the repo root inside herdr, and its name
+  resolves to exactly one live session. The confirmation names that recipient — a
+  pane title is settable by any process in the pane, so a person seeing the name is
+  the real check. Any doubt (no Manager, an ambiguous name, herdr unreachable)
+  silently falls through to the self-close below. On the receiving side the Manager
+  asks once before tearing anything down: an inbound message is not authorization.
+- **From inside the worktree tab, otherwise**: Claude cannot close its own tab, only
+  exit cleanly. So `/close` focuses the main tab and arms a **detached `/exit`** that
   fires once the turn ends — Claude exits cleanly, the armed marker + `SessionEnd`
   hook close its tab, and you land back in the main session, hands-free. (The injector polls until the
   prompt is idle before delivering the exit; injecting into a busy TUI is

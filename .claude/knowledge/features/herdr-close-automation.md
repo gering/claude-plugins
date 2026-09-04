@@ -1,10 +1,10 @@
 ---
 title: "herdr /close Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-08-11
+updatedAt: 2026-09-02
 createdFrom: "PR #18"
-updatedFrom: "session: 2026-08-11 (herdr 0.7.5+ shell-pane lifecycle)"
-pluginVersion: 1.11.1
+updatedFrom: "session: 2026-09-02 (task/delegate-worktree-close-to-manager)"
+pluginVersion: 1.13.0
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -19,6 +19,69 @@ lives in one tested helper — `plugins/work-system/scripts/herdr-teardown.sh`
 durable design and the hard-won TUI-exit gotchas; the scripts are the source of
 truth. Companion to [herdr-kickoff-automation](herdr-kickoff-automation.md) (kickoff creates the tab this
 tears down).
+
+## Delegating a worker close to the Manager (1.13.0) — the preferred path
+
+Scenario B is the fragile half of this feature: a worker closing *itself* needs the
+armed marker + the `SessionEnd` hook + a detached `/exit` injector that polls for idle,
+and it still **cannot confirm its own teardown in-turn** (hence the always-printed
+"close it by hand" fallback). The Manager, by contrast, survives the close and sees the
+worker tab as just another tab — i.e. Scenario A, which closes once and *verifies*.
+
+So a `/close` invoked inside a worktree now offers to hand the whole close to the
+Manager (one `SendMessage` carrying a `work-system close-request` block, then stop).
+**Every delegated close removes one use of Scenario B** — the point is not convenience,
+it is deleting a use of the path that cannot self-verify.
+
+Detection lives in `herdr-teardown.sh manager-session` (tri-state
+`name=<session>|none|unverified`, always exit 0, like `worktree-tab-state`). Design
+points worth keeping:
+
+- **`herdr agent list`, not `pane list`.** Only the agent list distinguishes a live
+  claude session from a bare shell that survived an earlier `/exit` — and a shell at
+  the repo root must never be offered as a delegation target. It also carries the
+  terminal title the address is derived from. Reuses the shared realpath cwd match
+  (`$HERDR_MATCH_PRELUDE`) and the bounded, JSON-validating `ha_list`.
+- **The address is the terminal title, not herdr's `name`.** Verified live: a herdr
+  agent named `gcp-auth-159` hosts the session `answer-gcp-auth-questions-buchhalter-159`
+  (the name `ListAgents` shows). herdr strips only its own `✳` status glyph, so one
+  leading symbol+space (the working spinner `◐`/`◑`) is stripped here too — requiring
+  the space, so a punctuation-led name like `/habemus-event` survives intact.
+- **The name is a CANDIDATE, never an address.** Also verified live: a pane titled
+  `Alpha-Architect` belongs to the session `alpha-architect-c9` — titles can be custom
+  or stale. The skill therefore resolves the name against `ListAgents` and drops the
+  offer when it matches zero or more than one session. **Never disambiguate with a
+  `[ref]`**: refs cannot be mapped back to a repo (they match neither
+  `agent_session.value` nor any pane/tab id), so a guess could message a stranger.
+  Real-world friction, worth knowing before "improving" this: several unrelated repos
+  can all have a tab titled `Manager`, and then no offer ever appears — by design. Count
+  only **live interactive** sessions there: offline / Remote-Control namesakes can neither
+  receive a close nor legitimately veto one, and counting them kills the feature outright.
+  Because the title is settable by any process in the pane, the confirmation must **name
+  the resolved recipient** — a person catching a wrong name is the actual trust anchor
+  here, not the string match.
+- **Fail-closed everywhere.** Two agents at the repo root, a non-claude or not-live one
+  there, an unreadable cwd, a junk list element, an empty/malformed list, missing tools
+  → `unverified` → no offer, today's flow unchanged. A wrong `none` costs only the
+  offer; a wrong `name=` would send a close request to a stranger session.
+- **The request is unauthenticated, so the receiver asks.** Cross-session messages carry
+  no proof of origin, and a close is destructive. The Manager therefore validates
+  (`task=` against `^[A-Za-z0-9._-]+$` before it touches any command, `repo=` against its
+  own main repo), cross-checks `worktree=` against the live lanes, re-runs
+  `task-status.sh assess` itself — and then **asks the user once, even on a verified
+  merged PR**. That is the one place `/close` asks where a user-invoked close would not:
+  a user invocation *is* the authorization; an inbound message is not. Ship-blocking
+  distinction, found in review — the earlier "verified merge proceeds unasked" rule let a
+  forged request delete a worktree somebody was still working in.
+- **The payload is three fields — `task=`, `worktree=`, `repo=` — on purpose.** No `pr=`
+  or `branch=`: the Manager re-derives both and is told not to trust them, so carrying
+  them would only widen what a misdelivered message leaks. What is left is exactly what
+  the receiver cross-checks the request against.
+- **The gate also refuses cases the delegation cannot serve**, not just unsafe ones: an
+  unconfirmed merge (the step-2 question belongs to the person with the context, not to a
+  tab they are not looking at) and an `/adopt`-ed branch that kept a non-`task/` name
+  (unresolvable by name outside its worktree, so the Manager would receive a close it
+  cannot resolve).
 
 ## Design decisions
 
