@@ -156,9 +156,13 @@ violation exits non-zero and becomes a visible `backendError`, never
 
 Security is layered. The hard boundaries are the OS secret-read jail, repository
 immutability, and an ephemeral `HOME`/`KIMI_CODE_HOME` that contains only a
-private copy of `credentials/kimi-code.json` (telemetry, auto-update, cron, and
-background keep-alive switched off). Ambient user config, hooks, MCP, plugins,
-trust records, sessions, and history are not mounted. ACP is defense-in-depth:
+private copy of `credentials/kimi-code.json` plus a **filtered projection** of
+`config.toml` — `default_model`, `[providers]`, `[models]`, `[services]`,
+`[thinking]`; never `[[hooks]]`, `[mcp]`, permission mode — because kimi-code
+0.32 offers a `kimi-code/*` model over ACP only when it is declared under
+`[models]` (an empty HOME fails `session/new` model selection). Telemetry,
+auto-update, cron, and background keep-alive are switched off. Ambient hooks,
+MCP, plugins, trust records, sessions, and history are not mounted. ACP is defense-in-depth:
 the client advertises neither filesystem-write nor terminal capability, rejects
 every `session/request_permission`, and fails if ACP reports a successful
 mutating tool kind (`edit`, `delete`, `move`, `execute`, `switch_mode`,
@@ -167,7 +171,10 @@ Approval-free read/search/web tools remain available. Official Kimi
 documentation identifies `WebSearch` and `FetchURL` as auto-allow tools when
 the host provider exposes them; the managed Kimi provider does. The shared
 external prompt's egress guard still applies. The ambient `~/.kimi-code` store
-is denied even to Kimi; codex/grok cannot read it either.
+is denied even to Kimi — entry by entry, sparing only `bin/` (and the resolved
+`$KIMI_BIN` directory), because the stock installer keeps the executable there
+and a whole-directory deny blocks the exec of every jailed run; codex/grok
+cannot read the rest either.
 
 
 Readiness requires all of: binary, credentials at

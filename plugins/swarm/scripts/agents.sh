@@ -78,7 +78,10 @@
 #            in-repo writes without request_permission. The hard write boundary
 #            is the OS jail (repository/Git remount-ro / file-write deny) plus
 #            an ephemeral HOME/KIMI_CODE_HOME that holds only a private copy of
-#            the managed-provider credentials. Kimi has no CLI schema flag; the
+#            the managed-provider credentials and a FILTERED config projection
+#            (provider/model catalogue + search services; never hooks or MCP —
+#            without the catalogue ACP offers no kimi-code/* model at all).
+#            Kimi has no CLI schema flag; the
 #            client validates the final assistant JSON strictly against the
 #            configured schema and fails closed without retry. ACP exposes the
 #            selected model and thinking ladder (low|high|max), so adapter effort
@@ -165,6 +168,11 @@ GROK_AUTH_FILE="${GROK_AUTH_FILE:-$HOME/.grok/auth.json}"
 # zero-byte compatibility path even while authenticated, so it is not an auth
 # signal (verified in work-system's Kimi worker integration).
 KIMI_CREDENTIALS_FILE="${KIMI_CREDENTIALS_FILE:-$HOME/.kimi-code/credentials/kimi-code.json}"
+# The host config.toml: the managed provider, its model catalogue (a model is
+# selectable over ACP only when declared under [models]), and the moonshot
+# search/fetch services live here — next to [[hooks]] and [mcp], which must not.
+# _kimi_prepare_runtime copies a FILTERED projection of it into the isolated HOME.
+KIMI_CONFIG_FILE="${KIMI_CONFIG_FILE:-$HOME/.kimi-code/config.toml}"
 
 # Temp files: codex's --output-last-message, and the assembled prompt the
 # backends read out-of-band (see the transport note in `run`). Both must be
@@ -622,10 +630,32 @@ _sandbox_deny_paths_build() {
     "$host/.config/anthropic" "$host/.config/openai" "$host/.claude.json"
   if [[ "$own" != "codex" ]]; then printf '%s\n' "$host/.codex"; fi
   if [[ "$own" != "grok" ]]; then printf '%s\n' "$host/.grok"; fi
-  # Always deny the ambient Kimi store: run_kimi copies only the managed-provider
-  # credentials into an ephemeral HOME/KIMI_CODE_HOME, so the real ~/.kimi-code
-  # (hooks, MCP, sessions, config, plugins) must not stay readable even to Kimi.
-  printf '%s\n' "$host/.kimi-code"
+  # Deny the ambient Kimi store ENTRY BY ENTRY, never the whole directory: the
+  # stock installer puts the executable itself at ~/.kimi-code/bin/kimi, so a
+  # whole-dir deny blocks the exec of every jailed kimi run (rc=10 on all four
+  # clusters in the 0.11.0 self-review) while the unjailed list/ready probes
+  # keep reporting it live. run_kimi copies only the managed-provider
+  # credentials plus a filtered config projection into an ephemeral
+  # HOME/KIMI_CODE_HOME, so everything else (hooks, MCP, sessions, the raw
+  # config, plugins, oauth) stays denied — even to Kimi.
+  # Two carve-outs, both by identity not by name alone: the `bin` entry, and the
+  # directory that actually holds the resolved $KIMI_BIN (a custom layout).
+  local kdir="$host/.kimi-code" kbin_dir="" kbin e
+  if [[ -d "$kdir" ]]; then
+    kbin="$(command -v -- "$KIMI_BIN" 2>/dev/null || true)"
+    if [[ -n "$kbin" ]]; then
+      kbin="$(readlink -f -- "$kbin" 2>/dev/null || printf '%s' "$kbin")"
+      kbin_dir="$(cd "$(dirname -- "$kbin")" 2>/dev/null && pwd -P || true)"
+    fi
+    for e in "$kdir"/* "$kdir"/.[!.]* "$kdir"/..?*; do
+      [[ -e "$e" || -L "$e" ]] || continue
+      [[ "${e##*/}" == "bin" ]] && continue
+      if [[ -n "$kbin_dir" && -d "$e" ]]; then
+        [[ "$(cd "$e" 2>/dev/null && pwd -P || true)" == "$kbin_dir" ]] && continue
+      fi
+      printf '%s\n' "$e"
+    done
+  fi
   # Repo-local secrets: .env*, data/, common key/cred files at repo root.
   # Best-effort (skip if not in a git work tree); only emit paths that exist so
   # the profile stays clean. The `[[ -e ]]` guard also filters an unmatched
@@ -2466,8 +2496,9 @@ _kimi_output_contract() {
 
 _kimi_prepare_runtime() {
   # VOID setter — fills TMP_KIMI_HOME, prints nothing. Copies only the managed
-  # provider credentials into an ephemeral HOME so ACP cannot load ambient
-  # config, hooks, MCP servers, plugins, trust records, sessions, or history.
+  # provider credentials and a filtered config projection (below) into an
+  # ephemeral HOME so ACP cannot load ambient hooks, MCP servers, plugins,
+  # trust records, sessions, or history.
   local home dest
   home="$(mktemp -d "${TMPDIR:-/tmp}/swarm-kimi.XXXXXX")" \
     || { echo "Could not create an isolated Kimi HOME" >&2; exit 2; }
@@ -2483,6 +2514,48 @@ _kimi_prepare_runtime() {
   cp "$KIMI_CREDENTIALS_FILE" "$dest/kimi-code.json" \
     || { echo "Could not copy Kimi credentials into the isolated runtime" >&2; exit 1; }
   chmod 600 "$dest/kimi-code.json"
+  # A FILTERED config.toml, not a copy: with none, kimi-code 0.32 offers no
+  # `kimi-code/*` model over ACP at all ("session does not offer model value
+  # 'kimi-code/k3-256k'", first live run after isolation) — the managed
+  # provider's model catalogue is plain config, written by `kimi login`. Keep
+  # only what a review needs: `default_model`, [providers.*] (+ their oauth
+  # references into the copied credentials), [models.*], [services.*] (the
+  # moonshot search/fetch tools) and [thinking]. Everything else — [[hooks]],
+  # [mcp], loop control, permission mode — is exactly the ambient executable
+  # state the isolation exists to leave behind. Raw-section projection on
+  # purpose: it needs no TOML parser (tomllib is 3.11+), and a section this
+  # filter does not recognise is DROPPED, never forwarded.
+  if [[ -s "$KIMI_CONFIG_FILE" ]]; then
+    _kimi_project_config "$KIMI_CONFIG_FILE" > "$home/.kimi-code/config.toml" \
+      || { echo "Could not project the Kimi config into the isolated runtime" >&2; exit 1; }
+    chmod 600 "$home/.kimi-code/config.toml"
+  fi
+}
+
+_kimi_project_config() {
+  # $1 = host config.toml → stdout: the allowlisted projection (see above).
+  # Top-level scalars: only default_model. Tables: only the allowlisted roots,
+  # including their sub-tables (providers."managed:kimi-code".oauth). Array
+  # tables ([[hooks]]) never match — the allowlist has no array-table root.
+  python3 - "$1" <<'PY'
+import re, sys
+ALLOWED = ("providers", "models", "services", "thinking")
+out, keep = [], False
+with open(sys.argv[1], encoding="utf-8", errors="strict") as fh:
+    for line in fh:
+        stripped = line.strip()
+        m = re.match(r"^\[(\[)?\s*([A-Za-z0-9_-]+)", stripped)
+        if m:
+            keep = (m.group(1) is None) and (m.group(2) in ALLOWED)
+            if keep:
+                out.append("\n" + line.rstrip("\n"))
+            continue
+        if keep:
+            out.append(line.rstrip("\n"))
+        elif re.match(r"^default_model\s*=", stripped) and not out:
+            out.append(line.rstrip("\n"))
+sys.stdout.write("\n".join(out) + "\n")
+PY
 }
 
 run_kimi() {

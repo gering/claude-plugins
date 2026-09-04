@@ -65,6 +65,13 @@ if kimi_backend:
     check("Kimi normal profile uses high", "--effort high" in kimi_backend.group(1))
     check("Kimi max profile uses max", "--effort max" in kimi_backend.group(1))
 
+grok_backend = re.search(r"\{ backend: 'grok', flags: ([^}]+)\}", WORKFLOW)
+check("workflow registers grok effort flags", bool(grok_backend))
+if grok_backend:
+    # `high` blew the 540 s wall on a ~190 KiB cluster prompt; it is --max only.
+    check("grok normal profile uses medium", "'--effort medium'" in grok_backend.group(1))
+    check("grok max profile uses high", "MAX ? '--effort high'" in grok_backend.group(1))
+
 if FAILS:
     print("backend-sync tests FAILED:")
     for failure in FAILS:

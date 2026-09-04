@@ -293,9 +293,11 @@ if (FINDING_NONCE && !/^[a-f0-9]{16,}$/.test(FINDING_NONCE)) FINDING_NONCE = ''
 const fenceDegraded = !FINDING_NONCE  // no structural fence at merge/verify — surfaced in the return payload
 // `--max` profile: lift every voice to its ceiling for a deepest-effort review.
 // codex has no `max` tier (xhigh is its top) + gets the stronger model; grok's
-// ladder is low|medium|high since 0.2.101, so `high` is already its ceiling on
-// both profiles; Kimi ACP exposes low|high|max, so the deepest profile selects
-// max while the normal profile stays high. In-session Claude goes to `xhigh`.
+// ladder is low|medium|high since 0.2.101 — the normal profile runs `medium`
+// because `high` blew the 540 s wall on a ~190 KiB cluster prompt (reach timed
+// out, design/threat at 94–95 %, 0.11.0 self-review), so `high` is reserved for
+// --max; Kimi ACP exposes low|high|max, so the deepest profile selects max
+// while the normal profile stays high. In-session Claude goes to `xhigh`.
 // Strict === true: the skill always passes a boolean, and a stray truthy value
 // (max:1 / "true") should NOT silently trigger a slower, costlier run.
 // MAX_CODEX_MODEL must be a model the local codex CLI can load — if it's been
@@ -765,7 +767,7 @@ const utf8Checksum = (s) => {
 const wantVoices = Array.isArray(INPUT.externalVoices) ? INPUT.externalVoices : ['codex', 'grok', 'kimi']
 const EXTERNAL_BACKENDS = [
   { backend: 'codex', flags: MAX ? `--model ${MAX_CODEX_MODEL} --effort xhigh` : '--effort high' },
-  { backend: 'grok', flags: '--effort high' },
+  { backend: 'grok', flags: MAX ? '--effort high' : '--effort medium' },
   { backend: 'kimi', flags: MAX ? '--effort max' : '--effort high' },
 ]
 // A claude:false control run has no gate (the gate is a Claude agent), so the

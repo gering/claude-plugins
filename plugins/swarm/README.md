@@ -27,7 +27,7 @@ findings + design suggestions, presents one ranked report, and — with `--fix` 
   (cap default `10`); `--max` runs the deepest-effort profile (codex
   `gpt-5.6-sol`/`xhigh`, Claude finders + verifier `xhigh`, Kimi `max`, and
   **every** voice — Claude, codex, grok, kimi — fanning out per **lens** instead
-  of per cluster; grok already runs at `high`, its ceiling) — slower, more
+  of per cluster; grok `medium` → `high`, its ceiling) — slower, more
   thorough, costs up to `3 × 11` external calls, composes with
   `--fix`/`--loop`.
 - `/swarm:review --pr [<number>]` — run the same ensemble against a **GitHub
@@ -115,7 +115,9 @@ prompt egress guard forbids putting repo content into web queries (model-
 cooperation-dependent; the jail is the hard boundary). A secret scrub at the
 adapter boundary plus a final **output gate** re-scrub findings before they reach you.
 Kimi runs only when this OS jail is available, with an ephemeral HOME that
-holds only a private copy of its managed-provider credentials. ACP permission
+holds only a private copy of its managed-provider credentials and a filtered
+projection of its config (provider/model catalogue and search services — never
+hooks or MCP). ACP permission
 rejection and mutating-tool detection are defense-in-depth, not the write
 boundary; arbitrary child-process execution remains a documented residual.
 Findings are advisory by default; `--fix` / `--loop` act only on the ones you

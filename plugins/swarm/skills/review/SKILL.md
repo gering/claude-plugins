@@ -52,9 +52,9 @@ branch delta).
   per lens **cluster** (≤5 units, the default) into one per **lens** (≤11 units).
   That is the real cost lever: up to **11 CLI calls per external backend (≤33
   total)**, not the 5 a cluster run makes (one per gated cluster). Design lenses
-  run at the same effort as defect lenses. gate/merge are unchanged, and grok's
-  *effort* stays `high` (its ceiling, on both profiles) — but its fan-out splits
-  per lens like everyone else's.
+  run at the same effort as defect lenses. gate/merge are unchanged; grok goes
+  `medium` → `high` (its ceiling) and, like everyone else's, its fan-out splits
+  per lens.
 - Anything left after removing the flags → the scope argument for step 1.
 
 Without either flag the review is **read-only**: present the report and offer to
