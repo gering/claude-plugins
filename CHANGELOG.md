@@ -277,6 +277,16 @@ entries are grouped per plugin, newest first.
 
 ## swarm
 
+### 0.10.15 — 2026-09-02
+`/swarm:review` could not start at all for anyone running the installed plugin.
+
+- **Workflow refuses a `scriptPath` in the plugin cache.** `Read` and `Bash` can open that path, so the failure only surfaced at the Workflow call — `scriptPath must be a script path this tool returned, or a file you can already read`. Every review, every `--fix` and every `--loop` round hit it; only `/add-dir` on the cache dir worked around it, which is not something a skill can assume.
+- **The scratch is now split by sensitivity.** Review DATA (diff, fenced prompt, telemetry) stays in `$TMPD`; only the self-contained workflow SCRIPT is staged in a cwd-local `.swarm-workflow.XXXXXX` and run by path. An interrupted run can therefore strand at most a copy of an already-committed file, never a diff. Staging the diff there too was tried first and rejected for exactly that reason.
+- **Three edges the split creates, all closed:** the staged dir is untracked and under cwd, so the untracked sweep skips every `.swarm-workflow.*` (otherwise a review pulls its own workflow copy into the diff it reviews); `WORKDIR` is declared empty before the first guard so all 21 early exits can drop both dirs; and `$PWD` is environment-derived like `$TMPDIR`, so it gets the same `SWARM_TMPD_ERR` metacharacter verdict rather than being trusted.
+- Passing the source through Workflow's inline `script` was rejected: the whole script (tens of KB, and growing) re-transmitted through the model's context every `--loop` round, nothing verifying the emitted text against disk, and executed code on the same untrusted-data path as the diff.
+- `test_lens_sync.py` pins the staging, the shared metacharacter guard, the sweep exclusion, the both-dirs cleanup, and that the call site never points back at the plugin cache.
+- **Hardened by a swarm review of the fix itself**, which reproduced one of its own findings while running: the staging `mktemp` now fails loudly with `SWARM_WORKFLOW_UNAVAILABLE` instead of aborting the block on a bare `mktemp` error when cwd is not writable; the sweep excludes `.swarm-workflow.*` **by pattern** rather than by the live run's basename, so a stranded or concurrent staging dir can no longer be inlined as user work (~90 KB, which also pushed the prompt past the cap and silently dropped the external voices); step 3's cleanup names substituted paths, because `$TMPD`/`$WORKDIR` expand empty in a fresh Bash call and left the staged copy sitting in the user's checkout; and the metacharacter refusal names a concrete remedy, since unlike `TMPDIR` no env var redirects a repo path.
+
 ### 0.10.14 — 2026-09-02
 Loop round 10 (the cap). One critical, and it was round 9's own fix: bounding a probe without counting it.
 

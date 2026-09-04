@@ -104,6 +104,65 @@ for _hd in re.finditer(r"<<(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1\n(.*?)^\2$", _body
         if "`" in _line or "$(" in _line:
             _bad.append(_line.strip()[:60])
 check(f"skill: no backticks/$( inside an unquoted heredoc ({_bad})", not _bad)
+# Workflow's scriptPath gate is stricter than Read/Bash: the installed
+# plugin-cache path is refused unless the user granted it with /add-dir. The prep
+# block therefore stages the workflow SCRIPT under cwd and passes that path,
+# while the review DATA (diff, prompt, telemetry) stays in $TMPD — the split is
+# what keeps an interrupted run from stranding diff content in the checkout.
+check(
+    "skill: keeps review data in the system temp dir",
+    'TMPD="$(mktemp -d "${TMPDIR:-/tmp}/swarm-review.XXXXXX")"' in skill,
+)
+check(
+    "skill: stages the workflow script under cwd",
+    'WORKDIR="$(mktemp -d "${PWD%/}/.swarm-workflow.XXXXXX")"' in skill
+    and 'cp "${CLAUDE_PLUGIN_ROOT}/workflows/swarm-review.js" "$WORKFLOW"' in skill,
+)
+check("skill: echoes the staged workflow path", 'echo "WORKFLOW=$WORKFLOW"' in skill)
+# $PWD is environment-derived like $TMPDIR and the staged path is echoed the same
+# way, so it must carry the same metacharacter verdict — not just $TMPD.
+check(
+    "skill: the staged path gets the same metacharacter guard as $TMPD",
+    re.search(r'case "\$WORKDIR" in', skill),
+)
+# The staged dir sits under cwd (that is the point) and is therefore untracked —
+# the sweep must skip it, or a review pulls its own workflow copy into the diff.
+# By PATTERN, not by the live run's basename: an interrupted or concurrent run
+# strands a differently-suffixed .swarm-workflow.*, which an exact-name test
+# would walk right past and inline as if it were user work.
+check(
+    "skill: untracked sweep skips every staged workflow dir",
+    'case "/$f" in */.swarm-workflow.*/*) continue ;; esac' in skill,
+)
+check(
+    "skill: sweep exclusion is not keyed to one run's basename",
+    "WORKDIR_BASENAME" not in skill,
+)
+# The staging mktemp must fail loudly like the cp below it: an unwritable cwd
+# would otherwise abort the block with a bare mktemp error and no SWARM_ marker.
+check(
+    "skill: the staging mktemp has a failure guard",
+    'WORKDIR="$(mktemp -d "${PWD%/}/.swarm-workflow.XXXXXX")" \\\n'
+    '  || { echo "SWARM_WORKFLOW_UNAVAILABLE=' in skill,
+)
+# Cross-call cleanup must use substituted paths: $TMPD/$WORKDIR expand empty in a
+# fresh Bash call, so `rm -rf "" ""` silently leaves the staged copy in the repo.
+check(
+    "skill: step-3 cleanup substitutes paths instead of shell vars",
+    'rm -rf "<TMPD>" "<WORKDIR>"' in skill,
+)
+# WORKDIR is declared empty before the first guard, so every early exit can drop
+# both; one that cleans only $TMPD leaves the staged copy in the checkout.
+_lone = re.findall(r'rm -rf "\$TMPD"(?! "\$WORKDIR")', skill)
+check(f"skill: every cleanup drops both scratch dirs ({len(_lone)} lone)", not _lone)
+_wc = re.search(r"Workflow\(\{(.*?)\n\}\)", skill, re.S)
+check("skill: Workflow call found", _wc)
+_wct = _wc.group(1) if _wc else ""
+check("skill: Workflow runs the staged path", 'scriptPath: "<WORKFLOW>"' in _wct)
+check(
+    "skill: Workflow never points at the plugin cache",
+    "${CLAUDE_PLUGIN_ROOT}/workflows/" not in _wct,
+)
 check("skill: HDR carries no lens-list mirror", not re.search(r"^- Cover ALL of these lenses:", skill, re.M))
 # The adapter flag the single-source design depends on must exist: without it the
 # workflow's per-cluster briefs would be silently dropped and every external voice
