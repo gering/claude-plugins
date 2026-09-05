@@ -37,8 +37,9 @@ user_invocable: true
 - `claude` is always ready when Claude Code runs (reviews happen in-session
   via the Agent tool; the external CLIs are called through the adapter).
 - **`kimi` Ready is model/transport-aware** — it requires the real
-  `~/.kimi-code/credentials/kimi-code.json`, ACP stdio support, and the pinned
-  `kimi-code/k3-256k` model in `kimi provider list --json`. A failed, bounded, or
+  `~/.kimi-code/credentials/kimi-code.json`, ACP stdio support, and the adapter's
+  pinned model (`KIMI_DEFAULT_MODEL` in `agents.sh`; the `hint` names the
+  effective id) in `kimi provider list --json`. A failed, bounded, or
   unrecognized-format capability probe degrades audibly to trusting credentials
   rather than silently dropping the Moonshot family; a clean negative stays
   not-ready. Kimi is live for reviews only with `jail=yes`, because ACP has no

@@ -421,25 +421,51 @@ class AcpClient:
                 f"unsafe tool ran despite approval guard: kind={effective_kind} status={status}"
             )  # "ran", not "completed": a failed shell command ran too
 
+    def _denied(self, candidate: str) -> bool:
+        # A path (realpath'd, ~ expanded) under a deny prefix — or any string
+        # that merely CONTAINS one (a file:// URL, a shell command, an argument
+        # list): the auth store must not appear in a tool call at all.
+        if not candidate:
+            return False
+        for prefix in self.deny_paths:
+            if prefix in candidate:
+                return True
+        expanded = os.path.expanduser(candidate)
+        if not expanded.startswith(os.sep):
+            return False
+        real = os.path.realpath(expanded)
+        return any(real == p or real.startswith(p + os.sep) for p in self.deny_paths)
+
     def _check_locations(self, update: dict[str, Any], tool_id: str) -> None:
         # Any tool kind, any status: the announcement alone means the agent is
-        # about to touch the path (or already did).
+        # about to touch the path (or already did). `locations` is optional
+        # UI follow-along data in ACP — so the raw tool input is scanned too,
+        # every string in it, recursively; a check that trusts the peer to
+        # volunteer `locations` is fail-open.
         if not self.deny_paths:
             return
+        candidates: list[str] = []
         locations = update.get("locations")
-        if not isinstance(locations, list):
-            return
-        for loc in locations:
-            path = loc.get("path") if isinstance(loc, dict) else None
-            if not isinstance(path, str) or not path:
-                continue
-            real = os.path.realpath(path)
-            for prefix in self.deny_paths:
-                if real == prefix or real.startswith(prefix + os.sep):
-                    self.close(force=True)
-                    raise ProtocolError(
-                        f"tool {tool_id!r} touched a denied path under the runtime/auth store"
-                    )
+        if isinstance(locations, list):
+            for loc in locations:
+                path = loc.get("path") if isinstance(loc, dict) else None
+                if isinstance(path, str):
+                    candidates.append(path)
+        stack: list[Any] = [update.get("rawInput"), update.get("title")]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, str):
+                candidates.append(item)
+            elif isinstance(item, dict):
+                stack.extend(item.values())
+            elif isinstance(item, list):
+                stack.extend(item)
+        for candidate in candidates:
+            if self._denied(candidate):
+                self.close(force=True)
+                raise ProtocolError(
+                    f"tool {tool_id!r} touched a denied path under the runtime/auth store"
+                )
 
     def unsettled_unsafe_tools(self) -> list[str]:
         # End-of-turn sweep: an unsafe-kind tool that was announced but never
@@ -482,6 +508,8 @@ def _set_option(
     offered = {item.get("value") for item in choices if isinstance(item, dict)}
     if value not in offered:
         raise ProtocolError(f"session does not offer {config_id} value {value!r}")
+    if option.get("currentValue") == value:
+        return config_options   # already in effect — no round trip
     result = client.request(
         "session/set_config_option",
         {"sessionId": session_id, "configId": config_id, "value": value},
@@ -504,9 +532,14 @@ def _load_json(path: Path, label: str) -> Any:
 
 
 def _load_prompt(path: Path) -> str:
+    # errors="replace": the prompt carries an untrusted diff that may embed
+    # Latin-1 (or worse) bytes; a decode error here surfaced as rc 2 "adapter
+    # rejected its configuration", pointing the operator at the schema instead
+    # of the diff. A replacement character in a hunk is a review nuisance, not
+    # a reason to lose the voice.
     try:
-        return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
         raise SchemaError(f"could not read prompt file: {exc}") from exc
 
 

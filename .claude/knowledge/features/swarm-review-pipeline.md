@@ -1,7 +1,7 @@
 ---
 title: "Swarm Review Pipeline (/swarm:review)"
 createdAt: 2026-07-08
-updatedAt: 2026-09-02
+updatedAt: 2026-09-05
 createdFrom: "PR #24"
 updatedFrom: "add-kimi-swarm-voice"
 pluginVersion: 0.11.0

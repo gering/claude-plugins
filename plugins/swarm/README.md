@@ -230,5 +230,6 @@ verifier tests in the confidence phase.
 
 - `python3` on PATH (JSON handling in the adapter).
 - `codex`, `grok`, and/or `kimi` CLIs are optional — install and authenticate
-  them to widen the ensemble. Kimi additionally needs ACP support, the pinned
-  `kimi-code/k3-256k` model, and a working OS jail.
+  them to widen the ensemble. Kimi additionally needs ACP support, the adapter's
+  pinned model (`KIMI_DEFAULT_MODEL`; the `list --json` hint names it), and a
+  working OS jail.

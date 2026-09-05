@@ -107,9 +107,11 @@
 #     (sandbox-exec) or bound then remounted read-only (bwrap), with
 #     GIT_OPTIONAL_LOCKS=0 so git exploration does not try to refresh the
 #     index. Writes to private runtime/temp locations stay allowed.
-#   - Kimi additionally starts with isolated HOME/KIMI_CODE_HOME (credentials
-#     copy only; no ambient config/hooks/MCP/sessions) and telemetry/update/
-#     keep-alive switches off.
+#   - Kimi additionally starts with isolated HOME/KIMI_CODE_HOME holding only
+#     LINKS to the host's credentials/ + oauth/ (a refresh must land on the
+#     host file — Moonshot rotates refresh tokens) and a filtered config
+#     projection (no ambient hooks/MCP/sessions), telemetry/update/keep-alive
+#     off, and the repo's own AGENTS.md/KIMI.md/.agents/.kimi-code denied.
 #   - Egress guard is a prompt policy (model-cooperation-dependent) — the
 #     jail is the hard boundary. scrub_secrets filters OUTPUT only.
 #   - CLI-level no-write/no-shell flags and ACP rejection are defense-in-depth.
@@ -715,11 +717,12 @@ _sandbox_deny_paths_build() {
       # (`mcpServers: []` in session/new does not disable file-declared ones).
       # Deny them to the ACP session; the diff still shows their content.
       # kimi-code also loads <cwd>/AGENTS.md, agents.md and KIMI.md into its
-      # SYSTEM prompt at session start — repo text that would reach the model
-      # as INSTRUCTIONS, outside the DIFF-<nonce> fence. Deny them too (bwrap
-      # masks them empty; sandbox-exec makes the read fail).
+      # SYSTEM prompt at session start, and discovers skills / subagents / a
+      # whole-prompt agent override under <root>/.agents/ — repo text that
+      # would reach the model as INSTRUCTIONS, outside the DIFF-<nonce> fence.
+      # Deny them too (bwrap masks them empty; sandbox-exec makes the read fail).
       for r in "${roots[@]+"${roots[@]}"}"; do
-        for p in "$r"/.kimi-code "$r"/.kimi "$r"/.mcp.json \
+        for p in "$r"/.kimi-code "$r"/.kimi "$r"/.mcp.json "$r"/.agents \
                  "$r"/AGENTS.md "$r"/agents.md "$r"/KIMI.md; do
           [[ -e "$p" ]] && printf '%s\n' "$p"
         done
@@ -893,6 +896,10 @@ _init_sandbox() {
   local backend="${1:-}"
   [[ "$_sandbox_ready" == "$backend" ]] && return
   _sandbox_ready="$backend"
+  # Fill the protected-roots memo HERE, in the main shell: every consumer below
+  # runs it inside `<(…)` / `$(…)`, where a memo set in the subshell dies with
+  # it — the parent's value, once set, is what those subshells inherit.
+  _repo_protected_roots >/dev/null
   SANDBOX_CMD=()
   # Built ONCE, in the main shell, so the containment check that follows reuses it
   # (see _deny_paths_ensure) — but only INSIDE the wrapper branches: on a host
@@ -1061,6 +1068,8 @@ PATTERNS = [
     (re.compile(r"(?i)\b(secret|token|password|passwd|api[_-]?key)\b\s*[=:]\s*[A-Za-z0-9/+._-]{16,}"), r"\1=[REDACTED]"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "[REDACTED-GH-TOKEN]"),
     (re.compile(r"\bsk-[A-Za-z0-9]{20,}"), "[REDACTED-API-KEY]"),
+    # JWT-shaped bearer/refresh tokens (Moonshot OAuth): three base64url runs.
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"), "[REDACTED-JWT]"),
 ]
 data = sys.stdin.read()
 hit = False
@@ -1488,18 +1497,29 @@ _kimi_has_acp() {
   local help="" rc=0
   help="$(_probe_or_bare "$KIMI_BIN" acp --help)" || rc=$?
   if (( rc == 0 )); then
-    _kimi_acp_supported=yes
-    if [[ "$help" != *"Agent Client Protocol"* || "$help" != *"stdio"* ]]; then
+    # POSITIVE detection. A commander-style CLI answers an unknown subcommand
+    # with its TOP-LEVEL help and rc 0, so "rc 0" alone advertised ACP on a
+    # build that has none — every cluster then died in the ACP spawn (rc 10)
+    # instead of the "no ACP stdio server" hint. Strong match: the acp help
+    # itself. Weak match (wording drift): any mention of ACP — still ready,
+    # audibly. Neither: a clean negative.
+    if [[ "$help" == *"Agent Client Protocol"* && "$help" == *"stdio"* ]]; then
+      _kimi_acp_supported=yes
+    elif [[ "$help" == *"ACP"* ]]; then
+      _kimi_acp_supported=yes
       _probe_degraded kimi "\`kimi acp --help\` returned unrecognized help text"
+    else
+      _kimi_acp_supported=no
     fi
-  elif (( rc == 2 || rc == 127 )); then
-    # A normal CLI usage/not-found result is a clean negative: the installed
-    # binary cannot enter ACP. Timeouts and infrastructure failures remain
-    # inconclusive and degrade to trusting the authenticated install.
-    _kimi_acp_supported=no
-  else
+  elif (( rc == 124 || rc == 137 || rc == 126 )); then
+    # Timeouts and infrastructure failures remain inconclusive and degrade to
+    # trusting the authenticated install — audibly.
     _probe_degraded kimi "\`kimi acp --help\` did not complete (rc=$rc)"
     _kimi_acp_supported=yes
+  else
+    # rc 1 (a CLI error), rc 2 (usage), rc 127 (not found): the installed
+    # binary cannot enter ACP — a clean negative, fail closed.
+    _kimi_acp_supported=no
   fi
   [[ "$_kimi_acp_supported" == "yes" ]]
 }
@@ -1851,7 +1871,9 @@ ready_hint() {
       fi
       ;;
     kimi)
-      if ! _kimi_credentials_usable; then
+      if [[ "${KIMI_CREDENTIALS_FILE##*/}" != "kimi-code.json" ]]; then
+        echo "KIMI_CREDENTIALS_FILE must be named kimi-code.json (kimi-code reads credentials/kimi-code.json; got: $KIMI_CREDENTIALS_FILE)"
+      elif ! _kimi_credentials_usable; then
         echo "run: kimi login"
       elif ! _kimi_has_acp; then
         echo "this kimi CLI has no ACP stdio server — update kimi-code (verified on 0.32.0)"
@@ -2558,6 +2580,10 @@ _kimi_credentials_usable() {
   # setup all ask, and one python3 start per answer is enough.
   if [[ -n "$_kimi_creds_done" ]]; then [[ "$_kimi_creds_ok" == "yes" ]]; return; fi
   _kimi_creds_done=1; _kimi_creds_ok=no
+  # kimi-code reads credentials/kimi-code.json by NAME; the runtime links the
+  # file's DIRECTORY, so a custom KIMI_CREDENTIALS_FILE under another name would
+  # pass readiness and then be invisible to the session.
+  [[ "${KIMI_CREDENTIALS_FILE##*/}" == "kimi-code.json" ]] || return 1
   [[ -s "$KIMI_CREDENTIALS_FILE" ]] || return 1
   python3 - "$KIMI_CREDENTIALS_FILE" <<'PY' 2>/dev/null && _kimi_creds_ok=yes
 import json, sys
@@ -2625,6 +2651,17 @@ _kimi_prepare_runtime() {
   local home cred_dir
   # No $TMPDIR fallback: a HOME outside the caller's scratch dir is the
   # SIGKILL-orphan (a projected config) this placement exists to prevent.
+  # And never UNDER a protected root: the jail write-denies those, so kimi
+  # could not write its session state and session/new would fail opaquely.
+  local pdir root
+  pdir="$(cd "$(dirname -- "$1")" 2>/dev/null && pwd -P || printf '%s' "$(dirname -- "$1")")"
+  while IFS= read -r root; do
+    [[ -n "$root" ]] || continue
+    if [[ "$pdir" == "$root" || "$pdir" == "$root"/* ]]; then
+      echo "kimi prompt file must not live inside the repository ($pdir is under the write-denied root $root) — the review skill hands over a file in its own scratch dir" >&2
+      exit 2
+    fi
+  done < <(_repo_protected_roots)
   home="$(mktemp -d "$(dirname -- "$1")/swarm-kimi.XXXXXX")" \
     || { echo "Could not create an isolated Kimi HOME next to the prompt file (is its directory writable?)" >&2; exit 2; }
   chmod 700 "$home"
@@ -2665,49 +2702,118 @@ _kimi_prepare_runtime() {
 
 _kimi_project_config() {
   # $1 = host config.toml → stdout: the allowlisted projection (see above).
-  # Top-level scalars: only default_model. Tables: [services.*] and [thinking]
-  # whole; [providers.*] ONLY the managed (`managed:*`, OAuth) ones with their
-  # sub-tables, and [models.*] only those declared on a kept provider. A
-  # third-party provider's `api_key = "sk-…"` would otherwise land in a file the
-  # read+web-capable Kimi can read — the very secret the host config.toml deny
-  # exists to hide. The managed provider's own block is Kimi's own auth
-  # (the accepted own-token residual). Array tables ([[hooks]]) never match.
+  # Top-level scalars: only default_model. Tables: [services.*] and [thinking];
+  # [providers.*] ONLY the managed (`managed:*`, OAuth) ones with their
+  # sub-tables; [models.*] only those declared on a kept provider; and NO
+  # secret-shaped scalar (api_key/token/secret/…) from any of them — the
+  # managed provider and the moonshot services authenticate via the linked
+  # oauth store. Parsed with tomllib (3.11+) and re-serialized, so a header-
+  # looking line inside a multiline string or single-quoted TOML cannot fool
+  # it; on an older python3 a hardened line-based projection applies the same
+  # allowlist. Array tables ([[hooks]]) are never emitted.
   python3 - "$1" <<'PY'
 import re, sys
-HEAD = re.compile(r"^\[(\[)?\s*([A-Za-z0-9_-]+)(?:\.(\"[^\"]*\"|[A-Za-z0-9_:-]+))?")
-sections, cur, default_model = [], None, None
-with open(sys.argv[1], encoding="utf-8", errors="strict") as fh:
-    for line in fh:
-        stripped = line.strip()
-        m = HEAD.match(stripped)
-        if m:
-            cur = {"array": m.group(1) is not None, "root": m.group(2),
-                   "name": (m.group(3) or "").strip('"'), "lines": [line.rstrip("\n")]}
-            sections.append(cur)
+# Secret-shaped scalars are dropped from EVERY projected table: the managed
+# provider and the moonshot services authenticate through the linked oauth
+# store (their api_key is "" on a stock install), so nothing a review needs is
+# lost, and a third-party key can never reach a file the read+web Kimi reads.
+SECRET_KEY = re.compile(r"(?i)(^|_)(api[_-]?key|key|token|secret|password|passwd)$")
+KEEP_ROOTS = ("providers", "models", "services", "thinking")
+
+def managed(name):
+    return isinstance(name, str) and name.startswith("managed:")
+
+def toml_scalar(v):
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    if isinstance(v, str):
+        return '"' + v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
+    if isinstance(v, list):
+        return "[" + ", ".join(toml_scalar(x) for x in v) + "]"
+    raise ValueError("unsupported TOML value")
+
+def emit_table(out, path, table):
+    scalars = {k: v for k, v in table.items() if not isinstance(v, dict)}
+    subs = {k: v for k, v in table.items() if isinstance(v, dict)}
+    out.append("")
+    out.append("[" + ".".join(quote_key(k) for k in path) + "]")
+    for k, v in scalars.items():
+        if SECRET_KEY.search(k):
             continue
-        if cur is None:
-            if re.match(r"^default_model\s*=", stripped) and default_model is None:
-                default_model = line.rstrip("\n")
-        else:
-            cur["lines"].append(line.rstrip("\n"))
-kept_providers = {s["name"] for s in sections
-                  if not s["array"] and s["root"] == "providers" and s["name"].startswith("managed:")}
-def provider_of(sec):
-    for l in sec["lines"]:
-        m = re.match(r"^\s*provider\s*=\s*\"([^\"]*)\"", l)
-        if m:
-            return m.group(1)
-    return None
-out = [default_model] if default_model else []
-for sec in sections:
-    if sec["array"]:
-        continue
-    keep = (sec["root"] in ("services", "thinking")
-            or (sec["root"] == "providers" and sec["name"] in kept_providers)
-            or (sec["root"] == "models" and provider_of(sec) in kept_providers))
-    if keep:
-        out.append("")
-        out.extend(sec["lines"])
+        try:
+            out.append("%s = %s" % (quote_key(k), toml_scalar(v)))
+        except ValueError:
+            continue
+    for k, v in subs.items():
+        emit_table(out, path + [k], v)
+
+def quote_key(k):
+    return k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else '"' + k.replace('"', '\\"') + '"'
+
+try:
+    import tomllib
+except ImportError:  # python < 3.11: keep the line-based projection, hardened
+    tomllib = None
+
+out = []
+if tomllib is not None:
+    with open(sys.argv[1], "rb") as fh:
+        doc = tomllib.load(fh)
+    dm = doc.get("default_model")
+    if isinstance(dm, str):
+        out.append("default_model = %s" % toml_scalar(dm))
+    providers = {k: v for k, v in (doc.get("providers") or {}).items() if managed(k) and isinstance(v, dict)}
+    for name, table in providers.items():
+        emit_table(out, ["providers", name], table)
+    for name, table in (doc.get("models") or {}).items():
+        if isinstance(table, dict) and table.get("provider") in providers:
+            emit_table(out, ["models", name], table)
+    for name, table in (doc.get("services") or {}).items():
+        if isinstance(table, dict):
+            emit_table(out, ["services", name], table)
+    if isinstance(doc.get("thinking"), dict):
+        emit_table(out, ["thinking"], doc["thinking"])
+else:
+    HEAD = re.compile(r"^\[(\[)?\s*([A-Za-z0-9_-]+)(?:\.(\"[^\"]*\"|'[^']*'|[A-Za-z0-9_:-]+))?")
+    sections, cur, default_model = [], None, None
+    with open(sys.argv[1], encoding="utf-8", errors="strict") as fh:
+        for line in fh:
+            stripped = line.strip()
+            m = HEAD.match(stripped)
+            if m:
+                cur = {"array": m.group(1) is not None, "root": m.group(2),
+                       "name": (m.group(3) or "").strip("\"'"), "lines": [line.rstrip("\n")]}
+                sections.append(cur)
+                continue
+            if cur is None:
+                if re.match(r"^default_model\s*=", stripped) and default_model is None:
+                    default_model = line.rstrip("\n")
+            else:
+                cur["lines"].append(line.rstrip("\n"))
+    kept = {s["name"] for s in sections if not s["array"] and s["root"] == "providers" and managed(s["name"])}
+    def provider_of(sec):
+        for l in sec["lines"]:
+            m = re.match(r"^\s*provider\s*=\s*[\"']([^\"']*)[\"']", l)
+            if m:
+                return m.group(1)
+        return None
+    if default_model:
+        out.append(default_model)
+    for sec in sections:
+        if sec["array"]:
+            continue
+        keep = (sec["root"] in ("services", "thinking")
+                or (sec["root"] == "providers" and sec["name"] in kept)
+                or (sec["root"] == "models" and provider_of(sec) in kept))
+        if keep:
+            out.append("")
+            for l in sec["lines"]:
+                key = re.match(r"^\s*([A-Za-z0-9_\"'-]+)\s*=", l)
+                if key and SECRET_KEY.search(key.group(1).strip("\"'")):
+                    continue
+                out.append(l)
 sys.stdout.write("\n".join(out) + "\n")
 PY
 }

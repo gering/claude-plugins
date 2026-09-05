@@ -1,7 +1,7 @@
 ---
 title: "Swarm Backend Adapter Layer"
 createdAt: 2026-07-03
-updatedAt: 2026-09-02
+updatedAt: 2026-09-05
 createdFrom: "PR #21"
 updatedFrom: "add-kimi-swarm-voice"
 pluginVersion: 0.11.0
@@ -193,9 +193,22 @@ on first sight (rc 13), and an unsafe tool left pending at end of turn is
 `--deny-path` prefix (the ephemeral HOME, the host `~/.kimi-code`) aborts the
 same way — the linked credential file is readable-by-process (refresh) but not
 readable-by-tool. kimi-code also loads `<cwd>/AGENTS.md`, `agents.md`, `KIMI.md`
-into its system prompt at session start — repo text as INSTRUCTIONS outside
-the diff fence — so Kimi's deny list masks those at every protected root
-(`CLAUDE.md` is not loaded by kimi-code 0.32). The config projection keeps
+into its system prompt at session start, and discovers skills / subagents / a
+whole-prompt agent override under `<root>/.agents/` — repo text as
+INSTRUCTIONS outside the diff fence — so Kimi's deny list masks those at every
+protected root (`CLAUDE.md` is not loaded by kimi-code 0.32). The ACP
+`--deny-path` check scans every string in a tool call's `rawInput` and `title`
+as well as `locations` (optional UI data in ACP — trusting it alone was
+fail-open); `scrub_secrets`/`scrubField` redact JWT-shaped tokens. The config
+projection parses with `tomllib` (3.11+) and re-serializes only the allowlisted
+tables, dropping every secret-shaped scalar (`api_key`, `token`, …) — the
+managed provider and the moonshot services authenticate via the linked oauth
+store, their `api_key` is empty on a stock install. `_kimi_has_acp` detects
+ACP POSITIVELY (a commander-style CLI prints top-level help with rc 0 for an
+unknown subcommand); rc 1/2/127 are clean negatives, only timeouts degrade.
+`KIMI_CREDENTIALS_FILE` must be named `kimi-code.json` (the directory is
+linked, kimi reads the file by name). The ephemeral HOME refuses to sit under a
+protected (write-denied) root. The config projection keeps
 only the `managed:*` provider(s), the models declared on them, services and
 thinking, so a third-party provider's `api_key` never reaches a file the
 read+web Kimi can open. The jail (`_read_web_safe`) is part of Kimi's

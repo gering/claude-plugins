@@ -136,6 +136,11 @@ for raw in sys.stdin:
             # kind must stay missing (= unsafe), not be laundered by the update.
             emit(tool_update("tool_call", "tool-5", None, "pending"))
             emit(tool_update("tool_call_update", "tool-5", "read", "completed"))
+        elif scenario == "read-credentials-rawinput":
+            # No `locations` at all — the path only appears in rawInput.
+            u = tool_update("tool_call", "tool-3", "read", "pending")
+            u["params"]["update"]["rawInput"] = {"args": ["--file", "~/.kimi-code/credentials/kimi-code.json"]}
+            emit(u)
         elif scenario == "read-credentials":
             u = tool_update("tool_call", "tool-4", "read", "pending")
             u["params"]["update"]["locations"] = [
@@ -241,7 +246,8 @@ for raw in sys.stdin:
 # addCleanup/TemporaryDirectory handling is what keeps those fixtures hermetic.
 class KimiAcpTests(unittest.TestCase):
     def run_helper(self, scenario: str = "valid", *, schema: Path = SCHEMA,
-                   env_extra: dict | None = None):
+                   env_extra: dict | None = None, prompt_bytes: bytes | None = None,
+                   effort: str = "max"):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
@@ -249,12 +255,16 @@ class KimiAcpTests(unittest.TestCase):
         fake.write_text(_FAKE_KIMI, encoding="utf-8")
         fake.chmod(0o755)
         prompt = root / "prompt.txt"
-        prompt.write_text("PROMPT_SENTINEL_7f0ac9\n", encoding="utf-8")
+        if prompt_bytes is None:
+            prompt.write_text("PROMPT_SENTINEL_7f0ac9\n", encoding="utf-8")
+        else:
+            prompt.write_bytes(prompt_bytes)
         log = root / "fake.log"
         env = os.environ.copy()
         env.update({
             "FAKE_SCENARIO": scenario,
             "FAKE_DENY": str(root / ".kimi-code"),
+            "HOME": str(root),   # so `~/.kimi-code/...` in a tool input resolves under the deny path
             "FAKE_LOG": str(log),
         })
         if env_extra:
@@ -267,7 +277,7 @@ class KimiAcpTests(unittest.TestCase):
                 "--schema", str(schema),
                 "--cwd", str(root),
                 "--model", MODEL,
-                "--effort", "max",
+                "--effort", effort,
                 "--kimi-bin", str(fake),
                 "--deny-path", str(root / ".kimi-code"),
             ],
@@ -382,6 +392,26 @@ class KimiAcpTests(unittest.TestCase):
         result, _ = self.run_helper("kind-late")
         self.assertEqual(result.returncode, 13)
         self.assertIn("no known kind", result.stderr)
+
+    def test_read_of_the_store_via_rawinput_only_aborts(self):
+        result, _ = self.run_helper("read-credentials-rawinput",
+                                    env_extra={"HOME": str(Path(os.environ["FAKE_ROOT_HINT"]).parent)}
+                                    if "FAKE_ROOT_HINT" in os.environ else None)
+        self.assertEqual(result.returncode, 13)
+        self.assertIn("denied path", result.stderr)
+
+    def test_undecodable_prompt_bytes_do_not_abort(self):
+        result, records = self.run_helper("valid", prompt_bytes=b"diff\n\xe9\xff\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_matching_option_is_not_re_set(self):
+        # The fake starts with thinking=high; requesting "high" must not send a
+        # set_config_option for it (model and mode still change).
+        result, records = self.run_helper("valid", effort="high")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        sets = [r["set"] for r in records if "set" in r]
+        self.assertNotIn("thinking", [x.get("configId") for x in sets])
+        self.assertIn("model", [x.get("configId") for x in sets])
 
     def test_read_under_the_runtime_store_aborts(self):
         # A `read` is a safe KIND, but not of the linked credential file.

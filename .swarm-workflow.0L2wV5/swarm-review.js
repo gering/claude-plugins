@@ -503,8 +503,6 @@ function scrubField(s) {
     [/aws_secret_access_key\s*[=:]\s*[A-Za-z0-9/+]{20,}/gi, 'aws_secret_access_key=[REDACTED]'],
     [/\bgh[pousr]_[A-Za-z0-9]{20,}/g, '[REDACTED-GH-TOKEN]'],
     [/\bsk-[A-Za-z0-9]{20,}/g, '[REDACTED-API-KEY]'],
-    // JWT-shaped bearer/refresh tokens (Moonshot OAuth): three base64url runs.
-    [/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, '[REDACTED-JWT]'],
     [/(?<key>\b(?:secret|token|password|passwd|api[_-]?key)\b)\s*[=:]\s*[A-Za-z0-9/+._-]{16,}/gi, '$<key>=[REDACTED]'],
   ]
   for (const [re, repl] of rules) {

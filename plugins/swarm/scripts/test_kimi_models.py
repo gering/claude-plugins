@@ -40,7 +40,7 @@ def run_ready(*, help_text: str, models: str, help_rc: int = 0,
               models_rc: int = 0, credentials: bool = True,
               requested_model: str = ""):
     with tempfile.TemporaryDirectory() as td:
-        cred = Path(td) / "credentials.json"
+        cred = Path(td) / "kimi-code.json"
         if credentials:
             cred.write_text('{"access_token":"tok","refresh_token":"ref"}\n', encoding="utf-8")
         env = os.environ.copy()
@@ -106,6 +106,12 @@ check("ACP + pinned model + credentials is ready", r.returncode == 0 and r.stdou
 
 r = run_ready(help_text="unknown command", models=GOOD_MODELS, help_rc=2)
 check("missing ACP capability is not ready", r.stdout.strip() == "not-ready")
+# A commander-style CLI answers an unknown subcommand with its TOP-LEVEL help
+# and rc 0 — that is a build without ACP, not a build with it.
+r = run_ready(help_text="Usage: kimi [options] [command]\n\nCommands:\n  login\n  provider", models=GOOD_MODELS)
+check("top-level help with rc 0 is a clean ACP negative", r.stdout.strip() == "not-ready")
+r = run_ready(help_text="error: unknown command 'acp'", models=GOOD_MODELS, help_rc=1)
+check("rc 1 from the ACP probe is a clean negative", r.stdout.strip() == "not-ready")
 
 r = run_ready(help_text="ACP server over standard I/O", models=GOOD_MODELS)
 check("ACP help wording drift degrades to ready", r.stdout.strip() == "ready")

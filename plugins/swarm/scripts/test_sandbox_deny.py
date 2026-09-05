@@ -79,6 +79,23 @@ def _bash_deny_paths(backend: str = "codex", cwd: Path | None = None,
     return [ln for ln in r.stdout.splitlines() if ln.strip()]
 
 
+
+class _CredFile:
+    """A credential fixture named kimi-code.json — kimi reads it BY NAME and the
+    adapter's readiness now refuses any other basename."""
+    def __enter__(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.name = os.path.join(self._td.name, "kimi-code.json")
+        self._fh = open(self.name, "w")
+        return self
+    def write(self, text):
+        self._fh.write(text)
+    def flush(self):
+        self._fh.flush()
+    def __exit__(self, *exc):
+        self._fh.close()
+        self._td.cleanup()
+
 # A credential file readiness accepts: kimi-code blanks the tokens in place after
 # a failed refresh, so the harness must not hand the adapter an empty object.
 CRED_JSON = '{"access_token":"tok","refresh_token":"ref"}\n'
@@ -421,7 +438,7 @@ class TestFailClosedDegrade(unittest.TestCase):
     def _argv(self, backend: str, jail: bool) -> str:
         with tempfile.NamedTemporaryFile("r", suffix=".argv") as tf, \
                 tempfile.NamedTemporaryFile("w", suffix=".prompt") as pf, \
-                tempfile.NamedTemporaryFile("w", suffix=".cred") as cred:
+                _CredFile() as cred:
             # run_codex/run_grok take the prompt as a PATH, not as text: the
             # prompt reaches the backend out-of-band (codex stdin redirect, grok
             # --prompt-file) so it never hits exec's argv limit. codex's stdin
@@ -487,7 +504,7 @@ class TestFailClosedDegrade(unittest.TestCase):
 
     def test_kimi_sigkill_is_reported_as_timeout(self):
         with tempfile.NamedTemporaryFile("w", suffix=".prompt") as pf, \
-                tempfile.NamedTemporaryFile("w", suffix=".cred") as cred:
+                _CredFile() as cred:
             pf.write("prompt text\n")
             pf.flush()
             cred.write(CRED_JSON)
@@ -510,7 +527,7 @@ class TestFailClosedDegrade(unittest.TestCase):
 
     def test_kimi_sigkill_without_wrapper_is_not_a_timeout(self):
         with tempfile.NamedTemporaryFile("w", suffix=".prompt") as pf, \
-                tempfile.NamedTemporaryFile("w", suffix=".cred") as cred:
+                _CredFile() as cred:
             pf.write("prompt text\n")
             pf.flush()
             cred.write(CRED_JSON)
@@ -532,7 +549,7 @@ class TestFailClosedDegrade(unittest.TestCase):
 
     def _kimi_gate_rc(self, helper_rc: int):
         with tempfile.NamedTemporaryFile("w", suffix=".prompt") as pf, \
-                tempfile.NamedTemporaryFile("w", suffix=".cred") as cred:
+                _CredFile() as cred:
             pf.write("prompt text\n")
             pf.flush()
             cred.write(CRED_JSON)
@@ -683,7 +700,7 @@ class TestProtectedRootsAndIsolation(unittest.TestCase):
             self.assertNotIn(str(repo.resolve() / ".mcp.json"), codex_paths)
 
     def test_kimi_ready_requires_the_jail(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".cred") as cred:
+        with _CredFile() as cred:
             cred.write(CRED_JSON); cred.flush()
             stubs = ("_kimi_has_acp() { return 0; }",
                      "kimi_model_offered() { return 0; }")
@@ -705,7 +722,7 @@ class TestProtectedRootsAndIsolation(unittest.TestCase):
         for body, expect in (('{"access_token":"","refresh_token":"","expires_at":0}', "NOT-READY"),
                              ('{}', "NOT-READY"), ('not json', "NOT-READY"),
                              ('{"access_token":"tok","refresh_token":"ref"}', "READY")):
-            with tempfile.NamedTemporaryFile("w", suffix=".cred") as cred:
+            with _CredFile() as cred:
                 cred.write(body + "\n"); cred.flush()
                 r = _source(*stubs, 'ready_check kimi && echo READY || echo NOT-READY; ready_hint kimi',
                             env_extra={"KIMI_CREDENTIALS_FILE": cred.name})
@@ -717,7 +734,7 @@ class TestProtectedRootsAndIsolation(unittest.TestCase):
         # SIGKILL-orphaned scratch (a projected config, the assembled diff) must
         # sit inside the caller's scratch dir, which the skill's rm -rf reaches.
         with tempfile.TemporaryDirectory() as td, \
-                tempfile.NamedTemporaryFile("w", suffix=".cred") as cred, \
+                _CredFile() as cred, \
                 tempfile.NamedTemporaryFile("r", suffix=".iso") as iso:
             cred.write(CRED_JSON); cred.flush()
             pf = Path(td) / "prompt.txt"; pf.write_text("prompt text\n")
@@ -741,7 +758,7 @@ class TestProtectedRootsAndIsolation(unittest.TestCase):
         # the cat, so Kimi received the output contract alone and answered
         # `{"findings":[]}` with rc 0 — a silent empty review.
         with tempfile.TemporaryDirectory() as td, \
-                tempfile.NamedTemporaryFile("w", suffix=".cred") as cred, \
+                _CredFile() as cred, \
                 tempfile.NamedTemporaryFile("r", suffix=".iso") as iso:
             cred.write(CRED_JSON); cred.flush()
             pf = Path(td) / "assembled.txt"; pf.write_text("[lens] brief\n\nDIFF_SENTINEL_31c\n")
@@ -893,7 +910,7 @@ effort = "high"
 
     def test_kimi_runtime_links_auth_projects_config_and_disables_side_channels(self):
         with tempfile.NamedTemporaryFile("w", suffix=".prompt") as pf, \
-                tempfile.NamedTemporaryFile("w", suffix=".cred") as cred, \
+                _CredFile() as cred, \
                 tempfile.NamedTemporaryFile("w", suffix=".toml") as cfg, \
                 tempfile.NamedTemporaryFile("r", suffix=".iso") as iso:
             pf.write("prompt text\n")
