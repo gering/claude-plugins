@@ -46,7 +46,7 @@ branch delta).
   slowest, most thorough review (costs more time + tokens). Orthogonal to
   `--fix`/`--loop` — composes with both (`--max --loop` = max-depth fix loop).
   Set `max: true` in the workflow args (step 2). It bumps: codex →
-  `gpt-5.6-sol` at `xhigh` (codex has no `max` tier), Kimi ACP thinking →
+  `xhigh` (from `medium`; codex has no `max` tier), Kimi ACP thinking →
   `max`, Claude finders + the adversarial verifier → `xhigh`, and it splits the
   fan-out of **every** voice — Claude, codex, grok and kimi alike — from one call
   per lens **cluster** (≤5 units, the default) into one per **lens** (≤11 units).

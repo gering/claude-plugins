@@ -304,11 +304,12 @@ backend rc null.
   is gone) → the adapter maps `xhigh`/`max`→`high`; codex has no `max` tier →
   map `max`→`xhigh` (`-c model_reasoning_effort=…`). Both mappings degrade a
   stale caller instead of erroring.
-- **codex model is pinned** to `CODEX_DEFAULT_MODEL` (`gpt-5.6-terra`, the adapter
-  passes `-m` on every call), overridable per call via `--model` — so a review is
-  reproducible instead of tracking the user's ambient `~/.codex/config` default.
-  The pipeline runs codex at `high` normally; the `--max` profile overrides both
-  model and effort (`gpt-5.6-sol` @ `xhigh`) — see
+- **codex model is pinned** to `CODEX_DEFAULT_MODEL` (`gpt-5.6-sol` since 0.11.0,
+  `gpt-5.6-terra` before; the adapter passes `-m` on every call), overridable per
+  call via `--model` — so a review is reproducible instead of tracking the user's
+  ambient `~/.codex/config` default. The pipeline runs codex at `medium` normally
+  and `xhigh` under `--max` — the model is the adapter's on both profiles, only
+  the effort is a profile knob — see
   [swarm-review-pipeline](swarm-review-pipeline.md).
 - **Model-aware readiness beats an auth-only check** (swarm 0.4.3). grok drops
   and renames models between releases — 0.2.101 removed

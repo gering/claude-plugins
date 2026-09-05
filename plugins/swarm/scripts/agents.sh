@@ -122,7 +122,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_SCHEMA="$SCRIPT_DIR/schema/finding.schema.json"
 KIMI_ACP_CLIENT="$SCRIPT_DIR/kimi-acp.py"
-CODEX_DEFAULT_MODEL="gpt-5.6-terra"
+CODEX_DEFAULT_MODEL="gpt-5.6-sol"
 KIMI_DEFAULT_MODEL="kimi-code/k3-256k"
 KIMI_BIN="${SWARM_KIMI_BIN:-kimi}"
 # The FALLBACK used wherever discovery cannot run — no model list, offline, an

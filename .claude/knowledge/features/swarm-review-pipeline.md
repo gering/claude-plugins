@@ -246,13 +246,14 @@ the diff out of the script, above). Claude applies edits between rounds.
   poll); the `Status` column (🔧/⏭️/🔁) and stable `#` across rounds come from
   the report table contract this entry defines above (P2 reserved them).
 - **`--max` profile** (`INPUT.max` in the workflow): lifts every voice to its
-  ceiling — codex `gpt-5.6-sol`@`xhigh` (codex has NO `max` tier, xhigh is its
-  top), Claude finder lenses + verifier `xhigh`, and Kimi `thinking=max` via ACP;
+  ceiling — codex `xhigh` (from `medium`; codex has NO `max` tier, xhigh is its
+  top; the model is the adapter's `gpt-5.6-sol` on both profiles since 0.11.0),
+  Claude finder lenses + verifier `xhigh`, and Kimi `thinking=max` via ACP;
   gate/merge unchanged, and grok `medium` → `high` (its ceiling since grok
   0.2.101 dropped `max`; `high` blew the 540 s wall on ~190 KiB cluster prompts,
   so it is `--max`-only since 0.11.0). Orthogonal to `--fix`/`--loop`,
   composes with both. The profile's live settings are verified end-to-end
-  (`gpt-5.6-sol`@`xhigh` at wiring time; grok re-verified at `--effort high` on
+  (`gpt-5.6-sol`@`xhigh` at wiring time, `@medium` on 2026-09-05; grok re-verified at `--effort high` on
   0.2.101) — the "no silent fail on a non-existent model/effort" rule.
 
 ## `--pr`: review a PR diff and post the result (swarm 0.4.0)

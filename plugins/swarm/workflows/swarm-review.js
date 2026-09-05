@@ -292,7 +292,9 @@ const FINDING_NONCE_RAW = FINDING_NONCE  // remember what was passed, to explain
 if (FINDING_NONCE && !/^[a-f0-9]{16,}$/.test(FINDING_NONCE)) FINDING_NONCE = ''
 const fenceDegraded = !FINDING_NONCE  // no structural fence at merge/verify — surfaced in the return payload
 // `--max` profile: lift every voice to its ceiling for a deepest-effort review.
-// codex has no `max` tier (xhigh is its top) + gets the stronger model; grok's
+// codex has no `max` tier (xhigh is its top); the normal profile runs `medium`
+// on the same `gpt-5.6-sol` the adapter pins (the model is the adapter's, only
+// the effort is a profile knob — 0.11.0 dropped the --max-only model switch); grok's
 // ladder is low|medium|high since 0.2.101 — the normal profile runs `medium`
 // because `high` blew the 540 s wall on a ~190 KiB cluster prompt (reach timed
 // out, design/threat at 94–95 %, 0.11.0 self-review), so `high` is reserved for
@@ -300,18 +302,7 @@ const fenceDegraded = !FINDING_NONCE  // no structural fence at merge/verify —
 // while the normal profile stays high. In-session Claude goes to `xhigh`.
 // Strict === true: the skill always passes a boolean, and a stray truthy value
 // (max:1 / "true") should NOT silently trigger a slower, costlier run.
-// MAX_CODEX_MODEL must be a model the local codex CLI can load — if it's been
-// renamed/retired, run_codex exits non-zero and the voice surfaces as a
-// backendError (a visible degraded ensemble), never a silent downgrade.
 const MAX = INPUT.max === true
-const MAX_CODEX_MODEL = 'gpt-5.6-sol'
-// Defense-in-depth: this value is interpolated into a shell command string a
-// transport agent runs via Bash. It is a constant today (no injection vector),
-// but guard it so a future edit to a dynamic/untrusted source can't inject —
-// allow only model-id characters, else fail loudly rather than build a bad cmd.
-if (MAX && !/^[A-Za-z0-9._-]+$/.test(MAX_CODEX_MODEL)) {
-  throw new Error(`unsafe MAX_CODEX_MODEL: ${JSON.stringify(MAX_CODEX_MODEL)}`)
-}
 if (!ADAPTER || !DIFF_FILE || !EXTERNAL_PROMPT) {
   // Full shape so the /swarm:review presenter can render this without tripping
   // on missing gate/balance/refuted/backendErrors keys.
@@ -766,7 +757,7 @@ const utf8Checksum = (s) => {
 // adapter); absent CLIs would otherwise show up as noisy "errors".
 const wantVoices = Array.isArray(INPUT.externalVoices) ? INPUT.externalVoices : ['codex', 'grok', 'kimi']
 const EXTERNAL_BACKENDS = [
-  { backend: 'codex', flags: MAX ? `--model ${MAX_CODEX_MODEL} --effort xhigh` : '--effort high' },
+  { backend: 'codex', flags: MAX ? '--effort xhigh' : '--effort medium' },
   { backend: 'grok', flags: MAX ? '--effort high' : '--effort medium' },
   { backend: 'kimi', flags: MAX ? '--effort max' : '--effort high' },
 ]
