@@ -840,6 +840,7 @@ max_retries_per_step = 3
 [services.moonshot_search]
 base_url = "https://search.example"
 api_key = "svc-key"
+token = ""
 
 [services.moonshot_search.oauth]
 storage = "file"
@@ -848,7 +849,7 @@ key = "kimi-code"
 [providers."managed:kimi-code"]
 type = "kimi"
 base_url = "https://api.example"
-api_key = "provider-key"
+api_key = ""
 
 [providers."managed:kimi-code".oauth]
 storage = "file"
@@ -894,11 +895,15 @@ effort = "high"
                          '[models."kimi-code/k3-256k"]',
                          "[services.moonshot_search]",
                          "[services.moonshot_search.oauth]",
-                         "[thinking]"):
+                         "[thinking]",
+                         # the credential-store REFERENCE is not a secret, and an
+                         # EMPTY api_key is the stock shape kimi expects to find
+                         'key = "kimi-code"', 'api_key = ""'):
                 self.assertIn(must, out)
             for never in ("hooks", "curl", "zsh_history", "mcp", "nc", "/bin/sh",
                           "loop_control", "default_permission_mode", "yolo",
-                          "sk-live-openai", "[providers.openai]", '[models."gpt"]'):
+                          "sk-live-openai", "[providers.openai]", '[models."gpt"]',
+                          "svc-key", "provider-key"):
                 self.assertNotIn(never, out, never)
             # Still parses as TOML (tomllib is 3.11+; skip the check below it).
             try:

@@ -2717,7 +2717,9 @@ import re, sys
 # provider and the moonshot services authenticate through the linked oauth
 # store (their api_key is "" on a stock install), so nothing a review needs is
 # lost, and a third-party key can never reach a file the read+web Kimi reads.
-SECRET_KEY = re.compile(r"(?i)(^|_)(api[_-]?key|key|token|secret|password|passwd)$")
+# NOT a bare `key`: `[providers.*.oauth] key = "kimi-code"` names the credential
+# store entry — dropping it broke session start (rc 10, 2026-09-05).
+SECRET_KEY = re.compile(r"(?i)(^|_)(api[_-]?key|secret[_-]?key|access[_-]?key|private[_-]?key|token|secret|password|passwd)$")
 KEEP_ROOTS = ("providers", "models", "services", "thinking")
 
 def managed(name):
@@ -2740,7 +2742,10 @@ def emit_table(out, path, table):
     out.append("")
     out.append("[" + ".".join(quote_key(k) for k in path) + "]")
     for k, v in scalars.items():
-        if SECRET_KEY.search(k):
+        # Drop a secret-shaped key only when it carries a value: `api_key = ""`
+        # is the stock managed-provider shape (auth comes from the oauth store)
+        # and kimi expects the field to exist.
+        if SECRET_KEY.search(k) and isinstance(v, str) and v:
             continue
         try:
             out.append("%s = %s" % (quote_key(k), toml_scalar(v)))
@@ -2810,8 +2815,9 @@ else:
         if keep:
             out.append("")
             for l in sec["lines"]:
-                key = re.match(r"^\s*([A-Za-z0-9_\"'-]+)\s*=", l)
-                if key and SECRET_KEY.search(key.group(1).strip("\"'")):
+                key = re.match(r"^\s*([A-Za-z0-9_\"'-]+)\s*=\s*(.*)$", l)
+                if key and SECRET_KEY.search(key.group(1).strip("\"'")) \
+                        and key.group(2).strip() not in ('""', "''"):
                     continue
                 out.append(l)
 sys.stdout.write("\n".join(out) + "\n")
