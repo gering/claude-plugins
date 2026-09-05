@@ -38,7 +38,7 @@ _probe_or_bare() { _fake_probe "$@"; }
 
 def run_ready(*, help_text: str, models: str, help_rc: int = 0,
               models_rc: int = 0, credentials: bool = True,
-              requested_model: str = ""):
+              requested_model: str = "", config_file: str = ""):
     with tempfile.TemporaryDirectory() as td:
         cred = Path(td) / "kimi-code.json"
         if credentials:
@@ -51,6 +51,9 @@ def run_ready(*, help_text: str, models: str, help_rc: int = 0,
             "FAKE_HELP_RC": str(help_rc),
             "FAKE_MODELS_RC": str(models_rc),
             "FAKE_REQUESTED_MODEL": requested_model,
+            # No host config in the harness: the projected-catalogue intersect
+            # is exercised by its own check below.
+            "KIMI_CONFIG_FILE": config_file or str(Path(td) / "no-config.toml"),
         })
         script = f'''set -euo pipefail
 source {str(AGENTS)!r}
@@ -141,6 +144,29 @@ check("failed model probe names its rc", "rc=124" in r.stderr)
 r = run_ready(help_text="partial", models=GOOD_MODELS, help_rc=124)
 check("failed ACP probe degrades to trusting install", r.stdout.strip() == "ready")
 check("failed ACP probe is audible", "acp --help" in r.stderr and "rc=124" in r.stderr)
+
+# Readiness validates against what the ISOLATED session can offer: a model on a
+# custom (non-managed) provider is listed by `provider list` but dropped by the
+# config projection, so it must not be ready.
+import tempfile as _tf
+_cfg_dir = _tf.mkdtemp()
+_cfg = Path(_cfg_dir) / "config.toml"
+_cfg.write_text('''[providers."managed:kimi-code"]
+type = "kimi"
+[models."kimi-code/k3-256k"]
+provider = "managed:kimi-code"
+model = "k3-256k"
+[providers.custom]
+type = "openai"
+[models."custom/other"]
+provider = "custom"
+model = "other"
+''')
+_both = json.dumps({"models": {"kimi-code/k3-256k": {"model": "k3-256k"}, "custom/other": {"model": "other"}}})
+r = run_ready(help_text=GOOD_HELP, models=_both, config_file=str(_cfg))
+check("managed model survives the projected-catalogue intersect", r.stdout.strip() == "ready")
+r = run_ready(help_text=GOOD_HELP, models=_both, requested_model="custom/other", config_file=str(_cfg))
+check("custom-provider model the projection drops is not ready", r.stdout.strip() == "not-ready")
 
 r = run_ready(help_text=GOOD_HELP, models=GOOD_MODELS, credentials=False)
 check("missing credentials is not ready", r.stdout.strip() == "not-ready")

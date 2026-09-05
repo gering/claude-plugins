@@ -4,7 +4,7 @@ createdAt: 2026-07-08
 updatedAt: 2026-09-05
 createdFrom: "PR #24"
 updatedFrom: "add-kimi-swarm-voice"
-pluginVersion: 0.11.0
+pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
 ---

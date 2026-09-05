@@ -1309,6 +1309,10 @@ return {
     fenceDegraded,
     voices: voices.length,
     agents: Object.values(agents),
+    // Backends that actually entered the workflow with at least one surviving
+    // voice — the pr-post footer names exactly these; the skill passes the list
+    // through verbatim instead of re-deriving it from `agents` in prose.
+    participants: Object.values(agents).filter((a) => a.ok && a.failedVoices < a.voices).map((a) => a.backend),
     familiesExpected,
     familiesPresent,
     familiesLost,

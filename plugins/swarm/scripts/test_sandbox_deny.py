@@ -571,11 +571,19 @@ class TestFailClosedDegrade(unittest.TestCase):
         self.assertIn("telemetry=", r.stderr)
         self.assertNotIn("telemetry=0", r.stderr)
 
-    def test_kimi_postprompt_policy_failure_is_rejected_response(self):
+    def test_kimi_postprompt_schema_rejection_is_an_answered_call(self):
+        r = self._kimi_gate_rc(11)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("rejected by the ACP schema gate", r.stderr)
+        self.assertIn("telemetry=0", r.stderr)
+
+    def test_kimi_policy_abort_keeps_its_own_code_in_telemetry(self):
+        # rc 13 may fire BEFORE any answer existed (unsafe tool killed mid-turn):
+        # telemetry must not claim Kimi answered.
         r = self._kimi_gate_rc(13)
         self.assertEqual(r.returncode, 1)
-        self.assertIn("response was rejected", r.stderr)
-        self.assertIn("telemetry=0", r.stderr)
+        self.assertIn("aborted by the ACP policy gate", r.stderr)
+        self.assertIn("telemetry=13", r.stderr)
 
 
 class TestPromptTransport(unittest.TestCase):
@@ -809,6 +817,61 @@ class TestProtectedRootsAndIsolation(unittest.TestCase):
                 paths = _bash_deny_paths(backend, env_extra={"HOME": td})
                 self.assertIn(str(store), paths, backend)
                 self.assertNotIn(str(store / "hooks"), paths, backend)
+
+    def test_host_write_deny_covers_shell_rc_and_kimi_binary_not_own_store(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            for name in (".zshrc", ".claude.json"):
+                (home / name).write_text("")
+            for d in (".claude", ".config", ".codex", ".grok", ".kimi-code/bin"):
+                (home / d).mkdir(parents=True)
+            for backend in ("codex", "grok", "kimi"):
+                r = _source(f'_host_write_deny_paths {backend}', env_extra={"HOME": td})
+                self.assertEqual(r.returncode, 0, r.stderr)
+                paths = r.stdout.splitlines()
+                for must in (".zshrc", ".claude.json", ".claude", ".config", ".kimi-code/bin"):
+                    self.assertIn(str(home / must), paths, f"{backend}: {must}")
+                # the owner keeps its own store writable; siblings do not
+                self.assertEqual(str(home / ".codex") in paths, backend != "codex", backend)
+                self.assertEqual(str(home / ".grok") in paths, backend != "grok", backend)
+                # never the auth dirs Kimi refreshes through the links
+                self.assertNotIn(str(home / ".kimi-code" / "credentials"), paths)
+
+    @unittest.skipUnless(shutil.which("sandbox-exec"), "sandbox-exec e2e is macOS-only")
+    def test_sandbox_exec_profile_write_denies_host_rc_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td); (home / ".zshrc").write_text("")
+            r = _source('_init_sandbox codex; printf "%s\\n" "${SANDBOX_CMD[@]}"', env_extra={"HOME": td})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(f'(deny file-write*', r.stdout)
+            self.assertIn(os.path.realpath(str(home / ".zshrc")), r.stdout)
+
+    def test_worktree_paths_with_odd_characters_are_protected(self):
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        with tempfile.TemporaryDirectory() as td:
+            main = Path(td) / "main"; main.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=main, check=True)
+            subprocess.run(["git", "-C", str(main), "commit", "--allow-empty", "-m", "x", "-q"], check=True, env=env)
+            odd = Path(td) / 'wt "quoted"'
+            # -b: git derives the branch name from the basename otherwise, and a
+            # quote is not a valid branch name.
+            subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", "-b", "odd", str(odd)], check=True, env=env)
+            r = _source("_repo_protected_roots", cwd=main)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(os.path.realpath(str(odd)), [os.path.realpath(p) for p in r.stdout.splitlines() if p])
+
+    def test_kimi_ready_refuses_tmpdir_inside_the_repo(self):
+        with tempfile.TemporaryDirectory() as td, _CredFile() as cred:
+            cred.write(CRED_JSON); cred.flush()
+            repo = Path(td); subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            inner = repo / "tmp"; inner.mkdir()
+            stubs = ("_kimi_has_acp() { return 0; }", "kimi_model_offered() { return 0; }",
+                     "_read_web_safe() { return 0; }")
+            r = _source(*stubs, 'ready_check kimi && echo READY || echo NOT-READY; ready_hint kimi',
+                        cwd=repo, env_extra={"KIMI_CREDENTIALS_FILE": cred.name, "TMPDIR": str(inner)})
+            self.assertIn("NOT-READY", r.stdout, r.stderr)
+            self.assertIn("TMPDIR", r.stdout)
 
     def test_kimi_passes_resolved_binary_to_acp_client(self):
         argv = self._argv_for("kimi")

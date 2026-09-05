@@ -45,6 +45,10 @@ def tool_update(kind_of_update, tool_id, kind, status):
             "params": {"sessionId": "fake-session", "update": update}}
 
 
+def response_error(request_id, code, message):
+    emit({"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}})
+
+
 def agent_text(text):
     return {"jsonrpc": "2.0", "method": "session/update",
             "params": {"sessionId": "fake-session",
@@ -136,6 +140,20 @@ for raw in sys.stdin:
             # kind must stay missing (= unsafe), not be laundered by the update.
             emit(tool_update("tool_call", "tool-5", None, "pending"))
             emit(tool_update("tool_call_update", "tool-5", "read", "completed"))
+        elif scenario == "read-credentials-relative":
+            u = tool_update("tool_call", "tool-2r", "read", "pending")
+            u["params"]["update"]["rawInput"] = {"path": "./.kimi-code/credentials/kimi-code.json"}
+            emit(u)
+        elif scenario == "read-credentials-symlink":
+            u = tool_update("tool_call", "tool-2s", "read", "pending")
+            u["params"]["update"]["rawInput"] = {"path": "leak.json"}
+            emit(u)
+        elif scenario == "prompt-error":
+            response_error(request_id, -32000, "Authentication required: 403 You've reached your 5-hour usage limit.")
+            continue
+        elif scenario == "flood":
+            for _ in range(2000):
+                emit(agent_text("x" * 8192))
         elif scenario == "read-credentials-rawinput":
             # No `locations` at all — the path only appears in rawInput.
             u = tool_update("tool_call", "tool-3", "read", "pending")
@@ -200,6 +218,10 @@ for raw in sys.stdin:
 
         if scenario == "invalid-json":
             answer = "RAW_SECRET_SHOULD_NOT_LEAK"
+        elif scenario == "fenced":
+            answer = 'Here is the review:\n```json\n{"findings":[]}\n```\nDone.'
+        elif scenario == "prose-wrapped":
+            answer = 'Summary first. {"findings":[]} That is all.'
         elif scenario == "wrong-shape":
             answer = '{"findings":[],"extra":true}'
         elif scenario == "missing-field":
@@ -247,7 +269,7 @@ for raw in sys.stdin:
 class KimiAcpTests(unittest.TestCase):
     def run_helper(self, scenario: str = "valid", *, schema: Path = SCHEMA,
                    env_extra: dict | None = None, prompt_bytes: bytes | None = None,
-                   effort: str = "max"):
+                   effort: str = "max", make_symlink: bool = False):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
@@ -260,6 +282,10 @@ class KimiAcpTests(unittest.TestCase):
         else:
             prompt.write_bytes(prompt_bytes)
         log = root / "fake.log"
+        (root / ".kimi-code" / "credentials").mkdir(parents=True, exist_ok=True)
+        (root / ".kimi-code" / "credentials" / "kimi-code.json").write_text("{}")
+        if make_symlink:
+            os.symlink(root / ".kimi-code" / "credentials" / "kimi-code.json", root / "leak.json")
         env = os.environ.copy()
         env.update({
             "FAKE_SCENARIO": scenario,
@@ -316,7 +342,7 @@ class KimiAcpTests(unittest.TestCase):
     def test_invalid_json_fails_without_echoing_content(self):
         result, _ = self.run_helper("invalid-json")
         self.assertEqual(result.returncode, 11)
-        self.assertIn("invalid JSON", result.stderr)
+        self.assertIn("not a JSON object", result.stderr)
         self.assertNotIn("RAW_SECRET_SHOULD_NOT_LEAK", result.stderr)
         self.assertEqual(result.stdout, "")
 
@@ -412,6 +438,33 @@ class KimiAcpTests(unittest.TestCase):
         sets = [r["set"] for r in records if "set" in r]
         self.assertNotIn("thinking", [x.get("configId") for x in sets])
         self.assertIn("model", [x.get("configId") for x in sets])
+
+    def test_relative_path_into_the_store_aborts(self):
+        result, _ = self.run_helper("read-credentials-relative")
+        self.assertEqual(result.returncode, 13)
+        self.assertIn("denied path", result.stderr)
+
+    def test_symlink_into_the_store_aborts(self):
+        result, _ = self.run_helper("read-credentials-symlink", make_symlink=True)
+        self.assertEqual(result.returncode, 13)
+        self.assertIn("denied path", result.stderr)
+
+    def test_peer_error_message_is_surfaced(self):
+        result, _ = self.run_helper("prompt-error")
+        self.assertEqual(result.returncode, 10)
+        self.assertIn("5-hour usage limit", result.stderr)
+
+    def test_fenced_and_prose_wrapped_json_are_accepted(self):
+        for scenario in ("fenced", "prose-wrapped"):
+            with self.subTest(scenario=scenario):
+                result, _ = self.run_helper(scenario)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), {"findings": []})
+
+    def test_response_flood_is_capped(self):
+        result, _ = self.run_helper("flood")
+        self.assertEqual(result.returncode, 13)
+        self.assertIn("exceeded", result.stderr)
 
     def test_read_under_the_runtime_store_aborts(self):
         # A `read` is a safe KIND, but not of the linked credential file.

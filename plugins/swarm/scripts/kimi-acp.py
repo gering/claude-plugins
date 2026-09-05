@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -31,6 +32,10 @@ EXIT_RESPONSE = 11
 EXIT_PROTOCOL = 12
 EXIT_POLICY_RESPONSE = 13
 ACP_VERSION = 1
+# Upper bound on the assistant text this client will buffer: the findings
+# schema caps a valid answer well under this; a peer streaming past it can only
+# be malfunctioning or hostile, and the outer timeout is the wrong tool for it.
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 # ALLOWLIST of tool kinds a review may run. Everything else — edit, delete,
 # move, execute, switch_mode, other, an unknown or missing kind — is unsafe.
 # An allowlist because the denylist version was fail-open: a kind this file
@@ -217,6 +222,8 @@ class AcpClient:
         # `read` there is the own-token exfiltration the egress guard can only
         # ask the model not to do — abort on first sight instead.
         self.deny_paths: list[str] = []
+        self.cwd: str = os.getcwd()       # the ACP session cwd; relative tool paths resolve here
+        self.output_bytes = 0
 
     def start(self) -> None:
         try:
@@ -313,7 +320,11 @@ class AcpClient:
             if "error" in message:
                 error = message.get("error")
                 code = error.get("code") if isinstance(error, dict) else "?"
-                raise BackendError(f"{method} failed with JSON-RPC error {code}")
+                # The peer's message names the cause (quota exhausted, auth,
+                # model) — pass it up, bounded; the adapter scrubs stderr.
+                msg = error.get("message") if isinstance(error, dict) else None
+                detail = f": {str(msg)[:300]}" if isinstance(msg, str) and msg else ""
+                raise BackendError(f"{method} failed with JSON-RPC error {code}{detail}")
             result = message.get("result")
             if not isinstance(result, dict):
                 raise ProtocolError(f"{method} returned a non-object result")
@@ -376,6 +387,12 @@ class AcpClient:
             if isinstance(content, dict) and content.get("type") == "text":
                 text = content.get("text")
                 if isinstance(text, str):
+                    self.output_bytes += len(text.encode("utf-8", "replace"))
+                    if self.output_bytes > MAX_RESPONSE_BYTES:
+                        self.close(force=True)
+                        raise ProtocolError(
+                            f"assistant text exceeded {MAX_RESPONSE_BYTES} bytes; session aborted"
+                        )
                     self.output_chunks.append(text)
 
         if update_type in {"tool_call", "tool_call_update"}:
@@ -431,10 +448,19 @@ class AcpClient:
             if prefix in candidate:
                 return True
         expanded = os.path.expanduser(candidate)
-        if not expanded.startswith(os.sep):
-            return False
+        # A RELATIVE path resolves against the session cwd — `../.kimi-code/…`
+        # from the repo root, or a repo symlink pointing into the store, reach
+        # the same file the absolute form would.
+        if not os.path.isabs(expanded):
+            expanded = os.path.join(self.cwd, expanded)
         real = os.path.realpath(expanded)
-        return any(real == p or real.startswith(p + os.sep) for p in self.deny_paths)
+        for p in self.deny_paths:
+            try:
+                if os.path.commonpath([real, p]) == p:
+                    return True
+            except ValueError:
+                continue
+        return False
 
     def _check_locations(self, update: dict[str, Any], tool_id: str) -> None:
         # Any tool kind, any status: the announcement alone means the agent is
@@ -531,6 +557,32 @@ def _load_json(path: Path, label: str) -> Any:
         raise SchemaError(f"could not read {label}: {exc}") from exc
 
 
+def _extract_json_object(text: str) -> Any:
+    """The single JSON object in the assistant text — bare, inside a ``` fence,
+    or wrapped in prose. Kimi has no CLI schema-enforcement flag (codex/grok
+    do), so the output contract is an instruction it may decorate; the strict
+    schema validation that follows is what actually gates the answer. Content
+    is never echoed on failure."""
+    size = len(text.encode("utf-8"))
+    candidates = [text]
+    fence = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.S)
+    if fence:
+        candidates.append(fence.group(1))
+    first, last = text.find("{"), text.rfind("}")
+    if 0 <= first < last:
+        candidates.append(text[first:last + 1])
+    for cand in candidates:
+        try:
+            value = json.loads(cand)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    raise ResponseError(
+        f"assistant text is not a JSON object ({size} bytes; content withheld)"
+    )
+
+
 def _load_prompt(path: Path) -> str:
     # errors="replace": the prompt carries an untrusted diff that may embed
     # Latin-1 (or worse) bytes; a decode error here surfaced as rc 2 "adapter
@@ -582,6 +634,7 @@ def main(argv: list[str]) -> int:
 
     client = AcpClient(args.kimi_bin)
     client.deny_paths = [os.path.realpath(p) for p in args.deny_path if p]
+    client.cwd = os.path.realpath(str(args.cwd))
     prompt_started = False
     previous_handlers: dict[int, Any] = {}
 
@@ -651,12 +704,7 @@ def main(argv: list[str]) -> int:
         response_text = "".join(client.output_chunks)
         if not response_text.strip():
             raise ResponseError("Kimi produced no assistant text")
-        try:
-            response = json.loads(response_text)
-        except json.JSONDecodeError as exc:
-            raise ResponseError(
-                f"assistant text is invalid JSON ({len(response_text.encode('utf-8'))} bytes; content withheld)"
-            ) from exc
+        response = _extract_json_object(response_text)
         _validate_instance(response, schema)
         json.dump(response, sys.stdout, separators=(",", ":"), ensure_ascii=True)
         sys.stdout.write("\n")

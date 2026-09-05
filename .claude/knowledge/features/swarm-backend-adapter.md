@@ -4,7 +4,7 @@ createdAt: 2026-07-03
 updatedAt: 2026-09-05
 createdFrom: "PR #21"
 updatedFrom: "add-kimi-swarm-voice"
-pluginVersion: 0.11.0
+pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -208,7 +208,24 @@ ACP POSITIVELY (a commander-style CLI prints top-level help with rc 0 for an
 unknown subcommand); rc 1/2/127 are clean negatives, only timeouts degrade.
 `KIMI_CREDENTIALS_FILE` must be named `kimi-code.json` (the directory is
 linked, kimi reads the file by name). The ephemeral HOME refuses to sit under a
-protected (write-denied) root. The config projection keeps
+protected (write-denied) root, and readiness already refuses a `TMPDIR` inside
+the checkout. **The ACP tool gate is detection, not prevention:** an
+auto-approved tool has run by the time its status update arrives; the OS
+controls are the boundary. Beyond the repository, the jail also
+**write-denies** the host's shell startup files, `~/.claude`, `~/.claude.json`,
+`~/.config`, `~/.local/bin`, the sibling agent stores and `~/.kimi-code/bin`
+(+ the resolved `$KIMI_BIN` dir, config, hooks) — one auto-approved write there
+would have turned the next *unjailed* readiness probe into a trojan launch.
+Relative tool paths resolve against the session cwd before the deny check
+(`../.kimi-code/…` and repo symlinks into the store). The adapter now keeps the
+ACP client's stderr and appends its last lines (scrubbed) to the backend error
+— the first four-family run had every Kimi answer "rejected by the gate" with
+no cause visible; the peer's JSON-RPC message is passed up too (that run ended
+in `403 You've reached your 5-hour usage limit`, Moonshot's rolling quota). The
+client extracts the JSON object from a fenced or prose-wrapped answer before
+strict schema validation (Kimi has no CLI schema-enforcement flag), caps the
+buffered answer at 8 MiB, and readiness validates the model against the
+*projected* catalogue, not the host's `provider list`. The config projection keeps
 only the `managed:*` provider(s), the models declared on them, services and
 thinking, so a third-party provider's `api_key` never reaches a file the
 read+web Kimi can open. The jail (`_read_web_safe`) is part of Kimi's

@@ -857,7 +857,7 @@ post. Do **not** re-implement the sanitize/gate/post logic inline.
      ],
      "has_quelle": true,
      "balance": "<the step-3 balance block, verbatim>",
-     "agents": ["<each balance.agents[].backend that entered the workflow>"],
+     "agents": <balance.participants, verbatim>,
      "notes": ["<every extra line from step 3, if any: coverage notes, redaction, backend errors, fence-degraded>"],
      "empty": false
    }
@@ -870,8 +870,10 @@ post. Do **not** re-implement the sanitize/gate/post logic inline.
    workflow's `num`, verbatim; `sev`/`v` = the glyphs; `ort` = raw `file:line`,
    no backticks).
    `has_quelle:false` for a single-source review (drops the `Source` column).
-   Build `agents` from `balance.agents[].backend`, without adding configured or
-   skipped voices; the script uses it to name only actual participants in the
+   Copy `agents` from `balance.participants` verbatim — the workflow already
+   computed which backends entered the run with a surviving voice; do not
+   re-derive it from `balance.agents` (a compaction made that list drift from
+   the balance line in the same comment). The script names only these in the
    footer. Pass each finding's `kind` and `lens` through verbatim on its row — the
    SCRIPT renders one table, orders defect rows before design rows, and
    prefixes each design row's finding cell with its `[lens]` deterministically;
