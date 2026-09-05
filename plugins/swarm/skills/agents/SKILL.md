@@ -1,7 +1,7 @@
 ---
 name: agents
 description: |
-  Shows swarm backend status: which review agents (claude, codex, grok) are
+  Shows swarm backend status: which review agents (claude, codex, grok, kimi) are
   installed and authenticated.
   Trigger: "swarm agents", "which review backends are live", "agent status".
 user_invocable: true
@@ -13,7 +13,9 @@ user_invocable: true
 
 ## Instructions
 
-1. Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json`
+1. Run from the current repository: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json`
+   (Kimi's `ready` already includes the OS jail; its `hint` names the jail when
+   that is what is missing.)
 2. Render the JSON array as a table:
 
    | Backend | Installed | Version | Ready | Notes |
@@ -22,11 +24,11 @@ user_invocable: true
    - `available: false` → Installed ❌, Notes = "not installed"
    - `available: true, ready: false` → Ready ❌, Notes = the `hint` field (e.g. "run: codex login")
    - both true → ✅ ✅, Notes empty
-3. Close with one line stating which backends are live (all with
-   `available && ready`), e.g.:
-   `Live backends: claude + codex + grok — full ensemble.`
+3. Close with one line stating which backends are live (`available && ready`),
+   e.g.:
+   `Live backends: claude + codex + grok + kimi — full ensemble.`
    If only claude is live, note that installing/authenticating the external
-   CLIs (`codex`, `grok`) would widen the ensemble. Do not reference other
+   CLIs (`codex`, `grok`, `kimi`) would widen the ensemble. Do not reference other
    swarm commands until they ship.
 
 ## Notes
@@ -34,6 +36,14 @@ user_invocable: true
 - Read-only, no side effects — safe to run anytime.
 - `claude` is always ready when Claude Code runs (reviews happen in-session
   via the Agent tool; the external CLIs are called through the adapter).
+- **`kimi` Ready is model/transport-aware** — it requires the real
+  `~/.kimi-code/credentials/kimi-code.json`, ACP stdio support, and the adapter's
+  pinned model (`KIMI_DEFAULT_MODEL` in `agents.sh`; the `hint` names the
+  effective id) in `kimi provider list --json`. A failed, bounded, or
+  unrecognized-format capability probe degrades audibly to trusting credentials
+  rather than silently dropping the Moonshot family; a clean negative stays
+  not-ready. Kimi is live for reviews only with `jail=yes`, because ACP has no
+  safe jail-less read tier.
 - **`grok` Ready is a heuristic** — it means a non-empty `~/.grok/auth.json`
   exists, that the CLI offers `--prompt-file` (the out-of-band prompt transport),
   **and** that `grok models` still lists a schema-verified model, NOT that the

@@ -435,9 +435,24 @@ if mb and hr:
         body = len("; ".join(f"{l}: {briefs.get(l, '')}" for l in lenses).encode("utf-8"))
         tags = len(" / ".join(f'"[{l}] "' for l in lenses).encode("utf-8"))
         worst = max(worst, fixed + body + tags)
+    schema = HERE / "schema" / "finding.schema.json"
+    contract = subprocess.run(
+        ["bash", "-c", 'source "$1"; _kimi_output_contract "$2"',
+         "bash", str(ADAPTER), str(schema)],
+        capture_output=True, timeout=10,
+    )
+    check("adapter: Kimi output contract renders", contract.returncode == 0)
+    missing_contract = subprocess.run(
+        ["bash", "-c", 'source "$1"; _kimi_output_contract "$2"',
+         "bash", str(ADAPTER), str(schema.with_name("missing.schema.json"))],
+        capture_output=True, timeout=10,
+    )
+    check("adapter: Kimi output contract fails when schema cannot be read", missing_contract.returncode != 0)
+    kimi_contract_bytes = len(contract.stdout) if contract.returncode == 0 else headroom + 1
+    required = worst + kimi_contract_bytes
     check(
-        f"oversize headroom ({headroom} B) covers the largest lens instruction (<= {worst} B)",
-        headroom >= worst,
+        f"oversize headroom ({headroom} B) covers lens instruction + Kimi schema contract (<= {required} B)",
+        headroom >= required,
     )
 
 # METHODOLOGICAL_LENSES: the verify-gating list of lenses that assert repo-wide
@@ -512,10 +527,10 @@ check("adapter: probe budget is derived from the resolved bound + slop + kill gr
 # "how much pre-timer work exists" and the margin the workflow derives from it. A
 # new _probe_or_bare call site that nobody counted is invisible to that margin —
 # exactly how 0.10.0 overran it.
-#
 # The call sites and the constant are NOT equal on purpose: the constant is the
-# worst case for ONE backend (grok: --version, models, --help), while the sites
-# include codex's login-status probe that grok never runs. So pin the site COUNT
+# worst case for ONE backend on the run path (kimi: acp --help + provider list;
+# grok: models + --help). Version probing is display-only. The sites also include
+# codex's login-status probe that the others never run. Pin the site COUNT
 # itself — adding one forces this number to be touched, and touching it forces a
 # decision about whether the worst case moved too.
 # The definition lines end in `() {`, so the trailing space in the two markers
@@ -605,12 +620,12 @@ check(f"adapter: no function both prints and caches into a global ({_bad_memo})"
       not _bad_memo)
 
 check("adapter: SWARM_MAX_PROBES_PER_RUN is declared", _declared)
-check(f"adapter: pre-timer probe call sites still number 6 (got {_probe_sites}) — "
+check(f"adapter: pre-timer probe call sites still number 8 (got {_probe_sites}) — "
       f"if you added one, re-derive SWARM_MAX_PROBES_PER_RUN "
       f"(currently {_declared.group(1) if _declared else '?'}, the worst case for a "
       f"single backend) and update this pin",
-      _probe_sites == 6)
-check("adapter: the declared worst case covers grok's three probes",
+      _probe_sites == 8)
+check("adapter: the declared worst case covers grok/kimi's three run-path probes",
       bool(_declared) and int(_declared.group(1)) >= 3)
 
 check("adapter: the --help capability probe is memoized",

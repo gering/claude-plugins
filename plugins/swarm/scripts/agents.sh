@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # agents.sh — swarm backend adapter layer
 #
-# Uniform interface over the review backends (claude, codex, grok) so swarm
-# skills never talk to an external CLI directly.
+# Uniform interface over the review backends (claude, codex, grok, kimi) so
+# swarm skills never talk to an external CLI directly.
 #
 # Subcommands:
 #   list [--json]         Probe all backends -> human table or JSON array
@@ -33,11 +33,13 @@
 #       --unit <name>       Cluster/lens label recorded in the telemetry line
 #
 # The prompt reaches the backend OUT-OF-BAND (codex: stdin · grok:
-# --prompt-file), never on argv — so the diff is bounded by model context, not
-# by exec's MAX_ARG_STRLEN. SWARM_MAX_PROMPT_BYTES (default 512 KiB) is that
-# sanity cap.
+# --prompt-file · kimi: ACP v1 NDJSON over stdio), never on argv — so the diff
+# is bounded by model context, not by exec's MAX_ARG_STRLEN.
+# SWARM_MAX_PROMPT_BYTES (default 512 KiB) is that sanity cap.
 #
-# Backend notes (probed against codex 0.147.0 / grok 1.0.13, 2026-07..08):
+# Backend notes (probed against codex 0.147.0 / grok 1.0.13 / kimi-code 0.32.0,
+# 2026-07..09):
+#
 #   claude — probe-only: reviews run in-session via the Agent tool, so
 #            `run claude` is a usage error. available/ready/list include it.
 #   codex  — `codex exec --output-schema` under `-s read-only` with
@@ -68,15 +70,52 @@
 #            bounds it with its own watchdog where coreutils is missing. Its
 #            bound is SWARM_PROBE_TIMEOUT (10s, ceiling 20s), not SWARM_TIMEOUT
 #            (a review-length cap).
+#   kimi   — ACP v1 headless session over NDJSON stdio. `-p` is deliberately
+#            NOT used: it only accepts the full prompt on argv and would restore
+#            Linux MAX_ARG_STRLEN failures. The local ACP client rejects every
+#            approval-gated tool call and fails a completed mutating tool, but
+#            that is defense-in-depth only: Kimi 0.32 can auto-approve some
+#            in-repo writes without request_permission. The hard boundaries are
+#            the OS jail's secret-read deny and its REPOSITORY write deny
+#            (repository/Git remount-ro / file-write deny — every worktree of
+#            the repository, not only the reviewed one) plus
+#            an ephemeral HOME/KIMI_CODE_HOME that holds only LINKS to the
+#            host's credentials/ + oauth/ dirs and a FILTERED config projection
+#            (provider/model catalogue + search services; never hooks or MCP —
+#            without the catalogue ACP offers no kimi-code/* model at all).
+#            Kimi has no CLI schema flag; the
+#            client validates the final assistant JSON strictly against the
+#            configured schema and fails closed without retry. ACP exposes the
+#            selected model and thinking ladder (low|high|max), so adapter effort
+#            maps down to those verified tiers instead of pretending it is ignored.
+#            No working jail/repo root means Kimi does not run at all: unlike the
+#            other CLIs it has no safe inline-prompt/tool-less fallback.
+#            NOT boundaries, documented residuals: the host HOME stays writable
+#            (codex/grok keep session state there — a HOME-wide write deny
+#            breaks them) and the jail carries no network rule; both rest on
+#            the ACP tool gate + model cooperation. Kimi's own auth state stays
+#            readable AND writable to Kimi (the codex/grok posture): Moonshot
+#            rotates refresh tokens, so a refresh inside a private COPY
+#            invalidated the host's token and logged the operator out.
 #
-# Security floor (both external voices):
+# Security floor (all external voices):
 #   - OS secret-jail (sandbox-exec/bwrap) denies HOME secret stores +
 #     repo-ROOT .env*/data/*.pem/id_rsa*|id_ed25519*|…/*.key/.npmrc/.pypirc/
 #     credentials.json (nested via SWARM_DENY_PATHS; main checkout too in a
 #     linked worktree). No working jail -> fail closed per voice.
+#   - OS repository/Git immutability: protected roots are file-write denied
+#     (sandbox-exec) or bound then remounted read-only (bwrap), with
+#     GIT_OPTIONAL_LOCKS=0 so git exploration does not try to refresh the
+#     index. Writes to private runtime/temp locations stay allowed.
+#   - Kimi additionally starts with isolated HOME/KIMI_CODE_HOME holding only
+#     LINKS to the host's credentials/ + oauth/ (a refresh must land on the
+#     host file — Moonshot rotates refresh tokens) and a filtered config
+#     projection (no ambient hooks/MCP/sessions), telemetry/update/keep-alive
+#     off, and the repo's own AGENTS.md/KIMI.md/.agents/.kimi-code denied.
 #   - Egress guard is a prompt policy (model-cooperation-dependent) — the
 #     jail is the hard boundary. scrub_secrets filters OUTPUT only.
-#   - No write/shell/network-write tools; review is read-only.
+#   - CLI-level no-write/no-shell flags and ACP rejection are defense-in-depth.
+#     Arbitrary child-process execution is NOT portably prevented (residual).
 #
 # Exit codes: 0 ok · 1 unavailable / not ready / run failed · 2 usage error
 
@@ -84,7 +123,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_SCHEMA="$SCRIPT_DIR/schema/finding.schema.json"
-CODEX_DEFAULT_MODEL="gpt-5.6-terra"
+KIMI_ACP_CLIENT="$SCRIPT_DIR/kimi-acp.py"
+CODEX_DEFAULT_MODEL="gpt-5.6-sol"
+KIMI_DEFAULT_MODEL="kimi-code/k3-256k"
+KIMI_BIN="${SWARM_KIMI_BIN:-kimi}"
 # The FALLBACK used wherever discovery cannot run — no model list, offline, an
 # unparseable listing. Deliberately the OLDEST still-verified id, not the newest:
 # this value is only ever reached when we could not read what the CLI offers, and
@@ -128,7 +170,20 @@ grok-4.6"
 # Default HOME so `$HOME` expansions below (auth file, sandbox deny paths) don't
 # abort the whole script under `set -u` when HOME is unset.
 HOME="${HOME:-$(cd ~ 2>/dev/null && pwd || echo /nonexistent)}"
+# Freeze the operator home used by the denylist. run_kimi replaces HOME with an
+# ephemeral directory so Kimi cannot load ambient config; secret paths must still
+# refer to the real home, not that runtime copy.
+SWARM_HOST_HOME="$HOME"
 GROK_AUTH_FILE="${GROK_AUTH_FILE:-$HOME/.grok/auth.json}"
+# Kimi's live OAuth token is here. ~/.kimi-code/oauth/kimi-code can exist as a
+# zero-byte compatibility path even while authenticated, so it is not an auth
+# signal (verified in work-system's Kimi worker integration).
+KIMI_CREDENTIALS_FILE="${KIMI_CREDENTIALS_FILE:-$HOME/.kimi-code/credentials/kimi-code.json}"
+# The host config.toml: the managed provider, its model catalogue (a model is
+# selectable over ACP only when declared under [models]), and the moonshot
+# search/fetch services live here — next to [[hooks]] and [mcp], which must not.
+# _kimi_prepare_runtime copies a FILTERED projection of it into the isolated HOME.
+KIMI_CONFIG_FILE="${KIMI_CONFIG_FILE:-$HOME/.kimi-code/config.toml}"
 
 # Temp files: codex's --output-last-message, and the assembled prompt the
 # backends read out-of-band (see the transport note in `run`). Both must be
@@ -142,6 +197,7 @@ TMP_PROMPT=""
 # and a file removed only on the normal return paths is orphaned by exactly the
 # signal it was created to bound.
 TMP_BOUNDED=""
+TMP_KIMI_HOME=""
 
 # Per-call telemetry (opt-in via --telemetry). WHY it exists: an external voice
 # that dies at the wall is reported, but a voice that *survived* at 550s looks
@@ -157,7 +213,7 @@ TELEMETRY_BACKEND=""
 TELEMETRY_EFFORT=""
 TELEMETRY_MODEL=""
 TELEMETRY_BYTES=""
-# The backend CLI's own rc, captured before run_codex/run_grok translate it into
+# The backend CLI's own rc, captured before run_codex/run_grok/run_kimi translate it into
 # the adapter's exit code — otherwise a timeout (124) and a plain failure both
 # reach the trap as exit 1 and the one distinction worth logging is lost.
 TELEMETRY_RC=""
@@ -258,6 +314,7 @@ cleanup() {
   if [[ -n "${TMP_OUT:-}" ]]; then rm -f "$TMP_OUT"; fi
   if [[ -n "${TMP_PROMPT:-}" ]]; then rm -f "$TMP_PROMPT"; fi
   if [[ -n "${TMP_BOUNDED:-}" ]]; then rm -f "$TMP_BOUNDED"; fi
+  if [[ -n "${TMP_KIMI_HOME:-}" ]]; then rm -rf "$TMP_KIMI_HOME"; fi
   _write_telemetry "$rc"
 }
 trap cleanup EXIT
@@ -337,8 +394,9 @@ _resolve_int() {
 # that the arithmetic below can never wrap.
 SWARM_MAX_PROMPT_BYTES_MAX=1073741824
 SWARM_TIMEOUT_MAX=86400
-# The headroom the skill subtracts for the per-cluster lens instruction. A cap at
-# or below it would make the oversize threshold zero or negative — i.e. EVERY
+# The headroom the skill subtracts for the per-cluster lens instruction plus
+# Kimi's appended schema-output contract. A cap at or below it would make the
+# oversize threshold zero or negative — i.e. EVERY
 # prompt "too large" and every external voice dropped, silently. Defined here so
 # the skill can read it rather than hard-code a second copy.
 SWARM_CAP_HEADROOM=4096
@@ -459,7 +517,7 @@ with_timeout() {
   _bounded_call "$ADAPTER_TIMEOUT" "$@"
 }
 
-# OS-level read-deny jail for external CLI calls. Both voices may now read
+# OS-level read-deny jail for external CLI calls. All external voices may read
 # project files (out-of-diff bugs), so the jail is the HARD boundary that bounds
 # blast radius if an injection steers a read: common secret stores stay
 # unreadable while the CLI's own config + non-secret project files remain
@@ -573,16 +631,56 @@ _sandbox_deny_paths_build() {
   # allowlist: the node/bun-based CLIs load runtime from all over $HOME, so
   # deny-$HOME breaks them (documented in the blueprint). scrub_secrets + env
   # filtering + the prompt egress guard back it up.
-  local own="${1:-}"
+  local own="${1:-}" host="${SWARM_HOST_HOME:-$HOME}"
   printf '%s\n' \
-    "$HOME/.aws" "$HOME/.ssh" "$HOME/.gnupg" "$HOME/.netrc" \
-    "$HOME/.config/gcloud" "$HOME/.kube" "$HOME/.docker" \
-    "$HOME/.git-credentials" "$HOME/.npmrc" "$HOME/.pypirc" \
-    "$HOME/.config/gh" "$HOME/.cargo/credentials" "$HOME/.cargo/credentials.toml" \
-    "$HOME/.gitconfig" "$HOME/.config/git" "/etc/master.passwd" \
-    "$HOME/.config/anthropic" "$HOME/.config/openai" "$HOME/.claude.json"
-  if [[ "$own" != "codex" ]]; then printf '%s\n' "$HOME/.codex"; fi
-  if [[ "$own" != "grok" ]]; then printf '%s\n' "$HOME/.grok"; fi
+    "$host/.aws" "$host/.ssh" "$host/.gnupg" "$host/.netrc" \
+    "$host/.config/gcloud" "$host/.kube" "$host/.docker" \
+    "$host/.git-credentials" "$host/.npmrc" "$host/.pypirc" \
+    "$host/.config/gh" "$host/.cargo/credentials" "$host/.cargo/credentials.toml" \
+    "$host/.gitconfig" "$host/.config/git" "/etc/master.passwd" \
+    "$host/.config/anthropic" "$host/.config/openai" "$host/.claude.json"
+  if [[ "$own" != "codex" ]]; then printf '%s\n' "$host/.codex"; fi
+  if [[ "$own" != "grok" ]]; then printf '%s\n' "$host/.grok"; fi
+  # Deny the ambient Kimi store ENTRY BY ENTRY, never the whole directory: the
+  # stock installer puts the executable itself at ~/.kimi-code/bin/kimi, so a
+  # whole-dir deny blocks the exec of every jailed kimi run (rc=10 on all four
+  # clusters in the 0.11.0 self-review) while the unjailed list/ready probes
+  # keep reporting it live. run_kimi links only the managed-provider auth
+  # dirs plus a filtered config projection into an ephemeral
+  # HOME/KIMI_CODE_HOME, so everything else (hooks, MCP, sessions, the raw
+  # config, plugins) stays denied — even to Kimi.
+  # Two carve-outs, both by identity not by name alone: the `bin` entry, and the
+  # directory that actually holds the resolved $KIMI_BIN (a custom layout).
+  local kdir="$host/.kimi-code" kbin_dir="" kbin e erp
+  if [[ "$own" != "kimi" ]]; then
+    # Only kimi ever execs kimi: the siblings get the whole store denied, like
+    # ~/.codex and ~/.grok above — no per-entry walk on every codex/grok call.
+    printf '%s\n' "$kdir"
+  elif [[ -d "$kdir" ]]; then
+    kbin="$(command -v -- "$KIMI_BIN" 2>/dev/null || true)"
+    if [[ -n "$kbin" ]]; then
+      kbin="$(readlink -f -- "$kbin" 2>/dev/null || printf '%s' "$kbin")"
+      kbin_dir="$(cd "$(dirname -- "$kbin")" 2>/dev/null && pwd -P || true)"
+    fi
+    for e in "$kdir"/* "$kdir"/.[!.]* "$kdir"/..?*; do
+      [[ -e "$e" || -L "$e" ]] || continue
+      [[ "${e##*/}" == "bin" ]] && continue
+      # Kimi's OWN auth state stays readable to Kimi (the codex/grok posture for
+      # their cred dirs): run_kimi links credentials/ and oauth/ into the
+      # ephemeral HOME so a mid-review token refresh lands on the HOST file.
+      # Moonshot ROTATES refresh tokens: a refresh inside a private copy
+      # invalidated the host's token and logged the operator out (observed
+      # 2026-09-04, kimi-code 0.32.0).
+      case "${e##*/}" in credentials|oauth) continue ;; esac
+      # Spare the entry that holds the resolved $KIMI_BIN — the directory itself
+      # OR any ancestor of it (a versioned layout: ~/.kimi-code/versions/X/bin).
+      if [[ -n "$kbin_dir" && -d "$e" ]]; then
+        erp="$(cd "$e" 2>/dev/null && pwd -P || true)"
+        [[ -n "$erp" && ( "$kbin_dir" == "$erp" || "$kbin_dir" == "$erp"/* ) ]] && continue
+      fi
+      printf '%s\n' "$e"
+    done
+  fi
   # Repo-local secrets: .env*, data/, common key/cred files at repo root.
   # Best-effort (skip if not in a git work tree); only emit paths that exist so
   # the profile stays clean. The `[[ -e ]]` guard also filters an unmatched
@@ -599,18 +697,10 @@ _sandbox_deny_paths_build() {
     # root globs: untracked .env/data/ never propagate into a worktree, so in
     # the standard /kickoff layout the real secrets sit in the main checkout —
     # a plain readable sibling path without this (0.6.0 self-review, round 2).
-    local roots=("$repo") common main
-    # --git-common-dir can print a path RELATIVE to CWD, so run it with -C "$repo"
-    # (→ relative to $repo, which we control) and anchor any relative result there.
-    # Bash-only resolution (cd+pwd -P), NOT `--path-format=absolute` (git >= 2.31)
-    # or a python realpath: this runs on the bwrap path too, which must not gain a
-    # git-version floor or a python3 dep. `cd … && pwd -P` canonicalizes symlinks.
-    common="$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null || true)"
-    if [[ -n "$common" ]]; then
-      [[ "$common" = /* ]] || common="$repo/$common"
-      main="$(cd "$(dirname -- "$common")" 2>/dev/null && pwd -P || true)"
-      if [[ -n "$main" && "$main" != "$repo" && -d "$main" ]]; then roots+=("$main"); fi
-    fi
+    local roots=() r
+    while IFS= read -r r; do
+      [[ -n "$r" ]] && roots+=("$r")
+    done < <(_repo_protected_roots)
     # Key globs are the SSH id names (id_rsa*/id_ed25519*/…), NOT a bare id_* —
     # that would jail legit files (id_utils.py), and under bwrap a denied path
     # reads as silently EMPTY (tmpfs / /dev/null bind), not EPERM, feeding the
@@ -619,8 +709,26 @@ _sandbox_deny_paths_build() {
     # — git treats an EPERM on it as fatal (sandbox-exec), which would break the
     # externals' git-based exploration entirely; a repo-config-embedded token is
     # an accepted residual ([[swarm-backend-adapter]] § residual risk).
-    local r p
-    for r in "${roots[@]}"; do
+    local p
+    if [[ "$own" == "kimi" ]]; then
+      # Kimi's PROJECT-LOCAL config surfaces: kimi-code reads <cwd>/.kimi-code/
+      # (local.toml, MCP) and the ACP session runs with --cwd <repo>, so a
+      # reviewed diff could plant an MCP server the ephemeral HOME never sees
+      # (`mcpServers: []` in session/new does not disable file-declared ones).
+      # Deny them to the ACP session; the diff still shows their content.
+      # kimi-code also loads <cwd>/AGENTS.md, agents.md and KIMI.md into its
+      # SYSTEM prompt at session start, and discovers skills / subagents / a
+      # whole-prompt agent override under <root>/.agents/ — repo text that
+      # would reach the model as INSTRUCTIONS, outside the DIFF-<nonce> fence.
+      # Deny them too (bwrap masks them empty; sandbox-exec makes the read fail).
+      for r in "${roots[@]+"${roots[@]}"}"; do
+        for p in "$r"/.kimi-code "$r"/.kimi "$r"/.mcp.json "$r"/.agents \
+                 "$r"/AGENTS.md "$r"/agents.md "$r"/KIMI.md; do
+          [[ -e "$p" ]] && printf '%s\n' "$p"
+        done
+      done
+    fi
+    for r in "${roots[@]+"${roots[@]}"}"; do
       for p in "$r"/.env* "$r"/data "$r"/*.pem "$r"/id_rsa* "$r"/id_ed25519* \
                "$r"/id_ecdsa* "$r"/id_dsa* "$r"/*.key "$r"/.npmrc "$r"/.pypirc \
                "$r"/credentials.json; do
@@ -675,6 +783,96 @@ _repo_root_ensure() {
   _REPO_ROOT_MEMO="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 }
 
+_PROTECTED_ROOTS_DONE=""
+_PROTECTED_ROOTS_MEMO=""
+_repo_protected_roots() {
+  # Canonical physical paths that must stay OS-read-only during a review: the
+  # reviewed worktree, the main checkout when this is a linked worktree, EVERY
+  # other linked worktree of the same repository (a sibling checkout is the same
+  # repository — an auto-approved edit into ../proj-wt-b is still a repository
+  # mutation), and the Git control directories.
+  # MEMOIZED: the value cannot change within one adapter process, and it is
+  # consulted by the deny-path build, the bwrap bind loop, the remount-ro loop
+  # and the sandbox-exec profile — each call used to fork git twice and python
+  # once per root. Bash-only realpath (cd + pwd -P): every root is a directory,
+  # and the bwrap path must not gain a python3 dependency.
+  # SORTED, ancestors first (a prefix sorts before everything under it): bwrap
+  # binds these in output order, and a later recursive `--bind <main> <main>`
+  # shadows an earlier `<main>/.claude/worktrees/x` mount (the bind source tree
+  # carries none of the sandbox-side mounts), so the following `--remount-ro`
+  # on the shadowed path hit a non-mountpoint and bwrap aborted — the smoke
+  # probe then declared the host jail-less on every Linux linked-worktree review.
+  if [[ -n "$_PROTECTED_ROOTS_DONE" ]]; then
+    printf '%s' "$_PROTECTED_ROOTS_MEMO"
+    return 0
+  fi
+  _PROTECTED_ROOTS_DONE=1
+  _repo_root_ensure
+  local repo="$_REPO_ROOT_MEMO"
+  [[ -n "$repo" ]] || return 0
+  local roots=("$repo") common main gitdir rp seen="" r line out=""
+  common="$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null || true)"
+  if [[ -n "$common" ]]; then
+    [[ "$common" = /* ]] || common="$repo/$common"
+    roots+=("$common")
+    main="$(cd "$(dirname -- "$common")" 2>/dev/null && pwd -P || true)"
+    if [[ -n "$main" && -d "$main" && ( -d "$main/.git" || -f "$main/.git" ) ]]; then
+      roots+=("$main")
+    fi
+  fi
+  gitdir="$(git -C "$repo" rev-parse --git-dir 2>/dev/null || true)"
+  if [[ -n "$gitdir" ]]; then
+    [[ "$gitdir" = /* ]] || gitdir="$repo/$gitdir"
+    roots+=("$gitdir")
+  fi
+  # -z: NUL-separated records, paths verbatim. The line form C-quotes a path
+  # with a newline or a quote, `cd` then fails on the quoted text and the
+  # worktree silently drops out of the write boundary.
+  while IFS= read -r -d '' line; do
+    [[ "$line" == "worktree "* ]] && roots+=("${line#worktree }")
+  done < <(git -C "$repo" worktree list --porcelain -z 2>/dev/null || true)
+  for r in "${roots[@]}"; do
+    rp="$(cd -- "$r" 2>/dev/null && pwd -P || true)"
+    [[ -n "$rp" && -d "$rp" ]] || continue
+    _line_in_list "$rp" "$seen" && continue
+    seen+="$rp"$'\n'
+    out+="$rp"$'\n'
+  done
+  _PROTECTED_ROOTS_MEMO="$(printf '%s' "$out" | LC_ALL=C sort)"
+  [[ -n "$_PROTECTED_ROOTS_MEMO" ]] && _PROTECTED_ROOTS_MEMO+=$'\n'
+  printf '%s' "$_PROTECTED_ROOTS_MEMO"
+}
+
+_host_write_deny_paths() {
+  # Paths a jailed external must not WRITE even though the host HOME stays
+  # writable overall (codex/grok keep session state there): the shell startup
+  # files, Claude Code's own config/hooks, XDG config, user bin dirs, and the
+  # Kimi executable's directory — one auto-approved write there turns the next
+  # UNJAILED readiness probe (`kimi acp --help` with the real HOME) into a
+  # trojan launch. Existing paths only; the auth dirs Kimi refreshes are not
+  # in this list, and neither is the calling backend's OWN store (codex/grok
+  # write session state and refreshed auth there). $1 = the calling backend.
+  local own="${1:-}" host="${SWARM_HOST_HOME:-$HOME}" p kbin kdir
+  for p in "$host"/.zshrc "$host"/.zprofile "$host"/.zshenv "$host"/.zlogin \
+           "$host"/.bashrc "$host"/.bash_profile "$host"/.bash_login "$host"/.profile \
+           "$host"/.claude "$host"/.claude.json "$host"/.config "$host"/.local/bin \
+           "$host"/.kimi-code/bin "$host"/.kimi-code/config.toml "$host"/.kimi-code/hooks \
+           "$host"/.codex "$host"/.grok; do
+    case "$p" in
+      "$host"/.codex) [[ "$own" == "codex" ]] && continue ;;
+      "$host"/.grok)  [[ "$own" == "grok" ]] && continue ;;
+    esac
+    [[ -e "$p" ]] && printf '%s\n' "$p"
+  done
+  kbin="$(command -v -- "$KIMI_BIN" 2>/dev/null || true)"
+  if [[ -n "$kbin" ]]; then
+    kbin="$(readlink -f -- "$kbin" 2>/dev/null || printf '%s' "$kbin")"
+    kdir="$(cd "$(dirname -- "$kbin")" 2>/dev/null && pwd -P || true)"
+    [[ -n "$kdir" && "$kdir" != "$host/.kimi-code/bin" ]] && printf '%s\n' "$kdir"
+  fi
+  return 0
+}
+
 _read_web_safe() {
   # $1 = backend. read+web is safe ONLY when BOTH hold: a working OS jail (the
   # hard boundary) AND a resolvable repo root. Without the root,
@@ -705,11 +903,11 @@ _scope_args() {
 
 _jail_available() {
   # $1 = backend. Builds the jail (memoized) and reports whether an OS sandbox
-  # wrapper exists. run_codex/run_grok consult this to FAIL CLOSED: the read+web
-  # posture is only safe under the OS secret-jail (the hard boundary), so on a
-  # host without sandbox-exec/bwrap the externals degrade to the 0.5.x
-  # tool-less/no-web flags instead of running read+web bare — 0.5.x was safe
-  # there precisely because the flags, not the jail, closed the channel.
+  # wrapper exists. All external run paths consult this to FAIL CLOSED: the
+  # read+web posture is only safe under the OS secret-jail (the hard boundary).
+  # Without one, codex/grok degrade to their 0.5.x restricted flags instead of
+  # running read+web bare; Kimi refuses because ACP has no equivalent safe
+  # no-read tier.
   _init_sandbox "${1:-}"
   (( ${#SANDBOX_CMD[@]} > 0 ))
 }
@@ -731,6 +929,10 @@ _init_sandbox() {
   local backend="${1:-}"
   [[ "$_sandbox_ready" == "$backend" ]] && return
   _sandbox_ready="$backend"
+  # Fill the protected-roots memo HERE, in the main shell: every consumer below
+  # runs it inside `<(…)` / `$(…)`, where a memo set in the subshell dies with
+  # it — the parent's value, once set, is what those subshells inherit.
+  _repo_protected_roots >/dev/null
   SANDBOX_CMD=()
   # Built ONCE, in the main shell, so the containment check that follows reuses it
   # (see _deny_paths_ensure) — but only INSIDE the wrapper branches: on a host
@@ -744,18 +946,36 @@ _init_sandbox() {
     # resolved path) and deny it as BOTH a subpath (dirs + contents) and a
     # literal (single files like ~/.netrc).
     local profile
-    profile="$(_sandbox_deny_paths "$backend" | python3 -c '
+    profile="$(
+      {
+        _sandbox_deny_paths "$backend"
+        printf '%s\n' '--write--'
+        _repo_protected_roots
+        _host_write_deny_paths "$backend"
+      } | python3 -c '
 import os, sys
-rules = []
+read_rules, write_rules = [], []
+mode = "read"
 for line in sys.stdin:
     p = line.rstrip("\n")
     if not p:
         continue
+    if p == "--write--":
+        mode = "write"
+        continue
     rp = os.path.realpath(p)
     esc = rp.replace("\\", "\\\\").replace("\"", "\\\"")
-    rules.append("(subpath \"%s\")" % esc)
-    rules.append("(literal \"%s\")" % esc)
-sys.stdout.write("(version 1)(allow default)(deny file-read* %s)" % " ".join(rules))
+    rule = "(subpath \"%s\") (literal \"%s\")" % (esc, esc)
+    if mode == "write":
+        write_rules.append(rule)
+    else:
+        read_rules.append(rule)
+parts = ["(version 1)(allow default)"]
+if read_rules:
+    parts.append("(deny file-read* %s)" % " ".join(read_rules))
+if write_rules:
+    parts.append("(deny file-write* %s)" % " ".join(write_rules))
+sys.stdout.write("".join(parts))
 ')"
     SANDBOX_CMD=(sandbox-exec -p "$profile")
   elif command -v bwrap >/dev/null; then
@@ -768,7 +988,19 @@ sys.stdout.write("(version 1)(allow default)(deny file-read* %s)" % " ".join(rul
     # name were masked. sandbox-exec realpaths in its profile builder; the bwrap
     # path must match, or Linux under-denies. Mask BOTH the link name and the
     # resolved target so neither is a bypass.
+    # Order: repository --bind FIRST (a recursive bind placed after a mask would
+    # shadow the mask), then the host write-deny ro-binds, then the secret masks
+    # on top, then --remount-ro of the repository roots LAST so it cannot undo a
+    # child mask. Binds before masks; remount after masks.
     local args=(--dev-bind / /) p rp q targets
+    while IFS= read -r p; do
+      [[ -n "$p" ]] || continue
+      if [[ -d "$p" ]]; then args+=(--bind "$p" "$p"); fi
+    done < <(_repo_protected_roots)
+    while IFS= read -r p; do
+      [[ -n "$p" && -e "$p" ]] || continue
+      args+=(--ro-bind "$p" "$p")
+    done < <(_host_write_deny_paths "$backend")
     while IFS= read -r p; do
       rp="$(readlink -f -- "$p" 2>/dev/null || printf '%s' "$p")"
       # Mask the link name, plus its resolved target when it differs (a symlink).
@@ -780,6 +1012,11 @@ sys.stdout.write("(version 1)(allow default)(deny file-read* %s)" % " ".join(rul
         fi
       done
     done < <(_sandbox_deny_paths "$backend")
+    while IFS= read -r p; do
+      [[ -n "$p" && -d "$p" ]] || continue
+      args+=(--remount-ro "$p")
+    done < <(_repo_protected_roots)
+    args+=(--unshare-pid --proc /proc --die-with-parent --new-session)
     SANDBOX_CMD=(bwrap "${args[@]}")
   fi
   # Probe that the wrapper actually WORKS, not merely exists on PATH: a
@@ -787,7 +1024,7 @@ sys.stdout.write("(version 1)(allow default)(deny file-read* %s)" % " ".join(rul
   # sandbox-exec would otherwise fail every review run with an opaque backend
   # error instead of taking the callers' fail-closed degrade path. On probe
   # failure treat the host as jail-less (audibly) — _jail_available then
-  # reports false and run_codex/run_grok degrade.
+  # reports false and the external run paths fail closed.
   if ((${#SANDBOX_CMD[@]} > 0)); then
     # BOUNDED: this is pre-timer work the timeout margin does not measure, and a
     # bwrap that stalls creating a user namespace blocks here for as long as the
@@ -820,13 +1057,16 @@ sandboxed() {
   # OS jail + env filter around an external call. $1 = backend (its own cred dir
   # stays readable; siblings' are denied). Warn once if no jail is available.
   # Wraps a review, which processes the untrusted diff — that is why it carries
-  # the full jail; the readiness probe deliberately does NOT go through here
-  # (it processes no diff, and _init_sandbox's python3 profile-build must not
-  # become a dependency of the local `ready`/`list` paths — see grok_model_fetch).
+  # the full jail. The codex/grok readiness probes do NOT go through here (they
+  # process no diff, and the python3 profile-build is not a dependency of their
+  # `ready`/`list` paths — see grok_model_fetch). Kimi's readiness DOES build
+  # the jail (ready_check → _read_web_safe → _init_sandbox, memoized): a Kimi
+  # that cannot run under the jail must not be advertised as ready, and that
+  # answer needs the jail's own smoke probe, not a guess.
   local backend="$1"; shift
   _init_sandbox "$backend"
   if ((${#SANDBOX_CMD[@]} == 0)) && [[ -z "$_sandbox_warned" ]]; then
-    echo "warning: no sandbox-exec/bwrap — external calls run without an OS read-deny jail (secret scrub + env filter still apply)" >&2
+    echo "warning: no sandbox-exec/bwrap — external calls run without an OS secret-read/repo-write jail (secret scrub + env filter still apply)" >&2
     _sandbox_warned=1
   fi
   local env_args=() _e
@@ -843,6 +1083,7 @@ sandboxed() {
   # first `-u` after an assignment as the command.
   with_timeout env ${env_args[@]+"${env_args[@]}"} \
     GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    GIT_OPTIONAL_LOCKS=0 \
     ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"} "$@"
 }
 
@@ -866,6 +1107,8 @@ PATTERNS = [
     (re.compile(r"(?i)\b(secret|token|password|passwd|api[_-]?key)\b\s*[=:]\s*[A-Za-z0-9/+._-]{16,}"), r"\1=[REDACTED]"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "[REDACTED-GH-TOKEN]"),
     (re.compile(r"\bsk-[A-Za-z0-9]{20,}"), "[REDACTED-API-KEY]"),
+    # JWT-shaped bearer/refresh tokens (Moonshot OAuth): three base64url runs.
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"), "[REDACTED-JWT]"),
 ]
 data = sys.stdin.read()
 hit = False
@@ -880,12 +1123,26 @@ sys.stdout.write(data)
 
 validate_backend() {
   case "$1" in
-    claude|codex|grok) ;;
-    *) echo "Unknown backend: $1 (expected claude|codex|grok)" >&2; exit 2 ;;
+    claude|codex|grok|kimi) ;;
+    *) echo "Unknown backend: $1 (expected claude|codex|grok|kimi)" >&2; exit 2 ;;
   esac
 }
 
 # ---------- probes ----------
+
+_backend_bin() {
+  # The ONE backend→executable mapping; only kimi is overridable (SWARM_KIMI_BIN).
+  case "$1" in
+    kimi) printf '%s\n' "$KIMI_BIN" ;;
+    *)    printf '%s\n' "$1" ;;
+  esac
+}
+
+backend_installed() {
+  local backend="$1"
+  [[ "$backend" == "claude" ]] && return 0
+  command -v "$(_backend_bin "$backend")" >/dev/null
+}
 
 available_version() {
   # Prints the backend's version line; exit 1 if not installed.
@@ -909,7 +1166,8 @@ available_version() {
     echo "${cver:-in-session}"
     return 0
   fi
-  command -v "$backend" >/dev/null || return 1
+  local executable; executable="$(_backend_bin "$backend")"
+  backend_installed "$backend" || return 1
   # BOUNDED like every other pre-timer call. `<backend> --version` looks trivial
   # but runs before TELEMETRY_START on the `run` path, and a CLI wedged on a stale
   # leader socket or a hung PATH entry blocks here forever — wall clock the
@@ -925,7 +1183,7 @@ available_version() {
   # (stock macOS), and the bounded call cannot make that choice itself: it runs
   # inside $(...) where it can neither warn once nor set a flag.
   _probe_setup_lenient
-  _probe_or_bare "$backend" --version 2>/dev/null | head -1 || true
+  _probe_or_bare "$executable" --version 2>/dev/null | head -1 || true
   return 0
 }
 
@@ -956,9 +1214,9 @@ probe_timeout() {
 }
 # How many bounded probes a single `run` may perform before the timed backend
 # call starts. Every one is memoized per process, so this is the worst case for
-# the heaviest backend (grok): `grok models`, `grok --help`, and the sandbox
-# smoke test (`<wrapper> true`, bounded since 0.10.13). codex needs two
-# (`login status`, the same sandbox test).
+# the heaviest backend (grok or kimi): grok (`models`, `--help`, sandbox smoke
+# test); kimi (`acp --help`, `provider list --json`, same sandbox test).
+# Codex needs two (`login status`, the same sandbox test).
 # `--version` is NOT among them: the `run` gate asks `command -v`, and the probe
 # that prints a version string only runs where that string is shown.
 # CHANGE THIS WHENEVER A PRE-TIMER PROBE IS ADDED. The workflow reads the derived
@@ -974,12 +1232,15 @@ _grok_models_done=""
 _grok_models=""
 _codex_probe_rc=0
 _probe_degraded() {
-  # The ONE exit for every "the model check did not happen" route (no timeout
-  # binary, probe failed, probe timed out, unparseable list). Each ends in the
-  # same trust-auth degrade, so each must be equally audible: the docs promise
-  # the check falls back "never silently", and a promise that holds on only some
-  # routes is the runtime-lie this branch removes.
-  echo "warning: grok model probe unavailable ($1) — readiness falls back to auth alone; the schema-verified-model check did not run" >&2
+  # $1 = backend, $2 = reason. The ONE exit for every "the model check did not
+  # happen" route (no timeout binary, probe failed, probe timed out, unparseable
+  # list), for every backend that probes. Each ends in the same trust-auth
+  # degrade, so each must be equally audible: the docs promise the check falls
+  # back "never silently", and a promise that holds on only some routes (or for
+  # only one backend) is the runtime-lie this branch removes.
+  local fallback="auth alone" what="the schema-verified-model check"
+  if [[ "$1" == "kimi" ]]; then fallback="authenticated install"; what="the ACP/model check"; fi
+  echo "warning: $1 model probe unavailable ($2) — readiness falls back to $fallback; $what did not run" >&2
 }
 # Which timeout wrapper exists, resolved once. Availability is a property of the
 # HOST, so asking it through a probe's exit code was always a category error: 126
@@ -1254,6 +1515,117 @@ grok_parse_models() {
 '
 }
 
+# Kimi readiness has two independently bounded capability checks: ACP support
+# (the only argv-safe prompt transport) and the offered model catalog. Both are
+# memoized because `list` asks ready_check and ready_hint in the same process.
+_kimi_acp_done=""
+_kimi_acp_supported=""
+_kimi_models_done=""
+_kimi_models_known=""
+_kimi_models=""
+_kimi_has_acp() {
+  if [[ -n "$_kimi_acp_done" ]]; then
+    [[ "$_kimi_acp_supported" == "yes" ]]
+    return
+  fi
+  _kimi_acp_done=1
+  # Local capability probe, same contract as `grok --help`: bound when a wrapper
+  # exists, run bare otherwise. Skipping it on a host without coreutils would
+  # advertise ACP on an old CLI that does not have it.
+  _probe_setup_lenient
+  local help="" rc=0
+  help="$(_probe_or_bare "$KIMI_BIN" acp --help)" || rc=$?
+  if (( rc == 0 )); then
+    # POSITIVE detection. A commander-style CLI answers an unknown subcommand
+    # with its TOP-LEVEL help and rc 0, so "rc 0" alone advertised ACP on a
+    # build that has none — every cluster then died in the ACP spawn (rc 10)
+    # instead of the "no ACP stdio server" hint. Strong match: the acp help
+    # itself. Weak match (wording drift): any mention of ACP — still ready,
+    # audibly. Neither: a clean negative.
+    if [[ "$help" == *"Agent Client Protocol"* && "$help" == *"stdio"* ]]; then
+      _kimi_acp_supported=yes
+    elif [[ -z "$help" ]]; then
+      # rc 0 with NOTHING captured: a wrapper that prints usage on stderr, not
+      # a build without ACP — inconclusive, like _grok_has_prompt_file.
+      _probe_degraded kimi "\`kimi acp --help\` printed nothing on stdout"
+      _kimi_acp_supported=yes
+    elif [[ "$help" == *"ACP"* ]]; then
+      _kimi_acp_supported=yes
+      _probe_degraded kimi "\`kimi acp --help\` returned unrecognized help text"
+    else
+      _kimi_acp_supported=no
+    fi
+  elif (( rc == 124 || rc == 137 || rc == 126 )); then
+    # Timeouts and infrastructure failures remain inconclusive and degrade to
+    # trusting the authenticated install — audibly.
+    _probe_degraded kimi "\`kimi acp --help\` did not complete (rc=$rc)"
+    _kimi_acp_supported=yes
+  else
+    # rc 1 (a CLI error), rc 2 (usage), rc 127 (not found): the installed
+    # binary cannot enter ACP — a clean negative, fail closed.
+    _kimi_acp_supported=no
+  fi
+  [[ "$_kimi_acp_supported" == "yes" ]]
+}
+
+kimi_model_fetch() {
+  [[ -n "$_kimi_models_done" ]] && return 0
+  _kimi_models_done=1
+  local raw="" rc=0 parsed=""
+  _probe_setup_lenient
+  raw="$(_probe_or_bare "$KIMI_BIN" provider list --json)" || rc=$?
+  if (( rc != 0 )); then
+    _probe_degraded kimi "\`kimi provider list --json\` did not complete (rc=$rc)"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    _probe_degraded kimi "python3 is unavailable to parse \`kimi provider list --json\`"
+    return 0
+  fi
+  parsed="$(printf '%s' "$raw" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+models = data.get("models") if isinstance(data, dict) else None
+if not isinstance(models, dict):
+    raise SystemExit(1)
+for model in models:
+    if isinstance(model, str) and model:
+        print(model)
+')" || rc=$?
+  if (( rc != 0 )); then
+    _probe_degraded kimi "\`kimi provider list --json\` returned an unrecognized document"
+    return 0
+  fi
+  # Intersect with what the isolated session will actually be able to offer:
+  # the projection keeps only managed:* providers and their models, so a
+  # custom-provider model that `provider list` shows would pass readiness and
+  # then fail session/set_config_option on every cluster.
+  if [[ -s "$KIMI_CONFIG_FILE" ]]; then
+    local projected filtered="" m
+    projected="$(_kimi_project_config "$KIMI_CONFIG_FILE" 2>/dev/null \
+      | sed -n -E 's/^\[models\.("([^"]*)"|'"'"'([^'"'"']*)'"'"')\]$/\2\3/p')"
+    while IFS= read -r m; do
+      [[ -n "$m" ]] || continue
+      _line_in_list "$m" "$projected" && filtered+="$m"$'\n'
+    done <<< "$parsed"
+    parsed="${filtered%$'\n'}"
+  fi
+  _kimi_models_known=yes
+  _kimi_models="$parsed"
+}
+
+kimi_model_offered() {
+  local model="$1"
+  kimi_model_fetch
+  # Unknown means probe-degraded, not definitely absent: trust auth and let the
+  # ACP session report a precise model-catalog error if the run reaches it.
+  [[ "$_kimi_models_known" != "yes" ]] && return 0
+  _line_in_list "$model" "$_kimi_models"
+}
+
 grok_model_fetch() {
   # Populates the cache globals. Call it DIRECTLY — never as `$(grok_model_fetch)`:
   # a command substitution runs it in a subshell, the assignments die with that
@@ -1299,10 +1671,10 @@ grok_model_fetch() {
     # firing on a SIGTERM-ignoring grok, but an OS OOM-kill or an external
     # SIGKILL yields the same code, so don't assert a timeout that may not have
     # happened; word it for both.
-    if (( rc == 124 )); then _probe_degraded "\`grok models\` timed out after ${_probe_timeout}s"
-    elif (( rc == 137 )); then _probe_degraded "\`grok models\` was killed (SIGKILL — likely the ${_probe_timeout}s \`-k\` bound)"
-    elif (( rc == 126 )); then _probe_degraded "\`grok models\` could not be bounded (no scratch file) — refused rather than run uncapped"
-    else _probe_degraded "\`grok models\` failed (rc=$rc)"
+    if (( rc == 124 )); then _probe_degraded grok "\`grok models\` timed out after ${_probe_timeout}s"
+    elif (( rc == 137 )); then _probe_degraded grok "\`grok models\` was killed (SIGKILL — likely the ${_probe_timeout}s \`-k\` bound)"
+    elif (( rc == 126 )); then _probe_degraded grok "\`grok models\` could not be bounded (no scratch file) — refused rather than run uncapped"
+    else _probe_degraded grok "\`grok models\` failed (rc=$rc)"
     fi
     return 0
   fi
@@ -1328,7 +1700,7 @@ grok_model_fetch() {
   # The rules themselves live in grok_parse_models, not here.
   _grok_models="$(printf '%s\n' "$raw" | grok_parse_models)"
   if [[ -z "$_grok_models" ]]; then
-    _probe_degraded "\`grok models\` returned no model ids — output format may have changed"
+    _probe_degraded grok "\`grok models\` returned no model ids — output format may have changed"
   fi
 }
 
@@ -1463,7 +1835,7 @@ grok_model_offered() {
 }
 
 ready_check() {
-  local backend="$1"
+  local backend="$1" requested_model="${2:-}"
   case "$backend" in
     claude) return 0 ;;  # in-session, no separate auth
     # Bounded on every host (_probe_or_bare falls back to the polling watchdog),
@@ -1504,12 +1876,22 @@ ready_check() {
     # offers any model the adapter can drive (grok drops/renames models
     # between releases — 0.2.101 removed grok-composer-2.5-fast).
     grok)   [[ -s "$GROK_AUTH_FILE" ]] && grok_model_offered ;;
+    # ACP is the only out-of-band transport in kimi-code 0.32.0. The default
+    # model is pinned for deterministic ensemble behavior and must be offered.
+    # The jail is part of Kimi's READINESS, not a rule the skill re-derives in
+    # prose: `list --json` used to advertise kimi ready on a jail-less host and
+    # every cluster then hit run_kimi's fail-closed exit. _read_web_safe is
+    # memoized; its sandbox smoke `true` is one of the three counted probes.
+    kimi)   _kimi_credentials_usable && _kimi_has_acp \
+              && kimi_model_offered "${requested_model:-$KIMI_DEFAULT_MODEL}" \
+              && _read_web_safe kimi && _kimi_scratch_dir_ok ;;
   esac
 }
 
 ready_hint() {
   # claude needs no hint: it is always available + ready in-session.
-  case "$1" in
+  local backend="$1" requested_model="${2:-}"
+  case "$backend" in
     codex)
       # TWO failures reach here since the probe is bounded: a definite negative
       # (not logged in) and a probe that hit the wall (wedged CLI, dead proxy,
@@ -1546,6 +1928,25 @@ ready_hint() {
         fi
       fi
       ;;
+    kimi)
+      if [[ "${KIMI_CREDENTIALS_FILE##*/}" != "kimi-code.json" ]]; then
+        echo "KIMI_CREDENTIALS_FILE must be named kimi-code.json (kimi-code reads credentials/kimi-code.json; got: $KIMI_CREDENTIALS_FILE)"
+      elif ! _kimi_credentials_usable; then
+        if [[ "$_kimi_creds_ok" == "nopython" ]]; then
+          echo "python3 is required to validate the Kimi credential file (none on PATH)"
+        else
+          echo "run: kimi login"
+        fi
+      elif ! _kimi_has_acp; then
+        echo "this kimi CLI has no ACP stdio server — update kimi-code (verified on 0.32.0)"
+      elif ! kimi_model_offered "${requested_model:-$KIMI_DEFAULT_MODEL}"; then
+        echo "this kimi CLI does not offer ${requested_model:-$KIMI_DEFAULT_MODEL} (see: kimi provider list --json)"
+      elif ! _read_web_safe kimi; then
+        echo "no working OS jail (sandbox-exec/bwrap) or resolvable repo root — kimi reviews only under the secret jail (see: agents.sh jail)"
+      else
+        echo "TMPDIR (${TMPDIR:-/tmp}) resolves inside the repository, which the jail write-denies — kimi cannot keep its session state there; point TMPDIR outside the checkout"
+      fi
+      ;;
   esac
 }
 
@@ -1561,7 +1962,6 @@ subcmd_available() {
 
 require_usable() {
   # Shared installed+ready gate for `ready` and `run`.
-  local backend="$1"
   # `command -v`, not available_version: the gate asks "is it installed", and
   # available_version answers a different question — it PRINTS a version string
   # and returns 0 regardless of what the probe did, so its result could never
@@ -1569,12 +1969,13 @@ require_usable() {
   # probe_budget_seconds and therefore subtracted from the backend-s own wall.
   # The version string is worth a probe where it is SHOWN (`available`, `list`),
   # not where it is discarded.
-  if [[ "$backend" != "claude" ]] && ! command -v "$backend" >/dev/null; then
+  local backend="$1" requested_model="${2:-}"
+  if ! backend_installed "$backend"; then
     echo "$backend: not installed" >&2
     exit 1
   fi
-  if ! ready_check "$backend"; then
-    echo "$backend: not ready — $(ready_hint "$backend")" >&2
+  if ! ready_check "$backend" "$requested_model"; then
+    echo "$backend: not ready — $(ready_hint "$backend" "$requested_model")" >&2
     exit 1
   fi
 }
@@ -1594,7 +1995,7 @@ print_rows() {
   # column collapses adjacent tabs, shifting later columns left.
   local placeholder="${1:-}"
   local b ver avail rdy hint
-  for b in claude codex grok; do
+  for b in claude codex grok kimi; do
     ver="" avail=no rdy=no hint=""
     if ver="$(available_version "$b")"; then
       avail=yes
@@ -1747,10 +2148,11 @@ subcmd_run() {
   # `exec`'s per-argument limit the binding cap (Linux MAX_ARG_STRLEN = 128 KiB)
   # and forced a 120 KiB ceiling — above it the SKILL dropped ALL external
   # voices (EXTERNALS_OVERSIZE), i.e. the same damage as a backend timeout.
-  # Both CLIs accept the prompt out-of-band, so the adapter now normalizes every
-  # input form to ONE file and hands the PATH (never the content) to the backend:
+  # All CLIs accept the prompt out-of-band, so the adapter now normalizes every
+  # input form to ONE file and hands only transport metadata to the backend:
   #   codex — `[PROMPT]` omitted or `-` reads the instructions from stdin
   #   grok  — `--prompt-file <PATH>` (present on 0.2.112; preflighted, no fallback)
+  #   kimi  — the ACP client reads the file and sends its content over NDJSON stdio
   # The content is therefore never read into a shell variable either, so a large
   # diff no longer costs a full in-memory copy.
   #
@@ -1871,38 +2273,14 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
     # place) also keeps a caller-owned --prompt-file untouched — the workflow
     # hands the SAME prompt file to every voice, so mutating it would corrupt
     # the sibling calls running concurrently.
-    local assembled prompt_dir
-    # NEXT TO the caller-s prompt file, not in bare $TMPDIR. The skill creates its
-    # own scratch dir and removes it with `rm -rf`, but a bare mktemp lands in
-    # $TMPDIR as a SIBLING of that dir — so the one failure this branch is about
-    # (the outer window SIGKILLs the adapter, no trap runs) left a full copy of
-    # the reviewed diff on disk that neither cleanup could reach. Deriving the
-    # directory from the prompt path needs no new flag: the caller already told
-    # us where its scratch space is by handing us a file inside it.
-    prompt_dir="$(dirname "$prompt_path")"
-    assembled="$(mktemp "$prompt_dir/swarm-assembled.XXXXXX" 2>/dev/null || mktemp)" \
+    _prompt_scratch "$prompt_path" \
       || { echo "Could not create a temp file for the assembled prompt" >&2; exit 2; }
-    chmod 600 "$assembled"
-    # Hand the file to the trap BEFORE any content lands in it. Assigning
-    # TMP_PROMPT only after the write left a window in which the file already
-    # held the untrusted diff while cleanup() could not see it — a kill during
-    # the `cat` (outer window, OOM) then left the diff on disk with nothing left
-    # to remove it. Registering first is free; the old file is dropped after.
-    # ACCEPTED RESIDUAL: bare `mktemp` puts it in $TMPDIR, not in the skill's
-    # scratch dir, so a SIGKILL still leaves a 0600 file the skill's `rm -rf
-    # "$TMPD"` cannot reach. Threading the skill's directory through the adapter
-    # would add a flag for a hard-kill-only case; the trap covers every path a
-    # signal handler can run at all.
-    local previous="$TMP_PROMPT"
-    TMP_PROMPT="$assembled"
-    { printf '%s\n\n' "$lens_instr"; cat "$prompt_path"; } > "$assembled" \
-      || { rm -f "$assembled"; TMP_PROMPT="$previous"; echo "Could not assemble the lens instruction and prompt" >&2; exit 2; }
-    [[ -n "$previous" ]] && rm -f "$previous"
+    { printf '%s\n\n' "$lens_instr" && cat "$prompt_path"; } > "$TMP_PROMPT" \
+      || { echo "Could not assemble the lens instruction and prompt" >&2; exit 2; }
+    [[ -n "$_PROMPT_SCRATCH_PREVIOUS" ]] && rm -f "$_PROMPT_SCRATCH_PREVIOUS"
     prompt_path="$TMP_PROMPT"
-    # Re-measure: the check above bounded the DIFF alone, but what the backend
-    # ingests is instruction+diff.
-    nbytes=$(wc -c < "$prompt_path" | tr -d "[:space:]")
-    (( nbytes > max_bytes )) && { echo "Prompt too large with lens instruction ($nbytes bytes > $max_bytes) — narrow the diff range, or raise SWARM_MAX_PROMPT_BYTES" >&2; exit 2; }
+    _prompt_bytes_checked "$prompt_path" "$max_bytes" "Prompt too large with lens instruction"
+    nbytes="$_PROMPT_BYTES"
   fi
 
   # Resolve BOTH knobs here, in the main shell, and BEFORE require_usable — its
@@ -1921,7 +2299,7 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
   # Both resolved above, in THIS shell — so the wall recorded in telemetry is the
   # wall that will actually apply, not a value assigned inside a subshell.
   _set_enforced_wall
-  require_usable "$backend"
+  require_usable "$backend" "$model"
   require_python3
 
   # Start the clock as late as possible: readiness probes and validation are
@@ -1936,9 +2314,16 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
     TELEMETRY_BYTES="$nbytes"
   fi
 
+  # Absolute ONCE, before dispatch: every backend compares this path against the
+  # jail's denies and derives its scratch dir from it (was re-typed per backend).
+  case "$prompt_path" in
+    /*) ;;
+    *)  prompt_path="$PWD/$prompt_path" ;;
+  esac
   case "$backend" in
     codex) run_codex "$prompt_path" "$effort" "$model" "$schema" ;;
     grok)  run_grok  "$prompt_path" "$effort" "$model" "$schema" ;;
+    kimi)  run_kimi  "$prompt_path" "$effort" "$model" "$schema" ;;
   esac
 }
 
@@ -2189,10 +2574,6 @@ run_grok() {
   # Absolute before the containment test: grok resolves --prompt-file against
   # `--cwd <repo>`, so a relative path would be compared as-is here and match no
   # deny prefix while the backend reads a different file entirely.
-  case "$prompt_path" in
-    /*) ;;
-    *)  prompt_path="$PWD/$prompt_path" ;;
-  esac
   _assert_prompt_readable_in_jail "$prompt_path" grok
   local raw rc=0
   raw="$(sandboxed grok grok -m "$grok_model" --effort "$effort" \
@@ -2240,6 +2621,428 @@ if not (isinstance(out, dict) and isinstance(out.get("findings"), list)):
 json.dump(out, sys.stdout)
 print()
 ' | scrub_secrets
+}
+
+_kimi_output_contract() {
+  # Kimi has no schema-enforcement flag. Put the exact schema in its PROMPT so
+  # obedience has the best chance of succeeding, then independently validate the
+  # answer in kimi-acp.py. The contract follows the fenced diff: lensInstr remains
+  # the first text in the prompt, preserving the workflow's scope invariant.
+  local schema="$1"
+  printf '\n\nOUTPUT CONTRACT (HIGH PRIORITY): Return ONLY one JSON object matching this JSON Schema. No markdown fence, preface, explanation, or trailing text. Empty findings is valid.\n' &&
+    cat "$schema" &&
+    printf '\nThe response must be exactly the schema object and nothing else.\n'
+}
+
+_dir_under_protected_root() {
+  # $1 = directory. 0 iff it resolves inside a write-denied repository root.
+  local d root
+  d="$(cd -- "$1" 2>/dev/null && pwd -P)" || return 1
+  while IFS= read -r root; do
+    [[ -n "$root" ]] || continue
+    [[ "$d" == "$root" || "$d" == "$root"/* ]] && return 0
+  done < <(_repo_protected_roots)
+  return 1
+}
+
+_kimi_scratch_dir_ok() {
+  # The skill's scratch dir (and so the ephemeral Kimi HOME) lives under
+  # $TMPDIR. A TMPDIR inside the checkout would put Kimi's session state under
+  # the write deny — refused by _kimi_prepare_runtime at run time, so say so at
+  # READINESS, once, instead of one opaque rc 2 per cluster.
+  ! _dir_under_protected_root "${TMPDIR:-/tmp}"
+}
+
+_kimi_creds_done=""; _kimi_creds_ok=""
+_kimi_credentials_usable() {
+  # A credential file that EXISTS is not enough: after a failed refresh
+  # kimi-code blanks the tokens in place (access_token "", expires_at 0) and
+  # `-s` still passed, so `list --json` advertised a Kimi whose every call
+  # died with "-32000 Authentication required". Require a non-empty token.
+  # Memoized like its probe siblings: ready_check, ready_hint and the runtime
+  # setup all ask, and one python3 start per answer is enough.
+  if [[ -n "$_kimi_creds_done" ]]; then [[ "$_kimi_creds_ok" == "yes" ]]; return; fi
+  _kimi_creds_done=1; _kimi_creds_ok=no
+  # kimi-code reads credentials/kimi-code.json by NAME; the runtime links the
+  # file's DIRECTORY, so a custom KIMI_CREDENTIALS_FILE under another name would
+  # pass readiness and then be invisible to the session.
+  [[ "${KIMI_CREDENTIALS_FILE##*/}" == "kimi-code.json" ]] || return 1
+  [[ -s "$KIMI_CREDENTIALS_FILE" ]] || return 1
+  if ! command -v python3 >/dev/null 2>&1; then
+    # Not "no token": the check itself cannot run. ready_hint names python3.
+    _kimi_creds_ok=nopython
+    return 1
+  fi
+  python3 - "$KIMI_CREDENTIALS_FILE" <<'PY' 2>/dev/null && _kimi_creds_ok=yes
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(1)
+ok = isinstance(d, dict) and any(isinstance(d.get(k), str) and d.get(k) for k in ("refresh_token", "access_token"))
+sys.exit(0 if ok else 1)
+PY
+  [[ "$_kimi_creds_ok" == "yes" ]]
+}
+
+_prompt_scratch() {
+  # VOID setter, result in TMP_PROMPT: a 0600 scratch file NEXT TO the caller's
+  # prompt file — inside the skill's scratch dir, which its `rm -rf "$TMPD"`
+  # reaches even after a SIGKILL that skipped the trap; a bare mktemp landed in
+  # $TMPDIR as a sibling nothing could clean — handed to the EXIT trap BEFORE
+  # any content lands, dropping the previous scratch prompt. Shared by
+  # subcmd_run (lens instruction + diff) and run_kimi (diff + schema contract):
+  # the two copies of this swap had already drifted on the mktemp location.
+  # The PREVIOUS scratch is handed back in _PROMPT_SCRATCH_PREVIOUS, not
+  # removed here: the caller may be about to READ it (run_kimi's input is the
+  # lens-assembled scratch subcmd_run just made — removing it first fed Kimi an
+  # empty diff that validated as `{"findings":[]}`, rc 0). Callers drop it AFTER
+  # the write. A read-only prompt directory falls back to $TMPDIR, audibly.
+  local dir f
+  dir="$(dirname -- "$1")"
+  _PROMPT_SCRATCH_PREVIOUS="$TMP_PROMPT"
+  if ! f="$(mktemp "$dir/swarm-assembled.XXXXXX" 2>/dev/null)"; then
+    # Read-only prompt directory (an ad-hoc `run --prompt-file /mnt/ro/…`):
+    # fall back to $TMPDIR rather than drop the voice — the trap still owns
+    # the file; only the SIGKILL-orphan guarantee is weaker, and it says so.
+    echo "warning: prompt directory $dir is not writable — assembling the prompt in ${TMPDIR:-/tmp} instead" >&2
+    f="$(mktemp)" || return 1
+  fi
+  chmod 600 "$f"
+  TMP_PROMPT="$f"
+  return 0
+}
+_PROMPT_SCRATCH_PREVIOUS=""
+
+_PROMPT_BYTES=""
+_prompt_bytes_checked() {
+  # VOID setter, result in _PROMPT_BYTES. $1 = path, $2 = cap, $3 = message
+  # prefix. Re-measures an ASSEMBLED prompt: the caller bounded the diff alone,
+  # but what the backend ingests is instruction/contract + diff. Exits 2 over
+  # the cap (a setter, not `$(…)`: an exit inside a substitution is swallowed).
+  _PROMPT_BYTES=$(wc -c < "$1" | tr -d "[:space:]")
+  (( _PROMPT_BYTES > $2 )) \
+    && { echo "$3 ($_PROMPT_BYTES bytes > $2) — narrow the diff range, or raise SWARM_MAX_PROMPT_BYTES" >&2; exit 2; }
+  return 0
+}
+
+_kimi_prepare_runtime() {
+  # VOID setter — fills TMP_KIMI_HOME, prints nothing. $1 = the prompt path:
+  # the HOME is created NEXT TO it (see _prompt_scratch), so a SIGKILL-orphaned
+  # one sits where the skill's cleanup reaches. The ephemeral HOME holds ONLY:
+  #   - credentials/ and oauth/ as SYMLINKS to the host's directories — not a
+  #     copy. Moonshot rotates refresh tokens, so a refresh performed inside a
+  #     private copy invalidated the host's refresh token and logged the
+  #     operator out (observed 2026-09-04). Kimi refreshes with an atomic
+  #     rename INSIDE the directory, which is why the directory is linked and
+  #     not the file (a rename would replace a file symlink and strand the new
+  #     token in the ephemeral HOME). Concurrent voices then share one token
+  #     file exactly like concurrent host sessions do.
+  #   - a filtered config projection (below).
+  # so ACP cannot load ambient hooks, MCP servers, plugins, trust records,
+  # sessions, or history.
+  local home cred_dir
+  # No $TMPDIR fallback: a HOME outside the caller's scratch dir is the
+  # SIGKILL-orphan (a projected config) this placement exists to prevent.
+  # And never UNDER a protected root: the jail write-denies those, so kimi
+  # could not write its session state and session/new would fail opaquely.
+  if _dir_under_protected_root "$(dirname -- "$1")"; then
+    echo "kimi prompt file must not live inside the repository (its directory is under a write-denied root) — the review skill hands over a file in its own scratch dir" >&2
+    exit 2
+  fi
+  home="$(mktemp -d "$(dirname -- "$1")/swarm-kimi.XXXXXX")" \
+    || { echo "Could not create an isolated Kimi HOME next to the prompt file (is its directory writable?)" >&2; exit 2; }
+  chmod 700 "$home"
+  TMP_KIMI_HOME="$home"
+  mkdir -p "$home/.kimi-code" || { echo "Could not create the isolated Kimi HOME" >&2; exit 2; }
+  chmod 700 "$home/.kimi-code"
+  if ! _kimi_credentials_usable; then
+    echo "kimi credentials missing or blank: $KIMI_CREDENTIALS_FILE (run: kimi login)" >&2
+    exit 1
+  fi
+  cred_dir="$(cd "$(dirname -- "$KIMI_CREDENTIALS_FILE")" 2>/dev/null && pwd -P)" \
+    || { echo "Could not resolve the Kimi credential dir" >&2; exit 1; }
+  ln -s "$cred_dir" "$home/.kimi-code/credentials" \
+    || { echo "Could not link Kimi credentials into the isolated runtime" >&2; exit 1; }
+  # oauth/ holds the managed provider's lock/marker next to the token; link it
+  # when present so a refresh has everything it touches on the host side.
+  if [[ -d "$(dirname -- "$cred_dir")/oauth" ]]; then
+    ln -s "$(dirname -- "$cred_dir")/oauth" "$home/.kimi-code/oauth" \
+      || { echo "Could not link the Kimi oauth dir into the isolated runtime" >&2; exit 1; }
+  fi
+  # A FILTERED config.toml, not a copy: with none, kimi-code 0.32 offers no
+  # `kimi-code/*` model over ACP at all ("session does not offer model value
+  # 'kimi-code/k3-256k'", first live run after isolation) — the managed
+  # provider's model catalogue is plain config, written by `kimi login`. Keep
+  # only what a review needs: `default_model`, [providers.*] (+ their oauth
+  # references into the linked credentials), [models.*], [services.*] (the
+  # moonshot search/fetch tools) and [thinking]. Everything else — [[hooks]],
+  # [mcp], loop control, permission mode — is exactly the ambient executable
+  # state the isolation exists to leave behind. Raw-section projection on
+  # purpose: it needs no TOML parser (tomllib is 3.11+), and a section this
+  # filter does not recognise is DROPPED, never forwarded.
+  if [[ -s "$KIMI_CONFIG_FILE" ]]; then
+    _kimi_project_config "$KIMI_CONFIG_FILE" > "$home/.kimi-code/config.toml" \
+      || { echo "Could not project the Kimi config into the isolated runtime" >&2; exit 1; }
+    chmod 600 "$home/.kimi-code/config.toml"
+  fi
+}
+
+_kimi_project_config() {
+  # $1 = host config.toml → stdout: the allowlisted projection (see above).
+  # Top-level scalars: only default_model. Tables: [services.*] and [thinking];
+  # [providers.*] ONLY the managed (`managed:*`, OAuth) ones with their
+  # sub-tables; [models.*] only those declared on a kept provider; and NO
+  # secret-shaped scalar (api_key/token/secret/…) from any of them — the
+  # managed provider and the moonshot services authenticate via the linked
+  # oauth store. Parsed with tomllib (3.11+) and re-serialized, so a header-
+  # looking line inside a multiline string or single-quoted TOML cannot fool
+  # it; on an older python3 a hardened line-based projection applies the same
+  # allowlist. Array tables ([[hooks]]) are never emitted.
+  python3 - "$1" <<'PY'
+import re, sys
+# Secret-shaped scalars are dropped from EVERY projected table: the managed
+# provider and the moonshot services authenticate through the linked oauth
+# store (their api_key is "" on a stock install), so nothing a review needs is
+# lost, and a third-party key can never reach a file the read+web Kimi reads.
+# NOT a bare `key`: `[providers.*.oauth] key = "kimi-code"` names the credential
+# store entry — dropping it broke session start (rc 10, 2026-09-05).
+SECRET_KEY = re.compile(r"(?i)(^|_)(api[_-]?key|secret[_-]?key|access[_-]?key|private[_-]?key|token|secret|password|passwd)$")
+KEEP_ROOTS = ("providers", "models", "services", "thinking")
+
+def managed(name):
+    return isinstance(name, str) and name.startswith("managed:")
+
+def toml_scalar(v):
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    if isinstance(v, str):
+        return '"' + v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
+    if isinstance(v, list):
+        return "[" + ", ".join(toml_scalar(x) for x in v) + "]"
+    raise ValueError("unsupported TOML value")
+
+def emit_table(out, path, table):
+    scalars = {k: v for k, v in table.items() if not isinstance(v, dict)}
+    subs = {k: v for k, v in table.items() if isinstance(v, dict)}
+    out.append("")
+    out.append("[" + ".".join(quote_key(k) for k in path) + "]")
+    for k, v in scalars.items():
+        # Drop a secret-shaped key only when it carries a value: `api_key = ""`
+        # is the stock managed-provider shape (auth comes from the oauth store)
+        # and kimi expects the field to exist.
+        if SECRET_KEY.search(k) and isinstance(v, str) and v:
+            continue
+        try:
+            out.append("%s = %s" % (quote_key(k), toml_scalar(v)))
+        except ValueError:
+            continue
+    for k, v in subs.items():
+        emit_table(out, path + [k], v)
+
+def quote_key(k):
+    return k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else '"' + k.replace('"', '\\"') + '"'
+
+try:
+    import tomllib
+except ImportError:  # python < 3.11: keep the line-based projection, hardened
+    tomllib = None
+
+out = []
+if tomllib is not None:
+    with open(sys.argv[1], "rb") as fh:
+        doc = tomllib.load(fh)
+    dm = doc.get("default_model")
+    if isinstance(dm, str):
+        out.append("default_model = %s" % toml_scalar(dm))
+    providers = {k: v for k, v in (doc.get("providers") or {}).items() if managed(k) and isinstance(v, dict)}
+    for name, table in providers.items():
+        emit_table(out, ["providers", name], table)
+    for name, table in (doc.get("models") or {}).items():
+        if isinstance(table, dict) and table.get("provider") in providers:
+            emit_table(out, ["models", name], table)
+    for name, table in (doc.get("services") or {}).items():
+        if isinstance(table, dict):
+            emit_table(out, ["services", name], table)
+    if isinstance(doc.get("thinking"), dict):
+        emit_table(out, ["thinking"], doc["thinking"])
+else:
+    HEAD = re.compile(r"^\[(\[)?\s*([A-Za-z0-9_-]+)(?:\.(\"[^\"]*\"|'[^']*'|[A-Za-z0-9_:-]+))?")
+    sections, cur, default_model = [], None, None
+    with open(sys.argv[1], encoding="utf-8", errors="strict") as fh:
+        for line in fh:
+            stripped = line.strip()
+            m = HEAD.match(stripped)
+            if m:
+                cur = {"array": m.group(1) is not None, "root": m.group(2),
+                       "name": (m.group(3) or "").strip("\"'"), "lines": [line.rstrip("\n")]}
+                sections.append(cur)
+                continue
+            if cur is None:
+                if re.match(r"^default_model\s*=", stripped) and default_model is None:
+                    default_model = line.rstrip("\n")
+            else:
+                cur["lines"].append(line.rstrip("\n"))
+    kept = {s["name"] for s in sections if not s["array"] and s["root"] == "providers" and managed(s["name"])}
+    def provider_of(sec):
+        for l in sec["lines"]:
+            m = re.match(r"^\s*provider\s*=\s*[\"']([^\"']*)[\"']", l)
+            if m:
+                return m.group(1)
+        return None
+    if default_model:
+        out.append(default_model)
+    for sec in sections:
+        if sec["array"]:
+            continue
+        keep = (sec["root"] in ("services", "thinking")
+                or (sec["root"] == "providers" and sec["name"] in kept)
+                or (sec["root"] == "models" and provider_of(sec) in kept))
+        if keep:
+            out.append("")
+            for l in sec["lines"]:
+                key = re.match(r"^\s*([A-Za-z0-9_\"'-]+)\s*=\s*(.*)$", l)
+                if key and SECRET_KEY.search(key.group(1).strip("\"'")) \
+                        and key.group(2).strip() not in ('""', "''"):
+                    continue
+                out.append(l)
+sys.stdout.write("\n".join(out) + "\n")
+PY
+}
+
+run_kimi() {
+  local prompt_path="$1" effort="$2" model="$3" schema="$4"
+
+  # kimi-code 0.32.0 exposes low|high|max through ACP session config even though
+  # the top-level CLI has no --effort flag. Map missing intermediate tiers DOWN,
+  # matching the conservative mappings used by codex/grok: a caller never gets a
+  # more expensive tier than requested merely because this ladder is sparse.
+  case "$effort" in
+    low|medium) effort="low" ;;
+    high|xhigh) effort="high" ;;
+    max) effort="max" ;;
+  esac
+  local kimi_model="${model:-$KIMI_DEFAULT_MODEL}"
+  TELEMETRY_EFFORT="$effort"; TELEMETRY_MODEL="$kimi_model"
+
+  [[ -f "$KIMI_ACP_CLIENT" ]] \
+    || { echo "kimi ACP client missing: $KIMI_ACP_CLIENT" >&2; exit 2; }
+
+  # Codex/Grok get the schema through an enforcement flag; Kimi has no equivalent,
+  # so append it as a strict output instruction before the local validator checks
+  # the answer. Keep the caller-owned prompt immutable and account for the extra
+  # bytes in both the context cap and telemetry.
+  _prompt_scratch "$prompt_path" \
+    || { echo "Could not create a temp file for the Kimi schema prompt" >&2; exit 2; }
+  # `&&`, not `;`: with `;` the group's status was the contract printf's 0 and
+  # a failed cat (the input already unlinked — see _prompt_scratch) went unseen.
+  { cat "$prompt_path" && _kimi_output_contract "$schema"; } >"$TMP_PROMPT" \
+    || { echo "Could not assemble the Kimi schema prompt" >&2; exit 2; }
+  [[ -n "$_PROMPT_SCRATCH_PREVIOUS" ]] && rm -f "$_PROMPT_SCRATCH_PREVIOUS"
+  prompt_path="$TMP_PROMPT"
+  _prompt_bytes_checked "$prompt_path" "$(swarm_max_prompt_bytes)" "Kimi prompt too large with output schema"
+  TELEMETRY_BYTES="$_PROMPT_BYTES"
+
+  # Kimi has no CLI switch that removes read/web while still accepting the full
+  # prompt out-of-band. Its safe transport is ACP under the OS jail: secret-read
+  # isolation plus repository/Git immutability. ACP permission rejection is
+  # defense-in-depth only. Without the jail AND a resolvable repo root, do not
+  # run a reduced imitation: fail once and let the skill omit Kimi.
+  if ! _read_web_safe kimi; then
+    echo "kimi requires a working OS jail and resolvable repo root — refusing to run read/web-capable ACP without the secret boundary (fail closed)" >&2
+    exit 1
+  fi
+  # _read_web_safe just guaranteed a non-empty _REPO_ROOT_MEMO — no second guard.
+  local repo="$_REPO_ROOT_MEMO"
+  _assert_prompt_readable_in_jail "$prompt_path" kimi
+
+  _kimi_prepare_runtime "$prompt_path"
+
+  TMP_OUT="$(mktemp)"
+  chmod 600 "$TMP_OUT"
+
+  # FULL PROMPT OVER ACP STDIO: kimi -p is intentionally absent because it only
+  # accepts the prompt on argv. The Python client starts `kimi acp`, sends the
+  # prompt as an ACP ContentBlock over NDJSON, pins model/thinking/default mode,
+  # rejects every permission request, and validates the final assistant text
+  # against the configured schema. HOME/KIMI_CODE_HOME point at the ephemeral
+  # runtime so ambient user config never loads. Kimi's own stderr is discarded
+  # inside the client; this outer redirect also withholds diagnostics from the
+  # workflow transport.
+  local rc=0
+  HOME="$TMP_KIMI_HOME" \
+  KIMI_CODE_HOME="$TMP_KIMI_HOME/.kimi-code" \
+  KIMI_DISABLE_TELEMETRY=1 \
+  KIMI_CODE_NO_AUTO_UPDATE=1 \
+  KIMI_CLI_NO_AUTO_UPDATE=1 \
+  KIMI_CODE_BACKGROUND_KEEP_ALIVE_ON_EXIT=0 \
+  KIMI_DISABLE_CRON=1 \
+  sandboxed kimi python3 "$KIMI_ACP_CLIENT" \
+      --prompt-file "$prompt_path" \
+      --schema "$schema" \
+      --cwd "$repo" \
+      --model "$kimi_model" \
+      --effort "$effort" \
+      --kimi-bin "$KIMI_BIN" \
+      --deny-path "$TMP_KIMI_HOME" \
+      --deny-path "$SWARM_HOST_HOME/.kimi-code" >"$TMP_OUT" 2>"$TMP_KIMI_HOME/client.err" || rc=$?
+  # The client's one-line diagnosis (scrubbed) — without it every 11/12/13
+  # read "rejected by the gate" and the operator had to re-run the python
+  # client by hand to learn that the model was not offered, the quota was
+  # exhausted, or the answer was not JSON. Kimi's own stderr never reaches this
+  # file (the client discards it); the file dies with the ephemeral HOME.
+  local kimi_why=""
+  kimi_why="$(tail -n 2 "$TMP_KIMI_HOME/client.err" 2>/dev/null | scrub_secrets 2>/dev/null | tr '\n' ' ' | cut -c1-400)"
+
+  if _is_timeout_rc "$rc"; then
+    TELEMETRY_RC="$rc"
+    echo "kimi ACP review timed out after ${_adapter_timeout}s" >&2
+    exit 1
+  fi
+
+  case "$rc" in
+    0) TELEMETRY_RC=0 ;;
+    2)
+      # Schema/config incompatibility is an adapter usage error; the backend was
+      # never meaningfully entered, so leave backend_rc null in telemetry.
+      TELEMETRY_RC=""
+      echo "kimi ACP adapter rejected its configuration" >&2
+      exit 2
+      ;;
+    11)
+      # Kimi answered, but local schema validation rejected the answer.
+      # Record backend_rc=0 so telemetry can distinguish this from "never ran".
+      TELEMETRY_RC=0
+      echo "kimi response was rejected by the ACP schema gate${kimi_why:+: $kimi_why}" >&2
+      exit 1
+      ;;
+    13)
+      # Policy abort after the prompt started — possibly BEFORE any answer
+      # existed (an unsafe tool killed mid-turn). Keep the client's own code in
+      # telemetry rather than claiming Kimi answered.
+      TELEMETRY_RC=13
+      echo "kimi session aborted by the ACP policy gate${kimi_why:+: $kimi_why}" >&2
+      exit 1
+      ;;
+    12)
+      # ACP negotiation/configuration failed before session/prompt. No review
+      # response existed to reject, so leave backend_rc null rather than claiming
+      # a successful model answer.
+      TELEMETRY_RC=""
+      echo "kimi ACP session negotiation failed before review${kimi_why:+: $kimi_why}" >&2
+      exit 1
+      ;;
+    *)
+      TELEMETRY_RC="$rc"
+      echo "kimi ACP review failed (rc=$rc)${kimi_why:+: $kimi_why}" >&2
+      exit 1
+      ;;
+  esac
+
+  [[ -s "$TMP_OUT" ]] || { echo "kimi ACP produced no output" >&2; exit 1; }
+  scrub_secrets <"$TMP_OUT"
 }
 
 main() {

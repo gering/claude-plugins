@@ -1,9 +1,9 @@
 ---
 title: "Swarm Backend Adapter Layer"
 createdAt: 2026-07-03
-updatedAt: 2026-09-02
+updatedAt: 2026-09-05
 createdFrom: "PR #21"
-updatedFrom: "fix-swarm-timeout-ceiling"
+updatedFrom: "add-kimi-swarm-voice"
 pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
@@ -12,7 +12,7 @@ reindexedAt: 2026-07-12
 # Swarm Backend Adapter Layer
 
 The `swarm` plugin reviews locally with a mixture-of-agents ensemble: Claude
-subagents plus the external `codex` and `grok` CLIs. All deterministic backend
+subagents plus the external `codex`, `grok`, and `kimi` CLIs. All deterministic backend
 logic lives in one script — `plugins/swarm/scripts/agents.sh` (verbs: `list`,
 `available`, `ready`, `jail`, `config`, `run`) — so skills never call an external CLI
 directly. `jail` prints `jail=yes|no` (a working OS sandbox?) — the
@@ -25,7 +25,7 @@ debugging round.
 
 ## Posture (swarm 0.6.0 — read + web, hardened egress)
 
-External voices are **no longer tool-less / inline-only**. Both may read
+External voices are **no longer tool-less / inline-only**. All three may read
 project files and research online so they can find bugs that live outside the
 inlined diff (callers, config, types, library/CVE knowledge).
 
@@ -33,6 +33,7 @@ inlined diff (callers, config, types, library/CVE knowledge).
 |-------|-----------|-----|-------------|-------|
 | **codex** | yes (`-s read-only` already permits FS reads) | yes (`-c tools.web_search=true`; works under read-only, no sandbox loosen) | no (`-s read-only` only — never `workspace-write` / `danger-full-access`) | `-C <repo-root>` (working root; do **not** use `--add-dir`, which grants writable dirs) |
 | **grok** | yes (`read_file,list_dir,grep` in `--tools` allowlist) | yes (`web_search,web_fetch` in the same allowlist; drop `--disable-web-search`) | no (strict allowlist — never admit `write` / `search_replace` / `run_terminal_command` / …) | `--cwd <repo-root>` |
+| **kimi** | yes (approval-free ACP read/search tools) | yes (`WebSearch`/`FetchURL`, when the managed provider exposes them) | OS-immutable repo/Git (every worktree); ACP tool-kind allowlist aborts on first unsafe run (Kimi 0.32 can auto-approve some in-repo writes) | ACP `session/new.cwd=<repo-root>`; isolated HOME; repo-local `.kimi-code`/`.kimi`/`.mcp.json` denied; `ready` includes the OS jail |
 
 **Security layers (do not soften or over-claim):**
 
@@ -72,7 +73,9 @@ inlined diff (callers, config, types, library/CVE knowledge).
    (tool-less, no web — the 0.5.x flags); codex gets web **hard-disabled**
    (`tools.web_search=false`, not merely omitted) while its FS reads remain
    inside its own `-s read-only` sandbox — there is no no-read codex tier, so
-   this is codex's 0.5.x read surface, honestly documented, not "tool-less".
+   this is codex's 0.5.x read surface, honestly documented, not "tool-less";
+   Kimi is omitted/refused entirely because ACP has no equivalent safe no-read
+   tier. Never fall Kimi back to `-p`, argv transport, or an unjailed tool mode.
    The degrade is announced by the SKILL's run-start notice (the adapter's
    `jail` subcommand feeds it — transport discards adapter stderr) and the
    prompt's capability lines are built to match (no promised reads/web on a
@@ -115,15 +118,26 @@ inlined diff (callers, config, types, library/CVE knowledge).
    operator's own tree — the egress guard is doing more load-bearing work there.
    These are the accepted cost of the user's "web always on, jail-not-allowlist,
    minimal" decision — documented so nobody quietly assumes a hard boundary.
-4. **No write/shell/network-write tools** — but this is a **CLI-level** barrier
-   (grok `--tools` allowlist; codex `-s read-only`), NOT OS-enforced: the jail
-   is a `(deny file-read*)` / `--dev-bind / /` **read**-deny only, so there is no
-   OS defense-in-depth against a write/exec if a future grok build's allowlist
-   admitted a mutating tool (the allowlist is lenient about unknown ids). An
-   OS-level write-deny was deliberately NOT added — the node/bun CLIs write
-   caches/temp all over, so a write-jail risks breaking them; codex's read-only
-   IS OS-enforced. Accepted residual, documented so nobody assumes the jail
-   blocks writes.
+4. **Repository/Git immutability (hard REPOSITORY-write boundary, 0.11.0).** The
+   same protected-root helper used for secret discovery (`_repo_protected_roots`
+   — memoized, bash-only realpath, **sorted ancestors-first**, and covering
+   every linked worktree via `git worktree list --porcelain`, not only the
+   reviewed one) feeds an OS write policy for every external: macOS
+   `sandbox-exec` adds `(deny file-write*)` literal/subpath rules; Linux `bwrap`
+   binds those roots ancestors-first (a descendant bound first is shadowed by
+   the ancestor's recursive bind and its `--remount-ro` then aborts bwrap —
+   which the smoke probe would report as "jail-less") then remounts them
+   read-only *after* secret masks so a child tmpfs is not undone. It is a
+   repository-write boundary, not a host-write one: the host HOME stays
+   writable (codex/grok keep session state there; a HOME-wide deny breaks
+   them) and the jail has no network rule — both documented residuals. `GIT_OPTIONAL_LOCKS=0` stops git from trying to refresh the index.
+   Private runtime/temp writes stay allowed. CLI-level no-write/no-shell flags
+   (grok `--tools` allowlist, codex `-s read-only`) and ACP rejection remain
+   defense-in-depth. **Accepted residual:** arbitrary child-process execution
+   is not portably prevented (the jail is not a seccomp exec-deny). Kimi and
+   managed search helpers may still run; they cannot mutate the reviewed
+   repository or Git state.
+
 
 The 120-KiB inline-diff cap described above was **removed in 0.8.0** (see the
 out-of-band transport section): the prompt no longer travels on argv, so the cap
@@ -132,11 +146,126 @@ agent read the diff file itself was considered there and REJECTED — delivery
 stops being verifiable, the untrusted diff arrives outside the nonce fence, and
 each voice pays an extra round-trip.
 
-## Verified CLI facts (codex 0.147.0 / grok 1.0.13, 2026-07..09)
+## Kimi ACP contract (swarm 0.11.0; kimi-code 0.32.0)
+
+Kimi is the schema-asymmetric backend: the CLI has no structured-output flag.
+The adapter therefore sends the complete review prompt out-of-band over ACP v1
+and validates the final assistant text locally. The deterministic flow in
+`scripts/kimi-acp.py` is `initialize → session/new → set model/thinking/mode →
+session/prompt`; `session/update` message chunks are concatenated, parsed as one
+JSON object, and checked against the bundled finding schema. The schema is also
+appended to Kimi's actual prompt as a high-priority output contract — validation
+without instruction made valid output accidental. There is deliberately **no
+retry**: one retry could double 5 default or 11 `--max` Kimi calls. Any invalid
+JSON/schema, empty answer, unexpected ACP request, non-`end_turn` stop, or policy
+violation exits non-zero and becomes a visible `backendError`, never
+`{"findings":[]}`.
+
+Security is layered. The hard boundaries are the OS secret-read jail, repository
+immutability, and an ephemeral `HOME`/`KIMI_CODE_HOME` that contains only
+**symlinks** to the host's `credentials/` and `oauth/` directories plus a
+**filtered projection** of
+`config.toml` — `default_model`, `[providers]`, `[models]`, `[services]`,
+`[thinking]`; never `[[hooks]]`, `[mcp]`, permission mode — because kimi-code
+0.32 offers a `kimi-code/*` model over ACP only when it is declared under
+`[models]` (an empty HOME fails `session/new` model selection). Telemetry,
+auto-update, cron, and background keep-alive are switched off. Ambient hooks,
+MCP, plugins, trust records, sessions, and history are not mounted; the
+repository's own `.kimi-code/`, `.kimi/` and `.mcp.json` (kimi-code reads
+`<cwd>/.kimi-code/` and `mcpServers: []` does not disable file-declared
+servers) are denied to the ACP session. The ephemeral HOME and the assembled
+prompt are created **next to the caller's prompt file** — inside the skill's
+scratch dir, which its `rm -rf "$TMPD"` reaches even after a SIGKILL that
+skipped the adapter's EXIT trap. **Why links, not a copy (2026-09-04):**
+Moonshot rotates refresh tokens. The first live run after isolation refreshed
+inside its private copy; the host kept the old refresh token, every later run
+failed `session/prompt` with `-32000 Authentication required`, and the host
+CLI then reported `auth.login_required` and blanked its credential file — the
+operator had to `kimi login` again. The DIRECTORY is linked (kimi refreshes by
+atomic rename inside it; a linked file would be replaced and strand the new
+token). Kimi's own auth dirs are therefore exempt from the kimi deny list —
+the same "own cred dir readable" posture codex/grok have.
+The ACP tool gate is an **allowlist** (read/search/fetch/think): an unsafe
+kind is sticky per tool id, a tool that is in progress, completed, or failed
+without this client having rejected its approval request kills the session
+on first sight (rc 13), and an unsafe tool left pending at end of turn is
+"unsettled" and fails too; a tool call whose `locations` resolve under a
+`--deny-path` prefix (the ephemeral HOME, the host `~/.kimi-code`) aborts the
+same way — the linked credential file is readable-by-process (refresh) but not
+readable-by-tool. kimi-code also loads `<cwd>/AGENTS.md`, `agents.md`, `KIMI.md`
+into its system prompt at session start, and discovers skills / subagents / a
+whole-prompt agent override under `<root>/.agents/` — repo text as
+INSTRUCTIONS outside the diff fence — so Kimi's deny list masks those at every
+protected root (`CLAUDE.md` is not loaded by kimi-code 0.32). The ACP
+`--deny-path` check scans every string in a tool call's `rawInput` and `title`
+as well as `locations` (optional UI data in ACP — trusting it alone was
+fail-open); `scrub_secrets`/`scrubField` redact JWT-shaped tokens. The config
+projection parses with `tomllib` (3.11+) and re-serializes only the allowlisted
+tables, dropping every secret-shaped scalar (`api_key`, `token`, …) — the
+managed provider and the moonshot services authenticate via the linked oauth
+store, their `api_key` is empty on a stock install. `_kimi_has_acp` detects
+ACP POSITIVELY (a commander-style CLI prints top-level help with rc 0 for an
+unknown subcommand); rc 1/2/127 are clean negatives, only timeouts degrade.
+`KIMI_CREDENTIALS_FILE` must be named `kimi-code.json` (the directory is
+linked, kimi reads the file by name). The ephemeral HOME refuses to sit under a
+protected (write-denied) root, and readiness already refuses a `TMPDIR` inside
+the checkout. **The ACP tool gate is detection, not prevention:** an
+auto-approved tool has run by the time its status update arrives; the OS
+controls are the boundary. Beyond the repository, the jail also
+**write-denies** the host's shell startup files, `~/.claude`, `~/.claude.json`,
+`~/.config`, `~/.local/bin`, the sibling agent stores and `~/.kimi-code/bin`
+(+ the resolved `$KIMI_BIN` dir, config, hooks) — one auto-approved write there
+would have turned the next *unjailed* readiness probe into a trojan launch.
+Relative tool paths resolve against the session cwd before the deny check
+(`../.kimi-code/…` and repo symlinks into the store). The adapter now keeps the
+ACP client's stderr and appends its last lines (scrubbed) to the backend error
+— the first four-family run had every Kimi answer "rejected by the gate" with
+no cause visible; the peer's JSON-RPC message is passed up too (that run ended
+in `403 You've reached your 5-hour usage limit`, Moonshot's rolling quota). The
+client extracts the JSON object from a fenced or prose-wrapped answer before
+strict schema validation (Kimi has no CLI schema-enforcement flag), caps the
+buffered answer at 8 MiB, and readiness validates the model against the
+*projected* catalogue, not the host's `provider list`. The config projection keeps
+only the `managed:*` provider(s), the models declared on them, services and
+thinking, so a third-party provider's `api_key` never reaches a file the
+read+web Kimi can open. The jail (`_read_web_safe`) is part of Kimi's
+`ready_check`, so `list --json` never advertises a Kimi the clusters would
+refuse. ACP is defense-in-depth:
+the client advertises neither filesystem-write nor terminal capability, rejects
+every `session/request_permission`, and fails if ACP reports a successful
+mutating tool kind (`edit`, `delete`, `move`, `execute`, `switch_mode`,
+`other`) — including Git-cwd writes Kimi 0.32 can auto-approve without asking.
+Approval-free read/search/web tools remain available. Official Kimi
+documentation identifies `WebSearch` and `FetchURL` as auto-allow tools when
+the host provider exposes them; the managed Kimi provider does. The shared
+external prompt's egress guard still applies. The ambient `~/.kimi-code` store
+is denied even to Kimi — entry by entry, sparing only `bin/` (and the resolved
+`$KIMI_BIN` directory), because the stock installer keeps the executable there
+and a whole-directory deny blocks the exec of every jailed run, plus Kimi's own
+`credentials/` and `oauth/`; codex/grok cannot read any of it.
+
+
+Readiness requires all of: binary, credentials at
+`~/.kimi-code/credentials/kimi-code.json`, ACP support, and the pinned qualified
+model `kimi-code/k3-256k` in `kimi provider list --json`. Probes are bounded;
+an explicit well-formed negative is not-ready, while a timeout/format drift is
+an audible trust-auth degrade so an inconclusive network probe cannot silently
+drop the fourth family. ACP then re-verifies the offered model and configures
+`mode=default`. Unlike the original task probe, ACP exposes a real thinking
+axis: requested `low|medium → low`, `high|xhigh → high`, `max → max`. Telemetry
+records the effective model/thinking, prompt bytes (including the schema
+contract), runtime, backend rc and adapter rc; backend rc 0 + adapter rc 1 means
+"backend response rejected", while pre-prompt ACP negotiation failure keeps the
+backend rc null.
+
+## Verified CLI facts (codex 0.147.0 / grok 1.0.13 / kimi-code 0.32.0, 2026-07..09)
 
 - **The prompt travels OUT-OF-BAND, never on argv** — codex reads it from stdin
   (`-- -`; the help states an omitted or `-` PROMPT reads stdin), grok takes
-  `--prompt-file <path>` (present on 0.2.112; the introducing release is not
+  `--prompt-file <path>`, and Kimi receives an ACP `session/prompt` content block.
+  Kimi's `-p` is deliberately not used: it accepts the prompt as one argv word,
+  reintroducing Linux's per-argument wall. Grok's file flag is present on 0.2.112;
+  the introducing release is not
   documented, so the adapter probes `grok --help` for the flag rather than
   parsing a version). *Why it matters:* on argv the binding limit is
   `MAX_ARG_STRLEN` (128 KiB on Linux), which forced a 120 KiB prompt cap — and
@@ -158,10 +287,11 @@ each voice pays an extra round-trip.
     adapter's own temp prompt is `chmod 600` before content lands and is removed
     by the EXIT trap on every path, including errors: it holds the untrusted
     diff.
-- **Uniform findings JSON** is achievable from both CLIs: `codex exec
-  --output-schema <file>` and `grok --json-schema '<inline>'` both enforce a
-  JSON Schema on the final answer. One bundled schema
-  (`scripts/schema/finding.schema.json`) feeds both — the ensemble merge never
+- **Uniform findings JSON** is achievable from all CLIs: `codex exec
+  --output-schema <file>` and `grok --json-schema '<inline>'` enforce a JSON
+  Schema on the final answer; Kimi receives the same schema in its prompt and
+  `kimi-acp.py` validates it locally, fail-closed. One bundled schema
+  (`scripts/schema/finding.schema.json`) feeds all three — the ensemble merge never
   parses free-form review prose. In strict structured-output modes all
   properties must be `required`, so the schema requires every field and uses
   honest defaults (`line: 0`, self-reported `confidence`) instead of optionals.
@@ -204,11 +334,12 @@ each voice pays an extra round-trip.
   is gone) → the adapter maps `xhigh`/`max`→`high`; codex has no `max` tier →
   map `max`→`xhigh` (`-c model_reasoning_effort=…`). Both mappings degrade a
   stale caller instead of erroring.
-- **codex model is pinned** to `CODEX_DEFAULT_MODEL` (`gpt-5.6-terra`, the adapter
-  passes `-m` on every call), overridable per call via `--model` — so a review is
-  reproducible instead of tracking the user's ambient `~/.codex/config` default.
-  The pipeline runs codex at `high` normally; the `--max` profile overrides both
-  model and effort (`gpt-5.6-sol` @ `xhigh`) — see
+- **codex model is pinned** to `CODEX_DEFAULT_MODEL` (`gpt-5.6-sol` since 0.11.0,
+  `gpt-5.6-terra` before; the adapter passes `-m` on every call), overridable per
+  call via `--model` — so a review is reproducible instead of tracking the user's
+  ambient `~/.codex/config` default. The pipeline runs codex at `medium` normally
+  and `xhigh` under `--max` — the model is the adapter's on both profiles, only
+  the effort is a profile knob — see
   [swarm-review-pipeline](swarm-review-pipeline.md).
 - **Model-aware readiness beats an auth-only check** (swarm 0.4.3). grok drops
   and renames models between releases — 0.2.101 removed
