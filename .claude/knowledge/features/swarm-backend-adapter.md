@@ -189,7 +189,16 @@ The ACP tool gate is an **allowlist** (read/search/fetch/think): an unsafe
 kind is sticky per tool id, a tool that is in progress, completed, or failed
 without this client having rejected its approval request kills the session
 on first sight (rc 13), and an unsafe tool left pending at end of turn is
-"unsettled" and fails too. The jail (`_read_web_safe`) is part of Kimi's
+"unsettled" and fails too; a tool call whose `locations` resolve under a
+`--deny-path` prefix (the ephemeral HOME, the host `~/.kimi-code`) aborts the
+same way — the linked credential file is readable-by-process (refresh) but not
+readable-by-tool. kimi-code also loads `<cwd>/AGENTS.md`, `agents.md`, `KIMI.md`
+into its system prompt at session start — repo text as INSTRUCTIONS outside
+the diff fence — so Kimi's deny list masks those at every protected root
+(`CLAUDE.md` is not loaded by kimi-code 0.32). The config projection keeps
+only the `managed:*` provider(s), the models declared on them, services and
+thinking, so a third-party provider's `api_key` never reaches a file the
+read+web Kimi can open. The jail (`_read_web_safe`) is part of Kimi's
 `ready_check`, so `list --json` never advertises a Kimi the clusters would
 refuse. ACP is defense-in-depth:
 the client advertises neither filesystem-write nor terminal capability, rejects

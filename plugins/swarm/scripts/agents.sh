@@ -38,8 +38,8 @@
 # SWARM_MAX_PROMPT_BYTES (default 512 KiB) is that sanity cap.
 #
 # Backend notes (probed against codex 0.147.0 / grok 1.0.13 / kimi-code 0.32.0,
-# 2026-07..08):
-
+# 2026-07..09):
+#
 #   claude — probe-only: reviews run in-session via the Agent tool, so
 #            `run claude` is a usage error. available/ready/list include it.
 #   codex  — `codex exec --output-schema` under `-s read-only` with
@@ -649,8 +649,12 @@ _sandbox_deny_paths_build() {
   # config, plugins) stays denied — even to Kimi.
   # Two carve-outs, both by identity not by name alone: the `bin` entry, and the
   # directory that actually holds the resolved $KIMI_BIN (a custom layout).
-  local kdir="$host/.kimi-code" kbin_dir="" kbin e
-  if [[ -d "$kdir" ]]; then
+  local kdir="$host/.kimi-code" kbin_dir="" kbin e erp
+  if [[ "$own" != "kimi" ]]; then
+    # Only kimi ever execs kimi: the siblings get the whole store denied, like
+    # ~/.codex and ~/.grok above — no per-entry walk on every codex/grok call.
+    printf '%s\n' "$kdir"
+  elif [[ -d "$kdir" ]]; then
     kbin="$(command -v -- "$KIMI_BIN" 2>/dev/null || true)"
     if [[ -n "$kbin" ]]; then
       kbin="$(readlink -f -- "$kbin" 2>/dev/null || printf '%s' "$kbin")"
@@ -665,11 +669,12 @@ _sandbox_deny_paths_build() {
       # Moonshot ROTATES refresh tokens: a refresh inside a private copy
       # invalidated the host's token and logged the operator out (observed
       # 2026-09-04, kimi-code 0.32.0).
-      if [[ "$own" == "kimi" ]]; then
-        case "${e##*/}" in credentials|oauth) continue ;; esac
-      fi
+      case "${e##*/}" in credentials|oauth) continue ;; esac
+      # Spare the entry that holds the resolved $KIMI_BIN — the directory itself
+      # OR any ancestor of it (a versioned layout: ~/.kimi-code/versions/X/bin).
       if [[ -n "$kbin_dir" && -d "$e" ]]; then
-        [[ "$(cd "$e" 2>/dev/null && pwd -P || true)" == "$kbin_dir" ]] && continue
+        erp="$(cd "$e" 2>/dev/null && pwd -P || true)"
+        [[ -n "$erp" && ( "$kbin_dir" == "$erp" || "$kbin_dir" == "$erp"/* ) ]] && continue
       fi
       printf '%s\n' "$e"
     done
@@ -702,15 +707,20 @@ _sandbox_deny_paths_build() {
     # — git treats an EPERM on it as fatal (sandbox-exec), which would break the
     # externals' git-based exploration entirely; a repo-config-embedded token is
     # an accepted residual ([[swarm-backend-adapter]] § residual risk).
-    local r p
+    local p
     if [[ "$own" == "kimi" ]]; then
       # Kimi's PROJECT-LOCAL config surfaces: kimi-code reads <cwd>/.kimi-code/
       # (local.toml, MCP) and the ACP session runs with --cwd <repo>, so a
       # reviewed diff could plant an MCP server the ephemeral HOME never sees
       # (`mcpServers: []` in session/new does not disable file-declared ones).
       # Deny them to the ACP session; the diff still shows their content.
+      # kimi-code also loads <cwd>/AGENTS.md, agents.md and KIMI.md into its
+      # SYSTEM prompt at session start — repo text that would reach the model
+      # as INSTRUCTIONS, outside the DIFF-<nonce> fence. Deny them too (bwrap
+      # masks them empty; sandbox-exec makes the read fail).
       for r in "${roots[@]+"${roots[@]}"}"; do
-        for p in "$r"/.kimi-code "$r"/.kimi "$r"/.mcp.json; do
+        for p in "$r"/.kimi-code "$r"/.kimi "$r"/.mcp.json \
+                 "$r"/AGENTS.md "$r"/agents.md "$r"/KIMI.md; do
           [[ -e "$p" ]] && printf '%s\n' "$p"
         done
       done
@@ -818,9 +828,7 @@ _repo_protected_roots() {
   for r in "${roots[@]}"; do
     rp="$(cd -- "$r" 2>/dev/null && pwd -P || true)"
     [[ -n "$rp" && -d "$rp" ]] || continue
-    case $'\n'"$seen"$'\n' in
-      *$'\n'"$rp"$'\n'*) continue ;;
-    esac
+    _line_in_list "$rp" "$seen" && continue
     seen+="$rp"$'\n'
     out+="$rp"$'\n'
   done
@@ -1003,9 +1011,12 @@ sandboxed() {
   # OS jail + env filter around an external call. $1 = backend (its own cred dir
   # stays readable; siblings' are denied). Warn once if no jail is available.
   # Wraps a review, which processes the untrusted diff — that is why it carries
-  # the full jail; the readiness probe deliberately does NOT go through here
-  # (it processes no diff, and _init_sandbox's python3 profile-build must not
-  # become a dependency of the local `ready`/`list` paths — see grok_model_fetch).
+  # the full jail. The codex/grok readiness probes do NOT go through here (they
+  # process no diff, and the python3 profile-build is not a dependency of their
+  # `ready`/`list` paths — see grok_model_fetch). Kimi's readiness DOES build
+  # the jail (ready_check → _read_web_safe → _init_sandbox, memoized): a Kimi
+  # that cannot run under the jail must not be advertised as ready, and that
+  # answer needs the jail's own smoke probe, not a guess.
   local backend="$1"; shift
   _init_sandbox "$backend"
   if ((${#SANDBOX_CMD[@]} == 0)) && [[ -z "$_sandbox_warned" ]]; then
@@ -1534,10 +1545,7 @@ kimi_model_offered() {
   # Unknown means probe-degraded, not definitely absent: trust auth and let the
   # ACP session report a precise model-catalog error if the run reaches it.
   [[ "$_kimi_models_known" != "yes" ]] && return 0
-  case $'\n'"$_kimi_models"$'\n' in
-    *$'\n'"$model"$'\n'*) return 0 ;;
-    *) return 1 ;;
-  esac
+  _line_in_list "$model" "$_kimi_models"
 }
 
 grok_model_fetch() {
@@ -2181,8 +2189,9 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
     # the sibling calls running concurrently.
     _prompt_scratch "$prompt_path" \
       || { echo "Could not create a temp file for the assembled prompt" >&2; exit 2; }
-    { printf '%s\n\n' "$lens_instr"; cat "$prompt_path"; } > "$TMP_PROMPT" \
+    { printf '%s\n\n' "$lens_instr" && cat "$prompt_path"; } > "$TMP_PROMPT" \
       || { echo "Could not assemble the lens instruction and prompt" >&2; exit 2; }
+    [[ -n "$_PROMPT_SCRATCH_PREVIOUS" ]] && rm -f "$_PROMPT_SCRATCH_PREVIOUS"
     prompt_path="$TMP_PROMPT"
     _prompt_bytes_checked "$prompt_path" "$max_bytes" "Prompt too large with lens instruction"
     nbytes="$_PROMPT_BYTES"
@@ -2219,6 +2228,12 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
     TELEMETRY_BYTES="$nbytes"
   fi
 
+  # Absolute ONCE, before dispatch: every backend compares this path against the
+  # jail's denies and derives its scratch dir from it (was re-typed per backend).
+  case "$prompt_path" in
+    /*) ;;
+    *)  prompt_path="$PWD/$prompt_path" ;;
+  esac
   case "$backend" in
     codex) run_codex "$prompt_path" "$effort" "$model" "$schema" ;;
     grok)  run_grok  "$prompt_path" "$effort" "$model" "$schema" ;;
@@ -2473,10 +2488,6 @@ run_grok() {
   # Absolute before the containment test: grok resolves --prompt-file against
   # `--cwd <repo>`, so a relative path would be compared as-is here and match no
   # deny prefix while the backend reads a different file entirely.
-  case "$prompt_path" in
-    /*) ;;
-    *)  prompt_path="$PWD/$prompt_path" ;;
-  esac
   _assert_prompt_readable_in_jail "$prompt_path" grok
   local raw rc=0
   raw="$(sandboxed grok grok -m "$grok_model" --effort "$effort" \
@@ -2537,13 +2548,18 @@ _kimi_output_contract() {
     printf '\nThe response must be exactly the schema object and nothing else.\n'
 }
 
+_kimi_creds_done=""; _kimi_creds_ok=""
 _kimi_credentials_usable() {
   # A credential file that EXISTS is not enough: after a failed refresh
   # kimi-code blanks the tokens in place (access_token "", expires_at 0) and
   # `-s` still passed, so `list --json` advertised a Kimi whose every call
   # died with "-32000 Authentication required". Require a non-empty token.
+  # Memoized like its probe siblings: ready_check, ready_hint and the runtime
+  # setup all ask, and one python3 start per answer is enough.
+  if [[ -n "$_kimi_creds_done" ]]; then [[ "$_kimi_creds_ok" == "yes" ]]; return; fi
+  _kimi_creds_done=1; _kimi_creds_ok=no
   [[ -s "$KIMI_CREDENTIALS_FILE" ]] || return 1
-  python3 - "$KIMI_CREDENTIALS_FILE" <<'PY' 2>/dev/null
+  python3 - "$KIMI_CREDENTIALS_FILE" <<'PY' 2>/dev/null && _kimi_creds_ok=yes
 import json, sys
 try:
     d = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -2552,6 +2568,7 @@ except Exception:
 ok = isinstance(d, dict) and any(isinstance(d.get(k), str) and d.get(k) for k in ("refresh_token", "access_token"))
 sys.exit(0 if ok else 1)
 PY
+  [[ "$_kimi_creds_ok" == "yes" ]]
 }
 
 _prompt_scratch() {
@@ -2562,15 +2579,23 @@ _prompt_scratch() {
   # any content lands, dropping the previous scratch prompt. Shared by
   # subcmd_run (lens instruction + diff) and run_kimi (diff + schema contract):
   # the two copies of this swap had already drifted on the mktemp location.
-  local dir f previous="$TMP_PROMPT"
+  # The PREVIOUS scratch is handed back in _PROMPT_SCRATCH_PREVIOUS, not
+  # removed here: the caller may be about to READ it (run_kimi's input is the
+  # lens-assembled scratch subcmd_run just made — removing it first fed Kimi an
+  # empty diff that validated as `{"findings":[]}`, rc 0). Callers drop it AFTER
+  # the write. No $TMPDIR fallback either: a scratch outside the caller's dir is
+  # exactly the SIGKILL-orphan this helper exists to prevent — fail loudly.
+  local dir f
   dir="$(dirname -- "$1")"
-  f="$(mktemp "$dir/swarm-assembled.XXXXXX" 2>/dev/null || mktemp)" || return 1
+  _PROMPT_SCRATCH_PREVIOUS="$TMP_PROMPT"
+  f="$(mktemp "$dir/swarm-assembled.XXXXXX")" || return 1
   chmod 600 "$f"
   TMP_PROMPT="$f"
-  [[ -n "$previous" ]] && rm -f "$previous"
   return 0
 }
+_PROMPT_SCRATCH_PREVIOUS=""
 
+_PROMPT_BYTES=""
 _prompt_bytes_checked() {
   # VOID setter, result in _PROMPT_BYTES. $1 = path, $2 = cap, $3 = message
   # prefix. Re-measures an ASSEMBLED prompt: the caller bounded the diff alone,
@@ -2581,7 +2606,6 @@ _prompt_bytes_checked() {
     && { echo "$3 ($_PROMPT_BYTES bytes > $2) — narrow the diff range, or raise SWARM_MAX_PROMPT_BYTES" >&2; exit 2; }
   return 0
 }
-_PROMPT_BYTES=""
 
 _kimi_prepare_runtime() {
   # VOID setter — fills TMP_KIMI_HOME, prints nothing. $1 = the prompt path:
@@ -2599,15 +2623,16 @@ _kimi_prepare_runtime() {
   # so ACP cannot load ambient hooks, MCP servers, plugins, trust records,
   # sessions, or history.
   local home cred_dir
-  home="$(mktemp -d "$(dirname -- "$1")/swarm-kimi.XXXXXX" 2>/dev/null \
-          || mktemp -d "${TMPDIR:-/tmp}/swarm-kimi.XXXXXX")" \
-    || { echo "Could not create an isolated Kimi HOME" >&2; exit 2; }
+  # No $TMPDIR fallback: a HOME outside the caller's scratch dir is the
+  # SIGKILL-orphan (a projected config) this placement exists to prevent.
+  home="$(mktemp -d "$(dirname -- "$1")/swarm-kimi.XXXXXX")" \
+    || { echo "Could not create an isolated Kimi HOME next to the prompt file (is its directory writable?)" >&2; exit 2; }
   chmod 700 "$home"
   TMP_KIMI_HOME="$home"
   mkdir -p "$home/.kimi-code" || { echo "Could not create the isolated Kimi HOME" >&2; exit 2; }
   chmod 700 "$home/.kimi-code"
-  if [[ ! -s "$KIMI_CREDENTIALS_FILE" ]]; then
-    echo "kimi credentials missing: $KIMI_CREDENTIALS_FILE" >&2
+  if ! _kimi_credentials_usable; then
+    echo "kimi credentials missing or blank: $KIMI_CREDENTIALS_FILE (run: kimi login)" >&2
     exit 1
   fi
   cred_dir="$(cd "$(dirname -- "$KIMI_CREDENTIALS_FILE")" 2>/dev/null && pwd -P)" \
@@ -2625,7 +2650,7 @@ _kimi_prepare_runtime() {
   # 'kimi-code/k3-256k'", first live run after isolation) — the managed
   # provider's model catalogue is plain config, written by `kimi login`. Keep
   # only what a review needs: `default_model`, [providers.*] (+ their oauth
-  # references into the copied credentials), [models.*], [services.*] (the
+  # references into the linked credentials), [models.*], [services.*] (the
   # moonshot search/fetch tools) and [thinking]. Everything else — [[hooks]],
   # [mcp], loop control, permission mode — is exactly the ambient executable
   # state the isolation exists to leave behind. Raw-section projection on
@@ -2640,26 +2665,49 @@ _kimi_prepare_runtime() {
 
 _kimi_project_config() {
   # $1 = host config.toml → stdout: the allowlisted projection (see above).
-  # Top-level scalars: only default_model. Tables: only the allowlisted roots,
-  # including their sub-tables (providers."managed:kimi-code".oauth). Array
-  # tables ([[hooks]]) never match — the allowlist has no array-table root.
+  # Top-level scalars: only default_model. Tables: [services.*] and [thinking]
+  # whole; [providers.*] ONLY the managed (`managed:*`, OAuth) ones with their
+  # sub-tables, and [models.*] only those declared on a kept provider. A
+  # third-party provider's `api_key = "sk-…"` would otherwise land in a file the
+  # read+web-capable Kimi can read — the very secret the host config.toml deny
+  # exists to hide. The managed provider's own block is Kimi's own auth
+  # (the accepted own-token residual). Array tables ([[hooks]]) never match.
   python3 - "$1" <<'PY'
 import re, sys
-ALLOWED = ("providers", "models", "services", "thinking")
-out, keep = [], False
+HEAD = re.compile(r"^\[(\[)?\s*([A-Za-z0-9_-]+)(?:\.(\"[^\"]*\"|[A-Za-z0-9_:-]+))?")
+sections, cur, default_model = [], None, None
 with open(sys.argv[1], encoding="utf-8", errors="strict") as fh:
     for line in fh:
         stripped = line.strip()
-        m = re.match(r"^\[(\[)?\s*([A-Za-z0-9_-]+)", stripped)
+        m = HEAD.match(stripped)
         if m:
-            keep = (m.group(1) is None) and (m.group(2) in ALLOWED)
-            if keep:
-                out.append("\n" + line.rstrip("\n"))
+            cur = {"array": m.group(1) is not None, "root": m.group(2),
+                   "name": (m.group(3) or "").strip('"'), "lines": [line.rstrip("\n")]}
+            sections.append(cur)
             continue
-        if keep:
-            out.append(line.rstrip("\n"))
-        elif re.match(r"^default_model\s*=", stripped) and not out:
-            out.append(line.rstrip("\n"))
+        if cur is None:
+            if re.match(r"^default_model\s*=", stripped) and default_model is None:
+                default_model = line.rstrip("\n")
+        else:
+            cur["lines"].append(line.rstrip("\n"))
+kept_providers = {s["name"] for s in sections
+                  if not s["array"] and s["root"] == "providers" and s["name"].startswith("managed:")}
+def provider_of(sec):
+    for l in sec["lines"]:
+        m = re.match(r"^\s*provider\s*=\s*\"([^\"]*)\"", l)
+        if m:
+            return m.group(1)
+    return None
+out = [default_model] if default_model else []
+for sec in sections:
+    if sec["array"]:
+        continue
+    keep = (sec["root"] in ("services", "thinking")
+            or (sec["root"] == "providers" and sec["name"] in kept_providers)
+            or (sec["root"] == "models" and provider_of(sec) in kept_providers))
+    if keep:
+        out.append("")
+        out.extend(sec["lines"])
 sys.stdout.write("\n".join(out) + "\n")
 PY
 }
@@ -2681,10 +2729,6 @@ run_kimi() {
 
   [[ -f "$KIMI_ACP_CLIENT" ]] \
     || { echo "kimi ACP client missing: $KIMI_ACP_CLIENT" >&2; exit 2; }
-  case "$prompt_path" in
-    /*) ;;
-    *)  prompt_path="$PWD/$prompt_path" ;;
-  esac
 
   # Codex/Grok get the schema through an enforcement flag; Kimi has no equivalent,
   # so append it as a strict output instruction before the local validator checks
@@ -2692,8 +2736,11 @@ run_kimi() {
   # bytes in both the context cap and telemetry.
   _prompt_scratch "$prompt_path" \
     || { echo "Could not create a temp file for the Kimi schema prompt" >&2; exit 2; }
-  { cat "$prompt_path"; _kimi_output_contract "$schema"; } >"$TMP_PROMPT" \
+  # `&&`, not `;`: with `;` the group's status was the contract printf's 0 and
+  # a failed cat (the input already unlinked — see _prompt_scratch) went unseen.
+  { cat "$prompt_path" && _kimi_output_contract "$schema"; } >"$TMP_PROMPT" \
     || { echo "Could not assemble the Kimi schema prompt" >&2; exit 2; }
+  [[ -n "$_PROMPT_SCRATCH_PREVIOUS" ]] && rm -f "$_PROMPT_SCRATCH_PREVIOUS"
   prompt_path="$TMP_PROMPT"
   _prompt_bytes_checked "$prompt_path" "$(swarm_max_prompt_bytes)" "Kimi prompt too large with output schema"
   TELEMETRY_BYTES="$_PROMPT_BYTES"
@@ -2738,7 +2785,9 @@ run_kimi() {
       --cwd "$repo" \
       --model "$kimi_model" \
       --effort "$effort" \
-      --kimi-bin "$KIMI_BIN" >"$TMP_OUT" 2>/dev/null || rc=$?
+      --kimi-bin "$KIMI_BIN" \
+      --deny-path "$TMP_KIMI_HOME" \
+      --deny-path "$SWARM_HOST_HOME/.kimi-code" >"$TMP_OUT" 2>/dev/null || rc=$?
 
   if _is_timeout_rc "$rc"; then
     TELEMETRY_RC="$rc"

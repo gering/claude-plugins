@@ -131,6 +131,16 @@ for raw in sys.stdin:
         elif scenario == "unknown-kind-pending":
             # Announced with an unlisted kind and never resolved: unsettled.
             emit(tool_update("tool_call", "tool-6", "teleport", "pending"))
+        elif scenario == "kind-late":
+            # Announced WITHOUT a kind, later "completed" as read: the missing
+            # kind must stay missing (= unsafe), not be laundered by the update.
+            emit(tool_update("tool_call", "tool-5", None, "pending"))
+            emit(tool_update("tool_call_update", "tool-5", "read", "completed"))
+        elif scenario == "read-credentials":
+            u = tool_update("tool_call", "tool-4", "read", "pending")
+            u["params"]["update"]["locations"] = [
+                {"path": os.environ["FAKE_DENY"] + "/credentials/kimi-code.json"}]
+            emit(u)
         elif scenario == "unexpected-client-request":
             emit({
                 "jsonrpc": "2.0",
@@ -220,11 +230,15 @@ for raw in sys.stdin:
                     },
                 })
         response(request_id, {"stopReason": "end_turn"})
+        log({"prompt_done": True})
     else:
         emit({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": "unknown"}})
 '''
 
 
+# unittest (not the siblings' check()/FAILS idiom) on purpose: every case drives
+# a fake ACP server subprocess through run_helper's fixture, and unittest's
+# addCleanup/TemporaryDirectory handling is what keeps those fixtures hermetic.
 class KimiAcpTests(unittest.TestCase):
     def run_helper(self, scenario: str = "valid", *, schema: Path = SCHEMA,
                    env_extra: dict | None = None):
@@ -240,6 +254,7 @@ class KimiAcpTests(unittest.TestCase):
         env = os.environ.copy()
         env.update({
             "FAKE_SCENARIO": scenario,
+            "FAKE_DENY": str(root / ".kimi-code"),
             "FAKE_LOG": str(log),
         })
         if env_extra:
@@ -254,6 +269,7 @@ class KimiAcpTests(unittest.TestCase):
                 "--model", MODEL,
                 "--effort", "max",
                 "--kimi-bin", str(fake),
+                "--deny-path", str(root / ".kimi-code"),
             ],
             capture_output=True,
             text=True,
@@ -331,9 +347,13 @@ class KimiAcpTests(unittest.TestCase):
 
     def test_rejected_tool_that_then_fails_is_fine(self):
         # tool_call pending → request_permission (rejected) → failed: the
-        # legitimate reject flow must not be mistaken for a run.
+        # legitimate reject flow must not be mistaken for a run, and the turn
+        # must run to completion.
         result, records = self.run_helper("permission")
         self.assertEqual(result.returncode, 0, result.stderr)
+        reply = next(r["permission_response"] for r in records if "permission_response" in r)
+        self.assertEqual(reply["result"]["outcome"]["optionId"], "reject")
+        self.assertTrue(any("prompt_done" in r for r in records), "turn did not complete")
 
     def test_failed_unsafe_tool_without_rejection_fails_review(self):
         # Denylist-era gate only fired on status == completed: a shell whose
@@ -354,7 +374,22 @@ class KimiAcpTests(unittest.TestCase):
         result, records = self.run_helper("unsafe-in-progress")
         self.assertEqual(result.returncode, 13)
         self.assertIn("status=in_progress", result.stderr)
-        self.assertFalse(any("prompt_result_consumed" in r for r in records))
+        # The fake logs prompt_done only after its end_turn response; a client
+        # that waited for end_turn would have let it get there.
+        self.assertFalse(any("prompt_done" in r for r in records), "client waited for end_turn")
+
+    def test_missing_kind_is_not_laundered_by_a_later_update(self):
+        result, _ = self.run_helper("kind-late")
+        self.assertEqual(result.returncode, 13)
+        self.assertIn("no known kind", result.stderr)
+
+    def test_read_under_the_runtime_store_aborts(self):
+        # A `read` is a safe KIND, but not of the linked credential file.
+        result, records = self.run_helper("read-credentials")
+        self.assertEqual(result.returncode, 13)
+        self.assertIn("denied path", result.stderr)
+        # (No prompt_done assertion: the fake writes its whole turn at once, so
+        # whether the kill lands before its last log line is a race.)
 
     def test_unknown_kind_left_pending_is_unsettled(self):
         result, _ = self.run_helper("unknown-kind-pending")

@@ -82,7 +82,10 @@ def render_footer(data) -> str:
     """Name only the backend families that actually entered the workflow."""
     raw = data.get("agents")
     active = {item for item in raw if isinstance(item, str)} if isinstance(raw, list) else set()
-    labels = [label for backend, label in _AGENT_LABELS.items() if backend in active]
+    # Unknown backends keep their raw name rather than vanishing: the footer
+    # claims to name every family that entered the workflow.
+    labels = [_AGENT_LABELS.get(b, b) for b in _AGENT_LABELS if b in active]
+    labels += sorted(b for b in active if b not in _AGENT_LABELS)
     suffix = f" ({' + '.join(labels)})" if labels else ""
     return (
         f"<sub>Local mixture-of-agents review{suffix} run from the author's "

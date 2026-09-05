@@ -963,7 +963,8 @@ post. Do **not** re-implement the sanitize/gate/post logic inline.
   fail closed **per voice**: grok tool-less/no-web, codex web hard-off with
   its own read-only sandbox's read surface, Kimi omitted entirely because
   ACP has no safe jail-less tier). Kimi additionally uses an isolated HOME
-  with a credentials copy only; ACP rejection is defense-in-depth. A prompt
+  holding only links to its host auth dirs (a copy strands a rotated refresh
+  token) plus a filtered config projection; ACP rejection is defense-in-depth. A prompt
   **egress guard** (outside the diff fence) forbids putting repo content into
   web queries; it is model-cooperation-dependent, not transport-enforced —
   the jail is the hard boundary. Arbitrary subprocess execution remains a

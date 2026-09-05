@@ -69,6 +69,11 @@ if kimi_backend:
     check("Kimi normal profile uses high", "--effort high" in kimi_backend.group(1))
     check("Kimi max profile uses max", "--effort max" in kimi_backend.group(1))
 
+PR_POST = (HERE / "pr-post.py").read_text(encoding="utf-8")
+_labels = re.search(r"_AGENT_LABELS = \{(.*?)\}", PR_POST, re.S)
+_label_set = set(re.findall(r'"([a-z]+)":', _labels.group(1))) if _labels else set()
+check("pr-post footer labels cover every adapter backend", _label_set == validated_set)
+
 grok_backend = re.search(r"\{ backend: 'grok', flags: ([^}]+)\}", WORKFLOW)
 check("workflow registers grok effort flags", bool(grok_backend))
 if grok_backend:

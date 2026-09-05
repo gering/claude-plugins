@@ -212,6 +212,11 @@ class AcpClient:
         # tool ids whose approval request this client rejected: their failed /
         # cancelled updates are the expected outcome, not evidence of a run.
         self.rejected_tool_ids: set[str] = set()
+        # Realpath prefixes no tool may touch, of any kind: the ephemeral HOME
+        # (linked host credentials, projected config) and the host store. A
+        # `read` there is the own-token exfiltration the egress guard can only
+        # ask the model not to do — abort on first sight instead.
+        self.deny_paths: list[str] = []
 
     def start(self) -> None:
         try:
@@ -246,12 +251,15 @@ class AcpClient:
         except OSError:
             pass
         if process.poll() is None:
-            try:
-                if force:
-                    raise subprocess.TimeoutExpired(self.executable, 0)
-                os.killpg(process.pid, signal.SIGTERM)
-                process.wait(timeout=3)
-            except (ProcessLookupError, subprocess.TimeoutExpired):
+            graceful = False
+            if not force:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                    process.wait(timeout=3)
+                    graceful = True
+                except (ProcessLookupError, subprocess.TimeoutExpired):
+                    pass
+            if not graceful:
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
@@ -377,12 +385,16 @@ class AcpClient:
             if not isinstance(tool_id, str) or not tool_id:
                 self.protocol_violations.append("tool update has no string toolCallId")
                 return
-            known = self.tool_kinds.get(tool_id)
-            if isinstance(kind, str) and (known is None or known in SAFE_TOOL_KINDS):
-                self.tool_kinds[tool_id] = kind      # first kind wins; unsafe is sticky
-            elif tool_id not in self.tool_kinds:
-                self.tool_kinds[tool_id] = None      # seen, kind unknown (= unsafe)
+            if tool_id not in self.tool_kinds:
+                # First sight wins — a MISSING kind stays missing (= unsafe); a
+                # later update cannot reclassify it.
+                self.tool_kinds[tool_id] = kind if isinstance(kind, str) else None
+            else:
+                known = self.tool_kinds[tool_id]
+                if known in SAFE_TOOL_KINDS and isinstance(kind, str) and kind not in SAFE_TOOL_KINDS:
+                    self.tool_kinds[tool_id] = kind  # may only escalate to unsafe
             effective_kind = self.tool_kinds[tool_id]
+            self._check_locations(update, tool_id)
             if effective_kind is None and status not in UNSTARTED_STATUSES:
                 # Keep the orphan wording: an update for a tool this client never
                 # saw announced is malformed ACP, not merely an unsafe kind.
@@ -408,6 +420,26 @@ class AcpClient:
             raise ProtocolError(
                 f"unsafe tool ran despite approval guard: kind={effective_kind} status={status}"
             )  # "ran", not "completed": a failed shell command ran too
+
+    def _check_locations(self, update: dict[str, Any], tool_id: str) -> None:
+        # Any tool kind, any status: the announcement alone means the agent is
+        # about to touch the path (or already did).
+        if not self.deny_paths:
+            return
+        locations = update.get("locations")
+        if not isinstance(locations, list):
+            return
+        for loc in locations:
+            path = loc.get("path") if isinstance(loc, dict) else None
+            if not isinstance(path, str) or not path:
+                continue
+            real = os.path.realpath(path)
+            for prefix in self.deny_paths:
+                if real == prefix or real.startswith(prefix + os.sep):
+                    self.close(force=True)
+                    raise ProtocolError(
+                        f"tool {tool_id!r} touched a denied path under the runtime/auth store"
+                    )
 
     def unsettled_unsafe_tools(self) -> list[str]:
         # End-of-turn sweep: an unsafe-kind tool that was announced but never
@@ -489,6 +521,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     # and hands it over explicitly — no second env lookup with its own default
     # here, so `ready` and `run` can never start two different binaries.
     parser.add_argument("--kimi-bin", required=True)
+    parser.add_argument("--deny-path", action="append", default=[],
+                        help="realpath prefix no tool call may touch (repeatable)")
     args = parser.parse_args(argv)
     if not args.kimi_bin.strip():
         parser.error("--kimi-bin cannot be empty")
@@ -514,6 +548,7 @@ def main(argv: list[str]) -> int:
         return 2
 
     client = AcpClient(args.kimi_bin)
+    client.deny_paths = [os.path.realpath(p) for p in args.deny_path if p]
     prompt_started = False
     previous_handlers: dict[int, Any] = {}
 
