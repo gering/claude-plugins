@@ -418,7 +418,7 @@ const METHODOLOGICAL_LENSES = ['removed-behavior', 'cross-file-trace']
 // Lenses the gate may NEVER prune. Since 0.7.0 the gate prunes for every voice,
 // so a lens it drops is reviewed by nobody — in 0.5.x/0.6.0 the full-width
 // external calls absorbed a mis-gate, and that redundancy is gone. The gate runs
-// on haiku/effort-low against a diff that is itself untrusted input, and its only
+// on haiku/effort-medium against a diff that is itself untrusted input, and its only
 // other protection is a sentence in its own prompt (model-cooperation-dependent,
 // injection-reachable). These are the code-level backstop: a diff that talks the
 // gate into "docs-only" still gets a threat review AND a correctness pass.
@@ -611,7 +611,7 @@ if (runClaude) {
     `Candidate lenses: ${CANDIDATE_LENSES.join(', ')}.\n` +
     `Decide which lenses are worth running; skip a lens ONLY when this diff genuinely cannot pay off for it (e.g. a doc-only diff → no efficiency). The design-quality lenses (${LENS_CLUSTERS.design.join(', ')}) are as first-class as the defect lenses — never skip them merely because the code looks functional. Be decisive. These lenses are NEVER skippable and are re-added if you omit them, so do not spend a skip on them: ${MANDATORY_LENSES.join(', ')}.\n` +
     `Return change_kind, run (lens names), skip (lens + one-clause why).`,
-    { label: 'scope+gate', phase: 'Scope', schema: GATE_SCHEMA, model: 'haiku', effort: 'low' }
+    { label: 'scope+gate', phase: 'Scope', schema: GATE_SCHEMA, model: 'haiku', effort: 'medium' }
   ).catch(() => null)  // gate failure degrades to "run all lenses" — never rejects the workflow
 }
 // Distinguish "gate absent/failed" (→ run all candidates) from "gate ran and

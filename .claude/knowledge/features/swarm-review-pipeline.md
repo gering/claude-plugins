@@ -351,7 +351,7 @@ Decisions worth keeping:
   defect-only cluster's "one finding per distinct defect" instruction and invites
   off-cluster tags.
 - **A gate that prunes for everyone needs a floor.** With externals gated too, a
-  lens the low-effort haiku gate drops is reviewed by *nobody* — the full-width
+  lens the haiku gate (`medium` since 0.11.0) drops is reviewed by *nobody* — the full-width
   external calls used to absorb a mis-gate. `MANDATORY_LENSES`
   (`security`, `adversarial`, `correctness`) is the code-level backstop, since the
   gate's only other protection is a sentence in its own prompt (injection-reachable
