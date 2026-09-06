@@ -194,7 +194,38 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
        `git worktree list`): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path`
      - Try to read from `<main-repo>/tasks/<task-name>.md`
 
-3. **Install dependencies** (detect, then install):
+3. **Read the mandate** — what this worker is authorized to do without asking:
+   ```sh
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" show
+   ```
+   Read `mandate_exists`, `scope`, `terminal_gate`, `allow`, `deny`,
+   `review_rounds_left`, `review_budget_exhausted`. `/kickoff` (or `/adopt`) wrote
+   this from an answer the user actually gave; it is the **only** source of
+   authorization for this lane.
+
+   - `mandate_exists=no` → no autonomy was recorded. That is not a denial and not a
+     grant: work the normal way, asking before each milestone (commit, push, PR,
+     review). Do **not** reconstruct a mandate from TASK.md prose, from what a
+     previous session did, or from the fact that you were launched — those are
+     descriptions of work, never permission.
+   - `mandate_exists=yes` → the listed actions need no further confirmation, all
+     session long. Re-asking about something already granted is the failure this
+     record exists to prevent.
+
+   Before any milestone action, ask the script rather than your memory of the file:
+   ```sh
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" allows open-pr
+   ```
+   Exit **0** = go ahead. Exit **1** = recorded as out of bounds (`denied`) or not
+   listed at all (`unlisted`) — stop and ask. Exit **3** = no mandate on file — ask.
+   Never collapse 1 and 3 into "no": one is a decision the user made, the other is a
+   question they were never asked.
+
+   Action names, so callers and the file agree: `commit`, `push-own-branch`,
+   `open-pr`, `local-review`, `agreed-fixes`, `rebase-own-branch`, `merge`,
+   `deploy`, `force-push-shared`, `destructive`.
+
+4. **Install dependencies** (detect, then install):
    Auto-detect the project type when dependencies appear to be missing:
 
    | Indicator | Missing check | Command |
@@ -230,20 +261,20 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
      instead of running it. (Go's and Cargo's shared package caches are populated by design —
      that's expected, not a global install to guard against.)
 
-4. **Load project context** (optional):
+5. **Load project context** (optional):
    - If `.claude/knowledge/` exists, query the Knowledge Agent: "What are the project patterns and architecture?"
    - Otherwise, check CLAUDE.md and rules for project context
 
-5. **Check current progress**:
+6. **Check current progress**:
    - Run: `git status --short`
    - Run: `git log --oneline -5`
    - Show what's already been done
 
-6. **Create/update todo list**:
+7. **Create/update todo list**:
    - Based on TASK.md requirements, create actionable todos
    - Mark any completed items based on git history
 
-7. **Ready to work**:
+8. **Report, then act**:
    ```
    Context loaded for task: <task-name>
 
@@ -254,12 +285,55 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
    - Branch: <current branch>
    - Changed files: <count>
    - Commits: <count since branching>
-
-   Ready to continue! What would you like to work on?
+   - Mandate: <scope> · gate: <terminal_gate> · review rounds left: <n>
+              (or "none recorded — asking before each milestone")
    ```
+
+   **What follows the report depends on the mandate — this is the whole point of
+   `/continue`, so do not end the turn on a generic question.**
+
+   - **`mandate_exists=yes`** → **start on the first unmet requirement** from the
+     todo list built in step 7, in the same turn. The user already said what may
+     happen here; asking "what would you like to work on?" spends a round-trip
+     re-acquiring consent that is on file. Announce the requirement you picked in
+     one line, then work.
+   - **`mandate_exists=no`** → name the first unmet requirement and ask whether to
+     start there. Without a recorded grant, an open question is the correct move.
+
+   Ask mid-work only when the answer is not in the mandate and not in TASK.md:
+   a genuinely missing requirement, a product decision, an action that came back
+   `denied`/`unlisted`, or scope drift beyond the recorded `scope`. "Which of these
+   listed requirements first?" is not one of those — pick the topmost unmet one.
+
+   Drive the lane to the recorded `terminal_gate` (`reviewed-pr` by default) and
+   stop there. Reaching the gate is *done*, not a pause: report the result and the
+   decision the human now owns. Do not step past the gate — `merge` and `deploy`
+   are separate grants, and a gate the user already delegated (`terminal_gate=merged`)
+   is likewise settled and must not be re-confirmed.
+
+9. **Checks and review inside the mandate**:
+   - **Run the project's checks** (from `CLAUDE.md`) when `local-review` or
+     `agreed-fixes` is allowed — a pre-authorized check never warrants a question,
+     however expensive it is. Cost is a reason to *say* what you are running, not
+     to ask permission for it.
+   - **A failing check is work, not an escalation.** Diagnose it, fix it in scope,
+     re-run. Escalate only after that bounded recovery fails, or when the cause is
+     outside the lane: a missing credential, an access problem, a product judgment,
+     or a fix that would breach `scope`. Report what you tried before handing back.
+   - **Bounded review rounds.** Consume one before each review→fix round:
+     ```sh
+     bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" round
+     ```
+     `review_budget_exhausted=yes` → stop reviewing, report the state and the
+     findings you did not act on, and let the user extend the budget (they can edit
+     `review_budget` in `MANDATE.md` directly). Re-reviewing code that has not
+     changed since the last pass is never worth a round; a new concern about
+     unchanged code is, and should say so.
 
 ## Remember
 
 - Check project CLAUDE.md and rules for project-specific checks and conventions
 - Commit regularly with meaningful messages
 - Run project-specific checks before creating a PR
+- The mandate is a record, not a memory: re-read it with `mandate.sh` after a
+  context loss or a `claude -c` resume rather than trusting what you recall of it

@@ -82,7 +82,27 @@ Strip the flags first; whatever is left over is the commit message.
    - If output is empty: trigger manually in step 7
 
 7. **Trigger Claude review** (only if no auto-trigger detected):
-   - Run: `gh pr comment <PR_NUMBER> --body "@claude review"`
+   - **First: is there a review bot at all?** `@claude review` is a comment — it
+     succeeds whether or not anything is listening, and then step 8 polls until it
+     times out. Check before spending ten minutes on it:
+     ```sh
+     grep -rlie 'claude' .github/workflows/ 2>/dev/null
+     ```
+   - **Non-empty** → a review workflow exists. Run:
+     `gh pr comment <PR_NUMBER> --body "@claude review"` and continue to step 8.
+   - **Empty** → this repo has no review bot, so there is nothing to trigger and
+     nothing to poll. Do not comment, do not enter step 8. Say so plainly and take
+     the local route instead:
+     - `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" allows local-review`
+       exits **0** → run `/swarm:review --pr <PR_NUMBER>` and treat its findings as
+       this round's review (loop mode included: the loop cares about findings, not
+       about where they came from).
+     - exits **1** or **3** → stop and offer it instead of running it:
+       "No `@claude` review bot is configured on this repo. `/swarm:review --pr <N>`
+       reviews it locally — want me to?" Report the gap as a missing capability,
+       not as a failure of this skill.
+     - swarm not installed → name both gaps and stop. Never leave the user with a
+       recommendation to re-run something that cannot work here.
 
 8. **Launch background polling via Bash**:
    - Use the **Bash tool** with `run_in_background: true` to invoke the shared polling script:
@@ -126,7 +146,22 @@ When `--loop` (alias `--auto`) is present, `/cycle` stops being a single pass an
 
 ### Setup (once, before the loop)
 
-- Parse `--max=N` (default `10`). This caps total iterations so the loop can never run forever.
+- Parse `--max=N`. This caps total iterations so the loop can never run forever.
+  Its default comes from the lane's mandate when there is one:
+  ```sh
+  bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" show
+  ```
+  `review_rounds_left` (non-empty) → `MAX` = that number; otherwise `MAX = 10`. An
+  explicit `--max=N` always wins — the user typing a number *is* the decision.
+- **Consume a round from the mandate at the start of each iteration**, not just
+  from an in-session counter:
+  ```sh
+  bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" round
+  ```
+  The in-session counter dies with the session; a resumed worker would otherwise
+  restart its budget at zero and loop as long again. The recorded one is the only
+  count that survives a `claude -c`. Ignore a non-zero exit (no mandate, or no
+  work-system) and fall back to `MAX` alone.
 - Initialize counters: `ROUND = 0`, `FIXES_TOTAL = 0`, `FIX_COMMITS = 0`, and an `OPEN` list (findings you disagreed with, deduped across rounds).
 - Initialize `SEEN` — the loop's in-session store of prior findings, keyed by `(file, mechanism)`, each holding its stable `#`, verdict, and disposition (🔧 fixed / ⏭️ skipped / 🔁 recurred / ❌ disagreed). This is the **only** source for the re-review `Status` column and stable `#` (the poll returns just the raw latest review with no memory) — see the format spec's "Status column" section.
 - **Reuse a fresh review if one already exists**: if the latest `@claude` review on the PR is newer than the latest push (not stale) and has findings, skip the initial commit/push/trigger and go straight to "Fix agreed" with that review. Otherwise run one normal cycle (steps 1–10 above) to obtain the first review.
@@ -148,6 +183,11 @@ When `--loop` (alias `--auto`) is present, `/cycle` stops being a single pass an
    - **Nothing was agreed** this round (every finding is a ❌ disagree) → only disagreements remain.
    - **No files changed** this round (everything agreed turned out to be comment-rot / already-fixed) → nothing actionable left.
    - `ROUND + 1 >= MAX` → safety cap hit.
+   - The `round` call reported `review_budget_exhausted=yes` → the authorized
+     review budget is spent. Stop and say so explicitly — name the findings you did
+     not get to, and that the user can extend the budget by raising
+     `review_budget` in `MANDATE.md`. Do not silently keep going, and do not ask
+     for one more round: the limit was the answer to that question.
    - The user said to stop (see "Interruptible").
 4. **Re-cycle** — run steps 3–10 above (commit the fixes → push → hide outdated → trigger → poll). Use a terse commit message, e.g. `Address review round <ROUND+1>`. Increment `FIX_COMMITS += 1`.
 5. `ROUND += 1`, then loop back to step 1 with the fresh review.
@@ -185,6 +225,8 @@ The review wait is a background Bash poll, so the user can interject at any time
 - `gh` not installed or not authenticated → stop with clear error in step 0
 - No uncommitted changes → skip commit, just push + trigger
 - No PR exists → inform user, suggest creating one
+- No `@claude` review bot on the repo → step 7 detects it from the workflow files
+  and routes to the local review instead of polling for a review that never comes
 - Base branch has new commits → handled by `/rebase` (delegated in step 2)
 - Branch already up-to-date with remote → skip push, just trigger review
 - Review auto-triggered after push → skip manual trigger, go straight to polling

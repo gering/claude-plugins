@@ -52,6 +52,11 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.14.0 — 2026-09-07
+- `/kickoff` and `/adopt` record the task's **autonomy mandate** in `MANDATE.md` beside `TASK.md` (new `scripts/mandate.sh`): what the user pre-authorized (commit, push own branch, open PR, local review, agreed fixes), what stays gated (merge, deploy, force-push a shared branch), the terminal gate, and a review budget. Authorization lives only in that file's frontmatter — never inferred from TASK.md prose, from a prior session, or from the fact that a worker was launched.
+- `/continue` reads the mandate and, when one exists, **starts on the first unmet requirement instead of ending on "What would you like to work on?"**. Without a mandate it asks, exactly as before. Pre-authorized checks run unasked, a failing check is diagnosed and fixed in scope before any escalation, and review rounds are bounded by the recorded budget (which survives a `claude -c` resume, unlike an in-session counter).
+- The codex/grok/kimi bootstrap prompt names `MANDATE.md`, so a worker without work-system skills reads the same record instead of inferring its authority.
+
 ### 1.13.0 — 2026-09-02
 - `/close` run **from inside a worktree** now offers to **delegate the teardown to the Manager session** (the Claude session at the main-repo root) instead of self-closing. Delegating sends one structured `work-system close-request` message via the built-in `SendMessage` and stops locally — the Manager re-verifies the merge and closes the worker tab through the robust Scenario A path, so every delegated close removes one use of the fragile self-exit + marker + hook chain (Scenario B), which cannot confirm its own teardown in-turn.
 - New `herdr-teardown.sh manager-session <workspace> <main-repo-path>`: tri-state Manager detection (`name=<session>` | `none` | `unverified`, always exit 0) built on the shared realpath cwd match and the bounded `ha_list` wrapper. Fail-closed by construction — a malformed/empty agent list, two candidates at the repo root, a non-claude or not-live agent there, an unreadable cwd, or missing tools all yield `unverified`, and every uncertainty simply skips the offer (today's flow, zero regression). Covered by `plugins/work-system/scripts/test_herdr_teardown.py`, which drives the real subcommand against a stub `herdr` on `PATH` (tri-state contract, glyph/control-char scrubbing, workspace scoping, every degrade path).
@@ -220,6 +225,12 @@ entries are grouped per plugin, newest first.
 - Add `/work-adopt` skill; store worktrees under `.claude/worktrees/`.
 
 ## pr-flow
+
+### 1.4.0 — 2026-09-07
+- `/open` and `/cycle` honor a work-system autonomy mandate (soft-coupled via `scripts/mandate-shim.sh`): a pre-authorized PR-open is no longer re-confirmed, and `--loop`'s round cap defaults to the mandate's remaining review budget, consuming a round per iteration so the limit survives a resumed session. A missing work-system reports "unknown" (ask), never a refusal.
+- `/open` and `/cycle` **detect whether a review bot exists** before recommending or triggering one. A repo with no `@claude` workflow is routed to `/swarm:review --pr <N>` (run when the mandate allows local review, offered otherwise) instead of into a `/cycle` that has nothing to trigger and polls until timeout.
+- Extract the work-system locator shared by the glyph and mandate shims into `scripts/lib-work-system.sh`.
+- Fix the stale note claiming `/open` asks before every expensive check — step 3 has run them automatically for some time.
 
 ### 1.3.0 — 2026-07-16
 - `/open`, `/merge`, `/cycle`, and `/check` refresh the work-system herdr tab glyphs after PR state changes (soft-coupled via `scripts/refresh-task-glyphs.sh` — silent no-op when work-system or herdr is absent). `/check` uses `--cached` (read-only survey, no blocking `gh` call); the state-changing skills refresh synchronously.

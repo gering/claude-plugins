@@ -193,6 +193,13 @@ Each skill runs a preflight check and stops with a clear message if requirements
 ## Design principles
 
 - **Interactive by default, silent when risk-free** — no silent commits or fixes without user confirmation; decisions are real selection menus, not free-text prompts. Two deliberate exceptions where the invocation itself is the authorization: `/cycle --loop` (autonomous cycle; the final squash still asks) and `/rebase` with zero file overlap (conflict-free catch-up, aborts cleanly if a conflict appears anyway)
+- **Never re-ask what was already answered** — when work-system's `/kickoff`
+  recorded a mandate for the lane (`MANDATE.md`), `/open` and `/cycle` read it and
+  treat its pre-authorized actions as settled. A missing work-system yields
+  "unknown" (ask), never a refusal
+- **Recommend only what can work** — before pointing at `/cycle`, `/open` checks
+  whether the repo has an `@claude` review workflow at all, and routes a bot-less
+  repo to the local review instead of into a command that fails every time
 - **Read-only where it matters** — `/check` never mutates anything
 - **User stays in control** — `/fix` does not auto-trigger `/cycle`; you decide when to re-push (or hand the wheel to `/cycle --loop` deliberately)
 - **Root cause over workaround** — `/merge` refuses `--admin` bypass. A failing required check is a signal to fix the check, not to skip it
@@ -201,7 +208,8 @@ Each skill runs a preflight check and stops with a clear message if requirements
 
 ## Relationship to other plugins
 
-- **`work-system`** — finish a task with `/close`, then `/open` to create the PR and `/cycle` for the review loop before `/merge`
+- **`work-system`** — finish a task with `/close`, then `/open` to create the PR and `/cycle` for the review loop before `/merge`. Soft-coupled both ways (detected, never required): PR state changes refresh work-system's herdr tab glyphs, and `/open`/`/cycle` read the lane's autonomy mandate so a pre-authorized step is not confirmed twice. `--loop`'s round cap defaults to the mandate's remaining review budget
+- **`swarm`** — the local review route when a repo has no `@claude` bot: `/open` and `/cycle` fall back to `/swarm:review --pr <N>` rather than recommending a review that cannot run
 - **`pr-review-toolkit`** (external, Anthropic) — local analysis agents. Complementary, not required. Install via `/plugin install pr-review-toolkit@claude-plugins-official`
 
 ## Installation

@@ -151,8 +151,11 @@ HARNESS_HERDR_MODE="pane-run"
 HARNESS_HERDR_KIND="claude"
 
 # The bootstrap prompt for CLIs without work-system skills (codex, grok, kimi). One
-# argv word; the launch helper passes it verbatim.
-BOOTSTRAP_PROMPT='Read TASK.md in this worktree and continue the task. Commit on the current branch as you go, and open a PR when the work is complete.'
+# argv word; the launch helper passes it verbatim. It names MANDATE.md because a
+# non-claude worker has no /continue to read it: without this line the worker would
+# have to infer its authority from TASK.md prose, which is exactly what the mandate
+# exists to prevent.
+BOOTSTRAP_PROMPT='Read TASK.md and MANDATE.md in this worktree, then start on the first unmet requirement. MANDATE.md is the record of what you may do without asking again and where you must stop; anything it does not list is not authorized. Commit on the current branch as you go, and open a PR when the work is complete.'
 
 # The ASCII marker a wrapper worker prints when its seed phase fails. It names the
 # failure unambiguously and states that TASK.md was never started, where the

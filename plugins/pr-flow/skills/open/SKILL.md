@@ -23,6 +23,21 @@ user_invocable: true
 
 **If everything is green, just proceed.** After all checks and auto-resolutions: if there are zero ❌ blockers and zero ⚠️ warnings, create the PR automatically without asking. Only ask for confirmation when at least one ⚠️ warning remains (something needed judgment). ❌ blockers always stop the skill — never proceed with blockers.
 
+**Honor a recorded mandate.** If work-system's `/kickoff` recorded an autonomy
+mandate for this lane, an action it pre-authorized must not be confirmed again —
+the user already answered, and re-asking is the friction this record exists to
+remove. Read it once, up front:
+
+```sh
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" show
+```
+
+Then gate the decisions below on `allows <action>`: exit **0** = proceed silently,
+exit **1** = recorded as out of bounds or unlisted (stop and ask), exit **3** =
+nothing recorded, or work-system is not installed (behave exactly as before this
+paragraph — ask). Never read exit 3 as a refusal: a missing record means the
+question was never put to the user, not that they said no.
+
 ## Instructions
 
 0. **Preflight (tooling)**:
@@ -110,6 +125,11 @@ user_invocable: true
      - `y` (default): continue to step 6
      - `n`: stop, leave state as-is
      - No other options. No "fix" branch. No alternatives.
+     - **Unless `mandate-shim.sh allows open-pr` exits 0** — then the warnings are
+       reported, not asked about: print the table, name the warnings in one line,
+       and continue to step 6. A warning is information; opening the PR was already
+       authorized. (A ❌ blocker still stops, mandate or not — it is a broken tree,
+       not a judgment call.)
 
 5. *(merged into step 4)*
 
@@ -172,7 +192,27 @@ user_invocable: true
       bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" poll <PR_NUMBER> "<TRIGGER_ISO>"
       ```
       Use the **Bash tool** with `run_in_background: true`. When it completes, render the review following the shared format spec at `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md` — read that file before presenting. Required sections: header, status line, findings markdown table, single-line recommendation. (`/open` is always round 0 — no prior findings, so no `Status` column.)
-    - **If output is empty** → no auto-trigger detected. Inform the user and suggest `/cycle` to trigger manually. Do NOT trigger automatically here — `/open` is about creation; triggering is `/cycle`'s job.
+    - **If output is empty** → no review started. Before recommending anything,
+      find out *why* — a slow trigger and an absent bot need opposite advice:
+      ```sh
+      grep -rlie 'claude' .github/workflows/ 2>/dev/null
+      ```
+      - **Non-empty** (a review workflow exists) → it just has not fired yet.
+        Suggest `/cycle` to trigger manually. Do NOT trigger automatically here —
+        `/open` is about creation; triggering is `/cycle`'s job.
+      - **Empty** (no review bot on this repo) → `/cycle` cannot work here, and
+        recommending it sends the user into a loop that fails every time. Route to
+        the local review instead:
+        - `mandate-shim.sh allows local-review` exits **0** → run
+          `/swarm:review --pr <PR_NUMBER>` now and render its result in place of
+          the bot review. Say which route you took and why ("no review bot on this
+          repo — ran the local review, which your mandate covers").
+        - exits **1** or **3** → do not run it unasked. Report the missing bot as
+          a *capability gap*, name the local route, and let the user choose:
+          "No `@claude` review bot is configured on this repo, so `/cycle` has
+          nothing to trigger. `/swarm:review --pr <N>` reviews it locally instead."
+        - swarm not installed either → report both gaps plainly rather than
+          recommending a command that cannot work.
 
 11. **Final summary**:
     ```
@@ -183,7 +223,8 @@ user_invocable: true
 
     Next step:
     - [if review auto-triggered]   Review results will appear when polling completes (~1-5 min)
-    - [if NOT auto-triggered]      Run `/cycle` to trigger Claude review manually
+    - [if bot exists, not fired]   Run `/cycle` to trigger Claude review manually
+    - [if no review bot]           <the step 10 routing: local review run, or offered>
     - [if CI failed/missing]       Investigate CI config before pushing more work
     ```
 
@@ -202,11 +243,13 @@ user_invocable: true
 - User declines to run checks → mark all as "skipped by user" in body, still create PR
 - Linter/tests hang → timeout 5min, mark as ⚠️ skipped, let user decide
 - Repo uses a non-default base (`develop`, `staging`) → ask user if auto-detected base seems wrong
-- `@claude` bot not installed on repo → auto-trigger check returns 0, normal fallback to `/cycle` (which will also fail gracefully)
+- `@claude` bot not installed on repo → step 10 detects it from the workflow files and routes to the local review instead of recommending a `/cycle` that has nothing to trigger
 
 ## Notes
 
-- This skill is **interactive** — every expensive check (tests, lint, build) asks first
+- Expensive checks (tests, lint, build) **run without asking** — step 3 says so
+  explicitly, and a mandate that pre-authorized the review makes it doubly settled.
+  Announce what is running; do not ask whether to run it
 - Readiness checks are **advisory**: the user can override and create a draft PR even with failures
 - The generated PR body includes the readiness snapshot so reviewers see what was verified
 - Designed to be run **once** per PR; for subsequent updates use `/cycle`

@@ -263,6 +263,57 @@ worktree that holds your git credentials, before you have looked at the tab. For
 else's** commits and diff — read it before launching a kimi worker on it.
 `/kickoff` announces the unattended start whenever the resolved worker is kimi.
 
+## Task mandate — how much a worker may do on its own
+
+A worker that has to guess its own authority either asks about everything or
+assumes too much. So `/kickoff` (and `/adopt`) asks **once**, at launch, and
+writes the answer to `MANDATE.md` beside `TASK.md`:
+
+```yaml
+---
+mandate_version: 1
+task: add-dark-mode
+authorized_by: user
+scope: dark-mode theming only; no design-system refactor
+terminal_gate: reviewed-pr
+allow: commit,push-own-branch,open-pr,local-review,agreed-fixes,rebase-own-branch
+deny: merge,deploy,force-push-shared,destructive
+review_budget: 2
+review_rounds_used: 0
+---
+```
+
+`/continue` reads it and, when a mandate exists, **starts on the first unmet
+requirement** rather than asking what to work on — the user already answered that.
+It runs pre-authorized checks unasked, diagnoses and fixes a failing check in
+scope before escalating, and stops at the `terminal_gate` (`reviewed-pr` by
+default: a reviewed PR, merge decision still the human's). pr-flow reads the same
+record, so a pre-authorized PR-open is not re-confirmed there either.
+
+Three properties are load-bearing:
+
+- **Authorization is never inferred.** Only this file's frontmatter grants
+  anything. A TASK.md that says "this should end in a merged PR" is a description
+  of the work, not permission to merge; neither is a decision made in a previous
+  session but never recorded, nor the bare fact that a worker was started.
+- **Unlisted is not consent.** `deny` wins over `allow`, and an action in neither
+  list makes the worker ask. `scripts/mandate.sh allows <action>` exits 0
+  (allowed), 1 (denied *or* unlisted) or 3 (no mandate at all) — callers must keep
+  1 and 3 apart: one is a decision the user made, the other a question they were
+  never asked. **No mandate is not a lockdown** — it is the pre-mandate behavior,
+  where the worker asks before each milestone.
+- **The budget outlives the session.** `review_budget` bounds review→fix rounds,
+  and `review_rounds_used` is counted in the file, so a worker resumed with
+  `claude -c` after a context loss does not silently restart its allowance.
+
+Edit `MANDATE.md` by hand to widen or narrow a running lane (raising
+`review_budget` is the usual case); `/kickoff` never rewrites an existing one.
+Decline the question and no file is written — that is a supported answer, not a
+degraded one. Non-claude workers (codex/grok/kimi) get the file named in their
+bootstrap prompt, and their mandate should omit `local-review`: they cannot run
+the review skills, and recording an authority the worker cannot exercise is worse
+than recording none.
+
 ## herdr integration
 
 When you run the work system inside a **herdr** session (herdr is a terminal
@@ -285,7 +336,7 @@ its tab label comes from the *resolved* task name, so it's sensible even when `/
 keeps the original branch name rather than renaming it to `task/<name>`:
 
 - The tab is **named after the task** (shortened for a readable sidebar — see
-  `skills/kickoff/SKILL.md` step 13 for the exact rule), so the sidebar shows one
+  `skills/kickoff/SKILL.md` step 14 for the exact rule), so the sidebar shows one
   clear entry per task instead of a wall of identical agents. The same short label
   names the herdr agent (and, for a claude worker, the `-n` session); the task's
   branch — `task/<name>` from `/kickoff`, or the original branch `/adopt` kept — is

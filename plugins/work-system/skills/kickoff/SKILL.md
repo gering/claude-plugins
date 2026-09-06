@@ -13,7 +13,7 @@ user_invocable: true
 
 ## Critical: never persist a `cd` into the worktree
 
-This skill runs **in the user's main-repo session**. Its job is to *create* the worktree, not to enter it. The user opens the worktree in a separate terminal/Claude session (see step 13).
+This skill runs **in the user's main-repo session**. Its job is to *create* the worktree, not to enter it. The user opens the worktree in a separate terminal/Claude session (see step 14).
 
 Because the Bash tool persists working directory between calls, a bare `cd .claude/worktrees/<task>` would silently trap the entire session inside the worktree — every subsequent `git status`, relative path, or check would target the worktree instead of the main repo. This has caused real user-visible bugs.
 
@@ -43,7 +43,7 @@ and `add-dark-mode` is the task. Every other selector is valueless. An optional
 | `--fable` / `--opus` | claude on fable / opus |
 | `--codex` / `--sol` | codex on gpt-5.6-terra / gpt-5.6-sol |
 | `--grok` | grok-4.5 |
-| `--kimi` | kimi-code on k3-256k (two-phase launch — see step 13b) |
+| `--kimi` | kimi-code on k3-256k (two-phase launch — see step 14b) |
 | `--agent <cli[:model]>` | any registry entry, e.g. `--agent claude:sonnet` or `--agent codex` |
 | `--agent cc-harness:<id>` | foreign model *inside* the CC harness (only when `cc-harness-agents` is on PATH; e.g. `cc-harness:grok`) |
 
@@ -118,7 +118,7 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     - If they differ, **stop and report an error**: "Session CWD drifted into the worktree during kickoff — investigate which step ran a persistent `cd`." Do not silently continue; a contaminated session will mislead every subsequent command.
 
 12. **Select the worker agent** — turn the argument selector into a concrete
-    `SELECTOR`, which step 13 passes straight to the launch helper. Also set
+    `SELECTOR`, which step 14 passes straight to the launch helper. Also set
     `OFFER_DEFAULT=no` (flipped to `yes` only on the picker path below).
     `REG="${CLAUDE_PLUGIN_ROOT}/scripts/agent-registry.sh"`.
 
@@ -237,11 +237,69 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
       helper did not print, and do not show the aggregate when the harness set is empty.
 
     Do not resolve models, the default, or availability yourself — the helper owns
-    that. Step 13 passes `SELECTOR` to `herdr-launch.sh`, which resolves +
+    that. Step 14 passes `SELECTOR` to `herdr-launch.sh`, which resolves +
     validates it (and reports a clear error if it is unavailable), so an
     unavailable pick is handled there, not here.
 
-13. **Launch the worktree session** — automate it inside herdr, otherwise show
+13. **Record the task's mandate** — the autonomy the user actually granted,
+    written down so it survives into the worker's process.
+
+    A worker that has to guess its own authority either asks about everything or
+    assumes too much. Both fail. So the grant is recorded **once, here**, in
+    `MANDATE.md` beside `TASK.md`, and every later step (`/continue`, pr-flow,
+    swarm) reads it instead of re-deriving it.
+
+    **Consent is never inferred.** Not from TASK.md prose ("this task should end in
+    a merged PR" is a description, not permission), not from the fact that a worker
+    was launched, and not from a decision the user made in *this* session but never
+    had recorded. Ask, then write down the answer.
+
+    Ask **one** question, with the standard arc as the recommended default:
+
+    | mandate | pre-authorized | never without new authorization |
+    |---------|----------------|---------------------------------|
+    | **standard** (recommended) | commit, push own branch, open PR, review, agreed fixes, rebase own branch | merge, deploy, force-push a shared branch, anything destructive |
+    | **draft-only** | commit, push own branch | opening a PR, review, merge, deploy |
+    | **merge-delegated** | the standard set **plus** merge | deploy, force-push a shared branch, anything destructive |
+
+    Offer a **review budget** with the same question (default: 2 rounds) — the
+    number of review→fix rounds the worker may run before it must come back. It is
+    what stops a worker from grinding through an unbounded review loop.
+
+    Then write the answer (`<worktree>` is the absolute path from step 6):
+
+    ```sh
+    bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" init "<worktree>" \
+      task="<task-name>" \
+      authorized_by="user" \
+      scope="<one line: what this lane is and is not>" \
+      terminal_gate="reviewed-pr" \
+      allow="commit,push-own-branch,open-pr,local-review,agreed-fixes,rebase-own-branch" \
+      deny="merge,deploy,force-push-shared,destructive" \
+      review_budget=2
+    ```
+
+    The script is the single source of truth for the file's format and for the
+    allow/deny semantics — do not hand-write `MANDATE.md`. Notes on the fields:
+    - `terminal_gate` — where "done" is. `reviewed-pr` (the default) means the
+      worker stops at a reviewed PR and the merge decision stays with the human.
+      `merged` only when the user delegated the merge in the answer above.
+    - `allow`/`deny` are **whole actions**, comma-separated. `deny` wins, and an
+      action in neither list is *unlisted* — the worker asks rather than acts.
+    - **Match the mandate to the worker** picked in step 12: only a claude worker
+      (`cc-harness:<id>` included) can run `/swarm:review` and the pr-flow skills,
+      so for **codex/grok/kimi** drop `local-review` from `allow` and set
+      `scope=".. drive to an open PR; review happens outside this lane"`. Recording
+      an authority the worker cannot exercise is worse than recording none.
+    - If `init` exits 2 with "a mandate already exists", a previous kickoff (or the
+      user) already recorded one — **show it** (`mandate.sh show "<worktree>"`) and
+      keep it. Re-record with `--force` only when the user asks.
+
+    If the user declines to grant anything, skip this step and say so: without
+    `MANDATE.md` the worker falls back to asking before each milestone, which is
+    the pre-mandate behavior and always safe.
+
+14. **Launch the worktree session** — automate it inside herdr, otherwise show
     the manual block.
 
     Detect herdr: automate **only** when `[ "${HERDR_ENV:-}" = "1" ]`, a non-empty
@@ -376,7 +434,7 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     the worktree). It writes the committed `.claude/work-system-agent` in the main
     repo; mention it's an uncommitted change to commit when ready.
 
-14. **Sync herdr tab glyphs** (best-effort, silent):
+15. **Sync herdr tab glyphs** (best-effort, silent):
     - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-tab-glyph.sh" refresh --cached "<main-repo>"`
       (the `<main-repo>` path from step 1) — after the launch, so the freshly-created
       tab is included.
