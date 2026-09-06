@@ -76,6 +76,20 @@ _labels = re.search(r"_AGENT_LABELS = \{(.*?)\}", PR_POST, re.S)
 _label_set = set(re.findall(r'"([a-z]+)":', _labels.group(1))) if _labels else set()
 check("pr-post footer labels cover every adapter backend", _label_set == validated_set)
 
+# grok's shell: run_terminal_command in the tool allowlist, headless dontAsk,
+# and a --deny prefix list (defense-in-depth; the OS jail's inverted write
+# model is the boundary). The isolated HOME/GROK_HOME keeps ambient Claude
+# settings, hooks and plugins out.
+check("grok tool list carries the shell", "run_terminal_command" in ADAPTER.split("GROK_TOOLS=")[1].split("\n")[0] or 'GROK_SHELL_TOOL="run_terminal_command"' in ADAPTER)
+check("run_grok pins --permission-mode dontAsk", "--permission-mode dontAsk" in ADAPTER)
+check("grok deny rules cover egress", "'Bash(curl:*)'" in ADAPTER and "'Bash(git push:*)'" in ADAPTER)
+check("run_grok runs from the isolated HOME", 'HOME="$TMP_GROK_HOME" GROK_HOME="$TMP_GROK_HOME/grok"' in ADAPTER)
+# codex: its own seatbelt cannot nest inside the OS jail, so under the jail it
+# runs with the jail as the boundary and its ambient config ignored; without
+# a jail it keeps its own read-only sandbox.
+check("codex under the jail bypasses its own sandbox", "sandbox_args=(-s danger-full-access -a never --ignore-user-config --ignore-rules)" in ADAPTER)
+check("codex without a jail keeps its own read-only sandbox", "sandbox_args=(-s read-only -a never --ignore-user-config --ignore-rules)" in ADAPTER)
+
 grok_backend = re.search(r"\{ backend: 'grok', flags: ([^}]+)\}", WORKFLOW)
 check("workflow registers grok effort flags", bool(grok_backend))
 if grok_backend:

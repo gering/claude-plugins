@@ -31,8 +31,8 @@ inlined diff (callers, config, types, library/CVE knowledge).
 
 | Voice | File-read | Web | Write/shell | Scope |
 |-------|-----------|-----|-------------|-------|
-| **codex** | yes (`-s read-only` already permits FS reads) | yes (`-c tools.web_search=true`; works under read-only, no sandbox loosen) | no (`-s read-only` only — never `workspace-write` / `danger-full-access`) | `-C <repo-root>` (working root; do **not** use `--add-dir`, which grants writable dirs) |
-| **grok** | yes (`read_file,list_dir,grep` in `--tools` allowlist) | yes (`web_search,web_fetch` in the same allowlist; drop `--disable-web-search`) | no (strict allowlist — never admit `write` / `search_replace` / `run_terminal_command` / …) | `--cwd <repo-root>` |
+| **codex** | yes — through its shell (codex reads files with shell commands) | yes (`-c tools.web_search=true`) | shell yes, writes OS-denied: under the jail `-s danger-full-access -a never --ignore-user-config --ignore-rules` (codex's own seatbelt cannot nest inside an outer profile with any deny rule — `sandbox_apply: Operation not permitted`, so `-s read-only` had killed every shell command and file read since 0.6.0); `-s read-only` only on a jail-less host; never `workspace-write` / `--add-dir` | `-C <repo-root>` |
+| **grok** | yes (`read_file,list_dir,grep` + `run_terminal_command` in `--tools`) | yes (`web_search,web_fetch` in the same allowlist; drop `--disable-web-search`) | shell yes (`run_terminal_command`), writes OS-denied; `--permission-mode dontAsk` + `--deny` prefix rules (egress/destructive verbs) as defense-in-depth — grok pre-approves every tool named in `--tools` whatever the mode, and deny rules are honoured; never `write` / `search_replace` | `--cwd <repo-root>`; ephemeral HOME/GROK_HOME with neutral `.claude/settings.json` and only `auth.json` linked |
 | **kimi** | yes (approval-free ACP read/search tools + a read-only shell command allowlist: git read subcommands, grep/rg/find/ls/cat pipelines) | yes (`WebSearch`/`FetchURL`, when the managed provider exposes them) | OS-immutable repo/Git (every worktree); ACP tool-kind allowlist aborts on first unsafe run, and an `execute` whose command fails the allowlist counts as unsafe (Kimi 0.32 can auto-approve some in-repo writes) | ACP `session/new.cwd=<repo-root>`; isolated HOME; repo-local `.kimi-code`/`.kimi`/`.mcp.json` denied; `ready` includes the OS jail |
 
 **Security layers (do not soften or over-claim):**
@@ -261,6 +261,44 @@ command waits for the end-of-turn sweep instead of aborting on sight (an
 run through the deny-path check, and a path that is an ANCESTOR of a deny path
 (`/`, `$HOME`, the scratch parent) is denied like the store itself — a
 `grep -r` rooted there would walk into the linked credentials.
+
+**The write model is inverted (0.11.0, 2026-09-07).** `_writable_roots` lists
+the only writable places — `$TMPDIR`, `/tmp`, the macOS per-user temp/cache
+dirs, `/dev`, and the backend's own auth state (codex: `~/.codex` minus its
+config surfaces; grok: `auth.json` + lock; Kimi: the linked `credentials/` +
+`oauth/`) — and the sandbox-exec profile goes `(allow default)` → `(deny
+file-write* (subpath "/"))` → `(allow file-write* <roots>)` → the read denies
+→ the repository/host write denies (SBPL is last-match-wins, so a protected
+path under an allowed root stays denied); bwrap goes `--ro-bind / / --dev
+/dev` → repo binds → writable binds → masks → `--remount-ro`. That is what
+makes a **shell for every voice** affordable: `git log/show/blame` and grep
+pipelines are what turns a diff review into a repo review, and no CLI's own
+permission model has to be the boundary. Three things learned wiring it:
+(1) **codex's seatbelt cannot nest** — `sandbox-exec` inside an outer profile
+that carries ANY deny rule (even one read-deny) fails with `sandbox_apply:
+Operation not permitted`, so `-s read-only` had left every codex shell
+command dead — and codex reads files through its shell, so it had reviewed
+the inlined diff alone since the jail arrived (0.6.0). Under the jail codex
+now runs `-s danger-full-access -a never --ignore-user-config --ignore-rules`
+(no ambient MCP servers, plugins, `notify`, hooks feature, execpolicy rules;
+auth still from CODEX_HOME); `-s read-only` stays the jail-less posture.
+(2) **grok pre-approves every tool in `--tools`** regardless of
+`--permission-mode` (default/plan/dontAsk all ran `touch`), honours `--deny`
+prefix rules (`Bash(touch:*)` blocked it), and its allow/deny compat has
+deny-wins semantics, so an allowlist is not expressible — the jail is the
+boundary, the deny list is prompt-independent defense-in-depth. And grok's
+permission engine must be able to READ `~/.claude/settings*.json`: merely
+denying them made it fall back to "ask", which headless `dontAsk` answers by
+cancelling the whole turn (`cancellationCategory: PermissionCancelled` on the
+first `git log`) — hence `_grok_prepare_runtime`'s ephemeral HOME with a
+neutral settings file and `GROK_HOME` with only `auth.json` linked; `grok
+inspect` then reports no instructions, permissions, plugins or hooks. The
+host `~/.grok` is denied entry by entry (sparing the auth file and the
+`downloads/` dir that holds the executable), `~/.claude` wholesale, and the
+repo's `CLAUDE.md`, `.claude/{settings*,rules,hooks,agents,skills,commands}`,
+`.mcp.json`, `.grok/`, `GROK.md`, `AGENTS.md`. (3) `SWARM_GROK_TRACE=<file>`
+keeps grok's stderr + raw stdout and `--debug-file` is how the cancel was
+found; `KIMI_ACP_TRACE` is the Kimi counterpart.
 Approval-free read/search/web tools remain available. Official Kimi
 documentation identifies `WebSearch` and `FetchURL` as auto-allow tools when
 the host provider exposes them; the managed Kimi provider does. The shared

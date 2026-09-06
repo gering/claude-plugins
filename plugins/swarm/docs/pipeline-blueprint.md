@@ -218,11 +218,26 @@ credential mid-review) converged on these non-negotiable mitigations:
 1. **Sandbox every backend + filter the env (read+web posture, 0.6.0; Kimi
    extension 0.11.0).** All shipped external voices may **read project files**
    and do **web research** so they
-   can catch out-of-diff bugs and external knowledge (API docs, CVEs). Adapter
-   enforces: grok strict `--tools read_file,list_dir,grep,web_search,web_fetch`
-   + `--cwd <repo>` (no write/shell tools); codex `-s read-only -C <repo>
-   -c tools.web_search=true` (web works under read-only; never
-   `workspace-write` / `--add-dir`); Kimi via ACP with no client FS/terminal
+   can catch out-of-diff bugs and external knowledge (API docs, CVEs), and
+   since 0.11.0 every voice keeps a **shell** for `git log/show/blame` and grep
+   pipelines — affordable only because the jail **inverts the write model**
+   (deny all writes; re-allow scratch, per-user temp/cache, `/dev`, the
+   backend's own auth state; deny the repository/Git roots and host config
+   surfaces on top). Adapter enforces: grok `--tools read_file,list_dir,grep,
+   run_terminal_command,web_search,web_fetch --permission-mode dontAsk` plus
+   `--deny` prefix rules (egress/destructive verbs; grok pre-approves every
+   listed tool regardless of mode, deny rules are honoured) + `--cwd <repo>`,
+   run from an ephemeral HOME/GROK_HOME (neutral Claude settings, only
+   `auth.json` linked — grok 1.0 otherwise loads the operator's Claude
+   settings, hooks, plugins/MCP servers and the repo's `CLAUDE.md`/rules as
+   instructions; and a merely DENIED settings file makes its permission engine
+   ask, which headless `dontAsk` answers by cancelling the turn); codex
+   `-s danger-full-access -a never --ignore-user-config --ignore-rules -C <repo>
+   -c tools.web_search=true` under the jail — codex's own seatbelt cannot be
+   applied inside any outer profile carrying a deny rule (`sandbox_apply:
+   Operation not permitted`), which had silently killed every codex shell
+   command and file read since 0.6.0; `-s read-only` remains the jail-less
+   posture (never `workspace-write` / `--add-dir`); Kimi via ACP with no client FS/terminal
    capability, its shell limited to a **read-only command allowlist** (git
    read subcommands, grep/rg/find/ls/cat pipelines; no chaining/redirection/
    substitution) vetted by the client — allowlisted commands approved once on

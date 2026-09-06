@@ -106,11 +106,17 @@ text they send back into the merge/verify prompts (closing second-order
 injection). External CLIs run **read+web** (file-read to find out-of-diff bugs;
 web for external knowledge only) under an OS jail that (1) denies HOME secret
 stores and repo-root `.env*`/`data/`/key/cred files (root-level; nested via
-`SWARM_DENY_PATHS`; the main checkout too in a linked worktree) and (2) makes
-the reviewed repository and Git directories **immutable** (`sandbox-exec`
-file-write deny / `bwrap` remount-ro, plus `GIT_OPTIONAL_LOCKS=0`). On a host
+`SWARM_DENY_PATHS`; the main checkout too in a linked worktree) and (2)
+**inverts the write model**: every write is denied, then only the scratch dir,
+the per-user temp/cache dirs, `/dev` and the backend's own auth state are
+re-allowed, and the reviewed repository/Git directories plus the host's shell
+startup files and agent config surfaces are denied again on top (`sandbox-exec`
+last-match-wins rules / `bwrap` read-only root with writable binds, plus
+`GIT_OPTIONAL_LOCKS=0`). That is what makes a **shell** affordable for every
+external voice — `git log/show/blame`, grep pipelines — with the jail, not the
+CLI's own permission model, as the boundary. On a host
 with no working sandbox the adapter **fails closed per voice** (grok
-tool-less/no-web, codex web hard-off) rather than running read+web bare. A
+tool-less/no-web, codex web hard-off inside its own read-only sandbox) rather than running read+web bare. A
 prompt egress guard forbids putting repo content into web queries (model-
 cooperation-dependent; the jail is the hard boundary). A secret scrub at the
 adapter boundary plus a final **output gate** re-scrub findings before they reach you.
@@ -127,9 +133,18 @@ against a positive allowlist — no chaining, redirection, substitution, config
 injection (`git -c`), `find -exec`, `rg --pre` — approves an allowlisted one
 when Kimi asks, and kills the session on first sight of anything else (any
 other tool kind outside read/search/fetch/think likewise). That gate is
-defense-in-depth, not the write boundary. Documented residuals: the host HOME
-stays writable (codex/grok keep session state there) and the jail has no
-network rule; arbitrary child-process execution is not portably prevented.
+defense-in-depth, not the write boundary. grok runs from an **ephemeral
+HOME/GROK_HOME** too (neutral `.claude/settings.json`, only `auth.json` linked
+back): grok 1.0 otherwise loads the operator's Claude Code settings —
+permission rules AND hooks (it ran a SessionStart hook), plugins with MCP
+servers, the global `Claude.md`, and from the reviewed repo `CLAUDE.md`,
+`.claude/rules`, `.mcp.json`, `.grok/` — all denied to it now. codex runs with
+`--ignore-user-config --ignore-rules` and, under the jail, **without its own
+seatbelt**: a nested `sandbox-exec` fails against any outer deny rule, which had
+silently killed every codex shell command (and so every file read) since the
+jail arrived. Documented residuals: the jail has no network rule (`--deny`
+prefix rules keep grok off `curl`/`ssh`/`git push`…, prompt-level only), and
+arbitrary child-process execution inside the jail is not prevented.
 Findings are advisory by default; `--fix` / `--loop` act only on the ones you
 agreed with, and **only Claude** applies edits — external agents stay
 review-only. The full threat model lives in `docs/pipeline-blueprint.md` § Security.
@@ -170,8 +185,8 @@ Backends:
 | Backend | Role | Mechanics |
 |---------|------|-----------|
 | `claude` | probe-only | reviews run in-session via the Agent tool |
-| `codex` | external reviewer | `codex exec -s read-only -C <repo> -c tools.web_search=true --output-schema` (model `gpt-5.6-sol`, `medium` by default / `xhigh` under `--max`), prompt on stdin (`-- -`); file-read + web under read-only; auth via `codex login status` |
-| `grok` | external reviewer | headless `--prompt-file` with inline `--json-schema`; the model is **discovered** — the newest canonical id whose schema enforcement is verified (the current set lives in `GROK_SCHEMA_VERIFIED` in `agents.sh`), never a silent upgrade to an unverified one. Strict `--tools` allowlist (`read_file,list_dir,grep,web_search,web_fetch`) + `--cwd <repo>` — no write/shell. Readiness is model-aware: auth, `--prompt-file` support, **and** a verified model on offer in `grok models`. `ready` answers usable/not-usable plus a hint; the concrete id is selected at `run` time and appears in that call's telemetry line. |
+| `codex` | external reviewer | `codex exec -s danger-full-access -a never --ignore-user-config --ignore-rules -C <repo> -c tools.web_search=true --output-schema` under the OS jail (its own seatbelt cannot nest inside it; `-s read-only` is kept only on a jail-less host), model `gpt-5.6-sol`, `medium` by default / `xhigh` under `--max`, prompt on stdin (`-- -`); shell + file-read + web; auth via `codex login status` |
+| `grok` | external reviewer | headless `--prompt-file` with inline `--json-schema`; the model is **discovered** — the newest canonical id whose schema enforcement is verified (the current set lives in `GROK_SCHEMA_VERIFIED` in `agents.sh`), never a silent upgrade to an unverified one. Strict `--tools` allowlist (`read_file,list_dir,grep,run_terminal_command,web_search,web_fetch`) + `--permission-mode dontAsk` + `--deny` prefix rules (egress/destructive verbs) + `--cwd <repo>`, run from an ephemeral HOME/GROK_HOME with only `auth.json` linked — the OS jail's inverted write model makes the shell read-only in effect. Readiness is model-aware: auth, `--prompt-file` support, **and** a verified model on offer in `grok models`. `ready` answers usable/not-usable plus a hint; the concrete id is selected at `run` time and appears in that call's telemetry line. |
 | `kimi` | external reviewer | ACP v1 over stdio (`kimi acp`), pinned to `kimi-code/k3-256k`; the complete prompt is an ACP content block, not argv. Isolated HOME/KIMI_CODE_HOME that links the host's `credentials/`+`oauth/` (links, not a copy — Moonshot rotates refresh tokens, so a refresh must land on the host file) and carries a filtered config projection. The client advertises no FS/terminal capability and rejects permission requests as defense-in-depth; repository immutability is OS-enforced. Invalid output or policy/protocol drift is a visible backend error, never an empty review. Requires auth, ACP, the pinned model, and a working OS jail. |
 
 The prompt always reaches a backend **out-of-band** — never as an argv word — so

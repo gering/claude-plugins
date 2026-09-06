@@ -198,6 +198,7 @@ TMP_PROMPT=""
 # signal it was created to bound.
 TMP_BOUNDED=""
 TMP_KIMI_HOME=""
+TMP_GROK_HOME=""
 
 # Per-call telemetry (opt-in via --telemetry). WHY it exists: an external voice
 # that dies at the wall is reported, but a voice that *survived* at 550s looks
@@ -315,6 +316,7 @@ cleanup() {
   if [[ -n "${TMP_PROMPT:-}" ]]; then rm -f "$TMP_PROMPT"; fi
   if [[ -n "${TMP_BOUNDED:-}" ]]; then rm -f "$TMP_BOUNDED"; fi
   if [[ -n "${TMP_KIMI_HOME:-}" ]]; then rm -rf "$TMP_KIMI_HOME"; fi
+  if [[ -n "${TMP_GROK_HOME:-}" ]]; then rm -rf "$TMP_GROK_HOME"; fi
   _write_telemetry "$rc"
 }
 trap cleanup EXIT
@@ -641,7 +643,32 @@ _sandbox_deny_paths_build() {
     "$host/.gitconfig" "$host/.config/git" "/etc/master.passwd" \
     "$host/.config/anthropic" "$host/.config/openai" "$host/.claude.json"
   if [[ "$own" != "codex" ]]; then printf '%s\n' "$host/.codex"; fi
-  if [[ "$own" != "grok" ]]; then printf '%s\n' "$host/.grok"; fi
+  if [[ "$own" != "grok" ]]; then
+    printf '%s\n' "$host/.grok"
+  elif [[ -d "$host/.grok" ]]; then
+    # grok runs from an ephemeral HOME/GROK_HOME (_grok_prepare_runtime) that
+    # links only auth.json back to the host, so the rest of ~/.grok — plugin
+    # registry (mirrors the operator's Claude plugins: hooks, MCP servers),
+    # mcp_credentials.json, sessions, trusted folders — is denied to grok
+    # itself, entry by entry. Spared: the auth file (+ its lock) and the entry
+    # holding the resolved grok executable (~/.grok/downloads/grok-<ver>).
+    local gdir="$host/.grok" gbin gbin_dir="" ge gerp
+    gbin="$(command -v -- grok 2>/dev/null || true)"
+    if [[ -n "$gbin" ]]; then
+      gbin="$(readlink -f -- "$gbin" 2>/dev/null || printf '%s' "$gbin")"
+      gbin_dir="$(cd "$(dirname -- "$gbin")" 2>/dev/null && pwd -P || true)"
+    fi
+    for ge in "$gdir"/* "$gdir"/.[!.]* "$gdir"/..?*; do
+      [[ -e "$ge" || -L "$ge" ]] || continue
+      case "${ge##*/}" in auth.json|auth.json.lock|bin) continue ;; esac
+      [[ "$ge" == "$GROK_AUTH_FILE" || "$ge" == "$GROK_AUTH_FILE.lock" ]] && continue
+      if [[ -n "$gbin_dir" && -d "$ge" ]]; then
+        gerp="$(cd "$ge" 2>/dev/null && pwd -P || true)"
+        [[ -n "$gerp" && ( "$gbin_dir" == "$gerp" || "$gbin_dir" == "$gerp"/* ) ]] && continue
+      fi
+      printf '%s\n' "$ge"
+    done
+  fi
   # Deny the ambient Kimi store ENTRY BY ENTRY, never the whole directory: the
   # stock installer puts the executable itself at ~/.kimi-code/bin/kimi, so a
   # whole-dir deny blocks the exec of every jailed kimi run (rc=10 on all four
@@ -725,6 +752,25 @@ _sandbox_deny_paths_build() {
       for r in "${roots[@]+"${roots[@]}"}"; do
         for p in "$r"/.kimi-code "$r"/.kimi "$r"/.mcp.json "$r"/.agents \
                  "$r"/AGENTS.md "$r"/agents.md "$r"/KIMI.md; do
+          [[ -e "$p" ]] && printf '%s\n' "$p"
+        done
+      done
+    fi
+    if [[ "$own" == "grok" ]]; then
+      # grok 1.0 is a Claude Code look-alike: it loads ~/.claude/settings*.json
+      # (permission rules AND hooks — it ran the operator's SessionStart hook),
+      # ~/.claude/plugins (skills, agents, MCP servers, more hooks), the global
+      # Claude.md, and from the reviewed repo CLAUDE.md, .claude/rules/*.md,
+      # .claude/settings*.json, .mcp.json and its own .grok/ + GROK.md /
+      # AGENTS.md — all of it as INSTRUCTIONS or executable config, outside the
+      # DIFF-<nonce> fence and, for --pr, attacker-controlled. Deny the host
+      # tree wholesale (grok needs nothing from it) and the repo-local surfaces.
+      printf '%s\n' "$host/.claude"
+      for r in "${roots[@]+"${roots[@]}"}"; do
+        for p in "$r"/.grok "$r"/.mcp.json "$r"/.claude/settings.json \
+                 "$r"/.claude/settings.local.json "$r"/.claude/rules "$r"/.claude/hooks \
+                 "$r"/.claude/agents "$r"/.claude/skills "$r"/.claude/commands \
+                 "$r"/GROK.md "$r"/AGENTS.md "$r"/agents.md "$r"/CLAUDE.md "$r"/Claude.md "$r"/claude.md; do
           [[ -e "$p" ]] && printf '%s\n' "$p"
         done
       done
@@ -850,9 +896,14 @@ _host_write_deny_paths() {
   # files, Claude Code's own config/hooks, XDG config, user bin dirs, and the
   # Kimi executable's directory — one auto-approved write there turns the next
   # UNJAILED readiness probe (`kimi acp --help` with the real HOME) into a
-  # trojan launch. Existing paths only; the auth dirs Kimi refreshes are not
-  # in this list, and neither is the calling backend's OWN store (codex/grok
-  # write session state and refreshed auth there). $1 = the calling backend.
+  # trojan launch. Emitted whether or not the path exists (sandbox-exec takes
+  # a rule for a missing file, and a jailed write could CREATE ~/.zshenv; the
+  # bwrap loop skips what it cannot bind). Not in this list: the auth files
+  # Kimi/grok refresh through their ephemeral HOMEs, and codex's own store
+  # (sessions, refreshed auth) — except codex's executable config surfaces
+  # (config.toml declares MCP servers and a `notify` command, AGENTS.md is
+  # instructions, hooks/rules/skills/prompts/agents/plugins are loaded on the
+  # next start), which stay write-denied even to codex. $1 = the calling backend.
   local own="${1:-}" host="${SWARM_HOST_HOME:-$HOME}" p kbin kdir
   for p in "$host"/.zshrc "$host"/.zprofile "$host"/.zshenv "$host"/.zlogin \
            "$host"/.bashrc "$host"/.bash_profile "$host"/.bash_login "$host"/.profile \
@@ -863,7 +914,10 @@ _host_write_deny_paths() {
       "$host"/.codex) [[ "$own" == "codex" ]] && continue ;;
       "$host"/.grok)  [[ "$own" == "grok" ]] && continue ;;
     esac
-    [[ -e "$p" ]] && printf '%s\n' "$p"
+    printf '%s\n' "$p"
+  done
+  for p in config.toml AGENTS.md hooks rules skills prompts agents plugins; do
+    printf '%s\n' "$host/.codex/$p"
   done
   kbin="$(command -v -- "$KIMI_BIN" 2>/dev/null || true)"
   if [[ -n "$kbin" ]]; then
@@ -871,6 +925,47 @@ _host_write_deny_paths() {
     kdir="$(cd "$(dirname -- "$kbin")" 2>/dev/null && pwd -P || true)"
     [[ -n "$kdir" && "$kdir" != "$host/.kimi-code/bin" ]] && printf '%s\n' "$kdir"
   fi
+  return 0
+}
+
+_writable_roots() {
+  # The ONLY places a jailed external may write. The jail inverts the write
+  # model (0.11.0): `deny file-write*` on `/` first, then these roots allowed,
+  # then the repository/host denies on top — so a reviewer with a shell (codex
+  # under its own sandbox, grok's run_terminal_command, Kimi's allowlisted
+  # Bash) can plant nothing outside its scratch space and its own state dir.
+  # $1 = backend: its own store is where it keeps sessions and refreshed auth.
+  local own="${1:-}" host="${SWARM_HOST_HOME:-$HOME}" t
+  for t in "${TMPDIR:-/tmp}" /tmp /private/tmp /dev; do
+    [[ -e "$t" ]] && printf '%s\n' "$t"
+  done
+  # macOS per-user temp + cache dirs (TMPDIR is usually the first; node and
+  # python write caches to the second).
+  if command -v getconf >/dev/null 2>&1; then
+    for t in "$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || true)" \
+             "$(getconf DARWIN_USER_CACHE_DIR 2>/dev/null || true)"; do
+      [[ -n "$t" && -d "$t" ]] && printf '%s\n' "$t"
+    done
+  fi
+  case "$own" in
+    codex) [[ -d "$host/.codex" ]] && printf '%s\n' "$host/.codex" ;;
+    grok)
+      # Only the auth file the ephemeral GROK_HOME links back to the host (a
+      # token refresh must land there); everything else grok writes goes to
+      # its ephemeral HOME under the scratch dir.
+      [[ -e "$GROK_AUTH_FILE" ]] && printf '%s\n' "$GROK_AUTH_FILE"
+      printf '%s\n' "$GROK_AUTH_FILE.lock"
+      ;;
+    kimi)
+      # Only the auth dirs the ephemeral HOME links back to the host — a token
+      # refresh must land there (Moonshot rotates refresh tokens); the rest of
+      # ~/.kimi-code stays read-only to Kimi (see _sandbox_deny_paths_build).
+      local cred_dir
+      cred_dir="$(cd "$(dirname -- "$KIMI_CREDENTIALS_FILE")" 2>/dev/null && pwd -P || true)"
+      [[ -n "$cred_dir" ]] && printf '%s\n' "$cred_dir"
+      [[ -n "$cred_dir" && -d "$(dirname -- "$cred_dir")/oauth" ]] && printf '%s\n' "$(dirname -- "$cred_dir")/oauth"
+      ;;
+  esac
   return 0
 }
 
@@ -950,28 +1045,38 @@ _init_sandbox() {
     profile="$(
       {
         _sandbox_deny_paths "$backend"
+        printf '%s\n' '--writable--'
+        _writable_roots "$backend"
         printf '%s\n' '--write--'
         _repo_protected_roots
         _host_write_deny_paths "$backend"
       } | python3 -c '
 import os, sys
-read_rules, write_rules = [], []
+read_rules, writable_rules, write_rules = [], [], []
 mode = "read"
 for line in sys.stdin:
     p = line.rstrip("\n")
     if not p:
         continue
-    if p == "--write--":
-        mode = "write"
+    if p in ("--write--", "--writable--"):
+        mode = p.strip("-")
         continue
     rp = os.path.realpath(p)
     esc = rp.replace("\\", "\\\\").replace("\"", "\\\"")
     rule = "(subpath \"%s\") (literal \"%s\")" % (esc, esc)
     if mode == "write":
         write_rules.append(rule)
+    elif mode == "writable":
+        writable_rules.append(rule)
     else:
         read_rules.append(rule)
-parts = ["(version 1)(allow default)"]
+# SBPL: the LAST matching rule wins. Deny every write, re-allow the scratch /
+# temp / own-store roots, then the read denies and the repository + host write
+# denies go last so a protected path under an allowed root (a TMPDIR inside
+# the checkout) stays denied.
+parts = ["(version 1)(allow default)", "(deny file-write* (subpath \"/\"))"]
+if writable_rules:
+    parts.append("(allow file-write* %s)" % " ".join(writable_rules))
 if read_rules:
     parts.append("(deny file-read* %s)" % " ".join(read_rules))
 if write_rules:
@@ -993,11 +1098,17 @@ sys.stdout.write("".join(parts))
     # shadow the mask), then the host write-deny ro-binds, then the secret masks
     # on top, then --remount-ro of the repository roots LAST so it cannot undo a
     # child mask. Binds before masks; remount after masks.
-    local args=(--dev-bind / /) p rp q targets
+    # Inverted write model: the whole tree read-only, a fresh /dev, then only
+    # the scratch / temp / own-store roots bound writable.
+    local args=(--ro-bind / / --dev /dev) p rp q targets
     while IFS= read -r p; do
       [[ -n "$p" ]] || continue
       if [[ -d "$p" ]]; then args+=(--bind "$p" "$p"); fi
     done < <(_repo_protected_roots)
+    while IFS= read -r p; do
+      [[ -n "$p" && -d "$p" && "$p" != /dev ]] || continue
+      args+=(--bind "$p" "$p")
+    done < <(_writable_roots "$backend")
     while IFS= read -r p; do
       [[ -n "$p" && -e "$p" ]] || continue
       args+=(--ro-bind "$p" "$p")
@@ -1871,12 +1982,13 @@ ready_check() {
       # probe hit the wall" or "the adapter could not bound it", and the rc is
       # the only thing that knows.
       _codex_probe_rc="$codex_rc"
+      (( codex_rc == 0 )) && ! _scratch_dir_ok && return 1
       return "$codex_rc"
       ;;
     # Model-aware: auth alone would advertise grok even when the CLI no longer
     # offers any model the adapter can drive (grok drops/renames models
     # between releases — 0.2.101 removed grok-composer-2.5-fast).
-    grok)   [[ -s "$GROK_AUTH_FILE" ]] && grok_model_offered ;;
+    grok)   [[ -s "$GROK_AUTH_FILE" ]] && grok_model_offered && _scratch_dir_ok ;;
     # ACP is the only out-of-band transport in kimi-code 0.32.0. The default
     # model is pinned for deterministic ensemble behavior and must be offered.
     # The jail is part of Kimi's READINESS, not a rule the skill re-derives in
@@ -1885,13 +1997,19 @@ ready_check() {
     # memoized; its sandbox smoke `true` is one of the three counted probes.
     kimi)   _kimi_credentials_usable && _kimi_has_acp \
               && kimi_model_offered "${requested_model:-$KIMI_DEFAULT_MODEL}" \
-              && _read_web_safe kimi && _kimi_scratch_dir_ok ;;
+              && _read_web_safe kimi && _scratch_dir_ok ;;
   esac
 }
 
 ready_hint() {
   # claude needs no hint: it is always available + ready in-session.
   local backend="$1" requested_model="${2:-}"
+  # One hint for every jailed backend: a TMPDIR inside the checkout sits under
+  # the write deny, so no external call could write its scratch file there.
+  if [[ "$backend" != "claude" ]] && ! _scratch_dir_ok; then
+    echo "TMPDIR (${TMPDIR:-/tmp}) is inside the reviewed repository, which the jail write-denies — set TMPDIR to a directory outside the checkout"
+    return 0
+  fi
   case "$backend" in
     codex)
       # TWO failures reach here since the probe is bounded: a definite negative
@@ -2361,9 +2479,24 @@ run_codex() {
   # codex always had in 0.5.x — the degrade is per-voice, not "tool-less", and
   # the docs describe it that way (do not over-claim).
   local web_args=(-c tools.web_search=true)
+  # Under the OS jail codex runs with its OWN sandbox off (`-s danger-full-
+  # access -a never`): a seatbelt profile cannot be applied inside another one
+  # that carries any deny rule (`sandbox_apply: Operation not permitted`,
+  # verified 2026-09-07 with a read-deny-only outer profile), so `-s read-only`
+  # had left every codex shell command — and with it every file read, which
+  # codex does through its shell — dead since the secret-jail arrived; codex
+  # reviewed the inlined diff alone. The jail is the boundary now (repository
+  # immutable, writes only to scratch + ~/.codex minus its config surfaces,
+  # secrets denied), the same posture grok and Kimi run under.
+  # --ignore-user-config / --ignore-rules: no ambient ~/.codex/config.toml
+  # (MCP servers, plugins, `notify` command, hooks feature) or execpolicy
+  # rules reach a review; auth still comes from CODEX_HOME.
+  local sandbox_args=(-s danger-full-access -a never --ignore-user-config --ignore-rules)
   if ! _read_web_safe codex; then
     echo "warning: no working OS jail or unresolvable repo root — codex web search HARD-disabled (fail closed); FS reads stay inside codex's own read-only sandbox (0.5.x read surface)" >&2
     web_args=(-c tools.web_search=false)
+    # No outer jail, so codex's own sandbox is the only boundary — keep it.
+    sandbox_args=(-s read-only -a never --ignore-user-config --ignore-rules)
   fi
 
   # The schema-validated JSON lands in $TMP_OUT; codex's stdout copy of the
@@ -2382,7 +2515,7 @@ run_codex() {
   # injection it could echo a secret it read, and it never passes scrub_secrets.
   # The exit code (incl. 124 timeout) still drives error handling.
   local rc=0
-  sandboxed codex codex exec -s read-only \
+  sandboxed codex codex exec "${sandbox_args[@]}" \
       ${repo_args[@]+"${repo_args[@]}"} \
       --skip-git-repo-check \
       ${web_args[@]+"${web_args[@]}"} \
@@ -2495,12 +2628,35 @@ _grok_has_prompt_file() {
     *--prompt-file*) _grok_help_rc=0 ;;
     *) _grok_help_rc=1 ;;
   esac
+  # --permission-mode / --deny arrived with grok 1.0; without them the shell
+  # tool cannot carry its deny rules, so run_grok drops the shell (audibly).
+  case "$help" in
+    *--permission-mode*) _grok_shell_policy=yes ;;
+    *) _grok_shell_policy=no ;;
+  esac
   return "$_grok_help_rc"
 }
+_grok_shell_policy=""
 
 GROK_READ_TOOLS="read_file,list_dir,grep"
+# run_terminal_command is grok's shell (traced 2026-09-07 on 1.0.13; it also
+# runs `bash` from PATH). Headless grok pre-approves every tool named in
+# --tools regardless of --permission-mode — default/plan/dontAsk all ran
+# `touch` — so the OS jail's inverted write model is the boundary and these
+# `--deny` rules (Claude-style prefixes, honoured: `Bash(touch:*)` blocked it)
+# are defense-in-depth against egress and the obvious destructive verbs.
+GROK_SHELL_TOOL="run_terminal_command"
 GROK_WEB_TOOLS="web_search,web_fetch"
-GROK_TOOLS="${GROK_READ_TOOLS},${GROK_WEB_TOOLS}"
+GROK_TOOLS="${GROK_READ_TOOLS},${GROK_SHELL_TOOL},${GROK_WEB_TOOLS}"
+GROK_TOOLS_NOSHELL="${GROK_READ_TOOLS},${GROK_WEB_TOOLS}"
+GROK_DENY_RULES=(
+  'Bash(curl:*)' 'Bash(wget:*)' 'Bash(nc:*)' 'Bash(ncat:*)' 'Bash(netcat:*)'
+  'Bash(ssh:*)' 'Bash(scp:*)' 'Bash(sftp:*)' 'Bash(rsync:*)' 'Bash(telnet:*)'
+  'Bash(git push:*)' 'Bash(git remote:*)' 'Bash(git fetch:*)' 'Bash(git pull:*)'
+  'Bash(rm:*)' 'Bash(sudo:*)' 'Bash(chmod:*)' 'Bash(chown:*)' 'Bash(mv:*)'
+  'Bash(python:*)' 'Bash(python3:*)' 'Bash(node:*)' 'Bash(npm:*)' 'Bash(npx:*)'
+  'Bash(pip:*)' 'Bash(pip3:*)' 'Bash(brew:*)' 'Bash(open:*)' 'Bash(osascript:*)'
+)
 
 run_grok() {
   local prompt_path="$1" effort="$2" model="$3" schema="$4"
@@ -2552,8 +2708,11 @@ run_grok() {
   # TMPDIR is (the denylist covers credential paths, not the temp dir). A user
   # who adds TMPDIR to SWARM_DENY_PATHS breaks their own prompt delivery.
   # Read+web posture (0.6.0): strict --tools allowlist grants file-read
-  # (read_file,list_dir,grep) + web (web_search,web_fetch) so grok can find
-  # out-of-diff bugs and research external knowledge. No write/shell tools.
+  # (read_file,list_dir,grep) + a shell (run_terminal_command: git log/show/
+  # blame, grep pipelines) + web (web_search,web_fetch) so grok can find
+  # out-of-diff bugs and research external knowledge. The OS jail makes the
+  # shell read-only in effect (writes only to scratch + ~/.grok); --deny rules
+  # add a prefix denylist for egress/destructive verbs.
   # --cwd pins the project root. The OS secret-jail (sandboxed) blocks
   # credential paths; the prompt egress guard (SKILL.md HDR, outside the diff
   # fence) is the model-cooperation web policy; scrub_secrets is the output
@@ -2566,7 +2725,13 @@ run_grok() {
   # boundary would re-open the exfil channel 0.5.x closed by flags. Degrade to
   # the 0.5.x posture (tool-less, no web) and say so — the review still runs on
   # the inlined diff, just without exploration.
-  local tool_args=(--tools "$GROK_TOOLS")
+  local tool_args=(--tools "$GROK_TOOLS" --permission-mode dontAsk) rule
+  for rule in "${GROK_DENY_RULES[@]}"; do tool_args+=(--deny "$rule"); done
+  _grok_has_prompt_file >/dev/null 2>&1 || true
+  if [[ "$_grok_shell_policy" == "no" ]]; then
+    echo "warning: this grok CLI has no --permission-mode/--deny — running it without the shell tool (git history unavailable to grok; update the grok CLI)" >&2
+    tool_args=(--tools "$GROK_TOOLS_NOSHELL")
+  fi
   if ! _read_web_safe grok; then
     echo "warning: no working OS jail or unresolvable repo root — grok degraded to tool-less/no-web (fail closed; read+web needs the OS secret-jail AND a resolvable repo to scope+deny)" >&2
     tool_args=(--tools "" --disable-web-search)
@@ -2577,12 +2742,17 @@ run_grok() {
   # deny prefix while the backend reads a different file entirely.
   _assert_prompt_readable_in_jail "$prompt_path" grok
   local raw rc=0
-  raw="$(sandboxed grok grok -m "$grok_model" --effort "$effort" \
+  _grok_prepare_runtime "$prompt_path"
+  raw="$(HOME="$TMP_GROK_HOME" GROK_HOME="$TMP_GROK_HOME/grok" \
+      sandboxed grok grok -m "$grok_model" --effort "$effort" \
       ${tool_args[@]+"${tool_args[@]}"} \
       ${cwd_args[@]+"${cwd_args[@]}"} \
       --json-schema "$(cat "$schema")" \
-      --prompt-file "$prompt_path" </dev/null 2>/dev/null)" || rc=$?
+      --prompt-file "$prompt_path" </dev/null 2>"${SWARM_GROK_TRACE:-/dev/null}")" || rc=$?
   TELEMETRY_RC="$rc"
+  # Diagnostics only: SWARM_GROK_TRACE=<file> keeps grok's stderr (above) and
+  # its raw stdout (here). Off by default — the raw output is untrusted text.
+  if [[ -n "${SWARM_GROK_TRACE:-}" ]]; then printf '%s\n' "$raw" >>"$SWARM_GROK_TRACE" 2>/dev/null || true; fi
   if (( rc != 0 )); then
     # stderr is deliberately discarded (injection guard), so name the likely
     # cause: an older CLI that predates the pinned model reports Ready (auth
@@ -2650,13 +2820,51 @@ _dir_under_protected_root() {
   return 1
 }
 
-_kimi_scratch_dir_ok() {
-  # The skill's scratch dir (and so the ephemeral Kimi HOME) lives under
-  # $TMPDIR. A TMPDIR inside the checkout would put Kimi's session state under
-  # the write deny — refused by _kimi_prepare_runtime at run time, so say so at
-  # READINESS, once, instead of one opaque rc 2 per cluster.
+_grok_prepare_runtime() {
+  # VOID setter — fills TMP_GROK_HOME, prints nothing. $1 = the prompt path:
+  # the HOME is created NEXT TO it (see _kimi_prepare_runtime for the
+  # placement rationale). grok 1.0 is a Claude Code look-alike: from $HOME it
+  # loads ~/.claude/settings*.json (permission rules AND hooks — it ran the
+  # operator's SessionStart hook), ~/.claude/plugins (skills, agents, MCP
+  # servers), the global Claude.md; from $GROK_HOME its plugin registry, MCP
+  # credentials, trusted folders and sessions. All of that is ambient config a
+  # review must not inherit — and reading ~/.claude/settings*.json is not
+  # optional: with the file merely DENIED, grok's permission engine falls back
+  # to "ask", which a headless `dontAsk` session answers by cancelling the
+  # whole turn (traced 2026-09-07: `cancellationCategory: PermissionCancelled`
+  # on the first `git log`). So the ephemeral HOME carries a NEUTRAL
+  # .claude/settings.json (no rules, no hooks) and the ephemeral GROK_HOME
+  # links only auth.json (+ lock) back to the host so a token refresh lands
+  # there. Verified: `grok inspect` then reports no instructions, no
+  # permissions, no plugins, no hooks, project trusted, and tools run.
+  if _dir_under_protected_root "$(dirname -- "$1")"; then
+    echo "grok prompt file must not live inside the repository (its directory is under a write-denied root) — the review skill hands over a file in its own scratch dir" >&2
+    exit 2
+  fi
+  local home
+  home="$(mktemp -d "$(dirname -- "$1")/swarm-grok.XXXXXX")" \
+    || { echo "Could not create an isolated grok HOME next to the prompt file (is its directory writable?)" >&2; exit 2; }
+  chmod 700 "$home"
+  TMP_GROK_HOME="$home"
+  mkdir -p "$home/.claude" "$home/grok" || { echo "Could not create the isolated grok HOME" >&2; exit 2; }
+  printf '{"permissions":{"allow":[],"deny":[]}}\n' > "$home/.claude/settings.json" \
+    || { echo "Could not write the neutral settings into the isolated grok HOME" >&2; exit 2; }
+  [[ -s "$GROK_AUTH_FILE" ]] || { echo "grok auth file missing or empty: $GROK_AUTH_FILE (run: grok login)" >&2; exit 1; }
+  ln -s "$GROK_AUTH_FILE" "$home/grok/auth.json" \
+    || { echo "Could not link the grok auth file into the isolated runtime" >&2; exit 1; }
+  if [[ -e "$GROK_AUTH_FILE.lock" ]]; then
+    ln -s "$GROK_AUTH_FILE.lock" "$home/grok/auth.json.lock" 2>/dev/null || true
+  fi
+}
+
+_scratch_dir_ok() {
+  # The skill's scratch dir (codex's --output-last-message file, grok's bounded
+  # call scratch, the ephemeral Kimi HOME) lives under $TMPDIR. A TMPDIR inside
+  # the checkout would put it under the write deny — refused at run time, so
+  # say so at READINESS, once, instead of one opaque error per cluster.
   ! _dir_under_protected_root "${TMPDIR:-/tmp}"
 }
+_kimi_scratch_dir_ok() { _scratch_dir_ok; }
 
 _kimi_creds_done=""; _kimi_creds_ok=""
 _kimi_credentials_usable() {

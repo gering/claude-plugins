@@ -963,12 +963,18 @@ post. Do **not** re-implement the sanitize/gate/post logic inline.
   external CLIs run **read+web** under an OS jail (HOME secret stores +
   root-level `.env*`/`data/`/key/cred files denied — reviewed root AND, in a
   linked worktree, the main checkout; root-level only, nested secrets via
-  `SWARM_DENY_PATHS`; repository/Git paths write-denied; no working jail →
+  `SWARM_DENY_PATHS`; writes denied everywhere except the scratch/temp dirs
+  and the backend's own auth state, repository/Git paths and host config
+  surfaces denied on top — so every voice keeps a shell for `git log`/grep
+  with the jail as the boundary; no working jail →
   fail closed **per voice**: grok tool-less/no-web, codex web hard-off with
   its own read-only sandbox's read surface, Kimi omitted entirely because
-  ACP has no safe jail-less tier). Kimi additionally uses an isolated HOME
-  holding only links to its host auth dirs (a copy strands a rotated refresh
-  token) plus a filtered config projection; ACP rejection is defense-in-depth. A prompt
+  ACP has no safe jail-less tier). Kimi and grok run from isolated HOMEs
+  holding only links to their host auth state (a copy strands a rotated
+  refresh token) — Kimi with a filtered config projection, grok with neutral
+  Claude settings so no ambient rules/hooks/plugins load; codex ignores its
+  user config and rules. Kimi's ACP command allowlist and grok's `--deny`
+  prefixes are defense-in-depth. A prompt
   **egress guard** (outside the diff fence) forbids putting repo content into
   web queries; it is model-cooperation-dependent, not transport-enforced —
   the jail is the hard boundary. Arbitrary subprocess execution remains a

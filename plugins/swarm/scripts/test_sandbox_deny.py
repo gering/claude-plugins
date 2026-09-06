@@ -837,6 +837,160 @@ class TestProtectedRootsAndIsolation(unittest.TestCase):
                 # never the auth dirs Kimi refreshes through the links
                 self.assertNotIn(str(home / ".kimi-code" / "credentials"), paths)
 
+    def test_host_write_deny_emits_missing_rc_files_and_codex_config_surfaces(self):
+        # No existence filter: a jailed write could CREATE ~/.zshenv, and codex's
+        # config.toml (MCP servers, notify command) must stay write-denied even
+        # to codex itself. sandbox-exec takes rules for missing paths; the
+        # bwrap loop filters what it cannot bind.
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            r = _source('_host_write_deny_paths codex', env_extra={"HOME": td})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            paths = r.stdout.splitlines()
+            for must in (".zshenv", ".bash_profile", ".codex/config.toml", ".codex/AGENTS.md",
+                         ".codex/hooks", ".codex/plugins"):
+                self.assertIn(str(home / must), paths, must)
+            self.assertNotIn(str(home / ".codex"), paths)
+
+    def test_writable_roots_are_scratch_temp_dev_and_the_own_auth_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            (home / ".codex").mkdir(); (home / ".grok").mkdir()
+            (home / ".grok" / "auth.json").write_text("{}")
+            (home / ".kimi-code" / "credentials").mkdir(parents=True)
+            (home / ".kimi-code" / "oauth").mkdir()
+            (home / ".kimi-code" / "credentials" / "kimi-code.json").write_text("{}")
+            scratch = home / "scratch"; scratch.mkdir()
+            env = {"HOME": td, "TMPDIR": str(scratch),
+                   "GROK_AUTH_FILE": str(home / ".grok" / "auth.json"),
+                   "KIMI_CREDENTIALS_FILE": str(home / ".kimi-code" / "credentials" / "kimi-code.json")}
+            roots = {}
+            for backend in ("codex", "grok", "kimi"):
+                r = _source(f'_writable_roots {backend}', env_extra=env)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                roots[backend] = r.stdout.splitlines()
+                self.assertIn(str(scratch), roots[backend], backend)
+                self.assertIn("/dev", roots[backend], backend)
+            self.assertIn(str(home / ".codex"), roots["codex"])
+            # grok: only the auth file (its GROK_HOME is ephemeral); never the store
+            self.assertIn(str(home / ".grok" / "auth.json"), roots["grok"])
+            self.assertNotIn(str(home / ".grok"), roots["grok"])
+            self.assertNotIn(str(home / ".grok"), roots["codex"])
+            # kimi: the linked auth dirs, never the store
+            self.assertIn(os.path.realpath(str(home / ".kimi-code" / "credentials")), roots["kimi"])
+            self.assertIn(os.path.realpath(str(home / ".kimi-code" / "oauth")), roots["kimi"])
+            self.assertNotIn(str(home / ".kimi-code"), roots["kimi"])
+            self.assertNotIn(str(home / ".codex"), roots["kimi"])
+
+    @unittest.skipUnless(shutil.which("sandbox-exec"), "sandbox-exec e2e is macOS-only")
+    def test_sandbox_exec_profile_inverts_the_write_model(self):
+        # deny-all-writes, then the writable roots, then the repo/host denies —
+        # SBPL is last-match-wins, so a protected path under a writable root
+        # (TMPDIR inside the checkout) must come AFTER the allow.
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td); (home / ".codex").mkdir()
+            r = _source('_init_sandbox codex; printf "%s\\n" "${SANDBOX_CMD[@]}"', env_extra={"HOME": td})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            prof = r.stdout
+            deny_all = prof.find('(deny file-write* (subpath "/"))')
+            allow = prof.find('(allow file-write*')
+            deny_rest = prof.find('(deny file-write*', deny_all + 1)
+            self.assertGreater(deny_all, 0, prof[:200])
+            self.assertGreater(allow, deny_all)
+            self.assertGreater(deny_rest, allow)
+            self.assertIn(os.path.realpath(str(home / ".codex")), prof[allow:deny_rest])
+
+    @unittest.skipUnless(shutil.which("sandbox-exec") and os.access("/Users/Shared", os.W_OK),
+                         "sandbox-exec e2e is macOS-only (probes /Users/Shared)")
+    def test_sandbox_exec_inverted_profile_blocks_writes_outside_the_roots(self):
+        # A fake HOME under TemporaryDirectory sits inside the per-user temp
+        # dir — itself a writable root — so the "outside" probe targets
+        # /Users/Shared (world-writable, never a scratch root) instead.
+        probe = f"/Users/Shared/swarm-jail-probe-{os.getpid()}"
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td); (home / ".codex").mkdir()
+            try:
+                r = _source(
+                    '_init_sandbox codex',
+                    f'"${{SANDBOX_CMD[@]}}" /bin/sh -c \'echo x > "{probe}" 2>/dev/null && echo outside-write-ok || echo outside-write-denied; '
+                    'echo x > "$TMPDIR/p" 2>/dev/null && echo tmp-write-ok || echo tmp-write-denied; '
+                    'echo x > "$HOME/.codex/p" 2>/dev/null && echo store-write-ok || echo store-write-denied\'',
+                    env_extra={"HOME": td},
+                )
+            finally:
+                try: os.remove(probe)
+                except OSError: pass
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("outside-write-denied", r.stdout)
+            self.assertIn("tmp-write-ok", r.stdout)
+            self.assertIn("store-write-ok", r.stdout)
+
+    def test_bwrap_root_is_read_only_with_writable_roots_bound(self):
+        src = AGENTS.read_text(encoding="utf-8")
+        self.assertIn("local args=(--ro-bind / / --dev /dev)", src)
+        ro_root = src.find("--ro-bind / / --dev /dev")
+        writable = src.find("done < <(_writable_roots \"$backend\")")
+        remount = src.find('args+=(--remount-ro "$p")')
+        self.assertGreater(writable, ro_root)
+        self.assertGreater(remount, writable)
+
+    def test_grok_store_is_denied_entry_wise_sparing_auth_and_its_binary_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td); store = home / ".grok"
+            for d in ("downloads", "sessions", "installed-plugins", "bin"):
+                (store / d).mkdir(parents=True)
+            for f in ("auth.json", "auth.json.lock", "mcp_credentials.json", "trusted_folders.toml"):
+                (store / f).write_text("")
+            fake_bin = store / "downloads" / "grok-9.9"; fake_bin.write_text("#!/bin/sh\n"); fake_bin.chmod(0o755)
+            (home / "bin").mkdir(); (home / "bin" / "grok").symlink_to(fake_bin)
+            env = {"HOME": td, "SWARM_HOST_HOME": td, "PATH": f"{home / 'bin'}:{os.environ['PATH']}",
+                   "GROK_AUTH_FILE": str(store / "auth.json")}
+            r = _source('_sandbox_deny_paths grok', env_extra=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            paths = r.stdout.splitlines()
+            self.assertNotIn(str(store), paths)
+            for spared in ("auth.json", "auth.json.lock", "downloads", "bin"):
+                self.assertNotIn(str(store / spared), paths, spared)
+            for denied in ("sessions", "installed-plugins", "mcp_credentials.json", "trusted_folders.toml"):
+                self.assertIn(str(store / denied), paths, denied)
+            # the host Claude tree is denied wholesale to grok, whole store to siblings
+            self.assertIn(str(home / ".claude"), paths)
+            r = _source('_sandbox_deny_paths codex', env_extra=env)
+            self.assertIn(str(store), r.stdout.splitlines())
+
+    def test_grok_runtime_is_an_isolated_home_with_neutral_settings_and_linked_auth(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td); store = home / ".grok"; store.mkdir()
+            (store / "auth.json").write_text('{"t":1}')
+            scratch = home / "scratch"; scratch.mkdir()
+            prompt = scratch / "p.txt"; prompt.write_text("x")
+            r = _source(
+                f'_grok_prepare_runtime "{prompt}"',
+                'printf "%s\\n" "$TMP_GROK_HOME"',
+                'cat "$TMP_GROK_HOME/.claude/settings.json"',
+                'readlink "$TMP_GROK_HOME/grok/auth.json"',
+                'TMP_GROK_HOME=""',   # keep it for inspection: the harness exit trap would remove it
+                env_extra={"HOME": td, "GROK_AUTH_FILE": str(store / "auth.json")},
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            lines = r.stdout.splitlines()
+            self.assertTrue(lines[0].startswith(str(scratch / "swarm-grok.")), lines)
+            self.assertIn('"permissions"', lines[1])
+            self.assertEqual(lines[2], str(store / "auth.json"))
+            shutil.rmtree(lines[0], ignore_errors=True)
+
+    def test_grok_runtime_refuses_a_prompt_inside_the_repository(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"; repo.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            prompt = repo / "p.txt"; prompt.write_text("x")
+            home = Path(td) / "home"; (home / ".grok").mkdir(parents=True)
+            (home / ".grok" / "auth.json").write_text("{}")
+            r = _source(f'_grok_prepare_runtime "{prompt}"', cwd=repo,
+                        env_extra={"HOME": str(home), "GROK_AUTH_FILE": str(home / ".grok" / "auth.json")})
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn("must not live inside the repository", r.stderr)
+
     @unittest.skipUnless(shutil.which("sandbox-exec"), "sandbox-exec e2e is macOS-only")
     def test_sandbox_exec_profile_write_denies_host_rc_files(self):
         with tempfile.TemporaryDirectory() as td:
