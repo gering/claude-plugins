@@ -675,7 +675,14 @@ def main(argv: list[str]) -> int:
         options = session.get("configOptions")
         options = _set_option(client, session_id, options, "model", args.model)
         options = _set_option(client, session_id, options, "thinking", args.effort)
-        _set_option(client, session_id, options, "mode", "default")
+        # `plan` is Kimi's read-only session mode ("no tool execution"): shell
+        # and edit tools are not offered to the model at all, so a review can
+        # not lose its voice to the policy gate below. Under `default` the
+        # first four-family runs auto-ran `execute` (kimi-code 0.41 treats
+        # some shell commands as safe) and the gate aborted the whole cluster.
+        # A Kimi that does not offer `plan` fails closed here (ProtocolError),
+        # never silently drops back to a tool-executing mode.
+        _set_option(client, session_id, options, "mode", "plan")
 
         client.collect_output = True
         prompt_started = True

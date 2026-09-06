@@ -66,8 +66,10 @@ check("agent status does not re-derive a Kimi jail gate",
 kimi_backend = re.search(r"\{ backend: 'kimi', flags: ([^}]+)\}", WORKFLOW)
 check("workflow registers Kimi effort flags", bool(kimi_backend))
 if kimi_backend:
-    check("Kimi normal profile uses high", "--effort high" in kimi_backend.group(1))
-    check("Kimi max profile uses max", "--effort max" in kimi_backend.group(1))
+    # Kimi's k3 thinking ladder is low|high|max (no medium); `high` ran 99–458 s
+    # per ~290 KiB cluster, so it is --max only. Pin the exact arms.
+    check("Kimi normal profile uses low", ": '--effort low'" in kimi_backend.group(1))
+    check("Kimi max profile uses high", "MAX ? '--effort high'" in kimi_backend.group(1))
 
 PR_POST = (HERE / "pr-post.py").read_text(encoding="utf-8")
 _labels = re.search(r"_AGENT_LABELS = \{(.*?)\}", PR_POST, re.S)
@@ -77,9 +79,10 @@ check("pr-post footer labels cover every adapter backend", _label_set == validat
 grok_backend = re.search(r"\{ backend: 'grok', flags: ([^}]+)\}", WORKFLOW)
 check("workflow registers grok effort flags", bool(grok_backend))
 if grok_backend:
-    # `high` blew the 540 s wall on a ~190 KiB cluster prompt; it is --max only.
-    check("grok normal profile uses medium", "'--effort medium'" in grok_backend.group(1))
-    check("grok max profile uses high", "MAX ? '--effort high'" in grok_backend.group(1))
+    # `high` blew the 540 s wall on a ~190 KiB cluster prompt and `medium` on a
+    # ~290 KiB one; the normal profile runs `low`, `medium` is --max only.
+    check("grok normal profile uses low", ": '--effort low'" in grok_backend.group(1))
+    check("grok max profile uses medium", "MAX ? '--effort medium'" in grok_backend.group(1))
 
 if FAILS:
     print("backend-sync tests FAILED:")

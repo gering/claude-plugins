@@ -395,11 +395,12 @@ _resolve_int() {
 SWARM_MAX_PROMPT_BYTES_MAX=1073741824
 SWARM_TIMEOUT_MAX=86400
 # The headroom the skill subtracts for the per-cluster lens instruction plus
-# Kimi's appended schema-output contract. A cap at or below it would make the
-# oversize threshold zero or negative — i.e. EVERY
+# Kimi's appended schema-output contract (~4.2 KiB with the read-only tools
+# line; test_lens_sync pins that the headroom covers both). A cap at or below
+# it would make the oversize threshold zero or negative — i.e. EVERY
 # prompt "too large" and every external voice dropped, silently. Defined here so
 # the skill can read it rather than hard-code a second copy.
-SWARM_CAP_HEADROOM=4096
+SWARM_CAP_HEADROOM=8192
 # Grace between SIGTERM and SIGKILL for every bounded call.
 TIMEOUT_KILL_GRACE=3
 # How far past its nominal bound a bounded call may return, before the grace.
@@ -2629,7 +2630,11 @@ _kimi_output_contract() {
   # answer in kimi-acp.py. The contract follows the fenced diff: lensInstr remains
   # the first text in the prompt, preserving the workflow's scope invariant.
   local schema="$1"
-  printf '\n\nOUTPUT CONTRACT (HIGH PRIORITY): Return ONLY one JSON object matching this JSON Schema. No markdown fence, preface, explanation, or trailing text. Empty findings is valid.\n' &&
+  # The session runs in Kimi's read-only `plan` mode (kimi-acp.py): shell and
+  # edit tools are not offered. Say so, or the model spends its turn trying to
+  # run `grep`/`git` and reports the refusal instead of findings.
+  printf '\n\nTOOLS: this session is read-only — file read/search and web fetch only. There is NO shell and NO editing; do not attempt to run commands.\n' &&
+  printf '\nOUTPUT CONTRACT (HIGH PRIORITY): Return ONLY one JSON object matching this JSON Schema. No markdown fence, preface, explanation, or trailing text. Empty findings is valid.\n' &&
     cat "$schema" &&
     printf '\nThe response must be exactly the schema object and nothing else.\n'
 }

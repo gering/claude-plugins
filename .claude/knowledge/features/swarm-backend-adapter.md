@@ -231,10 +231,14 @@ thinking, so a third-party provider's `api_key` never reaches a file the
 read+web Kimi can open. The jail (`_read_web_safe`) is part of Kimi's
 `ready_check`, so `list --json` never advertises a Kimi the clusters would
 refuse. ACP is defense-in-depth:
-the client advertises neither filesystem-write nor terminal capability, rejects
-every `session/request_permission`, and fails if ACP reports a successful
-mutating tool kind (`edit`, `delete`, `move`, `execute`, `switch_mode`,
-`other`) — including Git-cwd writes Kimi 0.32 can auto-approve without asking.
+the client puts the session into Kimi's read-only `plan` mode (kimi-code 0.41:
+"no tool execution" — shell/edit tools are not offered; a Kimi without `plan`
+fails closed), advertises neither filesystem-write nor terminal capability,
+rejects every `session/request_permission`, and fails if ACP reports a
+successful mutating tool kind (`edit`, `delete`, `move`, `execute`,
+`switch_mode`, `other`) — including Git-cwd writes Kimi 0.32 can auto-approve
+without asking. Under `default` mode the first four-family runs lost two
+clusters exactly that way: Kimi auto-ran `execute` and the gate aborted.
 Approval-free read/search/web tools remain available. Official Kimi
 documentation identifies `WebSearch` and `FetchURL` as auto-allow tools when
 the host provider exposes them; the managed Kimi provider does. The shared
@@ -332,8 +336,10 @@ backend rc null.
   shipped awk program.
 - **Effort ladders**: grok is `low|medium|high` since 0.2.101 (the `max` tier
   is gone) → the adapter maps `xhigh`/`max`→`high`; codex has no `max` tier →
-  map `max`→`xhigh` (`-c model_reasoning_effort=…`). Both mappings degrade a
-  stale caller instead of erroring.
+  map `max`→`xhigh` (`-c model_reasoning_effort=…`); Kimi's k3 models expose
+  ACP `thinking` `low|high|max` (the `kimi-for-coding` models only `on`) → the
+  adapter maps `medium`→`low`, `xhigh`→`high`. All mappings degrade a stale
+  caller instead of erroring.
 - **codex model is pinned** to `CODEX_DEFAULT_MODEL` (`gpt-5.6-sol` since 0.11.0,
   `gpt-5.6-terra` before; the adapter passes `-m` on every call), overridable per
   call via `--model` — so a review is reproducible instead of tracking the user's

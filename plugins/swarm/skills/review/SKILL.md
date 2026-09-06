@@ -47,13 +47,15 @@ branch delta).
   `--fix`/`--loop` — composes with both (`--max --loop` = max-depth fix loop).
   Set `max: true` in the workflow args (step 2). It bumps: codex →
   `xhigh` (from `medium`; codex has no `max` tier), Kimi ACP thinking →
-  `max`, Claude finders + the adversarial verifier → `xhigh`, and it splits the
+  `high` (from `low`; its k3 ladder is low|high|max, and `high` ran 99–458 s per
+  cluster), Claude finders + the adversarial verifier → `xhigh`, and it splits the
   fan-out of **every** voice — Claude, codex, grok and kimi alike — from one call
   per lens **cluster** (≤5 units, the default) into one per **lens** (≤11 units).
   That is the real cost lever: up to **11 CLI calls per external backend (≤33
   total)**, not the 5 a cluster run makes (one per gated cluster). Design lenses
   run at the same effort as defect lenses. gate/merge are unchanged; grok goes
-  `medium` → `high` (its ceiling) and, like everyone else's, its fan-out splits
+  `low` → `medium` (`high` and `medium` both hit the 540 s wall on 190–290 KiB
+  cluster prompts) and, like everyone else's, its fan-out splits
   per lens.
 - Anything left after removing the flags → the scope argument for step 1.
 

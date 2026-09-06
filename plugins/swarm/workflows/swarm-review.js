@@ -295,11 +295,13 @@ const fenceDegraded = !FINDING_NONCE  // no structural fence at merge/verify —
 // codex has no `max` tier (xhigh is its top); the normal profile runs `medium`
 // on the same `gpt-5.6-sol` the adapter pins (the model is the adapter's, only
 // the effort is a profile knob — 0.11.0 dropped the --max-only model switch); grok's
-// ladder is low|medium|high since 0.2.101 — the normal profile runs `medium`
-// because `high` blew the 540 s wall on a ~190 KiB cluster prompt (reach timed
-// out, design/threat at 94–95 %, 0.11.0 self-review), so `high` is reserved for
-// --max; Kimi ACP exposes low|high|max, so the deepest profile selects max
-// while the normal profile stays high. In-session Claude goes to `xhigh`.
+// ladder is low|medium|high since 0.2.101 — the normal profile runs `low`
+// because `medium` still hit the 540 s wall on a ~290 KiB cluster prompt
+// (breakage timed out, threat at 99 %, 0.11.0 four-family run) and `high` had
+// already done so on ~190 KiB, so `medium` is reserved for --max; Kimi's k3
+// models expose thinking low|high|max (no medium — the adapter maps medium
+// down to low), so the normal profile runs `low` and --max selects `high`
+// (`max` was 99–458 s per cluster at `high`). In-session Claude goes to `xhigh`.
 // Strict === true: the skill always passes a boolean, and a stray truthy value
 // (max:1 / "true") should NOT silently trigger a slower, costlier run.
 const MAX = INPUT.max === true
@@ -760,8 +762,8 @@ const utf8Checksum = (s) => {
 const wantVoices = Array.isArray(INPUT.externalVoices) ? INPUT.externalVoices : ['codex', 'grok', 'kimi']
 const EXTERNAL_BACKENDS = [
   { backend: 'codex', flags: MAX ? '--effort xhigh' : '--effort medium' },
-  { backend: 'grok', flags: MAX ? '--effort high' : '--effort medium' },
-  { backend: 'kimi', flags: MAX ? '--effort max' : '--effort high' },
+  { backend: 'grok', flags: MAX ? '--effort medium' : '--effort low' },
+  { backend: 'kimi', flags: MAX ? '--effort high' : '--effort low' },
 ]
 // A claude:false control run has no gate (the gate is a Claude agent), so the
 // externals keep their FULL-WIDTH coverage — per-cluster now, but over every

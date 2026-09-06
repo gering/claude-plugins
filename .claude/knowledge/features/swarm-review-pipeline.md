@@ -248,10 +248,12 @@ the diff out of the script, above). Claude applies edits between rounds.
 - **`--max` profile** (`INPUT.max` in the workflow): lifts every voice to its
   ceiling — codex `xhigh` (from `medium`; codex has NO `max` tier, xhigh is its
   top; the model is the adapter's `gpt-5.6-sol` on both profiles since 0.11.0),
-  Claude finder lenses + verifier `xhigh`, and Kimi `thinking=max` via ACP;
-  gate/merge unchanged, and grok `medium` → `high` (its ceiling since grok
-  0.2.101 dropped `max`; `high` blew the 540 s wall on ~190 KiB cluster prompts,
-  so it is `--max`-only since 0.11.0). Orthogonal to `--fix`/`--loop`,
+  Claude finder lenses + verifier `xhigh`, and Kimi `thinking=high` via ACP
+  (from `low`; the k3 ladder is low|high|max with no medium, and `high` ran
+  99–458 s per ~290 KiB cluster, so `max` is not wired to any profile);
+  gate/merge unchanged, and grok `low` → `medium` (`high` blew the 540 s wall
+  on ~190 KiB cluster prompts, `medium` on ~290 KiB ones — 0.11.0 four-family
+  run — so the normal profile runs `low`). Orthogonal to `--fix`/`--loop`,
   composes with both. The profile's live settings are verified end-to-end
   (`gpt-5.6-sol`@`xhigh` at wiring time, `@medium` on 2026-09-05; grok re-verified at `--effort high` on
   0.2.101) — the "no silent fail on a non-existent model/effort" rule.

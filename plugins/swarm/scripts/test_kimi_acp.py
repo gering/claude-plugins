@@ -20,6 +20,7 @@ _FAKE_KIMI = r'''#!/usr/bin/env python3
 import json
 import os
 import sys
+import time
 
 scenario = os.environ.get("FAKE_SCENARIO", "valid")
 log_path = os.environ["FAKE_LOG"]
@@ -72,6 +73,7 @@ def config_options():
         ]},
         {"type": "select", "id": "mode", "name": "Mode", "currentValue": state["mode"], "options": [
             {"value": "default", "name": "Default"},
+            {"value": "plan", "name": "Plan"},
             {"value": "auto", "name": "Auto"},
         ]},
     ]
@@ -129,6 +131,12 @@ for raw in sys.stdin:
             emit(tool_update("tool_call_update", "tool-8", "read", "completed"))
         elif scenario == "unsafe-in-progress":
             emit(tool_update("tool_call", "tool-7", "execute", "in_progress"))
+            # Give the client's kill a moment to land: it arrives within
+            # milliseconds of the frame above, and a client that instead waited
+            # for end_turn lets this fake reach prompt_done after the pause —
+            # which is what the test asserts. Without the pause the whole burst
+            # (plus prompt_done) could be written before the kill (1 in ~8 runs).
+            time.sleep(1.0)
             # Keep streaming: the client must NOT wait for end_turn.
             for _ in range(50):
                 emit(agent_text("still running "))
@@ -327,7 +335,7 @@ class KimiAcpTests(unittest.TestCase):
         self.assertNotIn("PROMPT_SENTINEL_7f0ac9", " ".join(records[0]["argv"]))
         self.assertEqual(
             prompt_record["state"],
-            {"model": MODEL, "thinking": "max", "mode": "default"},
+            {"model": MODEL, "thinking": "max", "mode": "plan"},
         )
 
     def test_permission_requests_are_rejected(self):

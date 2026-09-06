@@ -25,9 +25,9 @@ findings + design suggestions, presents one ranked report, and — with `--fix` 
   default branch (including uncommitted work). `--fix` applies the agreed
   findings once; `--loop[=N]` re-reviews after each fix round until it converges
   (cap default `10`); `--max` runs the deepest-effort profile (codex
-  `xhigh`, Claude finders + verifier `xhigh`, Kimi `max`, and
-  **every** voice — Claude, codex, grok, kimi — fanning out per **lens** instead
-  of per cluster; grok `medium` → `high`, its ceiling) — slower, more
+  `xhigh`, Claude finders + verifier `xhigh`, grok `low` → `medium`, Kimi
+  `low` → `high`, and **every** voice — Claude, codex, grok, kimi — fanning
+  out per **lens** instead of per cluster) — slower, more
   thorough, costs up to `3 × 11` external calls, composes with
   `--fix`/`--loop`.
 - `/swarm:review --pr [<number>]` — run the same ensemble against a **GitHub
@@ -121,9 +121,10 @@ refresh tokens, and a refresh inside a private copy logged the operator out)
 and a filtered projection of its config
 (provider/model catalogue and search services — never hooks or MCP); the
 repository's own `.kimi-code/`, `.kimi/` and `.mcp.json` are denied to it as
-well. ACP permission rejection and the tool-kind allowlist (any tool outside
-read/search/fetch/think that runs kills the session on first sight) are
-defense-in-depth, not the write boundary. Documented residuals: the host HOME
+well. The session runs in Kimi's read-only `plan` mode (shell/edit tools are
+not offered to the model); ACP permission rejection and the tool-kind allowlist
+(any tool outside read/search/fetch/think that runs kills the session on first
+sight) are defense-in-depth, not the write boundary. Documented residuals: the host HOME
 stays writable (codex/grok keep session state there) and the jail has no
 network rule; arbitrary child-process execution is not portably prevented.
 Findings are advisory by default; `--fix` / `--loop` act only on the ones you
