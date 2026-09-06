@@ -42,9 +42,14 @@
 #
 #   claude — probe-only: reviews run in-session via the Agent tool, so
 #            `run claude` is a usage error. available/ready/list include it.
-#   codex  — `codex exec --output-schema` under `-s read-only` with
-#            `-C <repo>` + `-c tools.web_search=true` (web works under read-only;
-#            no sandbox loosen). Pure schema JSON via --output-last-message.
+#   codex  — `codex exec --output-schema` with `-C <repo>` +
+#            `-c tools.web_search=true --ignore-user-config --ignore-rules`.
+#            Under the OS jail it runs `-s danger-full-access`: codex's own
+#            seatbelt cannot be applied inside an outer profile that carries
+#            any deny rule (sandbox_apply EPERM), and codex reads files
+#            through its shell — `-s read-only` there means NO reads at all
+#            (do not reintroduce it). Jail-less hosts keep `-s read-only`.
+#            Pure schema JSON via --output-last-message.
 #            Prompt via `-- -` = read instructions from stdin.
 #            Auth: `codex login status`. Effort has no "max" tier -> max→xhigh.
 #   grok   — headless `--prompt-file` with inline --json-schema; the validated
@@ -55,9 +60,13 @@
 #            GROK_SCHEMA_VERIFIED; a newer unverified model is reported, never
 #            silently chosen. GROK_DEFAULT_MODEL is only the fallback floor.
 #            Effort ladder is low|medium|high (no max tier, so the adapter maps
-#            xhigh/max down to high, mirroring codex's missing max). Read+web via STRICT `--tools` allowlist
-#            (read_file,list_dir,grep,web_search,web_fetch) + `--cwd <repo>`;
-#            no write/shell tools. Readiness is model-aware: auth (non-empty
+#            xhigh/max down to high, mirroring codex's missing max). Read+shell+web via a STRICT `--tools`
+#            allowlist (read_file,list_dir,grep,run_terminal_command,
+#            web_search,web_fetch) + `--permission-mode dontAsk` + `--deny`
+#            prefix rules + `--cwd <repo>`, from an ephemeral HOME/GROK_HOME
+#            (neutral Claude settings, only auth.json linked) — grok pre-approves
+#            every listed tool whatever the mode, so the jail's write model is
+#            the boundary. Readiness is model-aware: auth (non-empty
 #            ~/.grok/auth.json — there is no status command) AND at least one
 #            SCHEMA-VERIFIED canonical model listed by `grok models` (not one
 #            fixed id — the model is discovered); an unprobeable list degrades to
@@ -72,8 +81,9 @@
 #            (a review-length cap).
 #   kimi   — ACP v1 headless session over NDJSON stdio. `-p` is deliberately
 #            NOT used: it only accepts the full prompt on argv and would restore
-#            Linux MAX_ARG_STRLEN failures. The local ACP client rejects every
-#            approval-gated tool call and fails a completed mutating tool, but
+#            Linux MAX_ARG_STRLEN failures. The local ACP client approves only
+#            a shell command that passes its read-only policy, rejects every
+#            other approval request and fails a completed mutating tool, but
 #            that is defense-in-depth only: Kimi 0.32 can auto-approve some
 #            in-repo writes without request_permission. The hard boundaries are
 #            the OS jail's secret-read deny and its REPOSITORY write deny
@@ -90,10 +100,10 @@
 #            maps down to those verified tiers instead of pretending it is ignored.
 #            No working jail/repo root means Kimi does not run at all: unlike the
 #            other CLIs it has no safe inline-prompt/tool-less fallback.
-#            NOT boundaries, documented residuals: the host HOME stays writable
-#            (codex/grok keep session state there — a HOME-wide write deny
-#            breaks them) and the jail carries no network rule; both rest on
-#            the ACP tool gate + model cooperation. Kimi's own auth state stays
+#            NOT a boundary, documented residual: the jail carries no network
+#            rule (writes ARE denied everywhere except the scratch/temp dirs
+#            and each backend's own auth state — the inverted write model);
+#            egress rests on the ACP tool gate + model cooperation. Kimi's own auth state stays
 #            readable AND writable to Kimi (the codex/grok posture): Moonshot
 #            rotates refresh tokens, so a refresh inside a private COPY
 #            invalidated the host's token and logged the operator out.
@@ -875,9 +885,19 @@ _repo_protected_roots() {
   # -z: NUL-separated records, paths verbatim. The line form C-quotes a path
   # with a newline or a quote, `cd` then fails on the quoted text and the
   # worktree silently drops out of the write boundary.
-  while IFS= read -r -d '' line; do
-    [[ "$line" == "worktree "* ]] && roots+=("${line#worktree }")
-  done < <(git -C "$repo" worktree list --porcelain -z 2>/dev/null || true)
+  # `-z` needs git >= 2.36 (Ubuntu 22.04 ships 2.34): fall back to the
+  # newline form rather than silently dropping every sibling worktree out of
+  # the write boundary. The residual of the fallback is a path containing a
+  # newline (git C-quotes it, `cd` fails, the worktree is skipped).
+  if git -C "$repo" worktree list --porcelain -z >/dev/null 2>&1; then
+    while IFS= read -r -d '' line; do
+      [[ "$line" == "worktree "* ]] && roots+=("${line#worktree }")
+    done < <(git -C "$repo" worktree list --porcelain -z 2>/dev/null || true)
+  else
+    while IFS= read -r line; do
+      [[ "$line" == "worktree "* ]] && roots+=("${line#worktree }")
+    done < <(git -C "$repo" worktree list --porcelain 2>/dev/null || true)
+  fi
   for r in "${roots[@]}"; do
     rp="$(cd -- "$r" 2>/dev/null && pwd -P || true)"
     [[ -n "$rp" && -d "$rp" ]] || continue
@@ -891,8 +911,9 @@ _repo_protected_roots() {
 }
 
 _host_write_deny_paths() {
-  # Paths a jailed external must not WRITE even though the host HOME stays
-  # writable overall (codex/grok keep session state there): the shell startup
+  # Paths a jailed external must not WRITE on top of the inverted write model
+  # (already deny-by-default; these guard the writable own-store roots and
+  # document the trojan-launch surface explicitly): the shell startup
   # files, Claude Code's own config/hooks, XDG config, user bin dirs, and the
   # Kimi executable's directory — one auto-approved write there turns the next
   # UNJAILED readiness probe (`kimi acp --help` with the real HOME) into a
@@ -926,6 +947,18 @@ _host_write_deny_paths() {
     [[ -n "$kdir" && "$kdir" != "$host/.kimi-code/bin" ]] && printf '%s\n' "$kdir"
   fi
   return 0
+}
+
+_contains_protected_root() {
+  # $1 = directory. 0 iff a protected (repository) root lies UNDER it.
+  local d root
+  d="$(cd -- "$1" 2>/dev/null && pwd -P)" || return 1
+  _repo_protected_roots >/dev/null
+  while IFS= read -r root; do
+    [[ -n "$root" ]] || continue
+    [[ "$root" == "$d"/* ]] && return 0
+  done < <(_repo_protected_roots)
+  return 1
 }
 
 _writable_roots() {
@@ -1105,8 +1138,16 @@ sys.stdout.write("".join(parts))
       [[ -n "$p" ]] || continue
       if [[ -d "$p" ]]; then args+=(--bind "$p" "$p"); fi
     done < <(_repo_protected_roots)
+    # Files (grok's auth.json) bind like dirs. A writable root that CONTAINS a
+    # protected root (a repo cloned under /tmp) is skipped: its recursive bind
+    # would cover the repository bind above and the final --remount-ro would
+    # then target a non-mountpoint and abort bwrap — the jail would vanish.
     while IFS= read -r p; do
-      [[ -n "$p" && -d "$p" && "$p" != /dev ]] || continue
+      [[ -n "$p" && -e "$p" && "$p" != /dev ]] || continue
+      if _contains_protected_root "$p"; then
+        echo "warning: writable root $p contains a repository root — not bound writable inside the jail (a review scratch dir under it is still writable through TMPDIR when that is narrower)" >&2
+        continue
+      fi
       args+=(--bind "$p" "$p")
     done < <(_writable_roots "$backend")
     while IFS= read -r p; do
@@ -1717,8 +1758,13 @@ for model in models:
   # then fail session/set_config_option on every cluster.
   if [[ -s "$KIMI_CONFIG_FILE" ]]; then
     local projected filtered="" m
-    projected="$(_kimi_project_config "$KIMI_CONFIG_FILE" 2>/dev/null \
-      | sed -n -E 's/^\[models\.("([^"]*)"|'"'"'([^'"'"']*)'"'"')\]$/\2\3/p')"
+    local projection
+    if ! projection="$(_kimi_project_config "$KIMI_CONFIG_FILE" 2>/dev/null)"; then
+      echo "warning: could not project the Kimi config ($KIMI_CONFIG_FILE) — readiness cannot see its model catalogue" >&2
+      return 1
+    fi
+    projected="$(printf '%s\n' "$projection" \
+      | sed -n -E 's/^\[models\.("([^"]*)"|'"'"'([^'"'"']*)'"'"'|([A-Za-z0-9_-]+))\]$/\2\3\4/p')"
     while IFS= read -r m; do
       [[ -n "$m" ]] || continue
       _line_in_list "$m" "$projected" && filtered+="$m"$'\n'
@@ -2062,9 +2108,8 @@ ready_hint() {
         echo "this kimi CLI does not offer ${requested_model:-$KIMI_DEFAULT_MODEL} (see: kimi provider list --json)"
       elif ! _read_web_safe kimi; then
         echo "no working OS jail (sandbox-exec/bwrap) or resolvable repo root — kimi reviews only under the secret jail (see: agents.sh jail)"
-      else
-        echo "TMPDIR (${TMPDIR:-/tmp}) resolves inside the repository, which the jail write-denies — kimi cannot keep its session state there; point TMPDIR outside the checkout"
       fi
+      # (a TMPDIR inside the checkout is reported by the shared guard at the top)
       ;;
   esac
 }
@@ -2480,7 +2525,8 @@ run_codex() {
   # the docs describe it that way (do not over-claim).
   local web_args=(-c tools.web_search=true)
   # Under the OS jail codex runs with its OWN sandbox off (`-s danger-full-
-  # access -a never`): a seatbelt profile cannot be applied inside another one
+  # access`; `codex exec` is non-interactive and takes no -a): a seatbelt
+  # profile cannot be applied inside another one
   # that carries any deny rule (`sandbox_apply: Operation not permitted`,
   # verified 2026-09-07 with a read-deny-only outer profile), so `-s read-only`
   # had left every codex shell command — and with it every file read, which
@@ -2491,12 +2537,12 @@ run_codex() {
   # --ignore-user-config / --ignore-rules: no ambient ~/.codex/config.toml
   # (MCP servers, plugins, `notify` command, hooks feature) or execpolicy
   # rules reach a review; auth still comes from CODEX_HOME.
-  local sandbox_args=(-s danger-full-access -a never --ignore-user-config --ignore-rules)
+  local sandbox_args=(-s danger-full-access --ignore-user-config --ignore-rules)
   if ! _read_web_safe codex; then
     echo "warning: no working OS jail or unresolvable repo root — codex web search HARD-disabled (fail closed); FS reads stay inside codex's own read-only sandbox (0.5.x read surface)" >&2
     web_args=(-c tools.web_search=false)
     # No outer jail, so codex's own sandbox is the only boundary — keep it.
-    sandbox_args=(-s read-only -a never --ignore-user-config --ignore-rules)
+    sandbox_args=(-s read-only --ignore-user-config --ignore-rules)
   fi
 
   # The schema-validated JSON lands in $TMP_OUT; codex's stdout copy of the
@@ -2649,13 +2695,20 @@ GROK_SHELL_TOOL="run_terminal_command"
 GROK_WEB_TOOLS="web_search,web_fetch"
 GROK_TOOLS="${GROK_READ_TOOLS},${GROK_SHELL_TOOL},${GROK_WEB_TOOLS}"
 GROK_TOOLS_NOSHELL="${GROK_READ_TOOLS},${GROK_WEB_TOOLS}"
+# BEST-EFFORT prefix rules: a full path (/usr/bin/curl), `env curl`, or a
+# transport not listed here passes them — the jail's write model, not this
+# list, is the boundary; the network stays an open, documented residual.
 GROK_DENY_RULES=(
   'Bash(curl:*)' 'Bash(wget:*)' 'Bash(nc:*)' 'Bash(ncat:*)' 'Bash(netcat:*)'
-  'Bash(ssh:*)' 'Bash(scp:*)' 'Bash(sftp:*)' 'Bash(rsync:*)' 'Bash(telnet:*)'
-  'Bash(git push:*)' 'Bash(git remote:*)' 'Bash(git fetch:*)' 'Bash(git pull:*)'
-  'Bash(rm:*)' 'Bash(sudo:*)' 'Bash(chmod:*)' 'Bash(chown:*)' 'Bash(mv:*)'
-  'Bash(python:*)' 'Bash(python3:*)' 'Bash(node:*)' 'Bash(npm:*)' 'Bash(npx:*)'
-  'Bash(pip:*)' 'Bash(pip3:*)' 'Bash(brew:*)' 'Bash(open:*)' 'Bash(osascript:*)'
+  'Bash(socat:*)' 'Bash(ftp:*)' 'Bash(tftp:*)' 'Bash(dig:*)' 'Bash(host:*)'
+  'Bash(nslookup:*)' 'Bash(ssh:*)' 'Bash(scp:*)' 'Bash(sftp:*)' 'Bash(rsync:*)'
+  'Bash(telnet:*)' 'Bash(git push:*)' 'Bash(git remote:*)' 'Bash(git fetch:*)'
+  'Bash(git pull:*)' 'Bash(rm:*)' 'Bash(sudo:*)' 'Bash(doas:*)' 'Bash(chmod:*)'
+  'Bash(chown:*)' 'Bash(mv:*)' 'Bash(env:*)' 'Bash(sh:*)' 'Bash(bash:*)'
+  'Bash(zsh:*)' 'Bash(xargs:*)' 'Bash(python:*)' 'Bash(python3:*)' 'Bash(perl:*)'
+  'Bash(ruby:*)' 'Bash(php:*)' 'Bash(node:*)' 'Bash(deno:*)' 'Bash(bun:*)'
+  'Bash(npm:*)' 'Bash(npx:*)' 'Bash(pip:*)' 'Bash(pip3:*)' 'Bash(brew:*)'
+  'Bash(open:*)' 'Bash(osascript:*)'
 )
 
 run_grok() {
@@ -2813,6 +2866,7 @@ _dir_under_protected_root() {
   # $1 = directory. 0 iff it resolves inside a write-denied repository root.
   local d root
   d="$(cd -- "$1" 2>/dev/null && pwd -P)" || return 1
+  _repo_protected_roots >/dev/null   # prime the memo HERE, not in the <(…) subshell
   while IFS= read -r root; do
     [[ -n "$root" ]] || continue
     [[ "$d" == "$root" || "$d" == "$root"/* ]] && return 0
@@ -2864,7 +2918,6 @@ _scratch_dir_ok() {
   # say so at READINESS, once, instead of one opaque error per cluster.
   ! _dir_under_protected_root "${TMPDIR:-/tmp}"
 }
-_kimi_scratch_dir_ok() { _scratch_dir_ok; }
 
 _kimi_creds_done=""; _kimi_creds_ok=""
 _kimi_credentials_usable() {
@@ -3020,7 +3073,7 @@ import re, sys
 # lost, and a third-party key can never reach a file the read+web Kimi reads.
 # NOT a bare `key`: `[providers.*.oauth] key = "kimi-code"` names the credential
 # store entry — dropping it broke session start (rc 10, 2026-09-05).
-SECRET_KEY = re.compile(r"(?i)(^|_)(api[_-]?key|secret[_-]?key|access[_-]?key|private[_-]?key|token|secret|password|passwd)$")
+SECRET_KEY = re.compile(r"(?i)(api[_-]?keys?|secret|access[_-]?keys?|private[_-]?keys?|tokens?|password|passwd|credential)")
 KEEP_ROOTS = ("providers", "models", "services", "thinking")
 
 def managed(name):
@@ -3179,7 +3232,8 @@ run_kimi() {
   # FULL PROMPT OVER ACP STDIO: kimi -p is intentionally absent because it only
   # accepts the prompt on argv. The Python client starts `kimi acp`, sends the
   # prompt as an ACP ContentBlock over NDJSON, pins model/thinking/default mode,
-  # rejects every permission request, and validates the final assistant text
+  # approves only allowlisted read-only shell commands (once) and rejects every
+  # other permission request, and validates the final assistant text
   # against the configured schema. HOME/KIMI_CODE_HOME point at the ephemeral
   # runtime so ambient user config never loads. Kimi's own stderr is discarded
   # inside the client; this outer redirect also withholds diagnostics from the

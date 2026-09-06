@@ -87,8 +87,27 @@ check("run_grok runs from the isolated HOME", 'HOME="$TMP_GROK_HOME" GROK_HOME="
 # codex: its own seatbelt cannot nest inside the OS jail, so under the jail it
 # runs with the jail as the boundary and its ambient config ignored; without
 # a jail it keeps its own read-only sandbox.
-check("codex under the jail bypasses its own sandbox", "sandbox_args=(-s danger-full-access -a never --ignore-user-config --ignore-rules)" in ADAPTER)
-check("codex without a jail keeps its own read-only sandbox", "sandbox_args=(-s read-only -a never --ignore-user-config --ignore-rules)" in ADAPTER)
+check("codex under the jail bypasses its own sandbox", "sandbox_args=(-s danger-full-access --ignore-user-config --ignore-rules)" in ADAPTER)
+check("codex without a jail keeps its own read-only sandbox", "sandbox_args=(-s read-only --ignore-user-config --ignore-rules)" in ADAPTER)
+
+# The read-only shell brief Kimi is shown (agents.sh _kimi_output_contract)
+# hand-mirrors the policy in kimi-acp.py; every program and git subcommand the
+# brief NAMES must be one the policy accepts, or the model is told a command is
+# fine that the gate then kills the session for.
+_brief = re.search(r"TOOLS: read-only session\.(.*?)\\n' &&", ADAPTER, re.S)
+check("Kimi tool brief present", bool(_brief))
+if _brief:
+    text = _brief.group(1)
+    _pol = (HERE / "kimi-acp.py").read_text(encoding="utf-8")
+    def _set(name):
+        m = re.search(name + r" = frozenset\(\{(.*?)\}\)", _pol, re.S)
+        return set(re.findall(r'"([^"]+)"', m.group(1))) if m else set()
+    progs, subs = _set("READ_ONLY_PROGRAMS"), _set("GIT_READ_SUBCOMMANDS")
+    listing = set(re.findall(r'^\s+"([a-z-]+)": \{', _pol[_pol.find("GIT_LISTING_ONLY"):], re.M))
+    named_programs = {w for w in re.findall(r"\b(grep|rg|find|ls|cat|head|tail|wc|sort|uniq|cut|tr|diff|stat)\b", text)}
+    named_subs = set(re.search(r"git ([a-z/-]+)", text).group(1).split("/")) if re.search(r"git ([a-z/-]+)", text) else set()
+    check("brief programs are on the policy allowlist", named_programs <= progs)
+    check("brief git subcommands are on the policy read list", named_subs <= (subs | listing))
 
 grok_backend = re.search(r"\{ backend: 'grok', flags: ([^}]+)\}", WORKFLOW)
 check("workflow registers grok effort flags", bool(grok_backend))

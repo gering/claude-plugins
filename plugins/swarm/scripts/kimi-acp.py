@@ -6,14 +6,16 @@ contract forbids that because Linux limits one argv item to 128 KiB while real
 review prompts exceed it. ACP v1 carries the complete prompt as NDJSON over
 stdio instead, preserving the adapter's out-of-band transport.
 
-The ACP session stays in manual-approval mode and this client rejects every
-approval request. Read/search/fetch/think tools remain available; any OTHER
-tool kind (an allowlist, not a denylist) that the agent runs — in progress,
-completed, or failed without having been rejected here — kills the session on
-first sight and fails the review. That is defense-in-depth only: the outer
-agents.sh jail is the hard secret-read and REPOSITORY-write boundary (the host
-HOME stays writable and the network open — documented residuals, not
-boundaries).
+The ACP session stays in manual-approval mode. This client approves ONLY a
+shell command that passes the read-only policy below (once, when Kimi asks)
+and rejects every other approval request. Read/search/fetch/think tools remain
+available; any OTHER tool kind (an allowlist, not a denylist) that the agent
+runs — in progress, completed, or failed without having been rejected here —
+kills the session on first sight and fails the review, as does an `execute`
+whose command fails the policy. That is defense-in-depth only: the outer
+agents.sh jail is the hard boundary — secret reads denied, writes denied
+everywhere except the scratch/temp dirs and Kimi's own auth state. The
+network stays open (a documented residual, not a boundary).
 """
 from __future__ import annotations
 
@@ -87,14 +89,52 @@ GIT_LISTING_ONLY = {
     "worktree": {"list"},
     "config": {"--get", "--get-all", "--get-regexp", "--list", "-l"},
 }
-GIT_REJECTED_OPTIONS = ("-c", "--config-env", "--exec-path", "--output", "-o")
+GIT_REJECTED_OPTIONS = ("-c", "--config-env", "--exec-path", "--output", "-o", "-O",
+                        "--open-files-in-pager", "--pager", "--ext-diff", "--textconv")
 PROGRAM_REJECTED_OPTIONS = {
     "find": ("-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint",
              "-fprint0", "-fprintf", "-fls"),
-    "rg": ("--pre",),
+    "rg": ("--pre", "--pre-glob", "--hostname-bin"),
     "tail": ("-f", "-F", "--follow"),
-    "sort": ("-o", "--output"),
+    "sort": ("-o", "--output", "--compress-program"),
 }
+# Any long option whose NAME says it takes a program — `--compress-program`,
+# `--open-files-in-pager`, `--hostname-bin`, `--pre`, `--exec` — is rejected
+# for every program, so a tool's less-known escape hatch (the review found
+# three the explicit lists had missed) does not become a shell.
+EXEC_OPTION_NAME = re.compile(r"(?i)(pager|program|exec|command|bin|hostname|open-files|pre|editor|plugin|hook)")
+# Option VALUES (`--x=value`) naming a network client, shell or interpreter
+# are rejected outright: the jail leaves the network open, so this is the
+# second layer under the allowlist (grok has `--deny` rules for the same).
+EXEC_OR_NETWORK_PROGRAMS = frozenset({
+    "curl", "wget", "nc", "ncat", "netcat", "ssh", "scp", "sftp", "rsync",
+    "telnet", "socat", "ftp", "tftp", "dig", "host", "nslookup", "sh", "bash",
+    "zsh", "dash", "ksh", "fish", "python", "python2", "python3", "perl", "ruby",
+    "php", "node", "deno", "bun", "xargs", "env", "eval", "exec", "sudo", "doas",
+    "open", "osascript", "tee", "dd", "rm", "mv", "cp", "chmod", "chown", "ln",
+    "mkdir", "touch", "less", "more", "vi", "vim", "nano", "emacs",
+})
+# Positional words that turn a listing-capable git subcommand into a write.
+GIT_MUTATING_WORDS = frozenset({
+    "add", "remove", "rm", "rename", "set-url", "set-head", "set-branches",
+    "prune", "update", "delete", "drop", "pop", "push", "save", "apply", "clear",
+    "branch", "create", "edit", "unset", "unset-all", "replace-all", "lock",
+    "unlock", "move", "repair", "set", "import", "unset-branch",
+})
+
+
+def _option_name(tok: str) -> str:
+    return tok.split("=", 1)[0]
+
+
+def _option_value_ok(tok: str) -> tuple[bool, str]:
+    # `--x=value`: the value must not name a program the jail cannot contain.
+    if tok.startswith("-") and "=" in tok:
+        value = tok.split("=", 1)[1]
+        base = value.rsplit("/", 1)[-1]
+        if base in EXEC_OR_NETWORK_PROGRAMS or value.startswith("/"):
+            return False, f"option {_option_name(tok)!r} names a program"
+    return True, ""
 
 
 def _git_segment_ok(args: list[str]) -> tuple[bool, str]:
@@ -115,16 +155,47 @@ def _git_segment_ok(args: list[str]) -> tuple[bool, str]:
     if sub is None:
         return False, "git without a subcommand"
     rest = args[idx + 1:]
-    if any(tok == opt or tok.startswith(opt + "=") for tok in rest for opt in GIT_REJECTED_OPTIONS):
-        return False, f"git {sub} carries a non-read-only option"
+    for tok in rest:
+        if any(tok == opt or tok.startswith(opt + "=") for opt in GIT_REJECTED_OPTIONS):
+            return False, f"git {sub} carries a non-read-only option"
     if sub in GIT_READ_SUBCOMMANDS:
         return True, ""
     listing = GIT_LISTING_ONLY.get(sub)
     if listing is not None:
-        if any(tok in listing or tok.split("=", 1)[0] in listing for tok in rest):
+        # EVERY flag must be a listing flag (a listing flag next to `-D` is
+        # still a delete), no positional may be a mutating verb, and at least
+        # one listing token must be present (`git branch foo` creates one).
+        seen_listing = False
+        for tok in rest:
+            if tok.startswith("-"):
+                if _option_name(tok) not in listing:
+                    return False, f"git {sub} option {_option_name(tok)!r} is not a listing flag"
+                seen_listing = True
+            elif tok in listing:
+                seen_listing = True
+            elif tok in GIT_MUTATING_WORDS:
+                return False, f"git {sub} {tok} writes"
+        if seen_listing:
             return True, ""
         return False, f"git {sub} without a listing flag can write"
     return False, f"git subcommand {sub!r} is not read-only"
+
+
+def _split_pipeline(command: str) -> list[list[str]]:
+    """Tokenize with quotes respected, then split on BARE `|` tokens — a
+    quoted `|` (`grep -E 'a|b'`, `--format="%h|%s"`) stays inside its word."""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars="|")
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+    segments: list[list[str]] = [[]]
+    for tok in tokens:
+        if tok == "|":
+            segments.append([])
+        elif tok == "||" or tok.startswith("|"):
+            raise ValueError("shell chaining")
+        else:
+            segments[-1].append(tok)
+    return segments
 
 
 def _read_only_command(command: Any) -> tuple[bool, str]:
@@ -136,13 +207,11 @@ def _read_only_command(command: Any) -> tuple[bool, str]:
         return False, "command too long"
     if SHELL_META.search(command):
         return False, "shell chaining/redirection/substitution is not allowed"
-    if "||" in command:
-        return False, "shell chaining is not allowed"
-    for segment in command.split("|"):
-        try:
-            args = shlex.split(segment, posix=True)
-        except ValueError:
-            return False, "unparseable shell segment"
+    try:
+        segments = _split_pipeline(command)
+    except ValueError:
+        return False, "unparseable shell segment or chaining"
+    for args in segments:
         if not args:
             return False, "empty pipeline segment"
         prog = args[0]
@@ -150,6 +219,12 @@ def _read_only_command(command: Any) -> tuple[bool, str]:
             return False, f"program {prog!r} must be a bare PATH name"
         if prog not in READ_ONLY_PROGRAMS:
             return False, f"program {prog!r} is not on the read-only allowlist"
+        for tok in args[1:]:
+            if tok.startswith("--") and EXEC_OPTION_NAME.search(_option_name(tok)[2:]):
+                return False, f"{prog} option {_option_name(tok)!r} can run a program"
+            ok, why = _option_value_ok(tok)
+            if not ok:
+                return False, f"{prog} {why}"
         if prog == "git":
             ok, why = _git_segment_ok(args[1:])
             if not ok:
@@ -158,6 +233,21 @@ def _read_only_command(command: Any) -> tuple[bool, str]:
             if any(tok == opt or tok.startswith(opt + "=") for tok in args[1:]):
                 return False, f"{prog} option {opt!r} is not read-only"
     return True, ""
+
+
+def _find_option(options: Any, kinds: set[str]) -> dict[str, Any] | None:
+    if not isinstance(options, list):
+        return None
+    return next(
+        (
+            option
+            for option in options
+            if isinstance(option, dict)
+            and option.get("kind") in kinds
+            and isinstance(option.get("optionId"), str)
+        ),
+        None,
+    )
 
 
 def _command_of(raw_input: Any) -> Any:
@@ -490,16 +580,7 @@ class AcpClient:
                 command = self._command_for(tool_id)
                 if kind == "execute" and not self._denied_tokens(command):
                     ok, _why = _read_only_command(command)
-                    allow = next(
-                        (
-                            option
-                            for option in options
-                            if isinstance(option, dict)
-                            and option.get("kind") == "allow_once"
-                            and isinstance(option.get("optionId"), str)
-                        ),
-                        None,
-                    ) if ok else None
+                    allow = _find_option(options, {"allow_once"}) if ok else None
                     if allow is not None:
                         self.tool_kinds.setdefault(tool_id, "execute")
                         self.allowed_exec_ids.add(tool_id)
@@ -508,16 +589,7 @@ class AcpClient:
                         return
             if isinstance(tool_id, str) and tool_id:
                 self.rejected_tool_ids.add(tool_id)
-            reject = next(
-                (
-                    option
-                    for option in options
-                    if isinstance(option, dict)
-                    and option.get("kind") in {"reject_once", "reject_always"}
-                    and isinstance(option.get("optionId"), str)
-                ),
-                None,
-            )
+            reject = _find_option(options, {"reject_once", "reject_always"})
             if reject is None:
                 result = {"outcome": {"outcome": "cancelled"}}
             else:
@@ -705,7 +777,15 @@ class AcpClient:
     def _absorb_tool_args(self, tool_id: str, update: dict[str, Any]) -> None:
         raw = update.get("rawInput")
         if raw is not None:
-            self.tool_inputs.setdefault(tool_id, raw)
+            stored = self.tool_inputs.get(tool_id)
+            if stored is None:
+                self.tool_inputs[tool_id] = raw
+            elif stored != raw:
+                # The peer changed the command under an id this client had
+                # already vetted: forget the verdict so the new command goes
+                # through the policy again (and aborts if it fails).
+                self.tool_inputs[tool_id] = raw
+                self.allowed_exec_ids.discard(tool_id)
             if update.get("sessionUpdate") in {"tool_call", "tool_call_update"}:
                 self.exec_started_ids.add(tool_id)
         if tool_id in self.tool_inputs:
@@ -858,9 +938,11 @@ def _extract_json_object(text: str) -> Any:
     is never echoed on failure."""
     size = len(text.encode("utf-8"))
     candidates = [text]
-    fence = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.S)
-    if fence:
-        candidates.append(fence.group(1))
+    # LAST fence first: the answer is by contract the final output, and a
+    # fenced object the model merely quoted from the (untrusted) diff comes
+    # earlier — taking the first fence let a decoy replace the findings.
+    for fence in reversed(re.findall(r"```(?:json)?\s*\n(.*?)\n```", text, re.S)):
+        candidates.append(fence)
     first, last = text.find("{"), text.rfind("}")
     if 0 <= first < last:
         candidates.append(text[first:last + 1])

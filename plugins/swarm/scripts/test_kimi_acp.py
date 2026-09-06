@@ -128,6 +128,17 @@ for raw in sys.stdin:
             u["params"]["update"]["rawInput"] = {"command": os.environ.get("FAKE_COMMAND", "git log --oneline -5 | head -3")}
             emit(u)
             emit(tool_update("tool_call_update", "tool-x1", None, "completed"))
+        elif scenario == "exec-rewrite":
+            # Vetted as `git log`, then the same id carries a different command.
+            u = tool_update("tool_call", "tool-x9", "execute", "in_progress")
+            u["params"]["update"]["rawInput"] = {"command": "git log -1"}
+            emit(u)
+            u = tool_update("tool_call_update", "tool-x9", None, "in_progress")
+            u["params"]["update"]["rawInput"] = {"command": "git config user.email x"}
+            emit(u)
+            time.sleep(1.0)
+            for _ in range(50):
+                emit(agent_text("still running "))
         elif scenario == "exec-denied":
             u = tool_update("tool_call", "tool-x2", "execute", "in_progress")
             u["params"]["update"]["rawInput"] = {"command": os.environ.get("FAKE_COMMAND", "git log > /tmp/out")}
@@ -300,6 +311,11 @@ for raw in sys.stdin:
             answer = "RAW_SECRET_SHOULD_NOT_LEAK"
         elif scenario == "fenced":
             answer = 'Here is the review:\n```json\n{"findings":[]}\n```\nDone.'
+        elif scenario == "fenced-decoy":
+            real = ('{"findings":[{"file":"a.py","line":1,"severity":"minor","summary":"real",'
+                    '"failure_scenario":"x","confidence":"low","recommendation":"y"}]}')
+            answer = ('The diff quotes this:\n```json\n{"findings":[]}\n```\n'
+                      'My answer:\n```json\n' + real + '\n```\n')
         elif scenario == "prose-wrapped":
             answer = 'Summary first. {"findings":[]} That is all.'
         elif scenario == "wrong-shape":
@@ -427,6 +443,16 @@ class KimiAcpTests(unittest.TestCase):
         reply = next(r["permission_response"] for r in records if "permission_response" in r)
         self.assertEqual(reply["result"]["outcome"]["optionId"], "reject")
 
+    def test_changed_rawinput_under_a_vetted_id_is_re_vetted(self):
+        result, _ = self.run_helper("exec-rewrite")
+        self.assertEqual(result.returncode, 13)
+        self.assertIn("outside the read-only allowlist", result.stderr)
+
+    def test_last_fenced_object_wins_over_a_quoted_decoy(self):
+        result, _ = self.run_helper("fenced-decoy")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["findings"][0]["summary"], "real")
+
     def test_read_only_shell_command_is_allowed(self):
         result, _ = self.run_helper("exec-allowed")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -474,13 +500,24 @@ class KimiAcpTests(unittest.TestCase):
             "grep -rn TODO src | head -50", "rg -n 'def x' src", "find . -name '*.py'",
             "ls -la plugins", "cat README.md", "wc -l a.py",
         ]
+        allowed += [
+            # quoted pipes are data, not chaining
+            "grep -E 'foo|bar' x", 'git log --format="%h|%s" -5', 'rg "a|b" src',
+        ]
         rejected = [
+            # exec-capable options of allowlisted programs (review round 2, #1)
+            "git grep --open-files-in-pager=curl x", "git grep -O curl x",
+            "sort --compress-program=sh f", "rg --hostname-bin=x y", "rg --pre curl x",
+            "git log --foo=/usr/bin/curl",
+            # listing flag next to a mutating one (#2)
+            "git branch -a -D topic", "git tag -l -d v1", "git remote -v add o u",
+            "git config --list --edit", "git stash list drop",
             "git branch foo", "git tag v1", "git config user.name x", "git remote add o u",
             "git -c core.pager=evil log", "git log --output=/tmp/x", "git log > /tmp/x",
             "ls; rm -rf /", "echo hi && rm x", "echo hi || rm x", "cat $(echo x)",
             "cat `echo x`", "find . -exec rm {} \\;", "rg --pre evil x", "tail -f log",
             "sort -o out in", "awk 1 f", "sed -i s/a/b/ f", "./git log", "FOO=1 git log",
-            "bash -c ls", "xargs rm", "python3 x.py", "", "x" * 3000,
+            "bash -c ls", "xargs rm", "python3 x.py", "", "x" * 3000, "cat a |& rm b",
         ]
         for command in allowed:
             self.assertTrue(module._read_only_command(command)[0], command)

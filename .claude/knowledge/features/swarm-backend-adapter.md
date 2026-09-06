@@ -127,12 +127,12 @@ inlined diff (callers, config, types, library/CVE knowledge).
    binds those roots ancestors-first (a descendant bound first is shadowed by
    the ancestor's recursive bind and its `--remount-ro` then aborts bwrap —
    which the smoke probe would report as "jail-less") then remounts them
-   read-only *after* secret masks so a child tmpfs is not undone. It is a
-   repository-write boundary, not a host-write one: the host HOME stays
-   writable (codex/grok keep session state there; a HOME-wide deny breaks
-   them) and the jail has no network rule — both documented residuals. `GIT_OPTIONAL_LOCKS=0` stops git from trying to refresh the index.
-   Private runtime/temp writes stay allowed. CLI-level no-write/no-shell flags
-   (grok `--tools` allowlist, codex `-s read-only`) and ACP rejection remain
+   read-only *after* secret masks so a child tmpfs is not undone. Since the
+   inverted write model (below) it is a host-wide write boundary too: writes
+   land only in the scratch/temp dirs and each backend's own auth state; the
+   one residual is that the jail has no network rule. `GIT_OPTIONAL_LOCKS=0` stops git from trying to refresh the index.
+   CLI-level flags (grok `--deny` prefixes, codex `--ignore-user-config`) and
+   the ACP command policy remain
    defense-in-depth. **Accepted residual:** arbitrary child-process execution
    is not portably prevented (the jail is not a seccomp exec-deny). Kimi and
    managed search helpers may still run; they cannot mutate the reviewed
