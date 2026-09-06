@@ -33,7 +33,7 @@ inlined diff (callers, config, types, library/CVE knowledge).
 |-------|-----------|-----|-------------|-------|
 | **codex** | yes (`-s read-only` already permits FS reads) | yes (`-c tools.web_search=true`; works under read-only, no sandbox loosen) | no (`-s read-only` only — never `workspace-write` / `danger-full-access`) | `-C <repo-root>` (working root; do **not** use `--add-dir`, which grants writable dirs) |
 | **grok** | yes (`read_file,list_dir,grep` in `--tools` allowlist) | yes (`web_search,web_fetch` in the same allowlist; drop `--disable-web-search`) | no (strict allowlist — never admit `write` / `search_replace` / `run_terminal_command` / …) | `--cwd <repo-root>` |
-| **kimi** | yes (approval-free ACP read/search tools) | yes (`WebSearch`/`FetchURL`, when the managed provider exposes them) | OS-immutable repo/Git (every worktree); ACP tool-kind allowlist aborts on first unsafe run (Kimi 0.32 can auto-approve some in-repo writes) | ACP `session/new.cwd=<repo-root>`; isolated HOME; repo-local `.kimi-code`/`.kimi`/`.mcp.json` denied; `ready` includes the OS jail |
+| **kimi** | yes (approval-free ACP read/search tools + a read-only shell command allowlist: git read subcommands, grep/rg/find/ls/cat pipelines) | yes (`WebSearch`/`FetchURL`, when the managed provider exposes them) | OS-immutable repo/Git (every worktree); ACP tool-kind allowlist aborts on first unsafe run, and an `execute` whose command fails the allowlist counts as unsafe (Kimi 0.32 can auto-approve some in-repo writes) | ACP `session/new.cwd=<repo-root>`; isolated HOME; repo-local `.kimi-code`/`.kimi`/`.mcp.json` denied; `ready` includes the OS jail |
 
 **Security layers (do not soften or over-claim):**
 
@@ -231,14 +231,36 @@ thinking, so a third-party provider's `api_key` never reaches a file the
 read+web Kimi can open. The jail (`_read_web_safe`) is part of Kimi's
 `ready_check`, so `list --json` never advertises a Kimi the clusters would
 refuse. ACP is defense-in-depth:
-the client puts the session into Kimi's read-only `plan` mode (kimi-code 0.41:
-"no tool execution" — shell/edit tools are not offered; a Kimi without `plan`
-fails closed), advertises neither filesystem-write nor terminal capability,
-rejects every `session/request_permission`, and fails if ACP reports a
-successful mutating tool kind (`edit`, `delete`, `move`, `execute`,
-`switch_mode`, `other`) — including Git-cwd writes Kimi 0.32 can auto-approve
-without asking. Under `default` mode the first four-family runs lost two
-clusters exactly that way: Kimi auto-ran `execute` and the gate aborted.
+the client advertises neither filesystem-write nor terminal capability,
+vets every `execute` (Kimi's Shell tool) against a **read-only command
+allowlist** (`_read_only_command`: git read subcommands only — `branch`/`tag`/
+`stash`/`remote`/`config`/`worktree` need a listing flag; grep/rg/find/ls/cat/
+head/tail/wc/sort/… pipelines; no `;`/`&&`/`||`, no redirection, no `$(`/
+backticks, no `git -c`/`--output`, no `find -exec`, `rg --pre`, `tail -f`;
+awk/sed/xargs/shells/interpreters are off the list), approves an allowlisted
+command **once** when Kimi asks (`session/request_permission`) and rejects
+every other request, and fails if ACP reports a successful mutating tool kind
+(`edit`, `delete`, `move`, `switch_mode`, `other`, or an `execute` whose
+command failed the policy) — including Git-cwd writes Kimi 0.32 can
+auto-approve without asking. Why a shell at all: Kimi has no native git tool,
+and `git log/show/blame` plus grep pipelines are what turns a diff review into
+a repo review; `plan` mode (kimi-code 0.41, "no tool execution") was tried on
+2026-09-06 and removed the shell wholesale — the first four-family run had lost
+two clusters to auto-run `execute` under `default` mode, which the allowlist
+now vets instead of the gate killing on sight. **kimi-code 0.41 wire shape**
+(traced 2026-09-07, `KIMI_ACP_TRACE=<file>` on the client): a `tool_call`
+(`title: "Bash"`, kind `execute`, `pending`, no rawInput) is followed by
+`tool_call_update`s whose text content is a *cumulative snapshot* of the
+argument JSON (`{`, `{"command": "`, `{"command": "git`, …), then the
+`session/request_permission` arrives — **before** the frame that finally
+carries `rawInput` and the `Running: …` title — so the client parses the
+snapshot buffer to approve; `in_progress` therefore means "composing or
+running", never "ran" by itself, which is why an execute with no readable
+command waits for the end-of-turn sweep instead of aborting on sight (an
+`edit`/`delete` still aborts on sight — it is never approvable). Shell command tokens are also
+run through the deny-path check, and a path that is an ANCESTOR of a deny path
+(`/`, `$HOME`, the scratch parent) is denied like the store itself — a
+`grep -r` rooted there would walk into the linked credentials.
 Approval-free read/search/web tools remain available. Official Kimi
 documentation identifies `WebSearch` and `FetchURL` as auto-allow tools when
 the host provider exposes them; the managed Kimi provider does. The shared

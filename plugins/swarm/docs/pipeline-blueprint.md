@@ -223,8 +223,11 @@ credential mid-review) converged on these non-negotiable mitigations:
    + `--cwd <repo>` (no write/shell tools); codex `-s read-only -C <repo>
    -c tools.web_search=true` (web works under read-only; never
    `workspace-write` / `--add-dir`); Kimi via ACP with no client FS/terminal
-   capability, every permission request rejected, and completed mutating tool
-   kinds treated as policy failure (defense-in-depth); **an OS-level jail**
+   capability, its shell limited to a **read-only command allowlist** (git
+   read subcommands, grep/rg/find/ls/cat pipelines; no chaining/redirection/
+   substitution) vetted by the client — allowlisted commands approved once on
+   request, every other permission request rejected, and any other mutating
+   tool kind that ran treated as policy failure (defense-in-depth); **an OS-level jail**
    (`sandbox-exec`/`bwrap`) around every call, denying HOME secret stores
    **per-backend** (a backend keeps its own cred dir but not its siblings' —
    verified: codex can't read `~/.grok`; Kimi's ambient `~/.kimi-code` is

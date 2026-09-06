@@ -121,10 +121,13 @@ refresh tokens, and a refresh inside a private copy logged the operator out)
 and a filtered projection of its config
 (provider/model catalogue and search services — never hooks or MCP); the
 repository's own `.kimi-code/`, `.kimi/` and `.mcp.json` are denied to it as
-well. The session runs in Kimi's read-only `plan` mode (shell/edit tools are
-not offered to the model); ACP permission rejection and the tool-kind allowlist
-(any tool outside read/search/fetch/think that runs kills the session on first
-sight) are defense-in-depth, not the write boundary. Documented residuals: the host HOME
+well. Kimi keeps its shell for **read-only commands** (`git log/show/blame/
+diff`, grep/rg pipelines, `ls`, `cat`…): the ACP client vets every command
+against a positive allowlist — no chaining, redirection, substitution, config
+injection (`git -c`), `find -exec`, `rg --pre` — approves an allowlisted one
+when Kimi asks, and kills the session on first sight of anything else (any
+other tool kind outside read/search/fetch/think likewise). That gate is
+defense-in-depth, not the write boundary. Documented residuals: the host HOME
 stays writable (codex/grok keep session state there) and the jail has no
 network rule; arbitrary child-process execution is not portably prevented.
 Findings are advisory by default; `--fix` / `--loop` act only on the ones you

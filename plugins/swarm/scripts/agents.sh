@@ -2630,10 +2630,10 @@ _kimi_output_contract() {
   # answer in kimi-acp.py. The contract follows the fenced diff: lensInstr remains
   # the first text in the prompt, preserving the workflow's scope invariant.
   local schema="$1"
-  # The session runs in Kimi's read-only `plan` mode (kimi-acp.py): shell and
-  # edit tools are not offered. Say so, or the model spends its turn trying to
-  # run `grep`/`git` and reports the refusal instead of findings.
-  printf '\n\nTOOLS: this session is read-only — file read/search and web fetch only. There is NO shell and NO editing; do not attempt to run commands.\n' &&
+  # kimi-acp.py vets every shell command against a read-only allowlist and
+  # aborts the session on anything else. Tell the model the rules up front, or
+  # it burns its turn (or the whole voice) on a command the gate will kill.
+  printf '\n\nTOOLS: read-only session. You may read/search files, fetch the web, and run READ-ONLY shell commands: git log/show/blame/diff/status/ls-files/grep, grep/rg, find (no -exec), ls, cat, head, tail, wc, sort, uniq, cut, tr, diff, stat — pipes between them are fine. NO writes, NO redirection (>), NO command chaining (; && ||), NO $(...), NO other programs (sed, awk, xargs, python, bash...). A disallowed command aborts the whole review.\n' &&
   printf '\nOUTPUT CONTRACT (HIGH PRIORITY): Return ONLY one JSON object matching this JSON Schema. No markdown fence, preface, explanation, or trailing text. Empty findings is valid.\n' &&
     cat "$schema" &&
     printf '\nThe response must be exactly the schema object and nothing else.\n'

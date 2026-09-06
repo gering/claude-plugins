@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -42,6 +43,134 @@ MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 # had never heard of (or a kind rewritten to "read" on a later update) walked
 # straight through.
 SAFE_TOOL_KINDS = frozenset({"read", "search", "fetch", "think"})
+
+# --- read-only shell policy --------------------------------------------------
+# A reviewer needs `git log/show/blame` and grep pipelines, and Kimi has no
+# native git tool — those come only through its Shell tool (ACP kind
+# `execute`). So `execute` is neither on the safe list nor flatly unsafe: its
+# COMMAND is checked against this policy. It is a positive allowlist of
+# read-only programs (git restricted to read subcommands, no `-c` config
+# injection, no `--output`), pipes between them are fine, and the whole string
+# must be free of chaining, redirection, substitution and escapes. Anything
+# else — an unknown program, `find -exec`, `rg --pre`, `tail -f`, a `>` even
+# inside quotes — is rejected; a rejected command that Kimi nevertheless ran
+# aborts the session, exactly like any other unsafe kind. Detection, not
+# prevention, for auto-approved commands (Kimi runs what it deems safe without
+# asking); the OS jail (repo/Git immutable, secrets denied) is the boundary.
+# When Kimi DOES ask (`session/request_permission`), an allowlisted command
+# is approved once — everything else stays rejected.
+SHELL_META = re.compile(r"[;&<>`$\\\r\n]")
+MAX_COMMAND_CHARS = 2000
+READ_ONLY_PROGRAMS = frozenset({
+    "git", "grep", "egrep", "fgrep", "rg", "find", "ls", "cat", "head", "tail",
+    "wc", "sort", "uniq", "cut", "tr", "diff", "cmp", "comm", "paste", "stat",
+    "file", "tree", "pwd", "echo", "printf", "basename", "dirname", "realpath",
+    "readlink", "which", "du", "nl", "tac", "strings", "column", "jq", "fold",
+    "md5sum", "sha256sum", "shasum", "true", "date",
+})
+GIT_READ_SUBCOMMANDS = frozenset({
+    "log", "show", "blame", "diff", "status", "ls-files", "ls-tree", "grep",
+    "rev-parse", "rev-list", "describe", "shortlog", "cat-file", "name-rev",
+    "merge-base", "reflog", "show-ref", "for-each-ref", "count-objects",
+    "diff-tree", "whatchanged", "check-ignore", "check-attr", "log-tree",
+})
+# Subcommands that read only with a listing flag and WRITE otherwise
+# (`git branch foo` creates one, `git tag v1` too, `git stash` pushes).
+GIT_LISTING_ONLY = {
+    "branch": {"--list", "-l", "-a", "-r", "--all", "--remotes", "-v", "-vv",
+               "--verbose", "--show-current", "--contains", "--merged",
+               "--no-merged", "--points-at", "--sort", "--format"},
+    "tag": {"--list", "-l", "-n", "--contains", "--merged", "--points-at",
+            "--sort", "--format"},
+    "remote": {"-v", "--verbose", "show", "get-url"},
+    "stash": {"list", "show"},
+    "worktree": {"list"},
+    "config": {"--get", "--get-all", "--get-regexp", "--list", "-l"},
+}
+GIT_REJECTED_OPTIONS = ("-c", "--config-env", "--exec-path", "--output", "-o")
+PROGRAM_REJECTED_OPTIONS = {
+    "find": ("-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint",
+             "-fprint0", "-fprintf", "-fls"),
+    "rg": ("--pre",),
+    "tail": ("-f", "-F", "--follow"),
+    "sort": ("-o", "--output"),
+}
+
+
+def _git_segment_ok(args: list[str]) -> tuple[bool, str]:
+    sub = None
+    idx = 0
+    while idx < len(args):
+        tok = args[idx]
+        if any(tok == opt or tok.startswith(opt + "=") for opt in GIT_REJECTED_OPTIONS):
+            return False, f"git option {tok!r} is not read-only"
+        if tok == "-C" or tok == "--git-dir" or tok == "--work-tree":
+            idx += 2
+            continue
+        if tok.startswith("-"):
+            idx += 1
+            continue
+        sub = tok
+        break
+    if sub is None:
+        return False, "git without a subcommand"
+    rest = args[idx + 1:]
+    if any(tok == opt or tok.startswith(opt + "=") for tok in rest for opt in GIT_REJECTED_OPTIONS):
+        return False, f"git {sub} carries a non-read-only option"
+    if sub in GIT_READ_SUBCOMMANDS:
+        return True, ""
+    listing = GIT_LISTING_ONLY.get(sub)
+    if listing is not None:
+        if any(tok in listing or tok.split("=", 1)[0] in listing for tok in rest):
+            return True, ""
+        return False, f"git {sub} without a listing flag can write"
+    return False, f"git subcommand {sub!r} is not read-only"
+
+
+def _read_only_command(command: Any) -> tuple[bool, str]:
+    """(allowed, reason). Reason is empty when allowed and never echoes more
+    than the offending token when not — it reaches stderr and the report."""
+    if not isinstance(command, str) or not command.strip():
+        return False, "no command string"
+    if len(command) > MAX_COMMAND_CHARS:
+        return False, "command too long"
+    if SHELL_META.search(command):
+        return False, "shell chaining/redirection/substitution is not allowed"
+    if "||" in command:
+        return False, "shell chaining is not allowed"
+    for segment in command.split("|"):
+        try:
+            args = shlex.split(segment, posix=True)
+        except ValueError:
+            return False, "unparseable shell segment"
+        if not args:
+            return False, "empty pipeline segment"
+        prog = args[0]
+        if "/" in prog or "=" in prog:
+            return False, f"program {prog!r} must be a bare PATH name"
+        if prog not in READ_ONLY_PROGRAMS:
+            return False, f"program {prog!r} is not on the read-only allowlist"
+        if prog == "git":
+            ok, why = _git_segment_ok(args[1:])
+            if not ok:
+                return False, why
+        for opt in PROGRAM_REJECTED_OPTIONS.get(prog, ()):
+            if any(tok == opt or tok.startswith(opt + "=") for tok in args[1:]):
+                return False, f"{prog} option {opt!r} is not read-only"
+    return True, ""
+
+
+def _command_of(raw_input: Any) -> Any:
+    # Kimi's Shell tool sends {"command": "..."}; accept the common spellings
+    # and an argv list, and hand anything else to the policy as "no command".
+    if isinstance(raw_input, dict):
+        for key in ("command", "cmd", "commandLine", "command_line"):
+            value = raw_input.get(key)
+            if isinstance(value, str):
+                return value
+            if isinstance(value, list) and all(isinstance(v, str) for v in value):
+                return shlex.join(value)
+    return None
 # Statuses under which an unsafe-kind tool has NOT run: still awaiting the
 # approval this client will reject, or rejected. Anything else means it ran.
 UNSTARTED_STATUSES = frozenset({"pending", None})
@@ -214,6 +343,19 @@ class AcpClient:
         # kind per tool id; an unsafe kind is STICKY (a later update cannot
         # downgrade it to a safe one), a missing kind stays missing (= unsafe).
         self.tool_kinds: dict[str, str | None] = {}
+        # Shell commands by tool id (first sight wins) and the ids whose
+        # command passed the read-only policy — approved on request, or
+        # observed running and found allowlisted.
+        self.tool_inputs: dict[str, Any] = {}
+        self.allowed_exec_ids: set[str] = set()
+        # kimi-code 0.41 streams a tool's ARGUMENT JSON as text content while
+        # the model is still composing it (`tool_call` pending with "" and
+        # `tool_call_update` in_progress with "{", "\"command\"", …), and
+        # sends no rawInput. The pieces are accumulated here until they parse.
+        self.tool_arg_text: dict[str, str] = {}
+        # Ids whose frame carried rawInput — kimi-code's "Running: …" frame,
+        # i.e. the command is (about to be) executed, no longer composed.
+        self.exec_started_ids: set[str] = set()
         # tool ids whose approval request this client rejected: their failed /
         # cancelled updates are the expected outcome, not evidence of a run.
         self.rejected_tool_ids: set[str] = set()
@@ -334,10 +476,36 @@ class AcpClient:
         method = message.get("method")
         request_id = message.get("id")
         if method == "session/request_permission":
+            self._trace(message)
             params = message.get("params")
             options = params.get("options", []) if isinstance(params, dict) else []
             tool_call = params.get("toolCall") if isinstance(params, dict) else None
             tool_id = tool_call.get("toolCallId") if isinstance(tool_call, dict) else None
+            if isinstance(tool_call, dict) and isinstance(tool_id, str) and tool_id:
+                # Approve ONCE a shell command the read-only policy accepts —
+                # `git log` Kimi chose to ask about must not be lost to a blanket
+                # rejection. Every other kind, and any other command, is rejected.
+                kind = tool_call.get("kind", self.tool_kinds.get(tool_id))
+                self._absorb_tool_args(tool_id, tool_call)
+                command = self._command_for(tool_id)
+                if kind == "execute" and not self._denied_tokens(command):
+                    ok, _why = _read_only_command(command)
+                    allow = next(
+                        (
+                            option
+                            for option in options
+                            if isinstance(option, dict)
+                            and option.get("kind") == "allow_once"
+                            and isinstance(option.get("optionId"), str)
+                        ),
+                        None,
+                    ) if ok else None
+                    if allow is not None:
+                        self.tool_kinds.setdefault(tool_id, "execute")
+                        self.allowed_exec_ids.add(tool_id)
+                        self._send({"jsonrpc": "2.0", "id": request_id, "result": {
+                            "outcome": {"outcome": "selected", "optionId": allow["optionId"]}}})
+                        return
             if isinstance(tool_id, str) and tool_id:
                 self.rejected_tool_ids.add(tool_id)
             reject = next(
@@ -375,6 +543,9 @@ class AcpClient:
         )
 
     def _handle_notification(self, message: dict[str, Any]) -> None:
+        # Diagnostics only: KIMI_ACP_TRACE=<file> appends every tool frame
+        # verbatim. Off by default — the frames carry model-chosen commands.
+        self._trace(message)
         if message.get("method") != "session/update":
             return
         params = message.get("params")
@@ -421,6 +592,47 @@ class AcpClient:
                 return
             if effective_kind in SAFE_TOOL_KINDS or effective_kind is None:
                 return
+            if effective_kind == "execute":
+                self._absorb_tool_args(tool_id, update)
+                if tool_id in self.allowed_exec_ids:
+                    return
+                if tool_id in self.rejected_tool_ids and status in REJECTED_STATUSES:
+                    return
+                command = self._command_for(tool_id)
+                if command is not None:
+                    # Known command: vet it as soon as it is readable. With
+                    # streamed arguments that is usually while the model is
+                    # still composing the call — before anything ran.
+                    denied = self._denied_tokens(command)
+                    ok, why = (False, "") if denied else _read_only_command(command)
+                    if ok:
+                        self.allowed_exec_ids.add(tool_id)
+                        return
+                    composing = status in UNSTARTED_STATUSES or (
+                        status == "in_progress" and tool_id not in self.exec_started_ids
+                    )
+                    if composing:
+                        # Proposed (still streaming, or pending), not run: in
+                        # `default` mode Kimi asks first and the permission
+                        # handler rejects it — the model then sees a failed
+                        # tool, not a dead session. The rawInput frame marks
+                        # execution; a disallowed command reaching it aborts.
+                        return
+                    self.close(force=True)
+                    if denied:
+                        raise ProtocolError(
+                            f"tool {tool_id!r} touched a denied path under the runtime/auth store"
+                        )
+                    raise ProtocolError(
+                        f"shell command outside the read-only allowlist ({why}); status={status}"
+                    )
+                if status in UNSTARTED_STATUSES or status == "in_progress":
+                    # Still composing (or not started): nothing to vet yet.
+                    # The end-of-turn sweep catches an execute whose command
+                    # never became visible.
+                    return
+                # Terminal status with no command this client could read —
+                # fall through to the generic abort: it ran, unvetted.
             # Unsafe kind. The ONLY acceptable histories: still pending (the
             # approval request has not arrived yet — this client will reject
             # it), or rejected by this client and then failed/cancelled. An
@@ -434,8 +646,13 @@ class AcpClient:
             if tool_id in self.rejected_tool_ids and status in REJECTED_STATUSES:
                 return
             self.close(force=True)
+            raw = self.tool_inputs.get(tool_id, update.get("rawInput"))
+            shape = sorted(raw.keys())[:8] if isinstance(raw, dict) else type(raw).__name__
+            title = update.get("title")
+            title = title[:120] if isinstance(title, str) else ""
             raise ProtocolError(
                 f"unsafe tool ran despite approval guard: kind={effective_kind} status={status}"
+                f" rawInput={shape} title={title!r}"
             )  # "ran", not "completed": a failed shell command ran too
 
     def _denied(self, candidate: str) -> bool:
@@ -456,11 +673,86 @@ class AcpClient:
         real = os.path.realpath(expanded)
         for p in self.deny_paths:
             try:
-                if os.path.commonpath([real, p]) == p:
-                    return True
+                common = os.path.commonpath([real, p])
             except ValueError:
                 continue
+            if common == p:
+                return True
+            # An ANCESTOR of the store is just as bad as the store: a search
+            # or grep rooted there walks into the linked credentials. `/`,
+            # the user's HOME and the scratch parent all land here.
+            if common == real:
+                return True
         return False
+
+    @staticmethod
+    def _trace(message: dict[str, Any]) -> None:
+        # Diagnostics only: KIMI_ACP_TRACE=<file> appends every tool frame and
+        # permission request verbatim. Off by default — the frames carry
+        # model-chosen commands.
+        trace = os.environ.get("KIMI_ACP_TRACE")
+        if not trace:
+            return
+        try:
+            upd = (message.get("params") or {}).get("update") or {}
+            is_tool = isinstance(upd, dict) and upd.get("sessionUpdate") in {"tool_call", "tool_call_update"}
+            if is_tool or message.get("method") == "session/request_permission":
+                with open(trace, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(message, ensure_ascii=True) + "\n")
+        except (OSError, TypeError, ValueError):
+            pass
+
+    def _absorb_tool_args(self, tool_id: str, update: dict[str, Any]) -> None:
+        raw = update.get("rawInput")
+        if raw is not None:
+            self.tool_inputs.setdefault(tool_id, raw)
+            if update.get("sessionUpdate") in {"tool_call", "tool_call_update"}:
+                self.exec_started_ids.add(tool_id)
+        if tool_id in self.tool_inputs:
+            return
+        content = update.get("content")
+        if not isinstance(content, list):
+            return
+        buf = self.tool_arg_text.get(tool_id, "")
+        for block in content:
+            inner = block.get("content") if isinstance(block, dict) else None
+            if isinstance(inner, dict) and inner.get("type") == "text":
+                text = inner.get("text")
+                if isinstance(text, str):
+                    # kimi-code 0.41 sends cumulative SNAPSHOTS of the argument
+                    # JSON ("{", '{"command": "', '{"command": "git', …), so
+                    # a chunk that opens the object replaces the buffer; a
+                    # delta-streaming agent's pieces are appended instead.
+                    buf = text if text.startswith("{") else buf + text
+        # Bound the buffer: arguments are a few hundred bytes; anything past
+        # this is tool OUTPUT streamed on the same channel, which never parses
+        # as the argument object and only wastes memory.
+        self.tool_arg_text[tool_id] = buf[:65536]
+
+    def _command_for(self, tool_id: str) -> Any:
+        if tool_id in self.tool_inputs:
+            return _command_of(self.tool_inputs[tool_id])
+        buf = self.tool_arg_text.get(tool_id, "")
+        if not buf.startswith("{"):
+            return None
+        try:
+            parsed = json.loads(buf)
+        except ValueError:
+            return None   # still streaming
+        if isinstance(parsed, dict):
+            self.tool_inputs[tool_id] = parsed
+        return _command_of(parsed)
+
+    def _denied_tokens(self, command: Any) -> bool:
+        # A shell command is one string to `_denied`, so realpath would see
+        # `grep -r x /private/tmp` as one bogus path; check its tokens too.
+        if not isinstance(command, str):
+            return False
+        try:
+            tokens = shlex.split(command, posix=True)
+        except ValueError:
+            return True   # unparseable: treat as touching the store (fail closed)
+        return any(self._denied(tok) for tok in tokens)
 
     def _check_locations(self, update: dict[str, Any], tool_id: str) -> None:
         # Any tool kind, any status: the announcement alone means the agent is
@@ -487,7 +779,7 @@ class AcpClient:
             elif isinstance(item, list):
                 stack.extend(item)
         for candidate in candidates:
-            if self._denied(candidate):
+            if self._denied(candidate) or (" " in candidate and self._denied_tokens(candidate)):
                 self.close(force=True)
                 raise ProtocolError(
                     f"tool {tool_id!r} touched a denied path under the runtime/auth store"
@@ -501,6 +793,7 @@ class AcpClient:
             for tool_id, kind in self.tool_kinds.items()
             if (kind is None or kind not in SAFE_TOOL_KINDS)
             and tool_id not in self.rejected_tool_ids
+            and tool_id not in self.allowed_exec_ids
         )
 
 
@@ -675,14 +968,14 @@ def main(argv: list[str]) -> int:
         options = session.get("configOptions")
         options = _set_option(client, session_id, options, "model", args.model)
         options = _set_option(client, session_id, options, "thinking", args.effort)
-        # `plan` is Kimi's read-only session mode ("no tool execution"): shell
-        # and edit tools are not offered to the model at all, so a review can
-        # not lose its voice to the policy gate below. Under `default` the
-        # first four-family runs auto-ran `execute` (kimi-code 0.41 treats
-        # some shell commands as safe) and the gate aborted the whole cluster.
-        # A Kimi that does not offer `plan` fails closed here (ProtocolError),
-        # never silently drops back to a tool-executing mode.
-        _set_option(client, session_id, options, "mode", "plan")
+        # `default` = manual approvals: Kimi runs the shell commands it deems
+        # safe (`git log`, grep) without asking — the read-only policy above
+        # vets those after the fact — and asks for everything else, which this
+        # client approves only for an allowlisted command and rejects
+        # otherwise. (`plan` mode would remove the shell entirely, and with it
+        # git history and grep pipelines a reviewer needs; `auto`/`yolo`
+        # auto-approve writes.)
+        _set_option(client, session_id, options, "mode", "default")
 
         client.collect_output = True
         prompt_started = True

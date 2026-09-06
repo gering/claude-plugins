@@ -210,7 +210,8 @@ the diff out of the script, above). Claude applies edits between rounds.
 
 - **Only Claude edits.** External agents stay review-only — never `codex apply`,
   never hand them edit authority (also the security posture: they run jailed,
-  read-only — read+web tools but no write/shell). Act only on ✅-agree +
+  read-only — read+web tools; a shell only for codex's read-only sandbox and
+  Kimi's read-only command allowlist, never writes). Act only on ✅-agree +
   🟨-partial findings; 🟨 = apply the
   session's own variant, not the reviewer's `recommendation` verbatim;
   ❌-disagree is never touched and stays visible in the report.

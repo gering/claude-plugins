@@ -121,6 +121,45 @@ for raw in sys.stdin:
             })
             log({"permission_response": json.loads(sys.stdin.readline())})
             emit(tool_update("tool_call_update", "tool-1", None, "failed"))
+        elif scenario == "exec-allowed":
+            # Kimi auto-ran a read-only command (no permission request): the
+            # policy vets it after the fact and the review completes.
+            u = tool_update("tool_call", "tool-x1", "execute", "in_progress")
+            u["params"]["update"]["rawInput"] = {"command": os.environ.get("FAKE_COMMAND", "git log --oneline -5 | head -3")}
+            emit(u)
+            emit(tool_update("tool_call_update", "tool-x1", None, "completed"))
+        elif scenario == "exec-denied":
+            u = tool_update("tool_call", "tool-x2", "execute", "in_progress")
+            u["params"]["update"]["rawInput"] = {"command": os.environ.get("FAKE_COMMAND", "git log > /tmp/out")}
+            emit(u)
+            time.sleep(1.0)   # let the kill land (see unsafe-in-progress)
+            for _ in range(50):
+                emit(agent_text("still running "))
+        elif scenario == "exec-permission":
+            # Kimi ASKS before running: an allowlisted command is approved once,
+            # anything else rejected — the fake logs which option came back.
+            u = tool_update("tool_call", "tool-x3", "execute", "pending")
+            u["params"]["update"]["rawInput"] = {"command": os.environ.get("FAKE_COMMAND", "git blame -L 1,5 README.md")}
+            emit(u)
+            emit({
+                "jsonrpc": "2.0",
+                "id": 701,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "fake-session",
+                    "toolCall": {"toolCallId": "tool-x3", "kind": "execute",
+                                 "rawInput": {"command": os.environ.get("FAKE_COMMAND", "git blame -L 1,5 README.md")}},
+                    "options": [
+                        {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+                        {"optionId": "always", "name": "Always", "kind": "allow_always"},
+                        {"optionId": "reject", "name": "Reject", "kind": "reject_once"},
+                    ],
+                },
+            })
+            reply = json.loads(sys.stdin.readline())
+            log({"permission_response": reply})
+            chosen = reply.get("result", {}).get("outcome", {}).get("optionId")
+            emit(tool_update("tool_call_update", "tool-x3", None, "completed" if chosen == "allow" else "failed"))
         elif scenario == "unsafe-failed-unrejected":
             # The command RAN and exited non-zero; nobody asked for approval.
             emit(tool_update("tool_call", "tool-9", "execute", "pending"))
@@ -129,8 +168,37 @@ for raw in sys.stdin:
             # Announced as execute, "completed" as read: the unsafe kind sticks.
             emit(tool_update("tool_call", "tool-8", "execute", "pending"))
             emit(tool_update("tool_call_update", "tool-8", "read", "completed"))
+        elif scenario == "exec-no-command":
+            # An execute whose command never becomes visible (no rawInput, no
+            # argument text): nothing to vet, so the end-of-turn sweep fails it.
+            emit(tool_update("tool_call", "tool-7x", "execute", "in_progress"))
+        elif scenario == "exec-snapshots":
+            # kimi-code 0.41 shape: argument JSON streamed as cumulative text
+            # snapshots, then a rawInput frame, then a permission request.
+            u = tool_update("tool_call", "tool-7s", "execute", "pending")
+            u["params"]["update"]["content"] = [{"type": "content", "content": {"type": "text", "text": ""}}]
+            emit(u)
+            cmd = os.environ.get("FAKE_COMMAND", "git log --oneline -3")
+            full = json.dumps({"command": cmd})
+            for cut in list(range(1, len(full), 4)) + [len(full)]:
+                u = tool_update("tool_call_update", "tool-7s", None, "in_progress")
+                u["params"]["update"]["content"] = [{"type": "content", "content": {"type": "text", "text": full[:cut]}}]
+                emit(u)
+            emit({
+                "jsonrpc": "2.0", "id": 702, "method": "session/request_permission",
+                "params": {"sessionId": "fake-session", "toolCall": {"toolCallId": "tool-7s"},
+                           "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+                                       {"optionId": "reject", "name": "Reject", "kind": "reject_once"}]},
+            })
+            reply = json.loads(sys.stdin.readline())
+            log({"permission_response": reply})
+            chosen = reply.get("result", {}).get("outcome", {}).get("optionId")
+            emit(tool_update("tool_call_update", "tool-7s", None, "completed" if chosen == "allow" else "failed"))
         elif scenario == "unsafe-in-progress":
-            emit(tool_update("tool_call", "tool-7", "execute", "in_progress"))
+            # An in-progress EDIT: never approvable, so the client kills on
+            # sight instead of waiting for end_turn (execute differs: its
+            # command may still be streaming — see exec-no-command).
+            emit(tool_update("tool_call", "tool-7", "edit", "in_progress"))
             # Give the client's kill a moment to land: it arrives within
             # milliseconds of the frame above, and a client that instead waited
             # for end_turn lets this fake reach prompt_done after the pause —
@@ -165,7 +233,11 @@ for raw in sys.stdin:
         elif scenario == "read-credentials-rawinput":
             # No `locations` at all — the path only appears in rawInput.
             u = tool_update("tool_call", "tool-3", "read", "pending")
-            u["params"]["update"]["rawInput"] = {"args": ["--file", "~/.kimi-code/credentials/kimi-code.json"]}
+            if os.environ.get("FAKE_ANCESTOR"):
+                # A search rooted at the PARENT of the deny path (an ancestor).
+                u["params"]["update"]["rawInput"] = {"pattern": "refresh_token", "path": os.path.dirname(os.environ["FAKE_DENY"])}
+            else:
+                u["params"]["update"]["rawInput"] = {"args": ["--file", "~/.kimi-code/credentials/kimi-code.json"]}
             emit(u)
         elif scenario == "read-credentials":
             u = tool_update("tool_call", "tool-4", "read", "pending")
@@ -335,8 +407,88 @@ class KimiAcpTests(unittest.TestCase):
         self.assertNotIn("PROMPT_SENTINEL_7f0ac9", " ".join(records[0]["argv"]))
         self.assertEqual(
             prompt_record["state"],
-            {"model": MODEL, "thinking": "max", "mode": "plan"},
+            {"model": MODEL, "thinking": "max", "mode": "default"},
         )
+
+    def test_execute_without_a_visible_command_fails_at_end_of_turn(self):
+        result, _ = self.run_helper("exec-no-command")
+        self.assertEqual(result.returncode, 13)
+        self.assertIn("never rejected: execute:tool-7x", result.stderr)
+
+    def test_streamed_argument_snapshots_are_vetted_and_approved(self):
+        result, records = self.run_helper("exec-snapshots")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        reply = next(r["permission_response"] for r in records if "permission_response" in r)
+        self.assertEqual(reply["result"]["outcome"]["optionId"], "allow")
+
+    def test_streamed_disallowed_command_is_rejected_not_fatal(self):
+        result, records = self.run_helper("exec-snapshots", env_extra={"FAKE_COMMAND": "git push --force"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        reply = next(r["permission_response"] for r in records if "permission_response" in r)
+        self.assertEqual(reply["result"]["outcome"]["optionId"], "reject")
+
+    def test_read_only_shell_command_is_allowed(self):
+        result, _ = self.run_helper("exec-allowed")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_shell_command_outside_the_allowlist_aborts(self):
+        result, records = self.run_helper("exec-denied")
+        self.assertEqual(result.returncode, 13)
+        self.assertIn("outside the read-only allowlist", result.stderr)
+        self.assertIn("redirection", result.stderr)
+        self.assertFalse(any("prompt_done" in r for r in records), "client waited for end_turn")
+
+    def test_shell_command_rooted_at_an_ancestor_of_the_store_aborts(self):
+        # `grep -r` from `/` walks into the linked credentials: the ancestor
+        # rule fires on the path token even though the program is allowlisted.
+        result, _ = self.run_helper("exec-allowed", env_extra={"FAKE_COMMAND": "grep -r refresh_token /"})
+        self.assertEqual(result.returncode, 13)
+        self.assertIn("denied path", result.stderr)
+
+    def test_search_rooted_at_an_ancestor_of_the_store_aborts(self):
+        result, _ = self.run_helper("read-credentials-rawinput",
+                                    env_extra={"FAKE_ANCESTOR": "1"})
+        self.assertEqual(result.returncode, 13)
+
+    def test_allowlisted_command_is_approved_once_on_request(self):
+        result, records = self.run_helper("exec-permission")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        reply = next(r["permission_response"] for r in records if "permission_response" in r)
+        self.assertEqual(reply["result"]["outcome"], {"outcome": "selected", "optionId": "allow"})
+
+    def test_non_allowlisted_command_is_rejected_on_request(self):
+        result, records = self.run_helper("exec-permission", env_extra={"FAKE_COMMAND": "rm -rf build"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        reply = next(r["permission_response"] for r in records if "permission_response" in r)
+        self.assertEqual(reply["result"]["outcome"]["optionId"], "reject")
+
+    def test_read_only_command_policy(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("kimi_acp", HELPER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        allowed = [
+            "git log --oneline -20", "git show HEAD~1 -- a.py", "git blame -L 3,9 a.py",
+            "git diff main...HEAD --stat", "git branch -a", "git stash list",
+            "git worktree list", "git config --list", "git remote -v",
+            "grep -rn TODO src | head -50", "rg -n 'def x' src", "find . -name '*.py'",
+            "ls -la plugins", "cat README.md", "wc -l a.py",
+        ]
+        rejected = [
+            "git branch foo", "git tag v1", "git config user.name x", "git remote add o u",
+            "git -c core.pager=evil log", "git log --output=/tmp/x", "git log > /tmp/x",
+            "ls; rm -rf /", "echo hi && rm x", "echo hi || rm x", "cat $(echo x)",
+            "cat `echo x`", "find . -exec rm {} \\;", "rg --pre evil x", "tail -f log",
+            "sort -o out in", "awk 1 f", "sed -i s/a/b/ f", "./git log", "FOO=1 git log",
+            "bash -c ls", "xargs rm", "python3 x.py", "", "x" * 3000,
+        ]
+        for command in allowed:
+            self.assertTrue(module._read_only_command(command)[0], command)
+        for command in rejected:
+            self.assertFalse(module._read_only_command(command)[0], command)
+        self.assertEqual(module._command_of({"command": "git log"}), "git log")
+        self.assertEqual(module._command_of({"cmd": ["git", "log"]}), "git log")
+        self.assertIsNone(module._command_of({"path": "x"}))
 
     def test_permission_requests_are_rejected(self):
         result, records = self.run_helper("permission")
@@ -417,7 +569,7 @@ class KimiAcpTests(unittest.TestCase):
         # session on first sight rather than wait for end_turn.
         result, records = self.run_helper("unsafe-in-progress")
         self.assertEqual(result.returncode, 13)
-        self.assertIn("status=in_progress", result.stderr)
+        self.assertIn("kind=edit status=in_progress", result.stderr)
         # The fake logs prompt_done only after its end_turn response; a client
         # that waited for end_turn would have let it get there.
         self.assertFalse(any("prompt_done" in r for r in records), "client waited for end_turn")
