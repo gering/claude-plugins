@@ -27,7 +27,8 @@ findings + design suggestions, presents one ranked report, and — with `--fix` 
   (cap default `10`); `--max` runs the deepest-effort profile (codex
   `xhigh`, Claude finders + verifier `xhigh`, grok `low` → `medium`, Kimi
   `low` → `high`, and **every** voice — Claude, codex, grok, kimi — fanning
-  out per **lens** instead of per cluster) — slower, more
+  out per **lens** instead of per cluster; kimi stays on its breakage + threat
+  lenses on both profiles, being quota-metered) — slower, more
   thorough, costs up to `3 × 11` external calls, composes with
   `--fix`/`--loop`.
 - `/swarm:review --pr [<number>]` — run the same ensemble against a **GitHub

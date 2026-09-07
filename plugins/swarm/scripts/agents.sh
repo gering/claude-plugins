@@ -2875,7 +2875,7 @@ _kimi_output_contract() {
   # kimi-acp.py vets every shell command against a read-only allowlist and
   # aborts the session on anything else. Tell the model the rules up front, or
   # it burns its turn (or the whole voice) on a command the gate will kill.
-  printf '\n\nTOOLS: read-only session. You may read/search files, fetch the web, and run READ-ONLY shell commands: git log/show/blame/diff/status/ls-files/grep, grep/rg, find (no -exec), ls, cat, head, tail, wc, sort, uniq, cut, tr, diff, stat — pipes between them are fine. NO writes, NO redirection (>), NO command chaining (; && ||), NO $(...), NO other programs (sed, awk, xargs, python, bash...). A disallowed command aborts the whole review.\n' &&
+  printf '\n\nTOOLS: read-only session. You may read/search files, fetch the web, and run READ-ONLY shell commands: git log/show/blame/diff/status/ls-files/grep, grep/rg, find (no -exec), ls, cat, head, tail, wc, sort, uniq, cut, tr, diff, stat — pipes between them are fine. NO writes, NO redirection (>), NO command chaining (; && ||), NO $(...), NO other programs (sed, awk, xargs, python, bash...). A disallowed command aborts the whole review. TOOL BUDGET: the diff is already inlined above — use at most 8 tool calls in total, only to confirm a suspected out-of-diff defect; never re-read files the diff already shows.\n' &&
   printf '\nOUTPUT CONTRACT (HIGH PRIORITY): Return ONLY one JSON object matching this JSON Schema. No markdown fence, preface, explanation, or trailing text. Empty findings is valid.\n' &&
     cat "$schema" &&
     printf '\nThe response must be exactly the schema object and nothing else.\n'

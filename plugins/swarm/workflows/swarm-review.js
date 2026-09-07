@@ -760,11 +760,26 @@ const utf8Checksum = (s) => {
 // Only spawn transports for backends the skill reported live (probed via the
 // adapter); absent CLIs would otherwise show up as noisy "errors".
 const wantVoices = Array.isArray(INPUT.externalVoices) ? INPUT.externalVoices : ['codex', 'grok', 'kimi']
+// `clusters`: an optional allowlist of the lens clusters a backend reviews.
+// Kimi is metered on a 5-hour AND a 7-day quota that a full five-cluster
+// review (5 × ~370 KiB prompts plus tool loops) exhausted within one day
+// (2026-09-07), so it reviews only the two defect clusters where a fourth
+// family changes verdicts — breakage and threat — on BOTH profiles; reach,
+// design and consistency keep three families. Its effort is already at the
+// k3 floor (`low`; the ladder is low|high|max).
 const EXTERNAL_BACKENDS = [
   { backend: 'codex', flags: MAX ? '--effort xhigh' : '--effort medium' },
   { backend: 'grok', flags: MAX ? '--effort medium' : '--effort low' },
-  { backend: 'kimi', flags: MAX ? '--effort high' : '--effort low' },
+  { backend: 'kimi', flags: MAX ? '--effort high' : '--effort low', clusters: ['breakage', 'threat'] },
 ]
+// Units a backend actually runs: all of them, or (with `clusters`) those whose
+// lenses belong to an allowed cluster — under --max the units are single lenses,
+// so the filter goes by lens membership, not unit name.
+const unitsForBackend = (b, units) => {
+  if (!b.clusters) return units
+  const allowed = new Set(b.clusters.flatMap((c) => LENS_CLUSTERS[c] || []))
+  return units.filter((u) => u.lenses.some((l) => allowed.has(l)))
+}
 // A claude:false control run has no gate (the gate is a Claude agent), so the
 // externals keep their FULL-WIDTH coverage — per-cluster now, but over every
 // candidate lens. Without this they would inherit the empty Claude lens set and
@@ -776,7 +791,7 @@ const liveExternals = EXTERNAL_BACKENDS.filter((b) => wantVoices.includes(b.back
 const liveBackends = liveExternals.map((b) => b.backend)
 const reviewSources = [...(runClaude ? ['claude'] : []), ...liveBackends].join('/') || 'no live backend'
 const externalVoiceSpecs = liveExternals
-  .flatMap((b) => externalUnits.map((u) => ({
+  .flatMap((b) => unitsForBackend(b, externalUnits).map((u) => ({
     backend: b.backend, unit: u.name, lenses: u.lenses, label: `${b.backend}:${u.name}`,
     // --lens-instr-sum is an INTEGRITY check on the retype: an empty value is
     // already refused, but a transport that shortened, paraphrased or reworded
@@ -812,8 +827,9 @@ const externalVoiceSpecs = liveExternals
       (TELEMETRY ? ` --unit ${shQuote(u.name)} --telemetry ${shQuote(TELEMETRY)}` : ''),
   })))
 if (externalVoiceSpecs.length) {
-  log(`External fan-out: ${externalVoiceSpecs.length} call(s) — ${liveBackends.join(' + ')} ` +
-      `× ${externalUnits.length} ${MAX ? 'lens' : 'cluster'}(es)`)
+  log(`External fan-out: ${externalVoiceSpecs.length} call(s) — ` +
+      liveExternals.map((b) => `${b.backend}×${unitsForBackend(b, externalUnits).length}`).join(' + ') +
+      ` (${externalUnits.length} ${MAX ? 'lens' : 'cluster'}(es) gated in)`)
 } else if (liveBackends.length) {
   // Live backends but zero units: the gate pruned EVERY lens. Say so explicitly —
   // otherwise a review with no external calls looks like a dropped backend rather

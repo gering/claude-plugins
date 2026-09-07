@@ -49,7 +49,8 @@ branch delta).
   `xhigh` (from `medium`; codex has no `max` tier), Kimi ACP thinking →
   `high` (from `low`; its k3 ladder is low|high|max, and `high` ran 99–458 s per
   cluster), Claude finders + the adversarial verifier → `xhigh`, and it splits the
-  fan-out of **every** voice — Claude, codex, grok and kimi alike — from one call
+  fan-out of **every** voice — Claude, codex, grok and kimi alike (kimi stays on its
+  breakage + threat lenses: it is quota-metered) — from one call
   per lens **cluster** (≤5 units, the default) into one per **lens** (≤11 units).
   That is the real cost lever: up to **11 CLI calls per external backend (≤33
   total)**, not the 5 a cluster run makes (one per gated cluster). Design lenses

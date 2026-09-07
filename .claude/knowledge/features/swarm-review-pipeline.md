@@ -259,6 +259,16 @@ the diff out of the script, above). Claude applies edits between rounds.
   (`gpt-5.6-sol`@`xhigh` at wiring time, `@medium` on 2026-09-05; grok re-verified at `--effort high` on
   0.2.101) — the "no silent fail on a non-existent model/effort" rule.
 
+- **Per-backend cluster allowlist** (`EXTERNAL_BACKENDS[].clusters`, 0.11.0): Kimi
+  reviews only `breakage` + `threat` on both profiles. Moonshot meters a 5-hour
+  AND a 7-day quota; a five-cluster review (5 × ~370 KiB prompts plus tool loops)
+  hit the 5-hour limit mid-run and the 7-day one after two runs (2026-09-07), so
+  the fourth family is spent where it changes verdicts (correctness/removed-
+  behavior, security/adversarial) and reach/design/consistency keep three
+  families. Under `--max` the filter goes by lens membership. The appended Kimi
+  contract also carries a tool budget (≤ 8 calls) so agentic loops stop
+  re-reading what the diff already shows. Effort is at the k3 floor (`low`).
+
 ## `--pr`: review a PR diff and post the result (swarm 0.4.0)
 
 `/swarm:review --pr [<number>]` runs the **same** pipeline against a GitHub PR's

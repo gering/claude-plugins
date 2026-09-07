@@ -69,6 +69,7 @@ if kimi_backend:
     # Kimi's k3 thinking ladder is low|high|max (no medium); `high` ran 99–458 s
     # per ~290 KiB cluster, so it is --max only. Pin the exact arms.
     check("Kimi normal profile uses low", ": '--effort low'" in kimi_backend.group(1))
+    check("Kimi reviews only breakage + threat (quota)", "clusters: ['breakage', 'threat']" in kimi_backend.group(1))
     check("Kimi max profile uses high", "MAX ? '--effort high'" in kimi_backend.group(1))
 
 PR_POST = (HERE / "pr-post.py").read_text(encoding="utf-8")
