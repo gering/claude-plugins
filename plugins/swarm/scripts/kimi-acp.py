@@ -45,6 +45,10 @@ MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 # had never heard of (or a kind rewritten to "read" on a later update) walked
 # straight through.
 SAFE_TOOL_KINDS = frozenset({"read", "search", "fetch", "think"})
+# Statuses under which an unsafe-kind tool has NOT run: still awaiting the
+# approval this client will reject, or rejected. Anything else means it ran.
+UNSTARTED_STATUSES = frozenset({"pending", None})
+REJECTED_STATUSES = frozenset({"failed", "cancelled", "pending", None})
 
 # --- read-only shell policy --------------------------------------------------
 # A reviewer needs `git log/show/blame` and grep pipelines, and Kimi has no
@@ -84,13 +88,18 @@ GIT_LISTING_ONLY = {
                "--no-merged", "--points-at", "--sort", "--format"},
     "tag": {"--list", "-l", "-n", "--contains", "--merged", "--points-at",
             "--sort", "--format"},
-    "remote": {"-v", "--verbose", "show", "get-url"},
     "stash": {"list", "show"},
     "worktree": {"list"},
-    "config": {"--get", "--get-all", "--get-regexp", "--list", "-l"},
+    # `remote`/`config` deliberately absent: `git remote -v` and `git config
+    # --list` print remote URLs / helpers that can carry inline tokens, and the
+    # network is open. A reviewer does not need either.
 }
-GIT_REJECTED_OPTIONS = ("-c", "--config-env", "--exec-path", "--output", "-o", "-O",
+# Rejected ANYWHERE in a git invocation (they run a program or write a file).
+GIT_REJECTED_OPTIONS = ("--config-env", "--exec-path", "--output", "-O",
                         "--open-files-in-pager", "--pager", "--ext-diff", "--textconv")
+# Rejected only BEFORE the subcommand: `git -c core.pager=x log` injects config,
+# while `git log -c` (combined diff) and `git grep -c` (count) are read-only.
+GIT_REJECTED_GLOBAL_OPTIONS = ("-c",)
 PROGRAM_REJECTED_OPTIONS = {
     "find": ("-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint",
              "-fprint0", "-fprintf", "-fls"),
@@ -102,7 +111,15 @@ PROGRAM_REJECTED_OPTIONS = {
 # `--open-files-in-pager`, `--hostname-bin`, `--pre`, `--exec` — is rejected
 # for every program, so a tool's less-known escape hatch (the review found
 # three the explicit lists had missed) does not become a shell.
-EXEC_OPTION_NAME = re.compile(r"(?i)(pager|program|exec|command|bin|hostname|open-files|pre|editor|plugin|hook)")
+# Whole option NAMES (after `--`), not substrings: `pre` also matched
+# `--pretty`, `bin` matched `--binary-files`, and a Kimi that auto-ran
+# `git log --pretty=format:%h` lost its voice (round-5 finding).
+EXEC_OPTION_NAMES = frozenset({
+    "exec", "execdir", "pre", "pre-glob", "hostname-bin", "compress-program",
+    "open-files-in-pager", "pager", "editor", "plugin", "hook", "hooks", "run",
+    "command", "program", "external", "ext-diff", "textconv", "filter",
+    "exec-path", "config-env", "sort-program", "output",
+})
 # Option VALUES (`--x=value`) naming a network client, shell or interpreter
 # are rejected outright: the jail leaves the network open, so this is the
 # second layer under the allowlist (grok has `--deny` rules for the same).
@@ -142,7 +159,7 @@ def _git_segment_ok(args: list[str]) -> tuple[bool, str]:
     idx = 0
     while idx < len(args):
         tok = args[idx]
-        if any(tok == opt or tok.startswith(opt + "=") for opt in GIT_REJECTED_OPTIONS):
+        if any(tok == opt or tok.startswith(opt + "=") for opt in GIT_REJECTED_OPTIONS + GIT_REJECTED_GLOBAL_OPTIONS):
             return False, f"git option {tok!r} is not read-only"
         if tok == "-C" or tok == "--git-dir" or tok == "--work-tree":
             idx += 2
@@ -220,7 +237,7 @@ def _read_only_command(command: Any) -> tuple[bool, str]:
         if prog not in READ_ONLY_PROGRAMS:
             return False, f"program {prog!r} is not on the read-only allowlist"
         for tok in args[1:]:
-            if tok.startswith("--") and EXEC_OPTION_NAME.search(_option_name(tok)[2:]):
+            if tok.startswith("--") and _option_name(tok)[2:] in EXEC_OPTION_NAMES:
                 return False, f"{prog} option {_option_name(tok)!r} can run a program"
             ok, why = _option_value_ok(tok)
             if not ok:
@@ -261,10 +278,6 @@ def _command_of(raw_input: Any) -> Any:
             if isinstance(value, list) and all(isinstance(v, str) for v in value):
                 return shlex.join(value)
     return None
-# Statuses under which an unsafe-kind tool has NOT run: still awaiting the
-# approval this client will reject, or rejected. Anything else means it ran.
-UNSTARTED_STATUSES = frozenset({"pending", None})
-REJECTED_STATUSES = frozenset({"failed", "cancelled", "pending", None})
 
 
 class BackendError(RuntimeError):
@@ -742,10 +755,14 @@ class AcpClient:
         # the same file the absolute form would.
         if not os.path.isabs(expanded):
             expanded = os.path.join(self.cwd, expanded)
-        real = os.path.realpath(expanded)
+        real = os.path.normcase(os.path.realpath(expanded))
+        # A glob in a PATH-LIKE token (`/Users/*/.kimi-code/…`) would expand in
+        # Kimi's shell to something this scan never saw: deny it outright.
+        if "/" in candidate and any(ch in candidate for ch in "*?["):
+            return True
         for p in self.deny_paths:
             try:
-                common = os.path.commonpath([real, p])
+                common = os.path.commonpath([real, os.path.normcase(p)])
             except ValueError:
                 continue
             if common == p:
@@ -813,7 +830,7 @@ class AcpClient:
         if tool_id in self.tool_inputs:
             return _command_of(self.tool_inputs[tool_id])
         buf = self.tool_arg_text.get(tool_id, "")
-        if not buf.startswith("{"):
+        if not buf.startswith("{") or not buf.rstrip().endswith("}"):
             return None
         try:
             parsed = json.loads(buf)
@@ -831,7 +848,10 @@ class AcpClient:
         try:
             tokens = shlex.split(command, posix=True)
         except ValueError:
-            return True   # unparseable: treat as touching the store (fail closed)
+            # An apostrophe in a fetch/search TITLE ("Moonshot's docs") is not a
+            # path: fall back to whitespace words, which `_denied` still
+            # substring- and realpath-checks. (Round 5: this had killed a voice.)
+            tokens = command.split()
         return any(self._denied(tok) for tok in tokens)
 
     def _check_locations(self, update: dict[str, Any], tool_id: str) -> None:

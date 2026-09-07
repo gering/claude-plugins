@@ -148,8 +148,8 @@ check("failed ACP probe is audible", "acp --help" in r.stderr and "rc=124" in r.
 # Readiness validates against what the ISOLATED session can offer: a model on a
 # custom (non-managed) provider is listed by `provider list` but dropped by the
 # config projection, so it must not be ready.
-import tempfile as _tf
-_cfg_dir = _tf.mkdtemp()
+_cfg_tmp = tempfile.TemporaryDirectory()   # lives for the process; cleaned on exit
+_cfg_dir = _cfg_tmp.name
 _cfg = Path(_cfg_dir) / "config.toml"
 _cfg.write_text('''[providers."managed:kimi-code"]
 type = "kimi"

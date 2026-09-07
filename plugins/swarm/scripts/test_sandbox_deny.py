@@ -152,12 +152,13 @@ class TestSandboxDenyPaths(unittest.TestCase):
         # 0.11.0 self-review: a whole-dir deny of ~/.kimi-code blocked the exec
         # of every jailed kimi run (rc=10 on all clusters) because the stock
         # installer puts the binary at ~/.kimi-code/bin/kimi. The store must be
-        # denied entry by entry, with bin/ spared — for EVERY backend.
+        # denied entry by entry, with bin/ spared — for the OWNING backend only
+        # (siblings get the whole store: test_siblings_get_the_whole_kimi_store_denied).
         with tempfile.TemporaryDirectory() as td:
             store = self._fake_kimi_store(Path(td))
             env = {"HOME": td, "SWARM_KIMI_BIN": str(store / "bin" / "kimi")}
             (store / "oauth").mkdir()
-            for backend in ("kimi",):
+            for backend in ("kimi",):   # the owner; kept as a loop for the labelled asserts
                 paths = _bash_deny_paths(backend, env_extra=env)
                 self.assertNotIn(str(store), paths, backend)
                 self.assertNotIn(str(store / "bin"), paths, backend)
@@ -852,6 +853,57 @@ class TestProtectedRootsAndIsolation(unittest.TestCase):
                 self.assertIn(str(home / must), paths, must)
             self.assertNotIn(str(home / ".codex"), paths)
 
+    def test_codex_executable_config_surfaces_are_write_denied(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            r = _source('_host_write_deny_paths codex', env_extra={"HOME": td})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            paths = r.stdout.splitlines()
+            for must in ("hooks.json", "config.json", "instructions.md", "config.toml", "AGENTS.md"):
+                self.assertIn(str(home / ".codex" / must), paths, must)
+
+    def test_prompt_dir_becomes_a_writable_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td); (home / ".codex").mkdir()
+            elsewhere = home / "review-prompts"; elsewhere.mkdir()
+            r = _source(f'_note_prompt_dir "{elsewhere}/p.txt"', '_writable_roots codex', env_extra={"HOME": td})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(os.path.realpath(str(elsewhere)), r.stdout.splitlines())
+
+    def test_protected_root_relation_answers_under_contains_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "outer"; repo = root / "repo"; repo.mkdir(parents=True)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            (repo / "sub").mkdir(); other = Path(td) / "other"; other.mkdir()
+            r = _source(
+                f'_protected_root_relation "{repo}/sub"', f'_protected_root_relation "{root}"',
+                f'_protected_root_relation "{other}"',
+                f'_dir_under_protected_root "{repo}/sub" && echo under-ok',
+                f'_contains_protected_root "{root}" && echo contains-ok',
+                cwd=repo,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stdout.split(), ["under", "contains", "none", "under-ok", "contains-ok"])
+
+    def test_bwrap_binds_writable_roots_before_the_repository(self):
+        src = AGENTS.read_text(encoding="utf-8")
+        writable = src.find('done < <(_writable_roots "$backend")')
+        repo_bind = src.find('args+=(--bind "$p" "$p"); fi\n    done < <(_repo_protected_roots)')
+        self.assertGreater(writable, 0); self.assertGreater(repo_bind, writable)
+
+    def test_projector_reports_its_kept_model_ids(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / "config.toml"
+            cfg.write_text('default_model = "kimi-code/k3"\n[providers."managed:kimi-code"]\ntype = "kimi"\n'
+                           '[models."kimi-code/k3-256k"]\nprovider = "managed:kimi-code"\n'
+                           '[models.other]\nprovider = "custom"\n[providers.custom]\ntype = "openai"\napi_key = "sk-x"\n')
+            r = _source(f'_kimi_project_config "{cfg}" --models', f'_kimi_project_config "{cfg}" --models')
+            self.assertEqual(r.returncode, 0, r.stderr)
+            # memoized: the second call prints the same list from the memo
+            self.assertEqual(r.stdout.split(), ["kimi-code/k3-256k", "kimi-code/k3-256k"])
+            r = _source(f'_kimi_project_config "{cfg}"')
+            self.assertNotIn("sk-x", r.stdout); self.assertNotIn("[models.other]", r.stdout)
+
     def test_writable_roots_are_scratch_temp_dev_and_the_own_auth_state(self):
         with tempfile.TemporaryDirectory() as td:
             home = Path(td)
@@ -1158,7 +1210,7 @@ print('links=' + ','.join(links))
 print('HOME=' + home)
 print('KIMI_CODE_HOME=' + khome)
 print('TEL=' + os.environ.get('KIMI_DISABLE_TELEMETRY', ''))
-print('NOUPD=' + os.environ.get('KIMI_CODE_NO_AUTO_UPDATE', ''))
+print('NOUPD=' + os.environ.get('KIMI_CODE_NO_AUTO_UPDATE', '') + os.environ.get('KIMI_CLI_NO_AUTO_UPDATE', ''))
 print('KEEP=' + os.environ.get('KIMI_CODE_BACKGROUND_KEEP_ALIVE_ON_EXIT', ''))
 print('CRON=' + os.environ.get('KIMI_DISABLE_CRON', ''))
 print('files=' + ','.join(files))
@@ -1181,7 +1233,7 @@ print('cfg=' + cfg.read_text().replace(chr(10), ' | '))
             self.assertEqual(r.returncode, 0, r.stderr)
             info = Path(iso.name).read_text()
             self.assertIn("TEL=1", info)
-            self.assertIn("NOUPD=1", info)
+            self.assertIn("NOUPD=11", info)
             self.assertIn("KEEP=0", info)
             self.assertIn("CRON=1", info)
             # Exactly one file (the PROJECTED config); the credential dir is a

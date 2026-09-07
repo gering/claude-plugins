@@ -80,7 +80,9 @@ check("pr-post footer labels cover every adapter backend", _label_set == validat
 # and a --deny prefix list (defense-in-depth; the OS jail's inverted write
 # model is the boundary). The isolated HOME/GROK_HOME keeps ambient Claude
 # settings, hooks and plugins out.
-check("grok tool list carries the shell", "run_terminal_command" in ADAPTER.split("GROK_TOOLS=")[1].split("\n")[0] or 'GROK_SHELL_TOOL="run_terminal_command"' in ADAPTER)
+check("grok tool list carries the shell",
+      'GROK_SHELL_TOOL="run_terminal_command"' in ADAPTER
+      and 'GROK_TOOLS="${GROK_READ_TOOLS},${GROK_SHELL_TOOL},${GROK_WEB_TOOLS}"' in ADAPTER)
 check("run_grok pins --permission-mode dontAsk", "--permission-mode dontAsk" in ADAPTER)
 check("grok deny rules cover egress", "'Bash(curl:*)'" in ADAPTER and "'Bash(git push:*)'" in ADAPTER)
 check("run_grok runs from the isolated HOME", 'HOME="$TMP_GROK_HOME" GROK_HOME="$TMP_GROK_HOME/grok"' in ADAPTER)

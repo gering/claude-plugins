@@ -37,7 +37,7 @@
 # is bounded by model context, not by exec's MAX_ARG_STRLEN.
 # SWARM_MAX_PROMPT_BYTES (default 512 KiB) is that sanity cap.
 #
-# Backend notes (probed against codex 0.147.0 / grok 1.0.13 / kimi-code 0.32.0,
+# Backend notes (probed against codex 0.153.4 / grok 1.0.13 / kimi-code 0.41.0,
 # 2026-07..09):
 #
 #   claude — probe-only: reviews run in-session via the Agent tool, so
@@ -634,6 +634,38 @@ _sandbox_deny_paths() {
   _sandbox_deny_paths_build "$backend"
 }
 
+_bin_physical_dir() {
+  # $1 = command name or path → the physical directory of the resolved
+  # executable (symlinks followed), or nothing. The ONE resolution used by the
+  # read-deny store walks and the host write-deny list, so they cannot drift
+  # (one sparing a directory the other denies — the trojan-launch case).
+  local bin
+  bin="$(command -v -- "$1" 2>/dev/null || true)"
+  [[ -n "$bin" ]] || return 0
+  bin="$(readlink -f -- "$bin" 2>/dev/null || printf '%s' "$bin")"
+  (cd "$(dirname -- "$bin")" 2>/dev/null && pwd -P) || true
+}
+
+_deny_store_entries() {
+  # $1 = store dir, $2 = extended regex of entry NAMES to spare (auth state),
+  # $3 = physical dir of the backend executable (spared with every ancestor).
+  # Emits every other entry of the store for the read-deny — the walk grok and
+  # Kimi share (the whole store is denied to siblings; only the owner needs the
+  # entry-wise form, so its executable and refreshed auth stay reachable).
+  local store="$1" spare="$2" bin_dir="${3:-}" e erp
+  [[ -d "$store" ]] || return 0
+  for e in "$store"/* "$store"/.[!.]* "$store"/..?*; do
+    [[ -e "$e" || -L "$e" ]] || continue
+    [[ "${e##*/}" == "bin" ]] && continue
+    [[ "${e##*/}" =~ ^($spare)$ ]] && continue
+    if [[ -n "$bin_dir" && -d "$e" ]]; then
+      erp="$(cd "$e" 2>/dev/null && pwd -P || true)"
+      [[ -n "$erp" && ( "$bin_dir" == "$erp" || "$bin_dir" == "$erp"/* ) ]] && continue
+    fi
+    printf '%s\n' "$e"
+  done
+}
+
 _sandbox_deny_paths_build() {
   # $1 = the calling backend (its OWN credential dir stays readable — it needs
   # it to authenticate; the OTHER backends' cred dirs are denied so an injected
@@ -662,22 +694,9 @@ _sandbox_deny_paths_build() {
     # mcp_credentials.json, sessions, trusted folders — is denied to grok
     # itself, entry by entry. Spared: the auth file (+ its lock) and the entry
     # holding the resolved grok executable (~/.grok/downloads/grok-<ver>).
-    local gdir="$host/.grok" gbin gbin_dir="" ge gerp
-    gbin="$(command -v -- grok 2>/dev/null || true)"
-    if [[ -n "$gbin" ]]; then
-      gbin="$(readlink -f -- "$gbin" 2>/dev/null || printf '%s' "$gbin")"
-      gbin_dir="$(cd "$(dirname -- "$gbin")" 2>/dev/null && pwd -P || true)"
-    fi
-    for ge in "$gdir"/* "$gdir"/.[!.]* "$gdir"/..?*; do
-      [[ -e "$ge" || -L "$ge" ]] || continue
-      case "${ge##*/}" in auth.json|auth.json.lock|bin) continue ;; esac
-      [[ "$ge" == "$GROK_AUTH_FILE" || "$ge" == "$GROK_AUTH_FILE.lock" ]] && continue
-      if [[ -n "$gbin_dir" && -d "$ge" ]]; then
-        gerp="$(cd "$ge" 2>/dev/null && pwd -P || true)"
-        [[ -n "$gerp" && ( "$gbin_dir" == "$gerp" || "$gbin_dir" == "$gerp"/* ) ]] && continue
-      fi
-      printf '%s\n' "$ge"
-    done
+    local gspare="auth.json|auth.json.lock"
+    [[ "$(dirname -- "$GROK_AUTH_FILE")" == "$host/.grok" ]] && gspare="$gspare|${GROK_AUTH_FILE##*/}|${GROK_AUTH_FILE##*/}.lock"
+    _deny_store_entries "$host/.grok" "$gspare" "$(_bin_physical_dir grok)"
   fi
   # Deny the ambient Kimi store ENTRY BY ENTRY, never the whole directory: the
   # stock installer puts the executable itself at ~/.kimi-code/bin/kimi, so a
@@ -689,35 +708,20 @@ _sandbox_deny_paths_build() {
   # config, plugins) stays denied — even to Kimi.
   # Two carve-outs, both by identity not by name alone: the `bin` entry, and the
   # directory that actually holds the resolved $KIMI_BIN (a custom layout).
-  local kdir="$host/.kimi-code" kbin_dir="" kbin e erp
+  local kdir="$host/.kimi-code"
   if [[ "$own" != "kimi" ]]; then
     # Only kimi ever execs kimi: the siblings get the whole store denied, like
     # ~/.codex and ~/.grok above — no per-entry walk on every codex/grok call.
     printf '%s\n' "$kdir"
   elif [[ -d "$kdir" ]]; then
-    kbin="$(command -v -- "$KIMI_BIN" 2>/dev/null || true)"
-    if [[ -n "$kbin" ]]; then
-      kbin="$(readlink -f -- "$kbin" 2>/dev/null || printf '%s' "$kbin")"
-      kbin_dir="$(cd "$(dirname -- "$kbin")" 2>/dev/null && pwd -P || true)"
-    fi
-    for e in "$kdir"/* "$kdir"/.[!.]* "$kdir"/..?*; do
-      [[ -e "$e" || -L "$e" ]] || continue
-      [[ "${e##*/}" == "bin" ]] && continue
-      # Kimi's OWN auth state stays readable to Kimi (the codex/grok posture for
-      # their cred dirs): run_kimi links credentials/ and oauth/ into the
-      # ephemeral HOME so a mid-review token refresh lands on the HOST file.
-      # Moonshot ROTATES refresh tokens: a refresh inside a private copy
-      # invalidated the host's token and logged the operator out (observed
-      # 2026-09-04, kimi-code 0.32.0).
-      case "${e##*/}" in credentials|oauth) continue ;; esac
-      # Spare the entry that holds the resolved $KIMI_BIN — the directory itself
-      # OR any ancestor of it (a versioned layout: ~/.kimi-code/versions/X/bin).
-      if [[ -n "$kbin_dir" && -d "$e" ]]; then
-        erp="$(cd "$e" 2>/dev/null && pwd -P || true)"
-        [[ -n "$erp" && ( "$kbin_dir" == "$erp" || "$kbin_dir" == "$erp"/* ) ]] && continue
-      fi
-      printf '%s\n' "$e"
-    done
+    # Kimi's OWN auth state stays readable to Kimi (the codex/grok posture for
+    # their cred dirs): run_kimi links credentials/ and oauth/ into the
+    # ephemeral HOME so a mid-review token refresh lands on the HOST file.
+    # Moonshot ROTATES refresh tokens: a refresh inside a private copy
+    # invalidated the host's token and logged the operator out (observed
+    # 2026-09-04, kimi-code 0.32.0). The entry holding the resolved $KIMI_BIN
+    # (or any ancestor: a versioned ~/.kimi-code/versions/X/bin) is spared too.
+    _deny_store_entries "$kdir" "credentials|oauth" "$(_bin_physical_dir "$KIMI_BIN")"
   fi
   # Repo-local secrets: .env*, data/, common key/cred files at repo root.
   # Best-effort (skip if not in a git work tree); only emit paths that exist so
@@ -925,7 +929,7 @@ _host_write_deny_paths() {
   # (config.toml declares MCP servers and a `notify` command, AGENTS.md is
   # instructions, hooks/rules/skills/prompts/agents/plugins are loaded on the
   # next start), which stay write-denied even to codex. $1 = the calling backend.
-  local own="${1:-}" host="${SWARM_HOST_HOME:-$HOME}" p kbin kdir
+  local own="${1:-}" host="${SWARM_HOST_HOME:-$HOME}" p kdir
   for p in "$host"/.zshrc "$host"/.zprofile "$host"/.zshenv "$host"/.zlogin \
            "$host"/.bashrc "$host"/.bash_profile "$host"/.bash_login "$host"/.profile \
            "$host"/.claude "$host"/.claude.json "$host"/.config "$host"/.local/bin \
@@ -937,28 +941,36 @@ _host_write_deny_paths() {
     esac
     printf '%s\n' "$p"
   done
-  for p in config.toml AGENTS.md hooks rules skills prompts agents plugins; do
+  for p in config.toml config.json hooks.json hooks AGENTS.md instructions.md rules skills prompts agents plugins; do
     printf '%s\n' "$host/.codex/$p"
   done
-  kbin="$(command -v -- "$KIMI_BIN" 2>/dev/null || true)"
-  if [[ -n "$kbin" ]]; then
-    kbin="$(readlink -f -- "$kbin" 2>/dev/null || printf '%s' "$kbin")"
-    kdir="$(cd "$(dirname -- "$kbin")" 2>/dev/null && pwd -P || true)"
-    [[ -n "$kdir" && "$kdir" != "$host/.kimi-code/bin" ]] && printf '%s\n' "$kdir"
-  fi
+  kdir="$(_bin_physical_dir "$KIMI_BIN")"
+  [[ -n "$kdir" && "$kdir" != "$host/.kimi-code/bin" ]] && printf '%s\n' "$kdir"
   return 0
 }
 
-_contains_protected_root() {
-  # $1 = directory. 0 iff a protected (repository) root lies UNDER it.
-  local d root
-  d="$(cd -- "$1" 2>/dev/null && pwd -P)" || return 1
-  _repo_protected_roots >/dev/null
+_protected_root_relation() {
+  # $1 = directory → prints `under` (inside a protected repository root),
+  # `contains` (a protected root lies beneath it), or `none`. One loop for
+  # both questions so the jail build and the readiness guards cannot disagree.
+  local d root rel=none
+  d="$(cd -- "$1" 2>/dev/null && pwd -P)" || { echo none; return 1; }
+  _repo_protected_roots >/dev/null   # prime the memo HERE, not in the <(…) subshell
   while IFS= read -r root; do
     [[ -n "$root" ]] || continue
-    [[ "$root" == "$d"/* ]] && return 0
+    if [[ "$d" == "$root" || "$d" == "$root"/* ]]; then rel=under; break; fi
+    [[ "$root" == "$d"/* ]] && rel=contains
   done < <(_repo_protected_roots)
-  return 1
+  echo "$rel"
+}
+_contains_protected_root() { [[ "$(_protected_root_relation "$1")" == contains ]]; }
+
+_SWARM_PROMPT_DIR=""
+_note_prompt_dir() {
+  # VOID setter: the prompt's directory hosts the scratch copies and the
+  # ephemeral grok/Kimi HOMEs, so it becomes a writable root of the jail (it
+  # may sit outside TMPDIR). Read by _writable_roots.
+  _SWARM_PROMPT_DIR="$(cd -- "$(dirname -- "$1")" 2>/dev/null && pwd -P || true)"
 }
 
 _writable_roots() {
@@ -969,8 +981,10 @@ _writable_roots() {
   # Bash) can plant nothing outside its scratch space and its own state dir.
   # $1 = backend: its own store is where it keeps sessions and refreshed auth.
   local own="${1:-}" host="${SWARM_HOST_HOME:-$HOME}" t
-  for t in "${TMPDIR:-/tmp}" /tmp /private/tmp /dev; do
-    [[ -e "$t" ]] && printf '%s\n' "$t"
+  # _SWARM_PROMPT_DIR: the caller's prompt directory, where the ephemeral
+  # grok/Kimi HOMEs are created — writable even when it is outside TMPDIR.
+  for t in "${TMPDIR:-/tmp}" /tmp /private/tmp /dev "${_SWARM_PROMPT_DIR:-}"; do
+    [[ -n "$t" && -e "$t" ]] && printf '%s\n' "$t"
   done
   # macOS per-user temp + cache dirs (TMPDIR is usually the first; node and
   # python write caches to the second).
@@ -1134,22 +1148,18 @@ sys.stdout.write("".join(parts))
     # Inverted write model: the whole tree read-only, a fresh /dev, then only
     # the scratch / temp / own-store roots bound writable.
     local args=(--ro-bind / / --dev /dev) p rp q targets
+    # Writable roots FIRST (files such as grok's auth.json bind like dirs), the
+    # repository binds after them: a repo cloned under /tmp then sits as its own
+    # mount on top of the /tmp bind, so the final --remount-ro targets a real
+    # mountpoint instead of aborting bwrap, and the scratch dir stays writable.
+    while IFS= read -r p; do
+      [[ -n "$p" && -e "$p" && "$p" != /dev ]] || continue
+      args+=(--bind "$p" "$p")
+    done < <(_writable_roots "$backend")
     while IFS= read -r p; do
       [[ -n "$p" ]] || continue
       if [[ -d "$p" ]]; then args+=(--bind "$p" "$p"); fi
     done < <(_repo_protected_roots)
-    # Files (grok's auth.json) bind like dirs. A writable root that CONTAINS a
-    # protected root (a repo cloned under /tmp) is skipped: its recursive bind
-    # would cover the repository bind above and the final --remount-ro would
-    # then target a non-mountpoint and abort bwrap — the jail would vanish.
-    while IFS= read -r p; do
-      [[ -n "$p" && -e "$p" && "$p" != /dev ]] || continue
-      if _contains_protected_root "$p"; then
-        echo "warning: writable root $p contains a repository root — not bound writable inside the jail (a review scratch dir under it is still writable through TMPDIR when that is narrower)" >&2
-        continue
-      fi
-      args+=(--bind "$p" "$p")
-    done < <(_writable_roots "$backend")
     while IFS= read -r p; do
       [[ -n "$p" && -e "$p" ]] || continue
       args+=(--ro-bind "$p" "$p")
@@ -1758,13 +1768,10 @@ for model in models:
   # then fail session/set_config_option on every cluster.
   if [[ -s "$KIMI_CONFIG_FILE" ]]; then
     local projected filtered="" m
-    local projection
-    if ! projection="$(_kimi_project_config "$KIMI_CONFIG_FILE" 2>/dev/null)"; then
+    if ! projected="$(_kimi_project_config "$KIMI_CONFIG_FILE" --models 2>/dev/null)"; then
       echo "warning: could not project the Kimi config ($KIMI_CONFIG_FILE) — readiness cannot see its model catalogue" >&2
       return 1
     fi
-    projected="$(printf '%s\n' "$projection" \
-      | sed -n -E 's/^\[models\.("([^"]*)"|'"'"'([^'"'"']*)'"'"'|([A-Za-z0-9_-]+))\]$/\2\3\4/p')"
     while IFS= read -r m; do
       [[ -n "$m" ]] || continue
       _line_in_list "$m" "$projected" && filtered+="$m"$'\n'
@@ -2035,7 +2042,7 @@ ready_check() {
     # offers any model the adapter can drive (grok drops/renames models
     # between releases — 0.2.101 removed grok-composer-2.5-fast).
     grok)   [[ -s "$GROK_AUTH_FILE" ]] && grok_model_offered && _scratch_dir_ok ;;
-    # ACP is the only out-of-band transport in kimi-code 0.32.0. The default
+    # ACP is the only out-of-band transport in kimi-code (0.32.0+; 0.41.0 verified). The default
     # model is pinned for deterministic ensemble behavior and must be offered.
     # The jail is part of Kimi's READINESS, not a rule the skill re-derives in
     # prose: `list --json` used to advertise kimi ready on a jail-less host and
@@ -2103,7 +2110,7 @@ ready_hint() {
           echo "run: kimi login"
         fi
       elif ! _kimi_has_acp; then
-        echo "this kimi CLI has no ACP stdio server — update kimi-code (verified on 0.32.0)"
+        echo "this kimi CLI has no ACP stdio server — update kimi-code (verified on 0.41.0, where the ACP wire shape this adapter relies on was traced)"
       elif ! kimi_model_offered "${requested_model:-$KIMI_DEFAULT_MODEL}"; then
         echo "this kimi CLI does not offer ${requested_model:-$KIMI_DEFAULT_MODEL} (see: kimi provider list --json)"
       elif ! _read_web_safe kimi; then
@@ -2484,6 +2491,7 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
     /*) ;;
     *)  prompt_path="$PWD/$prompt_path" ;;
   esac
+  _note_prompt_dir "$prompt_path"
   case "$backend" in
     codex) run_codex "$prompt_path" "$effort" "$model" "$schema" ;;
     grok)  run_grok  "$prompt_path" "$effort" "$model" "$schema" ;;
@@ -2604,6 +2612,7 @@ if not (isinstance(d, dict) and isinstance(d.get("findings"), list)):
 # Do NOT fall back to a denylist that could admit a mutating tool.
 _grok_help_done=""
 _grok_help_rc=0
+_grok_shell_policy=""
 _grok_has_prompt_file() {
   # Preflight for the out-of-band prompt flag. `--prompt-file` is what keeps the
   # diff off argv (see the transport note in `run`); an older CLI without it
@@ -2654,7 +2663,8 @@ _grok_has_prompt_file() {
     # so a non-zero rc always means the probe itself failed — it is never the
     # "ran unbounded, cannot have timed out" case the old $_timeout_bin gate
     # silenced.
-    echo "warning: \`grok --help\` probe did not complete (rc=$rc) — assuming --prompt-file is supported" >&2
+    _grok_shell_policy=no
+    echo "warning: \`grok --help\` probe did not complete (rc=$rc) — assuming --prompt-file is supported; the shell tool and its --permission-mode/--deny flags stay off until the probe answers" >&2
     return 0
   fi
   # An EMPTY capture is not a negative answer either — same rule as a non-zero rc
@@ -2667,7 +2677,8 @@ _grok_has_prompt_file() {
   # report the truth, loudly.
   if [[ -z "$help" ]]; then
     _grok_help_rc=0
-    echo "warning: \`grok --help\` produced no output — assuming --prompt-file is supported" >&2
+    _grok_shell_policy=no
+    echo "warning: \`grok --help\` produced no output — assuming --prompt-file is supported; the shell tool and its --permission-mode/--deny flags stay off until the probe answers" >&2
     return 0
   fi
   case "$help" in
@@ -2682,7 +2693,6 @@ _grok_has_prompt_file() {
   esac
   return "$_grok_help_rc"
 }
-_grok_shell_policy=""
 
 GROK_READ_TOOLS="read_file,list_dir,grep"
 # run_terminal_command is grok's shell (traced 2026-09-07 on 1.0.13; it also
@@ -2806,6 +2816,15 @@ run_grok() {
   # Diagnostics only: SWARM_GROK_TRACE=<file> keeps grok's stderr (above) and
   # its raw stdout (here). Off by default — the raw output is untrusted text.
   if [[ -n "${SWARM_GROK_TRACE:-}" ]]; then printf '%s\n' "$raw" >>"$SWARM_GROK_TRACE" 2>/dev/null || true; fi
+  # auth.json is linked as a FILE (GROK_HOME must hold it by that name). A
+  # refresh that writes a temp file and renames it over the link replaces the
+  # link with a regular file — copy that rotated token back to the host before
+  # cleanup rm -rf's the ephemeral HOME, or the operator is logged out next run.
+  if [[ -f "$TMP_GROK_HOME/grok/auth.json" && ! -L "$TMP_GROK_HOME/grok/auth.json" ]]; then
+    cp -p "$TMP_GROK_HOME/grok/auth.json" "$GROK_AUTH_FILE" 2>/dev/null \
+      && echo "note: grok rotated its auth file during the review — copied back to $GROK_AUTH_FILE" >&2 \
+      || echo "warning: grok rotated its auth file during the review and it could not be copied back to $GROK_AUTH_FILE — run: grok login" >&2
+  fi
   if (( rc != 0 )); then
     # stderr is deliberately discarded (injection guard), so name the likely
     # cause: an older CLI that predates the pinned model reports Ready (auth
@@ -2862,16 +2881,23 @@ _kimi_output_contract() {
     printf '\nThe response must be exactly the schema object and nothing else.\n'
 }
 
-_dir_under_protected_root() {
-  # $1 = directory. 0 iff it resolves inside a write-denied repository root.
-  local d root
-  d="$(cd -- "$1" 2>/dev/null && pwd -P)" || return 1
-  _repo_protected_roots >/dev/null   # prime the memo HERE, not in the <(…) subshell
-  while IFS= read -r root; do
-    [[ -n "$root" ]] || continue
-    [[ "$d" == "$root" || "$d" == "$root"/* ]] && return 0
-  done < <(_repo_protected_roots)
-  return 1
+_dir_under_protected_root() { [[ "$(_protected_root_relation "$1")" == under ]]; }
+
+_ephemeral_home_beside_prompt() {
+  # $1 = backend label, $2 = prompt path → prints the new mode-0700 HOME dir,
+  # created NEXT TO the prompt (a SIGKILL-orphaned one then sits where the
+  # skill's cleanup reaches; no $TMPDIR fallback on purpose) and never under
+  # a protected root (the jail write-denies those, so the backend could not
+  # keep its session state there and would fail opaquely per cluster).
+  local backend="$1" prompt="$2" home
+  if _dir_under_protected_root "$(dirname -- "$prompt")"; then
+    echo "$backend prompt file must not live inside the repository (its directory is under a write-denied root) — the review skill hands over a file in its own scratch dir" >&2
+    exit 2
+  fi
+  home="$(mktemp -d "$(dirname -- "$prompt")/swarm-$backend.XXXXXX")" \
+    || { echo "Could not create an isolated $backend HOME next to the prompt file (is its directory writable?)" >&2; exit 2; }
+  chmod 700 "$home"
+  printf '%s\n' "$home"
 }
 
 _grok_prepare_runtime() {
@@ -2891,14 +2917,8 @@ _grok_prepare_runtime() {
   # links only auth.json (+ lock) back to the host so a token refresh lands
   # there. Verified: `grok inspect` then reports no instructions, no
   # permissions, no plugins, no hooks, project trusted, and tools run.
-  if _dir_under_protected_root "$(dirname -- "$1")"; then
-    echo "grok prompt file must not live inside the repository (its directory is under a write-denied root) — the review skill hands over a file in its own scratch dir" >&2
-    exit 2
-  fi
   local home
-  home="$(mktemp -d "$(dirname -- "$1")/swarm-grok.XXXXXX")" \
-    || { echo "Could not create an isolated grok HOME next to the prompt file (is its directory writable?)" >&2; exit 2; }
-  chmod 700 "$home"
+  home="$(_ephemeral_home_beside_prompt grok "$1")" || exit 2
   TMP_GROK_HOME="$home"
   mkdir -p "$home/.claude" "$home/grok" || { echo "Could not create the isolated grok HOME" >&2; exit 2; }
   printf '{"permissions":{"allow":[],"deny":[]}}\n' > "$home/.claude/settings.json" \
@@ -3012,13 +3032,7 @@ _kimi_prepare_runtime() {
   # SIGKILL-orphan (a projected config) this placement exists to prevent.
   # And never UNDER a protected root: the jail write-denies those, so kimi
   # could not write its session state and session/new would fail opaquely.
-  if _dir_under_protected_root "$(dirname -- "$1")"; then
-    echo "kimi prompt file must not live inside the repository (its directory is under a write-denied root) — the review skill hands over a file in its own scratch dir" >&2
-    exit 2
-  fi
-  home="$(mktemp -d "$(dirname -- "$1")/swarm-kimi.XXXXXX")" \
-    || { echo "Could not create an isolated Kimi HOME next to the prompt file (is its directory writable?)" >&2; exit 2; }
-  chmod 700 "$home"
+  home="$(_ephemeral_home_beside_prompt kimi "$1")" || exit 2
   TMP_KIMI_HOME="$home"
   mkdir -p "$home/.kimi-code" || { echo "Could not create the isolated Kimi HOME" >&2; exit 2; }
   chmod 700 "$home/.kimi-code"
@@ -3044,9 +3058,10 @@ _kimi_prepare_runtime() {
   # references into the linked credentials), [models.*], [services.*] (the
   # moonshot search/fetch tools) and [thinking]. Everything else — [[hooks]],
   # [mcp], loop control, permission mode — is exactly the ambient executable
-  # state the isolation exists to leave behind. Raw-section projection on
-  # purpose: it needs no TOML parser (tomllib is 3.11+), and a section this
-  # filter does not recognise is DROPPED, never forwarded.
+  # state the isolation exists to leave behind. _kimi_project_config parses
+  # with tomllib (python >= 3.11) and falls back to a hardened line-based
+  # projection on older interpreters; either way a section this filter does
+  # not recognise is DROPPED, never forwarded.
   if [[ -s "$KIMI_CONFIG_FILE" ]]; then
     _kimi_project_config "$KIMI_CONFIG_FILE" > "$home/.kimi-code/config.toml" \
       || { echo "Could not project the Kimi config into the isolated runtime" >&2; exit 1; }
@@ -3054,7 +3069,23 @@ _kimi_prepare_runtime() {
   fi
 }
 
+_kimi_projection_memo_key=""; _kimi_projection_memo=""
 _kimi_project_config() {
+  # $1 = host config.toml → stdout: the allowlisted projection (see below);
+  # `$2 = --models` prints only the kept [models.*] ids, one per line — the
+  # projector's own list, so no consumer re-parses its TOML with sed.
+  # Memoized per process: `run kimi` needs it for readiness AND the runtime.
+  _kimi_projection_fill "$@" || return $?
+  printf '%s\n' "$_kimi_projection_memo"
+}
+_kimi_projection_fill() {
+  # VOID setter for the memo (kept apart from the printer on purpose).
+  local key="$1|${2:-}" text
+  [[ "$_kimi_projection_memo_key" == "$key" ]] && return 0
+  text="$(_kimi_project_config_uncached "$@")" || return $?
+  _kimi_projection_memo_key="$key"; _kimi_projection_memo="$text"
+}
+_kimi_project_config_uncached() {
   # $1 = host config.toml → stdout: the allowlisted projection (see above).
   # Top-level scalars: only default_model. Tables: [services.*] and [thinking];
   # [providers.*] ONLY the managed (`managed:*`, OAuth) ones with their
@@ -3065,7 +3096,7 @@ _kimi_project_config() {
   # looking line inside a multiline string or single-quoted TOML cannot fool
   # it; on an older python3 a hardened line-based projection applies the same
   # allowlist. Array tables ([[hooks]]) are never emitted.
-  python3 - "$1" <<'PY'
+  python3 - "$1" "${2:-}" <<'PY'
 import re, sys
 # Secret-shaped scalars are dropped from EVERY projected table: the managed
 # provider and the moonshot services authenticate through the linked oauth
@@ -3117,6 +3148,7 @@ except ImportError:  # python < 3.11: keep the line-based projection, hardened
     tomllib = None
 
 out = []
+kept_models = []
 if tomllib is not None:
     with open(sys.argv[1], "rb") as fh:
         doc = tomllib.load(fh)
@@ -3128,6 +3160,7 @@ if tomllib is not None:
         emit_table(out, ["providers", name], table)
     for name, table in (doc.get("models") or {}).items():
         if isinstance(table, dict) and table.get("provider") in providers:
+            kept_models.append(name)
             emit_table(out, ["models", name], table)
     for name, table in (doc.get("services") or {}).items():
         if isinstance(table, dict):
@@ -3167,14 +3200,30 @@ else:
                 or (sec["root"] == "providers" and sec["name"] in kept)
                 or (sec["root"] == "models" and provider_of(sec) in kept))
         if keep:
+            if sec["root"] == "models":
+                kept_models.append(sec["name"])
             out.append("")
+            skipping_multiline = None   # the closing delimiter of a dropped """/\'\'\' value
             for l in sec["lines"]:
+                if skipping_multiline:
+                    if skipping_multiline in l:
+                        skipping_multiline = None
+                    continue
                 key = re.match(r"^\s*([A-Za-z0-9_\"'-]+)\s*=\s*(.*)$", l)
                 if key and SECRET_KEY.search(key.group(1).strip("\"'")) \
                         and key.group(2).strip() not in ('""', "''"):
+                    # A multiline string value continues on the following lines:
+                    # drop the whole block, not just its opening line.
+                    val = key.group(2).strip()
+                    for delim in ('"""', "\'\'\'"):
+                        if val.startswith(delim) and val.count(delim) == 1:
+                            skipping_multiline = delim
                     continue
                 out.append(l)
-sys.stdout.write("\n".join(out) + "\n")
+if sys.argv[2] == "--models":
+    sys.stdout.write("".join(m + "\n" for m in kept_models))
+else:
+    sys.stdout.write("\n".join(out) + "\n")
 PY
 }
 

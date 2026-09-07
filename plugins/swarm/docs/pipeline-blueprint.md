@@ -232,7 +232,7 @@ credential mid-review) converged on these non-negotiable mitigations:
    settings, hooks, plugins/MCP servers and the repo's `CLAUDE.md`/rules as
    instructions; and a merely DENIED settings file makes its permission engine
    ask, which headless `dontAsk` answers by cancelling the turn); codex
-   `-s danger-full-access -a never --ignore-user-config --ignore-rules -C <repo>
+   `-s danger-full-access --ignore-user-config --ignore-rules -C <repo>
    -c tools.web_search=true` under the jail — codex's own seatbelt cannot be
    applied inside any outer profile carrying a deny rule (`sandbox_apply:
    Operation not permitted`), which had silently killed every codex shell

@@ -496,7 +496,10 @@ class KimiAcpTests(unittest.TestCase):
         allowed = [
             "git log --oneline -20", "git show HEAD~1 -- a.py", "git blame -L 3,9 a.py",
             "git diff main...HEAD --stat", "git branch -a", "git stash list",
-            "git worktree list", "git config --list", "git remote -v",
+            "git worktree list",
+            # read-only flags that a substring match had mistaken for exec options
+            "git log --pretty=format:%h -n 20", "git diff --no-prefix", "grep --binary-files=text x f",
+            "git grep -o TODO", "git log -c", "git grep -c x",
             "grep -rn TODO src | head -50", "rg -n 'def x' src", "find . -name '*.py'",
             "ls -la plugins", "cat README.md", "wc -l a.py",
         ]
@@ -512,6 +515,8 @@ class KimiAcpTests(unittest.TestCase):
             # listing flag next to a mutating one (#2)
             "git branch -a -D topic", "git tag -l -d v1", "git remote -v add o u",
             "git config --list --edit", "git stash list drop",
+            # remote/config print URLs and helpers that can carry tokens
+            "git remote -v", "git config --list", "git config --get user.name",
             "git branch foo", "git tag v1", "git config user.name x", "git remote add o u",
             "git -c core.pager=evil log", "git log --output=/tmp/x", "git log > /tmp/x",
             "ls; rm -rf /", "echo hi && rm x", "echo hi || rm x", "cat $(echo x)",
@@ -524,6 +529,13 @@ class KimiAcpTests(unittest.TestCase):
         for command in rejected:
             self.assertFalse(module._read_only_command(command)[0], command)
         self.assertEqual(module._command_of({"command": "git log"}), "git log")
+        # deny scan: an apostrophe is not a deny hit, a glob in a path-like token is
+        client = module.AcpClient.__new__(module.AcpClient)
+        client.deny_paths = ["/tmp/swarm-deny-probe"]; client.cwd = "/"
+        self.assertFalse(client._denied_tokens("Fetch Moonshot's ACP docs"))
+        self.assertFalse(client._denied_tokens("what's the ACP spec say"))
+        self.assertTrue(client._denied("/Users/*/.kimi-code/credentials/kimi-code.json"))
+        self.assertFalse(client._denied("*.py"))
         self.assertEqual(module._command_of({"cmd": ["git", "log"]}), "git log")
         self.assertIsNone(module._command_of({"path": "x"}))
 
@@ -617,9 +629,7 @@ class KimiAcpTests(unittest.TestCase):
         self.assertIn("no known kind", result.stderr)
 
     def test_read_of_the_store_via_rawinput_only_aborts(self):
-        result, _ = self.run_helper("read-credentials-rawinput",
-                                    env_extra={"HOME": str(Path(os.environ["FAKE_ROOT_HINT"]).parent)}
-                                    if "FAKE_ROOT_HINT" in os.environ else None)
+        result, _ = self.run_helper("read-credentials-rawinput")
         self.assertEqual(result.returncode, 13)
         self.assertIn("denied path", result.stderr)
 

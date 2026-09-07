@@ -1,7 +1,7 @@
 ---
 title: "Swarm Backend Adapter Layer"
 createdAt: 2026-07-03
-updatedAt: 2026-09-05
+updatedAt: 2026-09-07
 createdFrom: "PR #21"
 updatedFrom: "add-kimi-swarm-voice"
 pluginVersion: 1.9.0
@@ -31,7 +31,7 @@ inlined diff (callers, config, types, library/CVE knowledge).
 
 | Voice | File-read | Web | Write/shell | Scope |
 |-------|-----------|-----|-------------|-------|
-| **codex** | yes — through its shell (codex reads files with shell commands) | yes (`-c tools.web_search=true`) | shell yes, writes OS-denied: under the jail `-s danger-full-access -a never --ignore-user-config --ignore-rules` (codex's own seatbelt cannot nest inside an outer profile with any deny rule — `sandbox_apply: Operation not permitted`, so `-s read-only` had killed every shell command and file read since 0.6.0); `-s read-only` only on a jail-less host; never `workspace-write` / `--add-dir` | `-C <repo-root>` |
+| **codex** | yes — through its shell (codex reads files with shell commands) | yes (`-c tools.web_search=true`) | shell yes, writes OS-denied: under the jail `-s danger-full-access --ignore-user-config --ignore-rules` (codex's own seatbelt cannot nest inside an outer profile with any deny rule — `sandbox_apply: Operation not permitted`, so `-s read-only` had killed every shell command and file read since 0.6.0); `-s read-only` only on a jail-less host; never `workspace-write` / `--add-dir` | `-C <repo-root>` |
 | **grok** | yes (`read_file,list_dir,grep` + `run_terminal_command` in `--tools`) | yes (`web_search,web_fetch` in the same allowlist; drop `--disable-web-search`) | shell yes (`run_terminal_command`), writes OS-denied; `--permission-mode dontAsk` + `--deny` prefix rules (egress/destructive verbs) as defense-in-depth — grok pre-approves every tool named in `--tools` whatever the mode, and deny rules are honoured; never `write` / `search_replace` | `--cwd <repo-root>`; ephemeral HOME/GROK_HOME with neutral `.claude/settings.json` and only `auth.json` linked |
 | **kimi** | yes (approval-free ACP read/search tools + a read-only shell command allowlist: git read subcommands, grep/rg/find/ls/cat pipelines) | yes (`WebSearch`/`FetchURL`, when the managed provider exposes them) | OS-immutable repo/Git (every worktree); ACP tool-kind allowlist aborts on first unsafe run, and an `execute` whose command fails the allowlist counts as unsafe (Kimi 0.32 can auto-approve some in-repo writes) | ACP `session/new.cwd=<repo-root>`; isolated HOME; repo-local `.kimi-code`/`.kimi`/`.mcp.json` denied; `ready` includes the OS jail |
 
@@ -146,7 +146,7 @@ agent read the diff file itself was considered there and REJECTED — delivery
 stops being verifiable, the untrusted diff arrives outside the nonce fence, and
 each voice pays an extra round-trip.
 
-## Kimi ACP contract (swarm 0.11.0; kimi-code 0.32.0)
+## Kimi ACP contract (swarm 0.11.0; kimi-code 0.41.0; first wired on 0.32.0)
 
 Kimi is the schema-asymmetric backend: the CLI has no structured-output flag.
 The adapter therefore sends the complete review prompt out-of-band over ACP v1
@@ -279,7 +279,7 @@ that carries ANY deny rule (even one read-deny) fails with `sandbox_apply:
 Operation not permitted`, so `-s read-only` had left every codex shell
 command dead — and codex reads files through its shell, so it had reviewed
 the inlined diff alone since the jail arrived (0.6.0). Under the jail codex
-now runs `-s danger-full-access -a never --ignore-user-config --ignore-rules`
+now runs `-s danger-full-access --ignore-user-config --ignore-rules`
 (no ambient MCP servers, plugins, `notify`, hooks feature, execpolicy rules;
 auth still from CODEX_HOME); `-s read-only` stays the jail-less posture.
 (2) **grok pre-approves every tool in `--tools`** regardless of
