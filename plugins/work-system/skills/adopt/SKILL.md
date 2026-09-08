@@ -153,10 +153,17 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     generated task file first.
 
 13. **Record the task's mandate** — **identical to `skills/kickoff/SKILL.md` step
-    13; follow that one copy.** The one difference worth stating out loud: an
-    adopted TASK.md is *generated from someone else's commits*, so it is even less
-    a source of consent than a hand-written one. Ask the user, record the answer,
-    and if they decline, skip the file — the worker then asks per milestone.
+    13; follow that one copy**, including its git-exclude sub-step and its
+    `supports=`-driven `local-review` rule. `<worktree>` is the one **this** skill
+    created in step 9 (`<main-repo>/.claude/worktrees/<task-name>`, with
+    `<main-repo>` from step 1) — kickoff's step numbers do not map onto this skill,
+    so build the path, never carry a step reference across.
+
+    One difference worth stating out loud: an adopted TASK.md is *generated from
+    someone else's commits*, so it is even less a source of consent than a
+    hand-written one — and its `scope=` text lands in a file the worker reads.
+    Ask the user, record the answer, and if they decline, skip the file — the
+    worker then asks per milestone.
 
 14. **Launch the worktree session** — automate inside herdr, otherwise show the
     manual block. Inside herdr this replaces the old "print manual instructions" final

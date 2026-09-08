@@ -155,7 +155,13 @@ HARNESS_HERDR_KIND="claude"
 # non-claude worker has no /continue to read it: without this line the worker would
 # have to infer its authority from TASK.md prose, which is exactly what the mandate
 # exists to prevent.
-BOOTSTRAP_PROMPT='Read TASK.md and MANDATE.md in this worktree, then start on the first unmet requirement. MANDATE.md is the record of what you may do without asking again and where you must stop; anything it does not list is not authorized. Commit on the current branch as you go, and open a PR when the work is complete.'
+#
+# The milestone list is NOT spelled out here. An earlier version ended with
+# "Commit on the current branch as you go, and open a PR when the work is
+# complete" — a concrete instruction that overrode the mandate the same prompt had
+# just told the worker to obey, so a draft-only lane opened a PR anyway. The
+# milestones live in MANDATE.md; this prompt only points at it.
+BOOTSTRAP_PROMPT='Read TASK.md and MANDATE.md in this worktree, then start on the first unmet requirement. MANDATE.md is the record of what you may do without asking again and where you must stop: carry out only the milestones listed under allow, and ask before anything else, including anything it does not mention. If there is no MANDATE.md, nothing was pre-authorized -- ask before each milestone (committing, pushing, opening a PR).'
 
 # The ASCII marker a wrapper worker prints when its seed phase fails. It names the
 # failure unambiguously and states that TASK.md was never started, where the
@@ -208,10 +214,10 @@ KIMI_LAUNCH_SCRIPT='if kimi -m "$1" -p "$2"; then exec kimi -c --auto; else rc=$
 #   close-exit -> /close may inject `/exit` for a clean self-teardown
 #   statusline -> the `[ws]` statusline segment tracks its session
 # codex/grok/kimi get commit,pr only — they drive git + a PR but have none of the
-# claude-session lifecycle hooks. RESERVED / not yet consumed: the skills
-# currently hardcode the claude-vs-non-claude distinction in prose; this field is
-# the seed for the manager/worker-orchestration design to read per-agent
-# capabilities from one place. Keep it in sync when that lands.
+# claude-session lifecycle hooks. CONSUMED by /kickoff and /adopt when recording
+# the lane's mandate: an agent whose `supports` lacks `continue` cannot run
+# /swarm:review or the pr-flow skills, so `local-review` is dropped from its
+# allow list. Read the field, never re-derive the split by matching CLI names.
 #
 # `herdr_mode|herdr_kind` is the modern-herdr transport contract (see the header):
 # agent-start entries hand their argv TAIL to `--kind <herdr_kind>` (so argv[0]

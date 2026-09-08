@@ -11,7 +11,10 @@ missing work-system yields 3, never 1 and never a silent 0.
 The dev layout (plugins/pr-flow + plugins/work-system as siblings) is the one
 resolution layer that can be exercised hermetically; the manifest and cache
 layers depend on the user's real ~/.claude and are covered by the glyph shim's
-production use.
+production use. Every run therefore gets an ISOLATED $HOME — otherwise the
+manifest layer resolves the user's actually-installed work-system and the
+"absent" assertions below start passing or failing depending on what the
+machine happens to have installed.
 """
 import os
 import subprocess
@@ -45,8 +48,16 @@ def layout(with_work_system=True):
     return root
 
 
-def run(root, *args, cwd=None):
-    env = dict(os.environ, CLAUDE_PLUGIN_ROOT=str(root / "pr-flow"))
+ISOLATED_HOME = tempfile.mkdtemp()   # empty: no ~/.claude/plugins manifest at all
+
+
+def run(root, *args, cwd=None, plugin_root=True, env_extra=None):
+    env = dict(os.environ, HOME=ISOLATED_HOME)
+    env.pop("CLAUDE_PLUGIN_ROOT", None)
+    if plugin_root:
+        env["CLAUDE_PLUGIN_ROOT"] = str(root / "pr-flow")
+    if env_extra:
+        env.update(env_extra)
     return subprocess.run(
         ["bash", str(root / "pr-flow" / "scripts" / "mandate-shim.sh"), *args],
         capture_output=True, text=True, env=env, cwd=cwd,
@@ -111,6 +122,33 @@ check("missing work-system names itself", "no-work-system" in r.stdout)
 r = run(lonely, "allows", "open-pr", str(repo))
 check("work-system without mandate.sh is exit 3", r.returncode == 3)
 check("work-system without mandate.sh names itself", "no-work-system" in r.stdout)
+
+# --- the locator never executes code from the working directory -------------
+# `${CLAUDE_PLUGIN_ROOT:-.}` used to make the fallback "wherever the shell is",
+# so any repo carrying scripts/lib-work-system.sh got it sourced — in the main
+# session, unsandboxed — while the shim still printed a plausible verdict.
+hostile = Path(tempfile.mkdtemp())
+(hostile / "scripts").mkdir()
+marker = hostile / "EXECUTED"
+(hostile / "scripts" / "lib-work-system.sh").write_text(
+    f'touch "{marker}"\nws_find() {{ :; }}\n'
+)
+r = run(root, "allows", "open-pr", str(repo), cwd=str(hostile), plugin_root=False)
+check("a cwd lib is never sourced", not marker.exists())
+check("the real sibling lib is used instead", r.returncode == 0)
+# Same from a layout with no work-system: the hostile lib must not be reached
+# even when the shim has nothing of its own to find.
+r = run(lonely, "allows", "open-pr", str(repo), cwd=str(hostile), plugin_root=False)
+check("a cwd lib is not sourced on the not-found path either", not marker.exists())
+check("and the answer stays 'unknown', not 'denied'", r.returncode == 3)
+
+# --- the dev layout resolves without CLAUDE_PLUGIN_ROOT ---------------------
+# A shim invoked outside a skill's ${CLAUDE_PLUGIN_ROOT} expansion (a hook, an
+# absolute-path call) must still find its sibling work-system, or a granted
+# action is silently re-asked.
+r = run(root, "allows", "open-pr", str(repo), plugin_root=False)
+check("dev layout resolves from the script's own location", r.returncode == 0)
+check("and reports the real verdict", "allowed" in r.stdout)
 
 # --- usage ------------------------------------------------------------------
 check("unknown verb exits 2", run(root, "bogus").returncode == 2)

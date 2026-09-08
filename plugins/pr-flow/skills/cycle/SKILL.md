@@ -84,15 +84,23 @@ Strip the flags first; whatever is left over is the commit message.
 7. **Trigger Claude review** (only if no auto-trigger detected):
    - **First: is there a review bot at all?** `@claude review` is a comment — it
      succeeds whether or not anything is listening, and then step 8 polls until it
-     times out. Check before spending ten minutes on it:
+     times out. Ask the shared probe (it anchors on the repo root, so it is
+     correct from a subdirectory or from the main repo while the PR belongs to a
+     worktree — a cwd-relative grep is not):
      ```sh
-     grep -rlie 'claude' .github/workflows/ 2>/dev/null
+     bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" has-bot
      ```
-   - **Non-empty** → a review workflow exists. Run:
+   - **`has_bot=yes`** → a comment-triggered review workflow exists. Run:
      `gh pr comment <PR_NUMBER> --body "@claude review"` and continue to step 8.
-   - **Empty** → this repo has no review bot, so there is nothing to trigger and
-     nothing to poll. Do not comment, do not enter step 8. Say so plainly and take
-     the local route instead:
+   - **`has_bot=unknown`** → the probe could not tell (not a git repo, unreadable
+     workflows dir). Do **not** guess in either direction: say what it could not
+     determine and ask whether to trigger the bot or run the local review.
+   - **`has_bot=no`** → this repo has no comment-triggered review bot, so there is
+     nothing to trigger and nothing to poll (the `why=` line says whether nothing
+     matched at all or a claude workflow exists that only a push can fire). Do not
+     comment, do not enter step 8. Say so plainly — including that a repo driven
+     purely by the Claude GitHub App with no workflow file also lands here — and
+     take the local route:
      - `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" allows local-review`
        exits **0** → run `/swarm:review --pr <PR_NUMBER>` and treat its findings as
        this round's review (loop mode included: the loop cares about findings, not
@@ -153,6 +161,12 @@ When `--loop` (alias `--auto`) is present, `/cycle` stops being a single pass an
   ```
   `review_rounds_left` (non-empty) → `MAX` = that number; otherwise `MAX = 10`. An
   explicit `--max=N` always wins — the user typing a number *is* the decision.
+- **Check the budget before the first round, not after it.** If `show` already
+  reports `review_budget_exhausted=yes` (or the derived `MAX` is `0`), stop right
+  here with the exhausted message — do not run one review/fix pass and discover
+  the cap afterwards. `/cycle --loop` is the **owner** of the counter for a lane
+  that reviews this way: `/continue` deliberately does not book a round when it
+  hands the review to this loop, so every increment below is the only one.
 - **Consume a round from the mandate at the start of each iteration**, not just
   from an in-session counter:
   ```sh
@@ -160,8 +174,11 @@ When `--loop` (alias `--auto`) is present, `/cycle` stops being a single pass an
   ```
   The in-session counter dies with the session; a resumed worker would otherwise
   restart its budget at zero and loop as long again. The recorded one is the only
-  count that survives a `claude -c`. Ignore a non-zero exit (no mandate, or no
-  work-system) and fall back to `MAX` alone.
+  count that survives a `claude -c`. Exit **3** (no mandate, or no work-system) →
+  fall back to `MAX` alone. Exit **4** means the round could NOT be persisted
+  (read-only tree, no space): the budget would silently restart on the next
+  resume, so surface the error and stop rather than looping on a counter that is
+  not being written.
 - Initialize counters: `ROUND = 0`, `FIXES_TOTAL = 0`, `FIX_COMMITS = 0`, and an `OPEN` list (findings you disagreed with, deduped across rounds).
 - Initialize `SEEN` — the loop's in-session store of prior findings, keyed by `(file, mechanism)`, each holding its stable `#`, verdict, and disposition (🔧 fixed / ⏭️ skipped / 🔁 recurred / ❌ disagreed). This is the **only** source for the re-review `Status` column and stable `#` (the poll returns just the raw latest review with no memory) — see the format spec's "Status column" section.
 - **Reuse a fresh review if one already exists**: if the latest `@claude` review on the PR is newer than the latest push (not stale) and has findings, skip the initial commit/push/trigger and go straight to "Fix agreed" with that review. Otherwise run one normal cycle (steps 1–10 above) to obtain the first review.

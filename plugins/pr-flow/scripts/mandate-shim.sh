@@ -22,10 +22,17 @@ case "${1:-}" in
   *) echo "usage: ${0##*/} {show|allows <action>|round} [<dir>]" >&2; exit 2 ;;
 esac
 
+# Source the locator from THIS script's own directory — never from a path built
+# out of an unset env var. `${CLAUDE_PLUGIN_ROOT:-.}` made the fallback "the
+# current working directory", so any checked-out repo carrying
+# scripts/lib-work-system.sh got its code executed the moment this shim ran, in
+# the main session with no sandbox.
 # shellcheck source=lib-work-system.sh
-. "${CLAUDE_PLUGIN_ROOT:-.}/scripts/lib-work-system.sh" 2>/dev/null \
-  || . "$(dirname "$0")/lib-work-system.sh" 2>/dev/null || {
-    echo "verdict=no-work-system"; exit 3; }
+WS_SHIM_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" || WS_SHIM_DIR=""
+if [ -z "$WS_SHIM_DIR" ] || [ ! -f "$WS_SHIM_DIR/lib-work-system.sh" ]; then
+  echo "verdict=no-work-system"; exit 3
+fi
+. "$WS_SHIM_DIR/lib-work-system.sh" || { echo "verdict=no-work-system"; exit 3; }
 
 t="$(ws_find scripts/mandate.sh)"
 if [ -z "$t" ]; then

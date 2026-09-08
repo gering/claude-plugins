@@ -16,7 +16,7 @@ user_invocable: true
 `/continue` runs in one of two modes, chosen by **where it is invoked**:
 
 - **Inside a worktree** → *in-session resume*: load TASK.md, deps, recent commits,
-  progress; keep working here. (Steps 1–7 under "In-session resume".)
+  progress; keep working here. (Steps 1–9 under "In-session resume".)
 - **From the main session with a `<task>` argument** → *reopen*: open the task's
   herdr tab at its worktree and resume its Claude session there (`claude -c`), then
   focus it — recovering a task tab that a bare `/exit` closed (on legacy herdr the
@@ -320,14 +320,24 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
      re-run. Escalate only after that bounded recovery fails, or when the cause is
      outside the lane: a missing credential, an access problem, a product judgment,
      or a fix that would breach `scope`. Report what you tried before handing back.
-   - **Bounded review rounds.** Consume one before each review→fix round:
-     ```sh
-     bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" round
-     ```
-     `review_budget_exhausted=yes` → stop reviewing, report the state and the
-     findings you did not act on, and let the user extend the budget (they can edit
-     `review_budget` in `MANDATE.md` directly). Re-reviewing code that has not
-     changed since the last pass is never worth a round; a new concern about
+   - **Bounded review rounds — exactly one component consumes them.** The counter
+     is a single shared number in one file, so a round must be booked by whoever
+     actually runs the review, once:
+     - Driving the review through **`/cycle --loop`** (the normal claude path)?
+       **Do not call `round` here.** `/cycle` books each of its own iterations.
+       Calling it on the way in burns a round for a review this skill never ran,
+       and a `review_budget=2` lane then gets one real round instead of two.
+     - Running a review **yourself** (a local `/swarm:review`, or the project's
+       own review step)? Then you are the one running it — book the round before
+       each review→fix cycle:
+       ```sh
+       bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" round
+       ```
+     Either way, check the remaining budget with `show` (which never consumes)
+     before starting, and stop when `review_budget_exhausted=yes`: report the state
+     and the findings you did not act on, and let the user extend the budget (they
+     can edit `review_budget` in `MANDATE.md` directly). Re-reviewing code that has
+     not changed since the last pass is never worth a round; a new concern about
      unchanged code is, and should say so.
 
 ## Remember

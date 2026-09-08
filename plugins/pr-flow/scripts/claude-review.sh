@@ -15,6 +15,15 @@
 #   latest-after <PR> <SINCE_ISO> [--json]
 #       Like `latest`, but only considers comments created after SINCE_ISO.
 #
+#   has-bot [<dir>]
+#       Does this repo have a comment-triggered Claude review workflow?
+#       Emits has_bot=yes|no|unknown plus workflows_dir / matched. Anchored on
+#       the repo ROOT (git rev-parse), never $PWD: /cycle can legitimately run
+#       from a subdirectory or from the main repo while the PR belongs to a
+#       worktree, and a cwd-relative probe reports "no bot" there.
+#       has_bot=unknown means "could not tell" (no git repo, unreadable dir) —
+#       callers must ASK, not silently reroute.
+#
 # Exit codes:
 #   0 = success (output contains the body, possibly empty for `latest`)
 #   1 = timeout (poll) or error
@@ -108,6 +117,54 @@ subcmd_poll() {
   exit 1
 }
 
+# Detect a review bot without a network call. Two signals, both cheap:
+#   1. a workflow that reacts to comments (`on: issue_comment`) — that is what
+#      `@claude review` actually needs;
+#   2. any workflow mentioning the bot at all.
+# The old inline form was a bare `grep -rlie claude .github/workflows/` copied
+# into two SKILL.md files: cwd-relative, and loose enough that a cache key or a
+# comment mentioning claude counted as a bot.
+#
+# Known limitation, deliberately surfaced rather than hidden: a repo driven only
+# by the Claude GitHub App with no workflow file of its own reports has_bot=no.
+# Detecting that needs an authenticated API round-trip on every call; callers are
+# told to present the local route as an offer, not to act on it silently.
+subcmd_has_bot() {
+  local dir="${1:-.}" root wf hits comment_hits
+  root="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ -z "$root" ]]; then
+    echo "has_bot=unknown"
+    echo "why=not inside a git repository"
+    return 0
+  fi
+  wf="$root/.github/workflows"
+  echo "workflows_dir=$wf"
+  if [[ ! -d "$wf" ]]; then
+    echo "has_bot=no"
+    echo "why=no .github/workflows directory"
+    return 0
+  fi
+  hits="$(grep -rlie 'anthropics/claude-code-action\|@claude' "$wf" 2>/dev/null | head -5 || true)"
+  comment_hits=""
+  if [[ -n "$hits" ]]; then
+    # Narrow to workflows that can actually be triggered by a PR comment.
+    comment_hits="$(grep -rle 'issue_comment' $hits 2>/dev/null | head -5 || true)"
+  fi
+  if [[ -n "$comment_hits" ]]; then
+    echo "has_bot=yes"
+    echo "matched=$(printf '%s' "$comment_hits" | tr '\n' ' ')"
+  elif [[ -n "$hits" ]]; then
+    # A claude workflow exists but nothing reacts to comments — e.g. a
+    # push-triggered review. `@claude review` would not fire it.
+    echo "has_bot=no"
+    echo "why=claude workflow(s) present but none triggered by issue_comment"
+    echo "matched=$(printf '%s' "$hits" | tr '\n' ' ')"
+  else
+    echo "has_bot=no"
+    echo "why=no workflow references the review bot"
+  fi
+}
+
 main() {
   local cmd="${1:-}"
   shift || true
@@ -115,6 +172,7 @@ main() {
     poll)          subcmd_poll "$@" ;;
     latest)        subcmd_latest "$@" ;;
     latest-after)  subcmd_latest_after "$@" ;;
+    has-bot)       subcmd_has_bot "$@" ;;
     ""|-h|--help)  usage ;;
     *)             echo "Unknown subcommand: $cmd" >&2; usage ;;
   esac

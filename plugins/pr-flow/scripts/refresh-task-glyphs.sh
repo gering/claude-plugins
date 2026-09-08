@@ -22,9 +22,13 @@ cached=""
 [ "${1:-}" = "--cached" ] && { cached="--cached"; shift; }
 dir="${1:-$PWD}"
 
+# Source the locator from THIS script's own directory only — a
+# `${CLAUDE_PLUGIN_ROOT:-.}` fallback would execute a lib-work-system.sh out of
+# whatever repo the shell happens to be in.
 # shellcheck source=lib-work-system.sh
-. "${CLAUDE_PLUGIN_ROOT:-.}/scripts/lib-work-system.sh" 2>/dev/null \
-  || . "$(dirname "$0")/lib-work-system.sh" 2>/dev/null || exit 0
+WS_SHIM_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" || exit 0
+[ -f "$WS_SHIM_DIR/lib-work-system.sh" ] || exit 0
+. "$WS_SHIM_DIR/lib-work-system.sh" || exit 0
 
 t="$(ws_find scripts/herdr-tab-glyph.sh)"
 [ -n "$t" ] || exit 0

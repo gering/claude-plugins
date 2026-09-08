@@ -266,8 +266,9 @@ else's** commits and diff — read it before launching a kimi worker on it.
 ## Task mandate — how much a worker may do on its own
 
 A worker that has to guess its own authority either asks about everything or
-assumes too much. So `/kickoff` (and `/adopt`) asks **once**, at launch, and
-writes the answer to `MANDATE.md` beside `TASK.md`:
+assumes too much. So `/kickoff` (and `/adopt`) asks **once**, at launch — one of
+three presets, `standard` / `draft-only` / `merge-delegated` — and writes the
+answer to `MANDATE.md` beside `TASK.md`:
 
 ```yaml
 ---
@@ -301,17 +302,31 @@ Three properties are load-bearing:
   (allowed), 1 (denied *or* unlisted) or 3 (no mandate at all) — callers must keep
   1 and 3 apart: one is a decision the user made, the other a question they were
   never asked. **No mandate is not a lockdown** — it is the pre-mandate behavior,
-  where the worker asks before each milestone.
+  where the worker asks before each milestone. Matching is a literal whole-token
+  comparison, and the action vocabulary is fixed (`mandate.sh actions`): a typo is
+  rejected when the mandate is written, because later it would be reported as
+  `unlisted` and read as a refusal nobody made.
 - **The budget outlives the session.** `review_budget` bounds review→fix rounds,
   and `review_rounds_used` is counted in the file, so a worker resumed with
   `claude -c` after a context loss does not silently restart its allowance.
 
 Edit `MANDATE.md` by hand to widen or narrow a running lane (raising
-`review_budget` is the usual case); `/kickoff` never rewrites an existing one.
-Decline the question and no file is written — that is a supported answer, not a
-degraded one. Non-claude workers (codex/grok/kimi) get the file named in their
-bootstrap prompt, and their mandate should omit `local-review`: they cannot run
-the review skills, and recording an authority the worker cannot exercise is worse
+`review_budget` is the usual case); `/kickoff` never rewrites an existing one, and
+refuses outright if the file on disk names a *different* task — that is what an
+accidentally committed mandate looks like when a fresh worktree inherits it.
+Keep each value on one line: a value carrying a newline would inject further
+frontmatter keys, so `init` rejects one, and a duplicate key is refused at read
+time rather than resolved first-one-wins. Decline the question and no file is
+written — a supported answer, not a degraded one.
+
+`/kickoff` adds `/MANDATE.md` to the repo's git exclude (not a `.gitignore` edit —
+no diff in your tree, and it covers every worktree), because a worker told to
+commit as it goes would otherwise commit the authorization record into the PR.
+
+Non-claude workers get the file named in their bootstrap prompt. Whether their
+mandate keeps `local-review` is read from the registry's `supports=` field, not
+from the CLI's name: an agent that cannot run the review skills gets an allow list
+without it, because recording an authority the worker cannot exercise is worse
 than recording none.
 
 ## herdr integration

@@ -7,15 +7,20 @@ properties under test are the ones a wrong answer makes unsafe:
 
   * absent mandate != denied mandate (exit 3 vs 1) — a worker that collapses
     the two either asks forever or acts without consent;
-  * only the leading frontmatter block grants anything, so TASK.md-style prose
-    quoted into the body can never become authorization;
-  * `allow`/`deny` match whole actions, `deny` wins, and unlisted is not consent;
-  * the review budget counts down across processes and survives a rewrite of
-    the surrounding file.
+  * only the leading frontmatter block grants anything, values cannot carry a
+    newline, and a duplicate key is refused — so TASK.md-derived prose (which
+    under /adopt comes from someone else's commits) can never become a grant;
+  * `allow`/`deny` match whole actions LITERALLY (no regex), `deny` wins, and
+    unlisted is not consent;
+  * an unknown action token is refused at write time, because `allows` would
+    later report it as `unlisted` — indistinguishable from a real denial;
+  * the review budget counts down across processes, and a round that could not
+    be persisted is an error, never a silent success.
 
 The tests run against real git repos because mandate.sh anchors MANDATE.md at
 the worktree root, not at $PWD.
 """
+import os
 import subprocess
 import sys
 import tempfile
@@ -77,7 +82,7 @@ check("round exits 3 without a mandate", r.returncode == 3)
 r = run("init", str(repo), "allow=commit")
 check("init without authorized_by fails", r.returncode == 2)
 r = run("init", str(repo), "authorized_by=user")
-check("init without allow fails", r.returncode == 2)
+check("init without allow or preset fails", r.returncode == 2)
 check("no file written by a rejected init", not (repo / "MANDATE.md").exists())
 
 # --- a recorded mandate -----------------------------------------------------
@@ -106,26 +111,67 @@ check("denied action exits 1", r.returncode == 1)
 check("denied action says denied", "denied" in r.stdout)
 r = run("allows", "deploy", str(repo))
 check("second denied action exits 1", r.returncode == 1)
-r = run("allows", "rebase-shared-branch", str(repo))
+r = run("allows", "rebase-own-branch", str(repo))
 check("unlisted action exits 1", r.returncode == 1)
 check("unlisted is reported as unlisted, not denied", "unlisted" in r.stdout)
 
-# Whole-action matching: no substring or prefix may satisfy a check.
+# Whole-action matching: no substring, prefix, or REGEX may satisfy a check.
 check("prefix of an allowed action is not allowed",
       run("allows", "commi", str(repo)).returncode == 1)
 check("superstring of an allowed action is not allowed",
       run("allows", "commit-and-merge", str(repo)).returncode == 1)
+for pattern in (".*", "co.mit", "commit|merge", "^commit$", "c[o]mmit"):
+    r = run("allows", pattern, str(repo))
+    check(f"regex metacharacters do not match: {pattern}",
+          r.returncode == 1 and "unlisted" in r.stdout)
 
 # --- init is not a rewrite tool --------------------------------------------
-r = init(repo, "task=overwritten")
-check("second init refuses to clobber", r.returncode == 2)
+r = init(repo, "task=demo")
+check("re-init for the SAME task refuses to clobber", r.returncode == 2)
 check("refused init reports written=no", kv(r.stdout).get("written") == "no")
+check("same-task refusal is not a mismatch",
+      kv(r.stdout).get("task_mismatch") == "no")
+
+# A mandate recorded for a DIFFERENT task does not authorize this lane. That is
+# what a consumer repo that committed MANDATE.md hands the next worktree.
+r = init(repo, "task=some-other-lane")
+check("a foreign task's mandate is refused", r.returncode == 2)
+check("the mismatch is named", kv(r.stdout).get("task_mismatch") == "yes")
+check("the existing task is reported", kv(r.stdout).get("existing_task") == "demo")
+check("stderr explains it does not authorize this lane",
+      "does not authorize this lane" in r.stderr)
 check("original mandate survives",
       kv(run("show", str(repo)).stdout).get("task") == "demo")
+
 r = init(repo, "task=rewritten", "--force")
 check("--force re-records", kv(r.stdout).get("written") == "yes")
 check("--force actually replaced the record",
       kv(run("show", str(repo)).stdout).get("task") == "rewritten")
+
+# --- values can never inject frontmatter keys -------------------------------
+inj = make_repo()
+r = run("init", str(inj), "task=t", "authorized_by=user", "allow=commit",
+        "deny=merge", "review_budget=2",
+        "scope=do X\ndeny:\nallow: merge\nreview_budget: 99")
+check("a newline in a value is refused", r.returncode == 2)
+check("the refusal names the injection risk", "inject" in r.stderr)
+check("nothing was written by the refused init", not (inj / "MANDATE.md").exists())
+r = run("init", str(inj), "task=t\nallow: merge", "authorized_by=user", "allow=commit")
+check("a newline in task= is refused too", r.returncode == 2)
+r = run("init", str(inj), "task=t", "authorized_by=user", "allow=commit",
+        "scope=tab\there")
+check("a control character is refused", r.returncode == 2)
+
+# A file that somehow acquired a duplicate key is refused, not resolved by
+# first-match — the old reader silently let an injected line above win.
+dup = make_repo()
+run("init", str(dup), "task=t", "authorized_by=user", "allow=commit", "deny=merge")
+m = dup / "MANDATE.md"
+m.write_text(m.read_text().replace("allow: commit", "allow: merge\nallow: commit", 1))
+r = run("allows", "merge", str(dup))
+check("a duplicate frontmatter key is a hard error", r.returncode == 2)
+check("the duplicate is named", "duplicate" in r.stderr)
+check("show refuses the same file", run("show", str(dup)).returncode == 2)
 
 # --- prose in the body is never authorization -------------------------------
 repo2 = make_repo()
@@ -155,6 +201,71 @@ repo3 = make_repo()
 check("a non-leading frontmatter block grants nothing",
       run("allows", "merge", str(repo3)).returncode == 1)
 
+# --- the action vocabulary is validated at write time -----------------------
+voc = make_repo()
+r = run("init", str(voc), "task=t", "authorized_by=user", "allow=commit,open_pr")
+check("an unknown action in allow= is refused", r.returncode == 2)
+check("the refusal names the token", "open_pr" in r.stderr)
+r = run("init", str(voc), "task=t", "authorized_by=user", "allow=commit",
+        "deny=merge,delete-everything")
+check("an unknown action in deny= is refused", r.returncode == 2)
+r = run("init", str(voc), "task=t", "authorized_by=user", "allow=commit",
+        "terminal_gate=whatever")
+check("an unknown terminal_gate is refused", r.returncode == 2)
+r = run("init", str(voc), "task=t", "authorized_by=user", "allow=commit",
+        "review_budget=lots")
+check("a non-numeric review_budget is refused", r.returncode == 2)
+check("nothing was written by any refused init", not (voc / "MANDATE.md").exists())
+known = run("actions").stdout.split()
+check("the action vocabulary is published", "open-pr" in known and "merge" in known)
+
+# --- presets carry the choice the user actually made ------------------------
+for preset, gate, may_open_pr, may_merge in [
+    ("standard", "reviewed-pr", True, False),
+    ("draft-only", "pushed-branch", False, False),
+    ("merge-delegated", "merged", True, True),
+]:
+    p = make_repo()
+    r = run("init", str(p), "--preset", preset, "task=t", "authorized_by=user")
+    check(f"{preset}: init succeeds without an explicit allow=",
+          kv(r.stdout).get("written") == "yes")
+    s = kv(run("show", str(p)).stdout)
+    check(f"{preset}: terminal_gate is {gate}", s.get("terminal_gate") == gate)
+    check(f"{preset}: open-pr {'allowed' if may_open_pr else 'refused'}",
+          (run("allows", "open-pr", str(p)).returncode == 0) == may_open_pr)
+    check(f"{preset}: merge {'allowed' if may_merge else 'refused'}",
+          (run("allows", "merge", str(p)).returncode == 0) == may_merge)
+    # --preset=X is the same as --preset X
+    p2 = make_repo()
+    run("init", str(p2), f"--preset={preset}", "task=t", "authorized_by=user")
+    check(f"{preset}: the =form matches the space form",
+          kv(run("show", str(p2)).stdout).get("allow") == s.get("allow"))
+
+# draft-only denies open-pr outright — a caller must be able to tell that from
+# "nobody mentioned it", because only one of the two is a decision.
+p = make_repo()
+run("init", str(p), "--preset", "draft-only", "task=t", "authorized_by=user")
+check("draft-only records open-pr as DENIED, not merely unlisted",
+      "denied" in run("allows", "open-pr", str(p)).stdout)
+
+# An explicit k=v overrides the preset, whichever order they are written in.
+p = make_repo()
+run("init", str(p), "--preset", "standard", "task=t", "authorized_by=user",
+    "review_budget=5")
+check("an explicit value overrides the preset",
+      kv(run("show", str(p)).stdout).get("review_budget") == "5")
+p = make_repo()
+run("init", str(p), "review_budget=5", "--preset", "standard", "task=t",
+    "authorized_by=user")
+check("override order does not matter",
+      kv(run("show", str(p)).stdout).get("review_budget") == "5")
+check("an unknown preset is refused",
+      run("init", str(make_repo()), "--preset", "yolo", "task=t",
+          "authorized_by=user").returncode == 2)
+check("a valueless --preset is refused",
+      run("init", str(make_repo()), "task=t", "authorized_by=user",
+          "allow=commit", "--preset").returncode == 2)
+
 # --- review budget counts down across calls ---------------------------------
 repo4 = make_repo()
 init(repo4, "task=budget", "review_budget=2")
@@ -173,7 +284,48 @@ check("a consumed round survives in the file",
 check("round kept the human body intact",
       "# Mandate" in (repo4 / "MANDATE.md").read_text())
 check("round left no temp file behind",
-      not (repo4 / "MANDATE.md.tmp").exists())
+      not any(p.name.startswith(".MANDATE.") for p in repo4.iterdir())
+      and not (repo4 / "MANDATE.md.tmp").exists())
+
+# The counter must persist even when the key is missing — MANDATE.md is
+# documented as hand-editable, and a substitute-only rewrite silently turned the
+# bounded review loop into an unbounded one.
+gap = make_repo()
+init(gap, "task=gap", "review_budget=2")
+m = gap / "MANDATE.md"
+m.write_text("\n".join(l for l in m.read_text().splitlines()
+                       if not l.startswith("review_rounds_used")) + "\n")
+r = kv(run("round", str(gap)).stdout)
+check("round inserts a missing review_rounds_used", r.get("review_rounds_used") == "1")
+check("the inserted counter persists",
+      kv(run("show", str(gap)).stdout).get("review_rounds_used") == "1")
+r = kv(run("round", str(gap)).stdout)
+check("a second round builds on the inserted counter",
+      r.get("review_rounds_used") == "2")
+check("the budget can actually be exhausted after an insert",
+      r.get("review_budget_exhausted") == "yes")
+check("the insert landed inside the frontmatter",
+      m.read_text().split("---")[1].count("review_rounds_used") == 1)
+
+# A round that cannot be written is an ERROR. Reporting it as consumed (exit 0)
+# is the one failure the persisted counter exists to prevent.
+if os.geteuid() != 0:   # root ignores the write bit; skip rather than assert wrongly
+    ro = make_repo()
+    init(ro, "task=readonly", "review_budget=2")
+    mode = ro.stat().st_mode
+    os.chmod(ro, 0o555)
+    try:
+        r = run("round", str(ro))
+        check("an unpersistable round exits non-zero", r.returncode == 4)
+        check("an unpersistable round reports no counters",
+              "review_rounds_used=" not in r.stdout)
+        check("an unpersistable round says so", "could not persist" in r.stderr)
+    finally:
+        os.chmod(ro, mode)
+    check("the file still holds the old count",
+          kv(run("show", str(ro)).stdout).get("review_rounds_used") == "0")
+    check("no temp file was left behind",
+          not any(p.name.startswith(".MANDATE.") for p in ro.iterdir()))
 
 # An unbounded budget is reported as unknown, never as exhausted: /kickoff may
 # legitimately record no limit, and that must not read as "stop reviewing".
@@ -194,8 +346,7 @@ sub.mkdir(parents=True)
 init(repo6, "task=anchored")
 out = run("path", str(sub)).stdout.strip()
 check("path anchors at the worktree root, not the cwd",
-      out == str((repo6 / "MANDATE.md").resolve()) or out.endswith("/MANDATE.md")
-      and "deep" not in out)
+      out.endswith("/MANDATE.md") and "deep" not in out)
 check("show from a subdirectory finds the root mandate",
       kv(run("show", str(sub)).stdout).get("task") == "anchored")
 check("allows from a subdirectory reads the root mandate",

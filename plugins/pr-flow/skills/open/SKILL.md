@@ -131,6 +131,20 @@ question was never put to the user, not that they said no.
        authorized. (A ❌ blocker still stops, mandate or not — it is a broken tree,
        not a judgment call.)
 
+   **The mandate gate is not part of that branch — it applies on every path.**
+   Run it once before moving on to step 6, whichever branch above was taken:
+   ```sh
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" allows open-pr
+   ```
+   - exit **0** → proceed (and skip the warning confirmation, as above).
+   - exit **1** → the lane's mandate records opening a PR as out of bounds
+     (`denied`) or never granted (`unlisted`). **Stop and ask** — do not create the
+     PR. An all-green tree is not authorization; the draft-only mandate exists
+     precisely so a worker pushes without opening a PR, and a gate that only fires
+     when something else already went wrong is not a gate.
+   - exit **3** → nothing recorded (or work-system absent). Behave exactly as
+     before: the all-green path proceeds, warnings ask once.
+
 5. *(merged into step 4)*
 
 6. **Ensure branch is pushed**:
@@ -193,16 +207,21 @@ question was never put to the user, not that they said no.
       ```
       Use the **Bash tool** with `run_in_background: true`. When it completes, render the review following the shared format spec at `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md` — read that file before presenting. Required sections: header, status line, findings markdown table, single-line recommendation. (`/open` is always round 0 — no prior findings, so no `Status` column.)
     - **If output is empty** → no review started. Before recommending anything,
-      find out *why* — a slow trigger and an absent bot need opposite advice:
+      find out *why* — a slow trigger and an absent bot need opposite advice. Use
+      the shared probe (repo-root anchored, comment-trigger aware; the same one
+      `/cycle` calls, so the two skills cannot drift apart):
       ```sh
-      grep -rlie 'claude' .github/workflows/ 2>/dev/null
+      bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" has-bot
       ```
-      - **Non-empty** (a review workflow exists) → it just has not fired yet.
-        Suggest `/cycle` to trigger manually. Do NOT trigger automatically here —
-        `/open` is about creation; triggering is `/cycle`'s job.
-      - **Empty** (no review bot on this repo) → `/cycle` cannot work here, and
-        recommending it sends the user into a loop that fails every time. Route to
-        the local review instead:
+      - **`has_bot=yes`** → a comment-triggered review workflow exists; it just has
+        not fired yet. Suggest `/cycle` to trigger manually. Do NOT trigger
+        automatically here — `/open` is about creation; triggering is `/cycle`'s job.
+      - **`has_bot=unknown`** → the probe could not tell. Report that and name both
+        routes rather than picking one.
+      - **`has_bot=no`** (no comment-triggered review bot — note a repo driven only
+        by the Claude GitHub App with no workflow file also reports `no`) →
+        `/cycle` cannot work here, and recommending it sends the user into a loop
+        that fails every time. Route to the local review instead:
         - `mandate-shim.sh allows local-review` exits **0** → run
           `/swarm:review --pr <PR_NUMBER>` now and render its result in place of
           the bot review. Say which route you took and why ("no review bot on this
@@ -243,7 +262,7 @@ question was never put to the user, not that they said no.
 - User declines to run checks → mark all as "skipped by user" in body, still create PR
 - Linter/tests hang → timeout 5min, mark as ⚠️ skipped, let user decide
 - Repo uses a non-default base (`develop`, `staging`) → ask user if auto-detected base seems wrong
-- `@claude` bot not installed on repo → step 10 detects it from the workflow files and routes to the local review instead of recommending a `/cycle` that has nothing to trigger
+- `@claude` bot not installed on repo → step 10 asks `claude-review.sh has-bot` (repo-root anchored, comment-trigger aware) and routes to the local review instead of recommending a `/cycle` that has nothing to trigger
 
 ## Notes
 

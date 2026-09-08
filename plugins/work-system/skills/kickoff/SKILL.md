@@ -246,54 +246,82 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
 
     A worker that has to guess its own authority either asks about everything or
     assumes too much. Both fail. So the grant is recorded **once, here**, in
-    `MANDATE.md` beside `TASK.md`, and every later step (`/continue`, pr-flow,
-    swarm) reads it instead of re-deriving it.
+    `MANDATE.md` beside `TASK.md`, and every later step (`/continue`, pr-flow)
+    reads it instead of re-deriving it.
 
     **Consent is never inferred.** Not from TASK.md prose ("this task should end in
     a merged PR" is a description, not permission), not from the fact that a worker
     was launched, and not from a decision the user made in *this* session but never
     had recorded. Ask, then write down the answer.
 
-    Ask **one** question, with the standard arc as the recommended default:
+    Ask **one** question, offering the three presets `mandate.sh` implements:
 
-    | mandate | pre-authorized | never without new authorization |
-    |---------|----------------|---------------------------------|
-    | **standard** (recommended) | commit, push own branch, open PR, review, agreed fixes, rebase own branch | merge, deploy, force-push a shared branch, anything destructive |
-    | **draft-only** | commit, push own branch | opening a PR, review, merge, deploy |
-    | **merge-delegated** | the standard set **plus** merge | deploy, force-push a shared branch, anything destructive |
+    | preset | pre-authorized | never without new authorization | gate |
+    |--------|----------------|---------------------------------|------|
+    | **standard** (recommended) | commit, push own branch, open PR, review, agreed fixes, rebase own branch | merge, deploy, force-push a shared branch, anything destructive | reviewed PR |
+    | **draft-only** | commit, push own branch | opening a PR, review, merge, deploy, … | pushed branch |
+    | **merge-delegated** | the standard set **plus** merge | deploy, force-push a shared branch, anything destructive | merged |
 
-    Offer a **review budget** with the same question (default: 2 rounds) — the
-    number of review→fix rounds the worker may run before it must come back. It is
-    what stops a worker from grinding through an unbounded review loop.
+    Offer a **review budget** with the same question (the presets record 2 rounds;
+    `draft-only` records 0 because it authorizes no review) — the number of
+    review→fix rounds the worker may run before it must come back. It is what stops
+    a worker from grinding through an unbounded review loop.
 
-    Then write the answer (`<worktree>` is the absolute path from step 6):
+    **a) Keep the record out of git.** MANDATE.md is ephemeral worktree state like
+    TASK.md, and a worker told to commit as it goes will otherwise commit the
+    authorization record into the PR — after which every future worktree branched
+    off main starts with *that* lane's grant already in place. Add it to the repo's
+    git exclude (shared across worktrees, and no diff in the user's tree, unlike a
+    `.gitignore` edit) before writing anything:
+
+    ```sh
+    EXCL="$(git -C "<worktree>" rev-parse --git-common-dir)/info/exclude"
+    mkdir -p "$(dirname "$EXCL")"
+    grep -qxF '/MANDATE.md' "$EXCL" 2>/dev/null || printf '/MANDATE.md\n' >> "$EXCL"
+    ```
+
+    Skip it silently if the repo already ignores the file (`git -C "<worktree>"
+    check-ignore -q MANDATE.md`) — some repos, this one included, carry the rule in
+    a committed `.gitignore`.
+
+    **b) Write the mandate.** `<worktree>` is
+    `<main-repo>/.claude/worktrees/<task-name>` — build it from `<main-repo>`
+    (step 1) and the task name, don't carry a relative path forward:
 
     ```sh
     bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" init "<worktree>" \
+      --preset <standard|draft-only|merge-delegated> \
       task="<task-name>" \
       authorized_by="user" \
-      scope="<one line: what this lane is and is not>" \
-      terminal_gate="reviewed-pr" \
-      allow="commit,push-own-branch,open-pr,local-review,agreed-fixes,rebase-own-branch" \
-      deny="merge,deploy,force-push-shared,destructive" \
-      review_budget=2
+      scope="<one line: what this lane is and is not>"
     ```
 
-    The script is the single source of truth for the file's format and for the
-    allow/deny semantics — do not hand-write `MANDATE.md`. Notes on the fields:
-    - `terminal_gate` — where "done" is. `reviewed-pr` (the default) means the
-      worker stops at a reviewed PR and the merge decision stays with the human.
-      `merged` only when the user delegated the merge in the answer above.
-    - `allow`/`deny` are **whole actions**, comma-separated. `deny` wins, and an
-      action in neither list is *unlisted* — the worker asks rather than acts.
-    - **Match the mandate to the worker** picked in step 12: only a claude worker
-      (`cc-harness:<id>` included) can run `/swarm:review` and the pr-flow skills,
-      so for **codex/grok/kimi** drop `local-review` from `allow` and set
-      `scope=".. drive to an open PR; review happens outside this lane"`. Recording
-      an authority the worker cannot exercise is worse than recording none.
-    - If `init` exits 2 with "a mandate already exists", a previous kickoff (or the
-      user) already recorded one — **show it** (`mandate.sh show "<worktree>"`) and
-      keep it. Re-record with `--force` only when the user asks.
+    The preset owns the allow/deny/terminal-gate/budget quadruple, so the answer
+    the user gave is what actually reaches the file — restating the lists here is
+    how three choices turned into one recorded outcome. Override a single field by
+    appending it as `key=value` (e.g. `review_budget=4`); the script rejects an
+    unknown action, an unknown gate, and any value containing a newline. It is the
+    single source of truth for the format — do not hand-write `MANDATE.md`.
+
+    **c) Match the mandate to the worker.** Ask the registry rather than the CLI's
+    name — `supports=` exists for exactly this split:
+
+    ```sh
+    bash "$REG" resolve "$SELECTOR" | sed -n 's/^supports=//p'
+    ```
+
+    If that list does **not** contain `continue`, the worker cannot run
+    `/swarm:review` or the pr-flow skills. Append `allow=` without `local-review`
+    (take the preset's list minus that one token) and set
+    `scope="… drive to an open PR; review happens outside this lane"`. Recording an
+    authority the worker cannot exercise is worse than recording none.
+
+    **d) An existing mandate.** `init` exits 2 rather than clobbering:
+    - `task_mismatch=yes` → the file was recorded for a **different** task (this is
+      what an accidentally committed MANDATE.md looks like). It does not authorize
+      this lane. Say so, and re-record with `--force` only after asking the user.
+    - `task_mismatch=no` → a previous kickoff already recorded this lane's mandate.
+      **Show it** (`mandate.sh show "<worktree>"`) and keep it.
 
     If the user declines to grant anything, skip this step and say so: without
     `MANDATE.md` the worker falls back to asking before each milestone, which is
@@ -406,6 +434,9 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     Branch:   task/<task-name>
     Agent:    <cli:model from the `name=` line>
     Task file: TASK.md (copied into the worktree)
+    Mandate:   MANDATE.md — <preset>, gate <terminal_gate>, <n> review round(s).
+               Edit it by hand to widen or narrow the lane.
+               (omit these two lines when step 13 recorded nothing)
 
     👉 To start working there, open a SEPARATE terminal (not this Claude
        session — this session stays in the main repo) and run:
@@ -418,7 +449,8 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     worker, which is still a full CC session — the helper only routes the model)
     resumes via `/work-system:continue` (plugin-qualified, since a CC built-in
     `/continue` shadows the skill); **codex/grok/kimi** have no work-system skills
-    and get the bootstrap prompt instead (read TASK.md, drive to a PR), with
+    and get the bootstrap prompt instead (read TASK.md + MANDATE.md, start on the
+    first unmet requirement, carry out only the milestones the mandate lists), with
     **kimi** launching in two phases because it has no positional launch prompt
     and `-p` cannot be combined with `--auto`. Do **not** execute the `cd`
     yourself — it is for the user's new terminal. If `resolve` exits non-zero

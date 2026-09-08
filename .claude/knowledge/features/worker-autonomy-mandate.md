@@ -1,7 +1,7 @@
 ---
 title: "Worker Autonomy Mandate (MANDATE.md)"
 createdAt: 2026-09-07
-updatedAt: 2026-09-07
+updatedAt: 2026-09-08
 createdFrom: "branch: task/extend-worker-autonomy"
 updatedFrom: "branch: task/extend-worker-autonomy"
 pluginVersion: 1.9.0
@@ -43,7 +43,15 @@ Collapsing 1 and 3 into "not allowed" is the defect this contract exists to
 prevent: **1 is a decision the user made, 3 is a question they were never
 asked.** Hence "no mandate" is *not* a lockdown — it is exactly the pre-mandate
 behavior where the worker asks before each milestone. `deny` beats `allow`,
-matching is whole-action (never substring), and silence is not consent.
+matching is whole-action, and silence is not consent.
+
+Two follow-on rules fall straight out of that contract, and both were review
+findings rather than design foresight. Matching must be **literal**: an anchored
+`grep -qx` is still a regex, so `allows '.*'` satisfied every list. And the action
+vocabulary must be **closed** (`KNOWN_ACTIONS`, validated at write time): an
+unrecognized token comes back as `unlisted`, i.e. exit 1, so a typo in an allow
+list is indistinguishable from a denial the user actually chose — the exact
+collapse the three exit codes exist to prevent, re-entering through the door.
 
 ## What has to be durable, and why
 
@@ -55,15 +63,31 @@ autonomy has to outlive the process it bounds.
 
 Storage is the worktree root (a deliberate choice over a per-worktree git-dir or
 a central per-repo store): visible and hand-editable, so widening a running
-lane is just an edit. The price is a `/MANDATE.md` line in every consumer
-repo's `.gitignore`, same as `/TASK.md` — see
+lane is just an edit. That visibility has a cost the design has to pay for
+explicitly: `/kickoff` adds `/MANDATE.md` to the repo's **git exclude**, because
+a worker instructed to commit as it goes will otherwise commit its own
+authorization record — and once it reaches main, every later worktree starts
+holding a grant recorded for a different task, with a spent budget and nobody
+re-asked. `init` refuses a mandate whose `task:` does not match the lane for the
+same reason. See
 [worktree-task-file-copy](../architecture/worktree-task-file-copy.md) for why
 that file is ephemeral in the first place.
 
-Match the mandate to the worker: codex/grok/kimi cannot run the review skills,
-so recording `local-review` for them is worse than recording nothing. Their
-bootstrap prompt (`agent-registry.sh`) names `MANDATE.md` precisely because they
-have no `/continue` to read it for them.
+Hand-editability also means the file must survive being edited *wrongly*: `round`
+inserts `review_rounds_used` when a hand-edit removed it (a substitute-only
+rewrite silently made the budget unbounded), values may not contain a newline
+(they would inject further keys — and `scope` is model-authored from TASK.md,
+which under `/adopt` comes from someone else's commits), and a duplicate key is
+refused rather than resolved first-one-wins.
+
+Match the mandate to the worker — from the registry's `supports=` field, not by
+matching CLI names: an agent that cannot run the review skills gets an allow list
+without `local-review`, because recording an authority the worker cannot exercise
+is worse than recording nothing. Their bootstrap prompt (`agent-registry.sh`)
+names `MANDATE.md` precisely because they have no `/continue` to read it for
+them — and names *only* the file. An earlier version also ended with "open a PR
+when the work is complete", a concrete instruction that overrode the mandate the
+same prompt had just told the worker to obey.
 
 ## Soft coupling, and what "missing" means
 
@@ -79,15 +103,31 @@ be answered by silence, or an absent plugin reads as a refusal.
 
 Shipped alongside, and the same class of bug: `/open` and `/cycle` used to send
 bot-less repos to `/cycle`, which comments `@claude review` into the void and
-polls until timeout. Both now check whether a review workflow exists at all
-before recommending or triggering one, and route a repo without one to the local
-`/swarm:review --pr <N>` (run when the mandate allows it, offered otherwise) —
-see [swarm-review-pipeline](swarm-review-pipeline.md). Reporting a missing
-capability beats recommending a command that cannot succeed here.
+polls until timeout. Both now ask `claude-review.sh has-bot` before recommending
+or triggering one, and route a repo without one to the local `/swarm:review --pr
+<N>` (run when the mandate allows it, offered otherwise) — see
+[swarm-review-pipeline](swarm-review-pipeline.md). Reporting a missing capability
+beats recommending a command that cannot succeed here.
 
-## Bash trap found building this
+The probe lives in the adapter, not in skill prose, for two reasons a first
+attempt got wrong: a bare `grep -rlie claude .github/workflows/` is **cwd-relative**
+(and `/cycle` legitimately runs from a subdirectory, or from the main repo while
+the PR belongs to a worktree), and mentioning claude is not the same as reacting
+to a comment — `@claude review` needs an `issue_comment` trigger. It answers
+`yes`/`no`/**`unknown`**; unknown is its own answer, because a probe that cannot
+tell must make the caller ask rather than pick a direction.
 
-`die` inside a command substitution kills only the subshell. `mandate_path()`
+## Two bash traps found building this
+
+**`${VAR:-.}` is not a safe default for a path you are about to source.**
+pr-flow's shims fell back to `"${CLAUDE_PLUGIN_ROOT:-.}/scripts/lib-work-system.sh"`,
+which means "whatever directory the shell happens to be in" — so any checked-out
+repo carrying that path got its code executed, unsandboxed, the moment a shim
+ran, while the shim still printed a plausible verdict. A default that silently
+widens a lookup into the working directory is worse than no default: resolve
+from `$0`/`BASH_SOURCE` and treat "not found" as the documented outcome.
+
+**`die` inside a command substitution kills only the subshell.** `mandate_path()`
 printed its result, so a failing `git rev-parse` left the caller with a
 truncated `/MANDATE.md` and exit 0 — it would have written to the filesystem
 root. The fix is the general one for this shape: resolve into a global
