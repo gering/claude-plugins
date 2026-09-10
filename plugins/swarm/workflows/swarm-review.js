@@ -759,18 +759,25 @@ const utf8Checksum = (s) => {
 }
 // Only spawn transports for backends the skill reported live (probed via the
 // adapter); absent CLIs would otherwise show up as noisy "errors".
-const wantVoices = Array.isArray(INPUT.externalVoices) ? INPUT.externalVoices : ['codex', 'grok', 'kimi']
+// The fallback names the STOCK ensemble: Kimi is opt-in (`--kimi` / SWARM_KIMI=1)
+// and only ever arrives here through the skill's externalVoices list.
+const wantVoices = Array.isArray(INPUT.externalVoices) ? INPUT.externalVoices : ['codex', 'grok']
 // `clusters`: an optional allowlist of the lens clusters a backend reviews.
 // Kimi is metered on a 5-hour AND a 7-day quota that a full five-cluster
 // review (5 × ~370 KiB prompts plus tool loops) exhausted within one day
 // (2026-09-07), so it reviews only the two defect clusters where a fourth
 // family changes verdicts — breakage and threat — on BOTH profiles; reach,
 // design and consistency keep three families. Its effort is already at the
-// k3 floor (`low`; the ladder is low|high|max).
+// k3 floor (`low`; the ladder is low|high|max). Even so two clusters drained
+// the entry plan's 5-hour window (every ACP tool round-trip re-sends the whole
+// ~370 KiB context), so Kimi is OPT-IN: the adapter's readiness gate requires
+// SWARM_KIMI=1, and `env` carries that opt-in onto the transport command —
+// the transport subagent's environment is not ours to rely on, and a voice in
+// externalVoices IS the opt-in (the skill only lists Kimi when it was asked for).
 const EXTERNAL_BACKENDS = [
   { backend: 'codex', flags: MAX ? '--effort xhigh' : '--effort medium' },
   { backend: 'grok', flags: MAX ? '--effort medium' : '--effort low' },
-  { backend: 'kimi', flags: MAX ? '--effort high' : '--effort low', clusters: ['breakage', 'threat'] },
+  { backend: 'kimi', flags: MAX ? '--effort high' : '--effort low', clusters: ['breakage', 'threat'], env: 'SWARM_KIMI=1 ' },
 ]
 // Units a backend actually runs: all of them, or (with `clusters`) those whose
 // lenses belong to an allowed cluster — under --max the units are single lenses,
@@ -815,7 +822,7 @@ const externalVoiceSpecs = liveExternals
     // caching was declined in 0.9.4 — a cached 'model absent' would outlive the CLI
     // upgrade that fixes it — and the probes are bounded and counted in
     // probe_budget_seconds, so the cost is paid in parallel, not against the margin.
-    cmd: `SWARM_TIMEOUT=${EFFECTIVE_TIMEOUT_S} SWARM_MAX_PROMPT_BYTES=${MAX_PROMPT_BYTES} SWARM_PROBE_TIMEOUT=${PROBE_TIMEOUT_S} bash ${shQuote(ADAPTER)} run ${b.backend} ${b.flags} --lens-instr ${shQuote(instrFor(u))} --lens-instr-sum ${utf8Checksum(instrFor(u))} --prompt-file ${shQuote(EXTERNAL_PROMPT)}` +
+    cmd: `${b.env || ''}SWARM_TIMEOUT=${EFFECTIVE_TIMEOUT_S} SWARM_MAX_PROMPT_BYTES=${MAX_PROMPT_BYTES} SWARM_PROBE_TIMEOUT=${PROBE_TIMEOUT_S} bash ${shQuote(ADAPTER)} run ${b.backend} ${b.flags} --lens-instr ${shQuote(instrFor(u))} --lens-instr-sum ${utf8Checksum(instrFor(u))} --prompt-file ${shQuote(EXTERNAL_PROMPT)}` +
       // Appended, not interpolated into the base string, so a run without a
       // telemetry sink produces the exact command it always did.
       // shQuote BOTH values. This string is executed as a shell command by the

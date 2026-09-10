@@ -1,7 +1,7 @@
 ---
 title: "Swarm Backend Adapter Layer"
 createdAt: 2026-07-03
-updatedAt: 2026-09-07
+updatedAt: 2026-09-10
 createdFrom: "PR #21"
 updatedFrom: "add-kimi-swarm-voice"
 pluginVersion: 1.9.0
@@ -33,7 +33,7 @@ inlined diff (callers, config, types, library/CVE knowledge).
 |-------|-----------|-----|-------------|-------|
 | **codex** | yes — through its shell (codex reads files with shell commands) | yes (`-c tools.web_search=true`) | shell yes, writes OS-denied: under the jail `-s danger-full-access --ignore-user-config --ignore-rules` (codex's own seatbelt cannot nest inside an outer profile with any deny rule — `sandbox_apply: Operation not permitted`, so `-s read-only` had killed every shell command and file read since 0.6.0); `-s read-only` only on a jail-less host; never `workspace-write` / `--add-dir` | `-C <repo-root>` |
 | **grok** | yes (`read_file,list_dir,grep` + `run_terminal_command` in `--tools`) | yes (`web_search,web_fetch` in the same allowlist; drop `--disable-web-search`) | shell yes (`run_terminal_command`), writes OS-denied; `--permission-mode dontAsk` + `--deny` prefix rules (egress/destructive verbs) as defense-in-depth — grok pre-approves every tool named in `--tools` whatever the mode, and deny rules are honoured; never `write` / `search_replace` | `--cwd <repo-root>`; ephemeral HOME/GROK_HOME with neutral `.claude/settings.json` and only `auth.json` linked |
-| **kimi** | yes (approval-free ACP read/search tools + a read-only shell command allowlist: git read subcommands, grep/rg/find/ls/cat pipelines) | yes (`WebSearch`/`FetchURL`, when the managed provider exposes them) | OS-immutable repo/Git (every worktree); ACP tool-kind allowlist aborts on first unsafe run, and an `execute` whose command fails the allowlist counts as unsafe (Kimi 0.32 can auto-approve some in-repo writes) | ACP `session/new.cwd=<repo-root>`; isolated HOME; repo-local `.kimi-code`/`.kimi`/`.mcp.json` denied; `ready` includes the OS jail |
+| **kimi** | yes (approval-free ACP read/search tools + a read-only shell command allowlist: git read subcommands, grep/rg/find/ls/cat pipelines) | yes (`WebSearch`/`FetchURL`, when the managed provider exposes them) | OS-immutable repo/Git (every worktree); ACP tool-kind allowlist aborts on first unsafe run, and an `execute` whose command fails the allowlist counts as unsafe (Kimi 0.32 can auto-approve some in-repo writes) | ACP `session/new.cwd=<repo-root>`; isolated HOME; repo-local `.kimi-code`/`.kimi`/`.mcp.json` denied; `ready` includes the OS jail AND the opt-in (`SWARM_KIMI=1`, un-opted → not-ready with the hint, no probe spent) |
 
 **Security layers (do not soften or over-claim):**
 
@@ -229,7 +229,12 @@ buffered answer at 8 MiB, and readiness validates the model against the
 only the `managed:*` provider(s), the models declared on them, services and
 thinking, so a third-party provider's `api_key` never reaches a file the
 read+web Kimi can open. The jail (`_read_web_safe`) is part of Kimi's
-`ready_check`, so `list --json` never advertises a Kimi the clusters would
+`ready_check`, and so is the **opt-in** (`SWARM_KIMI=1`, exactly `1`; the
+skill's `--kimi` exports it for one run and the workflow carries it onto the
+transport command): even limited to two clusters at `low`, Kimi drained the
+entry plan's 5-hour window in one review, because every ACP tool round-trip
+re-sends the whole ~370 KiB cluster context. The gate comes first in the arm so
+a stock `list` spends no probe on it. So `list --json` never advertises a Kimi the clusters would
 refuse. ACP is defense-in-depth:
 the client advertises neither filesystem-write nor terminal capability,
 vets every `execute` (Kimi's Shell tool) against a **read-only command

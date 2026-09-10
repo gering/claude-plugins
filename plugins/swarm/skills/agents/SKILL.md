@@ -14,8 +14,9 @@ user_invocable: true
 ## Instructions
 
 1. Run from the current repository: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json`
-   (Kimi's `ready` already includes the OS jail; its `hint` names the jail when
-   that is what is missing.)
+   (Kimi's `ready` already includes the opt-in and the OS jail; its `hint`
+   names whichever is missing — "opt-in only" means pass `--kimi` to
+   `/swarm:review` or export `SWARM_KIMI=1`, it is not an install problem.)
 2. Render the JSON array as a table:
 
    | Backend | Installed | Version | Ready | Notes |
@@ -43,7 +44,9 @@ user_invocable: true
   unrecognized-format capability probe degrades audibly to trusting credentials
   rather than silently dropping the Moonshot family; a clean negative stays
   not-ready. Kimi is live for reviews only with `jail=yes`, because ACP has no
-  safe jail-less read tier.
+  safe jail-less read tier — and only when **opted in** (`/swarm:review --kimi`
+  or `SWARM_KIMI=1`): Moonshot meters it on 5-hour/7-day quotas, so a stock
+  review is the three-family ensemble and Kimi joins on request.
 - **`grok` Ready is a heuristic** — it means a non-empty `~/.grok/auth.json`
   exists, that the CLI offers `--prompt-file` (the out-of-band prompt transport),
   **and** that `grok models` still lists a schema-verified model, NOT that the

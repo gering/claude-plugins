@@ -43,9 +43,24 @@ workflow_set = set(re.findall(r"backend:\s*'([^']+)'", backend_block.group(1))) 
 check("workflow EXTERNAL_BACKENDS found", bool(backend_block))
 check("workflow externals equal adapter externals", workflow_set == externals)
 
+# Kimi is OPT-IN (metered quota): the workflow's fallback voices are the STOCK
+# ensemble without it, the adapter's readiness arm requires the opt-in before
+# any probe, and the transport command carries the opt-in so a listed Kimi
+# voice is not refused by the adapter's own gate one process later.
+OPT_IN = {"kimi"}
 want = re.search(r"const wantVoices = .*? : \[([^\]]+)\]", WORKFLOW)
 want_set = set(re.findall(r"'([^']+)'", want.group(1))) if want else set()
-check("workflow default voices equal adapter externals", want_set == externals)
+check("workflow default voices are the non-opt-in externals", want_set == externals - OPT_IN)
+kimi_ready_arm = re.search(r"^\s*kimi\)\s*(.*?);;", ready_block.group(1), re.S | re.M) if ready_block else None
+check("adapter readiness gates Kimi on the opt-in first",
+      bool(kimi_ready_arm) and kimi_ready_arm.group(1).lstrip().startswith("_kimi_opted_in &&"))
+check("adapter opt-in reads SWARM_KIMI", 'KIMI_OPT_IN="${SWARM_KIMI:-0}"' in ADAPTER)
+check("workflow carries the Kimi opt-in onto the transport command",
+      "env: 'SWARM_KIMI=1 '" in WORKFLOW and "cmd: `${b.env || ''}" in WORKFLOW)
+check("skill documents --kimi", "- `--kimi` —" in SKILL)
+check("skill block exports the opt-in for the readiness probe",
+      'export SWARM_KIMI="${SWARM_KIMI:-0}"' in SKILL)
+check("agent status names the opt-in hint", "opt-in only" in AGENTS_SKILL)
 
 family = re.search(r"const FAMILY = \{([^}]+)\}", WORKFLOW)
 family_map = dict(re.findall(r"([a-z]+):\s*'([^']+)'", family.group(1))) if family else {}

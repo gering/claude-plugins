@@ -1,9 +1,9 @@
 # Swarm
 
 Local mixture-of-agents code review for Claude Code. Fans out one review
-across multiple independent agents — Claude subagents plus the `codex`, `grok`,
-and `kimi` CLIs — merges and deduplicates their findings, and presents a single
-ranked report. Cross-family agreement is a strong confidence signal when it
+across multiple independent agents — Claude subagents plus the `codex` and
+`grok` CLIs, and `kimi` on request (`--kimi`) — merges and deduplicates their
+findings, and presents a single ranked report. Cross-family agreement is a strong confidence signal when it
 occurs; single-family findings (the common case) pass an adversarial 3-state
 verifier so real catches survive and noise is dropped.
 
@@ -13,14 +13,14 @@ Complementary to [pr-flow](../pr-flow/): pr-flow drives the GitHub-PR
 ## Status
 
 **Phase 5 of 6** — the pipeline can now **act**. `/swarm:review` fans a diff
-across four model families (Claude lenses + `codex` + `grok` + `kimi`), each
-running one call per gated lens cluster, merges by mechanism, verifies solo
+across up to four model families (Claude lenses + `codex` + `grok`, plus
+`kimi` when opted in), each running one call per gated lens cluster, merges by mechanism, verifies solo
 findings + design suggestions, presents one ranked report, and — with `--fix` /
 `--loop` — applies the findings you agreed with.
 
 ## Commands
 
-- `/swarm:review [ref | --staged | pathspec] [--fix | --loop[=N]] [--max]` —
+- `/swarm:review [ref | --staged | pathspec] [--fix | --loop[=N]] [--max] [--kimi]` —
   review a diff with the full ensemble. Defaults to the branch delta vs the
   default branch (including uncommitted work). `--fix` applies the agreed
   findings once; `--loop[=N]` re-reviews after each fix round until it converges
@@ -30,7 +30,11 @@ findings + design suggestions, presents one ranked report, and — with `--fix` 
   out per **lens** instead of per cluster; kimi stays on its breakage + threat
   lenses on both profiles, being quota-metered) — slower, more
   thorough, costs up to `3 × 11` external calls, composes with
-  `--fix`/`--loop`.
+  `--fix`/`--loop`. `--kimi` opts Kimi in for the run (the fourth family):
+  Moonshot meters its CLI on 5-hour and 7-day quotas, and one two-cluster
+  review drained the entry plan's 5-hour window — every ACP tool round-trip
+  re-sends the whole ~370 KiB cluster prompt — so a stock review is the
+  three-family ensemble. `export SWARM_KIMI=1` opts in permanently.
 - `/swarm:review --pr [<number>]` — run the same ensemble against a **GitHub
   PR's diff** (`gh pr diff`; bare `--pr` resolves the current branch's PR) and,
   after a single confirmation, post the output-gated result as a PR comment via
@@ -59,8 +63,8 @@ Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok ∥ kimi)
    by nobody. Every pruned lens is reported as gated-out, never silently
    dropped.
 2. **Fan-out** — all voices at the **same granularity**: one Claude finder per
-   gated lens **cluster**, and `codex` + `grok` + `kimi` each once per gated
-   cluster too (per lens under `--max`). The gate prunes calls for everyone — a
+   gated lens **cluster**, and `codex` + `grok` (+ `kimi` when opted in) each
+   once per gated cluster too (per lens under `--max`). The gate prunes calls for everyone — a
    fully-gated-out cluster spawns nothing for any voice — and each finding's
    `[lens]` tag is authoritative, because the voice *is* that lens.
 3. **Merge** — an LLM step clusters findings by `(file, mechanism)`, not
@@ -121,8 +125,9 @@ tool-less/no-web, codex web hard-off inside its own read-only sandbox) rather th
 prompt egress guard forbids putting repo content into web queries (model-
 cooperation-dependent; the jail is the hard boundary). A secret scrub at the
 adapter boundary plus a final **output gate** re-scrub findings before they reach you.
-Kimi is **ready only under this OS jail** (its `list --json` hint says so),
-and runs with an ephemeral HOME that holds only links to its managed-provider
+Kimi is **opt-in** (`--kimi` / `SWARM_KIMI=1`; un-opted, `list --json` says
+"opt-in only" without spending a probe) and **ready only under this OS jail**
+(the hint says so), and runs with an ephemeral HOME that holds only links to its managed-provider
 auth directories (a refresh must land on the host file — Moonshot rotates
 refresh tokens, and a refresh inside a private copy logged the operator out)
 and a filtered projection of its config
@@ -251,5 +256,5 @@ verifier tests in the confidence phase.
 - `python3` on PATH (JSON handling in the adapter).
 - `codex`, `grok`, and/or `kimi` CLIs are optional — install and authenticate
   them to widen the ensemble. Kimi additionally needs ACP support, the adapter's
-  pinned model (`KIMI_DEFAULT_MODEL`; the `list --json` hint names it), and a
-  working OS jail.
+  pinned model (`KIMI_DEFAULT_MODEL`; the `list --json` hint names it), a
+  working OS jail, and the per-run opt-in (`--kimi`, or `SWARM_KIMI=1`).

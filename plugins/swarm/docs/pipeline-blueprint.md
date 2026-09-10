@@ -9,8 +9,8 @@
 >
 > The shipped `workflows/swarm-review.js` has since evolved past this snapshot
 > (11 lenses in 5 clusters, per-cluster fan-out for **every** voice — external
-> `codex`, `grok`, and `kimi` included, via the adapter's `--lens-instr` — four-
-> family consensus, and kind-aware verify for design findings). The workflow
+> `codex`, `grok`, and the opt-in `kimi` included, via the adapter's `--lens-instr`
+> — up-to-four-family consensus, and kind-aware verify for design findings). The workflow
 > file is authoritative; this blueprint deliberately keeps the original 5-lens
 > PoC shape with its single broad codex/grok call. Kimi's shipped ACP transport
 > and local schema validation are documented in the plugin README and knowledge.

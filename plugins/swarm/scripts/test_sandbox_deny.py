@@ -713,15 +713,33 @@ class TestProtectedRootsAndIsolation(unittest.TestCase):
             cred.write(CRED_JSON); cred.flush()
             stubs = ("_kimi_has_acp() { return 0; }",
                      "kimi_model_offered() { return 0; }")
+            env = {"KIMI_CREDENTIALS_FILE": cred.name, "SWARM_KIMI": "1"}
             r = _source(*stubs, "_read_web_safe() { return 1; }",
                         'ready_check kimi && echo READY || echo NOT-READY; ready_hint kimi',
-                        env_extra={"KIMI_CREDENTIALS_FILE": cred.name})
+                        env_extra=env)
             self.assertIn("NOT-READY", r.stdout, r.stderr)
             self.assertIn("jail", r.stdout)
             r = _source(*stubs, "_read_web_safe() { return 0; }",
                         'ready_check kimi && echo READY || echo NOT-READY',
-                        env_extra={"KIMI_CREDENTIALS_FILE": cred.name})
+                        env_extra=env)
             self.assertIn("READY", r.stdout, r.stderr)
+
+    def test_kimi_ready_requires_the_opt_in_before_any_probe(self):
+        # Kimi is metered (5-hour/7-day quota): without SWARM_KIMI=1 it is
+        # not-ready with the opt-in hint, and NO probe runs — the credential,
+        # ACP, model and jail checks are stubbed to record a call.
+        with _CredFile() as cred:
+            cred.write(CRED_JSON); cred.flush()
+            stubs = ("_kimi_credentials_usable() { echo PROBED; return 0; }",
+                     "_kimi_has_acp() { echo PROBED; return 0; }",
+                     "kimi_model_offered() { echo PROBED; return 0; }",
+                     "_read_web_safe() { echo PROBED; return 0; }")
+            r = _source(*stubs, 'ready_check kimi && echo READY || echo NOT-READY; ready_hint kimi',
+                        env_extra={"KIMI_CREDENTIALS_FILE": cred.name, "SWARM_KIMI": ""})
+            self.assertIn("NOT-READY", r.stdout, r.stderr)
+            self.assertIn("opt-in only", r.stdout)
+            self.assertIn("--kimi", r.stdout)
+            self.assertNotIn("PROBED", r.stdout)
 
     def test_kimi_blanked_credentials_are_not_ready(self):
         # kimi-code blanks the tokens in place after a failed refresh; the
@@ -734,7 +752,7 @@ class TestProtectedRootsAndIsolation(unittest.TestCase):
             with _CredFile() as cred:
                 cred.write(body + "\n"); cred.flush()
                 r = _source(*stubs, 'ready_check kimi && echo READY || echo NOT-READY; ready_hint kimi',
-                            env_extra={"KIMI_CREDENTIALS_FILE": cred.name})
+                            env_extra={"KIMI_CREDENTIALS_FILE": cred.name, "SWARM_KIMI": "1"})
                 self.assertIn(expect, r.stdout, (body, r.stderr))
                 if expect == "NOT-READY":
                     self.assertIn("kimi login", r.stdout)

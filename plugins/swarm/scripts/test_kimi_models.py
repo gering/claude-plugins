@@ -38,7 +38,8 @@ _probe_or_bare() { _fake_probe "$@"; }
 
 def run_ready(*, help_text: str, models: str, help_rc: int = 0,
               models_rc: int = 0, credentials: bool = True,
-              requested_model: str = "", config_file: str = ""):
+              requested_model: str = "", config_file: str = "",
+              opt_in: str = "1"):
     with tempfile.TemporaryDirectory() as td:
         cred = Path(td) / "kimi-code.json"
         if credentials:
@@ -51,6 +52,9 @@ def run_ready(*, help_text: str, models: str, help_rc: int = 0,
             "FAKE_HELP_RC": str(help_rc),
             "FAKE_MODELS_RC": str(models_rc),
             "FAKE_REQUESTED_MODEL": requested_model,
+            # Kimi is opt-in (metered quota); the harness opts in unless a
+            # check exercises the gate itself.
+            "SWARM_KIMI": opt_in,
             # No host config in the harness: the projected-catalogue intersect
             # is exercised by its own check below.
             "KIMI_CONFIG_FILE": config_file or str(Path(td) / "no-config.toml"),
@@ -106,6 +110,12 @@ OTHER_MODELS = json.dumps({"models": {"kimi-code/other": {"model": "other"}}})
 
 r = run_ready(help_text=GOOD_HELP, models=GOOD_MODELS)
 check("ACP + pinned model + credentials is ready", r.returncode == 0 and r.stdout.strip() == "ready")
+
+# The opt-in gate: everything else in order, but no SWARM_KIMI=1 → not ready,
+# and only the exact value `1` opts in (a profile's `=no`/`=0` must not).
+for value in ("", "0", "no", "yes", "true"):
+    r = run_ready(help_text=GOOD_HELP, models=GOOD_MODELS, opt_in=value)
+    check(f"SWARM_KIMI={value!r} does not opt in", r.stdout.strip() == "not-ready")
 
 r = run_ready(help_text="unknown command", models=GOOD_MODELS, help_rc=2)
 check("missing ACP capability is not ready", r.stdout.strip() == "not-ready")

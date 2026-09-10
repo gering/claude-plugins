@@ -1,7 +1,7 @@
 ---
 title: "Swarm Review Pipeline (/swarm:review)"
 createdAt: 2026-07-08
-updatedAt: 2026-09-07
+updatedAt: 2026-09-10
 createdFrom: "PR #24"
 updatedFrom: "add-kimi-swarm-voice"
 pluginVersion: 1.9.0
@@ -268,6 +268,14 @@ the diff out of the script, above). Claude applies edits between rounds.
   families. Under `--max` the filter goes by lens membership. The appended Kimi
   contract also carries a tool budget (≤ 8 calls) so agentic loops stop
   re-reading what the diff already shows. Effort is at the k3 floor (`low`).
+  Even so a two-cluster run drained the 5-hour window (each ACP tool
+  round-trip re-sends the full context), so **Kimi is opt-in** (`--kimi` →
+  `SWARM_KIMI=1`, exported by the step-1 block for the readiness probe and
+  carried by the workflow onto the transport command via
+  `EXTERNAL_BACKENDS[].env`): the stock ensemble is three families, the
+  workflow's fallback voices are `codex`+`grok`, and `test_backend_sync.py`
+  pins all three sides. Follow-up: make Kimi token-efficient (smaller prompt,
+  diff-only tier) before it can rejoin by default.
 
 ## `--pr`: review a PR diff and post the result (swarm 0.4.0)
 

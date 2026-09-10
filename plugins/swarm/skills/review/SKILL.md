@@ -1,8 +1,8 @@
 ---
 name: review
 description: |
-  Local mixture-of-agents review: Claude lenses, codex, grok and kimi, one ranked
-  report. --fix/--loop applies agreed findings; --pr posts to a PR.
+  Local mixture-of-agents review: Claude lenses, codex, grok, opt-in kimi; one
+  ranked report. --fix/--loop applies agreed findings; --pr posts to a PR.
   Trigger: "swarm review", "review my changes", "review this PR".
 user_invocable: true
 ---
@@ -58,6 +58,12 @@ branch delta).
   `low` → `medium` (`high` and `medium` both hit the 540 s wall on 190–290 KiB
   cluster prompts) and, like everyone else's, its fan-out splits
   per lens.
+- `--kimi` — **opt Kimi in** for this run (the fourth family, `moonshot`). Kimi
+  is off by default because Moonshot meters it on 5-hour and 7-day quotas that
+  a review drains fast; the adapter reports it not-ready with an opt-in hint
+  otherwise. **Prefix the step-1 block with `SWARM_KIMI=1;`** (same mechanism as
+  `--pr`), and the block exports it so the readiness probe sees it. An exported
+  `SWARM_KIMI=1` in the operator's shell opts in every run without the flag.
 - Anything left after removing the flags → the scope argument for step 1.
 
 Without either flag the review is **read-only**: present the report and offer to
@@ -153,6 +159,10 @@ REVIEW_PR="${REVIEW_PR:-0}"      # 1 iff --pr was given (set by the caller's pre
 PR_ARG="${PR_ARG:-}"             # ${VAR:-default} so a caller-set value SURVIVES — a plain
 INCLUDE_UNTRACKED=1              # REVIEW_PR=0 here would clobber the prefix and revert to local.
 FIX_OR_LOOP="${FIX_OR_LOOP:-0}"  # caller sets 1 when --fix/--loop was given (same prefix mechanism)
+# Kimi opt-in: `--kimi` prefixes SWARM_KIMI=1 (same mechanism); an operator's
+# exported SWARM_KIMI survives the default. EXPORTED because the adapter's
+# readiness probe (`list --json` below) is what gates the metered voice.
+export SWARM_KIMI="${SWARM_KIMI:-0}"
 
 # --pr is read-only + mutually exclusive with --fix/--loop (a local-edit loop has no
 # meaning against a remote diff). Enforce it deterministically here, not only in prose.
@@ -440,11 +450,13 @@ echo "LIVE_JSON=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json | t
   because no default-branch ancestor was found. Then continue.
 - From `LIVE_JSON` build `externalVoices`: include each of `"codex"`, `"grok"`,
   `"kimi"` iff that backend is `available && ready` — the same rule for all
-  three. Kimi's readiness already includes the OS jail (its ACP transport keeps
-  read/web enabled and has no safe jail-less fallback, so the adapter reports
-  it not-ready with a jail hint instead of failing once per cluster); do not
-  re-derive that from `JAIL` here. If none are live, the review runs with the
-  Claude lenses alone — say so.
+  three. Kimi's readiness already includes the opt-in (`--kimi` / `SWARM_KIMI=1`;
+  without it the hint says "opt-in only") and the OS jail (its ACP transport
+  keeps read/web enabled and has no safe jail-less fallback, so the adapter
+  reports it not-ready with a jail hint instead of failing once per cluster);
+  do not re-derive either from the flags or `JAIL` here. If none are live, the
+  review runs with the Claude lenses alone — say so. When Kimi is installed but
+  not opted in, mention once that `--kimi` adds the fourth family.
 - **Oversize** — `EXTERNALS_OVERSIZE=1` means the diff cannot clear the adapter's
   per-call cap: set `externalVoices` to `[]` (Claude-lens-only review), tell the
   user the external backends were skipped as *prompt too large*, and suggest

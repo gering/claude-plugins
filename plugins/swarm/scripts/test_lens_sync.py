@@ -265,7 +265,8 @@ check("skill: EXTERNALS_OVERSIZE decided in shell against the adapter threshold"
 # SWARM_TIMEOUT look useless in the first place.
 check(
     "workflow: sets SWARM_TIMEOUT on the transport command",
-    re.search(r"cmd: `SWARM_TIMEOUT=\$\{EFFECTIVE_TIMEOUT_S\} ", js),
+    # `${b.env || ''}` in front carries a backend's opt-in (Kimi) the same way.
+    re.search(r"cmd: `\$\{b\.env \|\| ''\}SWARM_TIMEOUT=\$\{EFFECTIVE_TIMEOUT_S\} ", js),
 )
 # The prompt cap travels the same way, and for the same reason: the skill decides
 # the oversize skip from the adapter-reported cap, so the adapter process must

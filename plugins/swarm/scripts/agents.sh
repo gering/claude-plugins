@@ -79,7 +79,10 @@
 #            bounds it with its own watchdog where coreutils is missing. Its
 #            bound is SWARM_PROBE_TIMEOUT (10s, ceiling 20s), not SWARM_TIMEOUT
 #            (a review-length cap).
-#   kimi   — ACP v1 headless session over NDJSON stdio. `-p` is deliberately
+#   kimi   — OPT-IN (SWARM_KIMI=1; `/swarm:review --kimi`): Moonshot meters the
+#            CLI on 5-hour + 7-day quotas that two cluster prompts with a tool
+#            loop drained. Un-opted, `ready`/`list` say so without probing.
+#            ACP v1 headless session over NDJSON stdio. `-p` is deliberately
 #            NOT used: it only accepts the full prompt on argv and would restore
 #            Linux MAX_ARG_STRLEN failures. The local ACP client approves only
 #            a shell command that passes its read-only policy, rejects every
@@ -137,6 +140,14 @@ KIMI_ACP_CLIENT="$SCRIPT_DIR/kimi-acp.py"
 CODEX_DEFAULT_MODEL="gpt-5.6-sol"
 KIMI_DEFAULT_MODEL="kimi-code/k3-256k"
 KIMI_BIN="${SWARM_KIMI_BIN:-kimi}"
+# Kimi is OPT-IN (SWARM_KIMI=1; `/swarm:review --kimi` exports it for one run):
+# Moonshot meters the CLI on a 5-hour AND a 7-day quota, and two ~370 KiB
+# cluster prompts with a tool loop — every ACP tool round-trip re-sends the whole
+# context — drained the entry plan's 5-hour window in one review. Without the
+# opt-in `ready`/`list` report it not-ready with the hint (no probe is spent),
+# so a stock review is the three-family codex + grok + Claude ensemble and Kimi
+# only enters when the operator asks for the fourth family that run.
+KIMI_OPT_IN="${SWARM_KIMI:-0}"
 # The FALLBACK used wherever discovery cannot run — no model list, offline, an
 # unparseable listing. Deliberately the OLDEST still-verified id, not the newest:
 # this value is only ever reached when we could not read what the CLI offers, and
@@ -2048,10 +2059,18 @@ ready_check() {
     # prose: `list --json` used to advertise kimi ready on a jail-less host and
     # every cluster then hit run_kimi's fail-closed exit. _read_web_safe is
     # memoized; its sandbox smoke `true` is one of the three counted probes.
-    kimi)   _kimi_credentials_usable && _kimi_has_acp \
+    # The opt-in comes FIRST: an un-opted Kimi is not-ready before any probe
+    # runs, so `list` on a stock host spends none of the probe budget on it.
+    kimi)   _kimi_opted_in && _kimi_credentials_usable && _kimi_has_acp \
               && kimi_model_offered "${requested_model:-$KIMI_DEFAULT_MODEL}" \
               && _read_web_safe kimi && _scratch_dir_ok ;;
   esac
+}
+
+_kimi_opted_in() {
+  # Exactly `1`, not "non-empty": `SWARM_KIMI=0` or `=no` in a profile must not
+  # opt the operator into a metered voice.
+  [[ "$KIMI_OPT_IN" == "1" ]]
 }
 
 ready_hint() {
@@ -2101,7 +2120,9 @@ ready_hint() {
       fi
       ;;
     kimi)
-      if [[ "${KIMI_CREDENTIALS_FILE##*/}" != "kimi-code.json" ]]; then
+      if ! _kimi_opted_in; then
+        echo "opt-in only (metered 5-hour/7-day quota) — pass --kimi to /swarm:review or export SWARM_KIMI=1"
+      elif [[ "${KIMI_CREDENTIALS_FILE##*/}" != "kimi-code.json" ]]; then
         echo "KIMI_CREDENTIALS_FILE must be named kimi-code.json (kimi-code reads credentials/kimi-code.json; got: $KIMI_CREDENTIALS_FILE)"
       elif ! _kimi_credentials_usable; then
         if [[ "$_kimi_creds_ok" == "nopython" ]]; then
