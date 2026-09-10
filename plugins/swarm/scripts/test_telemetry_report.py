@@ -51,6 +51,8 @@ def write(lines):
 REC_FAST = '{"backend":"codex","unit":"threat","effort":"high","model":"m","prompt_bytes":1024,"seconds":30,"backend_rc":0,"adapter_rc":0,"timed_out":false}'
 REC_NEAR = '{"backend":"grok","unit":"breakage","effort":"high","model":"m","prompt_bytes":42665,"seconds":374,"backend_rc":0,"adapter_rc":0,"timed_out":false}'
 REC_DEAD = '{"backend":"grok","unit":"threat","effort":"high","model":"m","prompt_bytes":42665,"seconds":600,"backend_rc":124,"adapter_rc":1,"timed_out":true}'
+REC_NEVER_RAN = '{"backend":"kimi","unit":"design","effort":"high","model":"m","prompt_bytes":1024,"seconds":0,"backend_rc":null,"adapter_rc":2,"timed_out":false}'
+REC_REJECTED = '{"backend":"kimi","unit":"design","effort":"high","model":"m","prompt_bytes":1024,"seconds":30,"backend_rc":0,"adapter_rc":1,"timed_out":false}'
 
 # --- diagnostics must never fail a review -----------------------------------
 r = run([str(HERE / "does-not-exist.jsonl")])
@@ -83,6 +85,14 @@ check("an all-fast run raises no warning", "⚠️" not in r.stdout)
 r = run([write([REC_DEAD])])
 check("a timed-out call is marked", "TIMED OUT" in r.stdout)
 check("a timeout names the lost coverage", "reviewed without grok" in r.stdout)
+
+# A local schema/policy rejection happens AFTER a healthy backend response. It
+# must not be mislabeled as "never reached the backend", which sends debugging
+# toward install/auth instead of the malformed answer.
+r = run([write([REC_NEVER_RAN, REC_REJECTED])])
+check("null backend rc means the backend never ran", "never reached the backend" in r.stdout)
+check("zero backend rc plus adapter failure means response rejected",
+      "adapter rejected the response" in r.stdout)
 
 # The wall is configurable, and the percentages must follow it: with a 1200s
 # wall the same 374s call is only 31% and must NOT be flagged.

@@ -86,6 +86,7 @@ DATA = {
     ],
     "has_quelle": True,
     "balance": "Bilanz: 1 Finding",
+    "agents": ["claude", "codex", "grok", "kimi"],
     "notes": ["Redactions: 1 scrubbed"],
 }
 body = pr_post.render_body(DATA)
@@ -98,7 +99,13 @@ check("row notiz pipe encoded in body", "pipe&#124;here" in body)
 check("ort code span in body", "`a.sh:5`" in body)
 check("balance fenced", "```\nBilanz: 1 Finding\n```" in body)
 check("note present", "Redactions: 1 scrubbed" in body)
+check("footer names the participating voices", "Claude lenses + codex + grok + kimi" in body)
 check("footer present", "not a hosted bot" in body)
+degraded_body = pr_post.render_body({**DATA, "agents": ["claude", "codex"]})
+degraded_footer = degraded_body.rstrip().splitlines()[-1]
+check("footer omits absent voices", "Claude lenses + codex" in degraded_footer and "grok" not in degraded_footer and "kimi" not in degraded_footer)
+malformed_footer = pr_post.render_footer({"agents": ["claude", {"backend": "kimi"}, None]})
+check("footer ignores malformed agent entries", "Claude lenses" in malformed_footer and "kimi" not in malformed_footer)
 
 
 def header_row(rendered):

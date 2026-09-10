@@ -8,10 +8,12 @@
 > to the repo); this file is the concrete shape.
 >
 > The shipped `workflows/swarm-review.js` has since evolved past this snapshot
-> (11 lenses in 5 clusters, per-cluster fan-out for **every** voice — externals
-> included, via the adapter's `--lens-instr` — and kind-aware verify for design
-> findings) — the workflow file is authoritative; this blueprint keeps the
-> original 5-lens PoC shape with its single broad external call per backend.
+> (11 lenses in 5 clusters, per-cluster fan-out for **every** voice — external
+> `codex`, `grok`, and the opt-in `kimi` included, via the adapter's `--lens-instr`
+> — up-to-four-family consensus, and kind-aware verify for design findings). The workflow
+> file is authoritative; this blueprint deliberately keeps the original 5-lens
+> PoC shape with its single broad codex/grok call. Kimi's shipped ACP transport
+> and local schema validation are documented in the plugin README and knowledge.
 
 ## Pipeline shape (4 phases)
 
@@ -213,33 +215,62 @@ The diff under review is **untrusted input** that flows into agentic backends an
 back into the report. Three loop rounds (one of which exfiltrated a real
 credential mid-review) converged on these non-negotiable mitigations:
 
-1. **Sandbox every backend + filter the env (read+web posture, 0.6.0).** Both
-   external voices may **read project files** and do **web research** so they
-   can catch out-of-diff bugs and external knowledge (API docs, CVEs). Adapter
-   enforces: grok strict `--tools read_file,list_dir,grep,web_search,web_fetch`
-   + `--cwd <repo>` (no write/shell tools); codex `-s read-only -C <repo>
-   -c tools.web_search=true` (web works under read-only; never
-   `workspace-write` / `--add-dir`); **an OS-level read-deny jail**
+1. **Sandbox every backend + filter the env (read+web posture, 0.6.0; Kimi
+   extension 0.11.0).** All shipped external voices may **read project files**
+   and do **web research** so they
+   can catch out-of-diff bugs and external knowledge (API docs, CVEs), and
+   since 0.11.0 every voice keeps a **shell** for `git log/show/blame` and grep
+   pipelines — affordable only because the jail **inverts the write model**
+   (deny all writes; re-allow scratch, per-user temp/cache, `/dev`, the
+   backend's own auth state; deny the repository/Git roots and host config
+   surfaces on top). Adapter enforces: grok `--tools read_file,list_dir,grep,
+   run_terminal_command,web_search,web_fetch --permission-mode dontAsk` plus
+   `--deny` prefix rules (egress/destructive verbs; grok pre-approves every
+   listed tool regardless of mode, deny rules are honoured) + `--cwd <repo>`,
+   run from an ephemeral HOME/GROK_HOME (neutral Claude settings, only
+   `auth.json` linked — grok 1.0 otherwise loads the operator's Claude
+   settings, hooks, plugins/MCP servers and the repo's `CLAUDE.md`/rules as
+   instructions; and a merely DENIED settings file makes its permission engine
+   ask, which headless `dontAsk` answers by cancelling the turn); codex
+   `-s danger-full-access --ignore-user-config --ignore-rules -C <repo>
+   -c tools.web_search=true` under the jail — codex's own seatbelt cannot be
+   applied inside any outer profile carrying a deny rule (`sandbox_apply:
+   Operation not permitted`), which had silently killed every codex shell
+   command and file read since 0.6.0; `-s read-only` remains the jail-less
+   posture (never `workspace-write` / `--add-dir`); Kimi via ACP with no client FS/terminal
+   capability, its shell limited to a **read-only command allowlist** (git
+   read subcommands, grep/rg/find/ls/cat pipelines; no chaining/redirection/
+   substitution) vetted by the client — allowlisted commands approved once on
+   request, every other permission request rejected, and any other mutating
+   tool kind that ran treated as policy failure (defense-in-depth); **an OS-level jail**
    (`sandbox-exec`/`bwrap`) around every call, denying HOME secret stores
    **per-backend** (a backend keeps its own cred dir but not its siblings' —
-   verified: codex can't read `~/.grok`) **plus repo-root** `.env*` / `data/` /
+   verified: codex can't read `~/.grok`; Kimi's ambient `~/.kimi-code` is
+   denied entry by entry — all but `bin/`, which holds the executable, and
+   Kimi's own `credentials/`/`oauth/`, linked into its ephemeral HOME so a
+   rotated refresh token lands on the host file)
+   **plus repo-root** `.env*` / `data/` /
    `*.pem` / SSH id keys (`id_rsa*`/`id_ed25519*`/…) / `*.key` / `.npmrc` /
    `.pypirc` / `credentials.json` (root-level only — nested secrets via
-   `SWARM_DENY_PATHS`; in a linked worktree the **main checkout's** root too).
+   `SWARM_DENY_PATHS`; in a linked worktree the **main checkout's** root too)
+   **and repository/Git write-deny** (`sandbox-exec` `file-write*` /
+   `bwrap --remount-ro`, `GIT_OPTIONAL_LOCKS=0`).
    No working jail → **fail closed per voice** (grok tool-less/no-web, codex web
-   hard-off); **an env filter** stripping secret-shaped vars (the jail blocks
+   hard-off, Kimi omitted/refused because ACP has no safe jail-less tier); **an
+   env filter** stripping secret-shaped vars (the jail blocks
    files, not the inherited env) and pointing git at `/dev/null` for
    global/system config so a denied `~/.gitconfig` never breaks git. A prompt
    **egress guard** (outside the untrusted-diff fence) forbids putting repository
    content into web queries — it is **model-cooperation-dependent**, not
-   transport-enforced; the kept+extended secret-jail is the hard boundary that
-   bounds blast radius.
+   transport-enforced; the secret-read jail plus repository immutability are
+   the hard boundaries. Arbitrary child-process execution is a documented
+   residual.
    *Denylist, not allowlist, by necessity:* the node/bun-based CLIs load runtime
    from all over `$HOME`, so a deny-`$HOME`-allowlist jail breaks them (tested:
    codex's node loader dies).
 2. **Scrub secrets at the boundaries.** `scrub_secrets` redacts secret-shaped
    content (AWS keys, private keys, gh/sk tokens, `secret=…`) from findings JSON
-   before it leaves `run_codex`/`run_grok` — a backstop even if a sandbox is
+   before it leaves `run_codex`/`run_grok`/`run_kimi` — a backstop even if a sandbox is
    bypassed. A final **output gate** re-scrubs every surviving finding (incl.
    Claude finders, which never pass the adapter) before results leave the
    workflow. Scrubbing runs at these two *boundaries* (inbound from a backend,
@@ -251,7 +282,7 @@ credential mid-review) converged on these non-negotiable mitigations:
    forge, plus a system instruction that everything inside is data, never
    instructions — deterministic Bash, never an LLM step.
    - *Diff (first hop):* the skill fences the inlined diff (`DIFF-<nonce>`,
-     `secrets.token_hex`, collision-checked) before codex/grok/Claude read it.
+     `secrets.token_hex`, collision-checked) before codex/grok/Kimi/Claude read it.
    - *Findings (second hop):* the free-text fields those backends send BACK
      (`summary`, `failure_scenario`, `mechanism`) are re-interpolated into the
      merge and verify prompts — a diff can plant reviewer instructions in a

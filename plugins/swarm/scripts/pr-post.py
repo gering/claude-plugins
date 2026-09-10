@@ -29,6 +29,7 @@ Input JSON (via --input <path>, or --input - for stdin):
     "rows": [ {num,sev,ort,befund,quelle,v,notiz[,kind,lens]}, ... ],  # gated findings
     "has_quelle": true,        # optional; defaults to: any row has a quelle
     "balance": "Bilanz: …\nAgents: …\nLenses: …",
+    "agents": ["claude", "codex", "grok", "kimi"],      # backends that entered the workflow
     "notes": ["Redactions: …", "Backend error: …"],        # optional extra lines
     "empty": false             # true -> "No issues raised." instead of a table
   }
@@ -69,11 +70,28 @@ import tempfile
 
 GH_TIMEOUT = 60  # seconds for any single gh call
 
-FOOTER = (
-    "<sub>Local mixture-of-agents review (Claude lenses + codex + grok) run "
-    "from the author's machine — not a hosted bot. Verdicts "
-    "(✅/\U0001f7e8/❌) are the runner's own assessment.</sub>"
-)
+_AGENT_LABELS = {
+    "claude": "Claude lenses",
+    "codex": "codex",
+    "grok": "grok",
+    "kimi": "kimi",
+}
+
+
+def render_footer(data) -> str:
+    """Name only the backend families that actually entered the workflow."""
+    raw = data.get("agents")
+    active = {item for item in raw if isinstance(item, str)} if isinstance(raw, list) else set()
+    # Unknown backends keep their raw name rather than vanishing: the footer
+    # claims to name every family that entered the workflow.
+    labels = [_AGENT_LABELS.get(b, b) for b in _AGENT_LABELS if b in active]
+    labels += sorted(b for b in active if b not in _AGENT_LABELS)
+    suffix = f" ({' + '.join(labels)})" if labels else ""
+    return (
+        f"<sub>Local mixture-of-agents review{suffix} run from the author's "
+        "machine — not a hosted bot. Verdicts (✅/\U0001f7e8/❌) are the "
+        "runner's own assessment.</sub>"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -313,7 +331,7 @@ def render_body(data: dict) -> str:
         if note:
             parts += ["", note]
 
-    parts += ["", FOOTER]
+    parts += ["", render_footer(data)]
     return "\n".join(parts) + "\n"
 
 

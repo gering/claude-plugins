@@ -1,9 +1,9 @@
 export const meta = {
   name: 'swarm-review',
-  description: 'Local mixture-of-agents review: scope+gate → fan-out (Claude lenses + codex + grok) → (file,mechanism) merge with family-aware consensus → verify solos + design clusters → output-gated ranked synthesis.',
+  description: 'Local mixture-of-agents review: scope+gate → fan-out (Claude lenses + codex + grok + kimi) → (file,mechanism) merge with family-aware consensus → verify solos + design clusters → output-gated ranked synthesis.',
   phases: [
     { title: 'Scope', detail: 'classify diff + gate lenses' },
-    { title: 'Fan-out', detail: 'Claude lens-cluster finders + codex + grok in parallel' },
+    { title: 'Fan-out', detail: 'Claude lens-cluster finders + codex + grok + kimi in parallel' },
     { title: 'Merge', detail: 'cluster by (file, mechanism), consensus by family' },
     { title: 'Verify', detail: '3-state verify of solo + design clusters' },
   ],
@@ -13,7 +13,7 @@ export const meta = {
 // args.adapter            absolute path to scripts/agents.sh
 // args.diffFile           file the Claude finders read (raw unified diff)
 // args.externalPromptFile file the external CLIs get (review instr + fenced diff)
-// args.externalVoices     which external backends are live (subset of codex, grok)
+// args.externalVoices     which external backends are live (subset of codex, grok, kimi)
 // args.claude             false → external-only control run (no Claude lenses)
 // args.max                true (strict boolean) → deepest-effort profile below
 // Normalize: the runtime may deliver `args` as an object OR a JSON string.
@@ -32,8 +32,9 @@ const EXTERNAL_PROMPT = INPUT.externalPromptFile
 const TELEMETRY = INPUT.telemetryFile
 
 // TWO timeouts guard every external call, and they must not race:
-//   inner — the adapter's `timeout` wrapper, yielding a clean rc=124 that the
-//           error path and the telemetry line both key on;
+//   inner — the adapter's `timeout` wrapper, yielding a clean rc=124 (SIGTERM)
+//           or rc=137 (SIGKILL after `-k`) that `_is_timeout_rc` and telemetry
+//           both key on — but 137 only when a wrapper actually enforced a wall;
 //   outer — the Bash tool the transport agent runs the command with, whose
 //           maximum is a HARD 600000 ms.
 // Both defaulted to 600 s, so which one fired first was undefined — and when the
@@ -291,23 +292,19 @@ const FINDING_NONCE_RAW = FINDING_NONCE  // remember what was passed, to explain
 if (FINDING_NONCE && !/^[a-f0-9]{16,}$/.test(FINDING_NONCE)) FINDING_NONCE = ''
 const fenceDegraded = !FINDING_NONCE  // no structural fence at merge/verify — surfaced in the return payload
 // `--max` profile: lift every voice to its ceiling for a deepest-effort review.
-// codex has no `max` tier (xhigh is its top) + gets the stronger model; grok's
-// ladder is low|medium|high since 0.2.101, so `high` is already its ceiling on
-// both profiles; the in-session Claude finders and verifier go to `xhigh`.
+// codex has no `max` tier (xhigh is its top); the normal profile runs `medium`
+// on the same `gpt-5.6-sol` the adapter pins (the model is the adapter's, only
+// the effort is a profile knob — 0.11.0 dropped the --max-only model switch); grok's
+// ladder is low|medium|high since 0.2.101 — the normal profile runs `low`
+// because `medium` still hit the 540 s wall on a ~290 KiB cluster prompt
+// (breakage timed out, threat at 99 %, 0.11.0 four-family run) and `high` had
+// already done so on ~190 KiB, so `medium` is reserved for --max; Kimi's k3
+// models expose thinking low|high|max (no medium — the adapter maps medium
+// down to low), so the normal profile runs `low` and --max selects `high`
+// (`max` was 99–458 s per cluster at `high`). In-session Claude goes to `xhigh`.
 // Strict === true: the skill always passes a boolean, and a stray truthy value
 // (max:1 / "true") should NOT silently trigger a slower, costlier run.
-// MAX_CODEX_MODEL must be a model the local codex CLI can load — if it's been
-// renamed/retired, run_codex exits non-zero and the voice surfaces as a
-// backendError (a visible degraded ensemble), never a silent downgrade.
 const MAX = INPUT.max === true
-const MAX_CODEX_MODEL = 'gpt-5.6-sol'
-// Defense-in-depth: this value is interpolated into a shell command string a
-// transport agent runs via Bash. It is a constant today (no injection vector),
-// but guard it so a future edit to a dynamic/untrusted source can't inject —
-// allow only model-id characters, else fail loudly rather than build a bad cmd.
-if (MAX && !/^[A-Za-z0-9._-]+$/.test(MAX_CODEX_MODEL)) {
-  throw new Error(`unsafe MAX_CODEX_MODEL: ${JSON.stringify(MAX_CODEX_MODEL)}`)
-}
 if (!ADAPTER || !DIFF_FILE || !EXTERNAL_PROMPT) {
   // Full shape so the /swarm:review presenter can render this without tripping
   // on missing gate/balance/refuted/backendErrors keys.
@@ -360,8 +357,8 @@ if (!FINDING_NONCE) {
 // Two further effects, neither reachable by lowering effort:
 //   1. A timeout costs ONE lens instead of three — `correctness` and
 //      `removed-behavior` no longer die alongside it. That was the family-critical
-//      failure: grok is the only third-family voice, so one rc=124 removed the
-//      whole cluster's third opinion.
+//      failure at the time: grok was the only third-family voice, so one rc=124
+//      removed the whole cluster's third opinion.
 //   2. `reach` carries no MANDATORY lens, so the gate may prune it away
 //      ENTIRELY on a diff with no cross-file surface — where the old layout
 //      still spawned the expensive call because `correctness` held the cluster open.
@@ -423,7 +420,7 @@ const METHODOLOGICAL_LENSES = ['removed-behavior', 'cross-file-trace']
 // Lenses the gate may NEVER prune. Since 0.7.0 the gate prunes for every voice,
 // so a lens it drops is reviewed by nobody — in 0.5.x/0.6.0 the full-width
 // external calls absorbed a mis-gate, and that redundancy is gone. The gate runs
-// on haiku/effort-low against a diff that is itself untrusted input, and its only
+// on haiku/effort-medium against a diff that is itself untrusted input, and its only
 // other protection is a sentence in its own prompt (model-cooperation-dependent,
 // injection-reachable). These are the code-level backstop: a diff that talks the
 // gate into "docs-only" still gets a threat review AND a correctness pass.
@@ -454,8 +451,9 @@ for (const l of MANDATORY_LENSES) {
 }
 
 // One finding. DRIFT WARNING: this schema is hand-mirrored in TWO places —
-// scripts/schema/finding.schema.json (canonical, CLI-enforced on codex/grok)
-// and this FINDING_ITEM. The caps double as injection limits, so both must stay
+// scripts/schema/finding.schema.json (canonical; CLI-enforced on codex/grok,
+// locally enforced after Kimi ACP) and this FINDING_ITEM. The caps double as
+// injection limits, so both must stay
 // in sync — edit them together.
 const FINDING_ITEM = {
   type: 'object', additionalProperties: false,
@@ -485,7 +483,7 @@ const EXTERNAL_SCHEMA = {
 // backend label -> model family. Consensus counts distinct FAMILIES, not
 // backends: if two voices ever share a vendor again (as grok-4.5 + composer
 // did), their agreement must count once, not as an independent cross-check.
-const FAMILY = { claude: 'claude', codex: 'openai', grok: 'grok' }
+const FAMILY = { claude: 'claude', codex: 'openai', grok: 'grok', kimi: 'moonshot' }
 
 // ---- output gate: last-line secret scrub over surviving findings ------------
 // Runs on EVERY finding (incl. Claude finders, which never pass the adapter)
@@ -507,6 +505,8 @@ function scrubField(s) {
     [/aws_secret_access_key\s*[=:]\s*[A-Za-z0-9/+]{20,}/gi, 'aws_secret_access_key=[REDACTED]'],
     [/\bgh[pousr]_[A-Za-z0-9]{20,}/g, '[REDACTED-GH-TOKEN]'],
     [/\bsk-[A-Za-z0-9]{20,}/g, '[REDACTED-API-KEY]'],
+    // JWT-shaped bearer/refresh tokens (Moonshot OAuth): three base64url runs.
+    [/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, '[REDACTED-JWT]'],
     [/(?<key>\b(?:secret|token|password|passwd|api[_-]?key)\b)\s*[=:]\s*[A-Za-z0-9/+._-]{16,}/gi, '$<key>=[REDACTED]'],
   ]
   for (const [re, repl] of rules) {
@@ -533,7 +533,7 @@ function scrubFinding(f) {
 }
 
 // ---- finding fence: structural delimiter around untrusted finding text ------
-// Findings come back from external backends (codex/grok) as free text, then get
+// Findings come back from external backends (codex/grok/kimi) as free text, then get
 // re-interpolated into the merge- and verify-stage prompts. A malicious diff can
 // plant reviewer instructions in a finding field → second-order prompt injection.
 // Mirror the diff fence (SKILL.md § 1): wrap the untrusted text between two
@@ -615,7 +615,7 @@ if (runClaude) {
     `Candidate lenses: ${CANDIDATE_LENSES.join(', ')}.\n` +
     `Decide which lenses are worth running; skip a lens ONLY when this diff genuinely cannot pay off for it (e.g. a doc-only diff → no efficiency). The design-quality lenses (${LENS_CLUSTERS.design.join(', ')}) are as first-class as the defect lenses — never skip them merely because the code looks functional. Be decisive. These lenses are NEVER skippable and are re-added if you omit them, so do not spend a skip on them: ${MANDATORY_LENSES.join(', ')}.\n` +
     `Return change_kind, run (lens names), skip (lens + one-clause why).`,
-    { label: 'scope+gate', phase: 'Scope', schema: GATE_SCHEMA, model: 'haiku', effort: 'low' }
+    { label: 'scope+gate', phase: 'Scope', schema: GATE_SCHEMA, model: 'haiku', effort: 'medium' }
   ).catch(() => null)  // gate failure degrades to "run all lenses" — never rejects the workflow
 }
 // Distinguish "gate absent/failed" (→ run all candidates) from "gate ran and
@@ -710,10 +710,10 @@ const claudeThunks = finderUnits.map((u) => () =>
 // over the SAME units as the Claude finders, so the gate prunes calls for
 // everyone — a fully-gated-out cluster spawns nothing for any voice — and each
 // finding's [lens] tag becomes AUTHORITATIVE (the voice *is* that lens; no
-// self-tagging from a broad prompt). Both backends read files + research since
-// 0.6.0, so neither needs a diff-only brief variant.
+// self-tagging from a broad prompt). Every external backend can read files and
+// research under the same jail policy, so none needs a diff-only brief variant.
 // Cost: `live-backends × units` calls, each re-sending the fenced diff and
-// paying CLI startup — ≤2×5 by default, ≤2×11 under --max (the explicitly
+// paying CLI startup — ≤3×5 by default, ≤3×11 under --max (the explicitly
 // ordered ceiling). Logged below; never silently capped.
 const shQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
 // Single LINE by construction: this string is embedded in a command the transport
@@ -759,11 +759,34 @@ const utf8Checksum = (s) => {
 }
 // Only spawn transports for backends the skill reported live (probed via the
 // adapter); absent CLIs would otherwise show up as noisy "errors".
+// The fallback names the STOCK ensemble: Kimi is opt-in (`--kimi` / SWARM_KIMI=1)
+// and only ever arrives here through the skill's externalVoices list.
 const wantVoices = Array.isArray(INPUT.externalVoices) ? INPUT.externalVoices : ['codex', 'grok']
+// `clusters`: an optional allowlist of the lens clusters a backend reviews.
+// Kimi is metered on a 5-hour AND a 7-day quota that a full five-cluster
+// review (5 × ~370 KiB prompts plus tool loops) exhausted within one day
+// (2026-09-07), so it reviews only the two defect clusters where a fourth
+// family changes verdicts — breakage and threat — on BOTH profiles; reach,
+// design and consistency keep three families. Its effort is already at the
+// k3 floor (`low`; the ladder is low|high|max). Even so two clusters drained
+// the entry plan's 5-hour window (every ACP tool round-trip re-sends the whole
+// ~370 KiB context), so Kimi is OPT-IN: the adapter's readiness gate requires
+// SWARM_KIMI=1, and `env` carries that opt-in onto the transport command —
+// the transport subagent's environment is not ours to rely on, and a voice in
+// externalVoices IS the opt-in (the skill only lists Kimi when it was asked for).
 const EXTERNAL_BACKENDS = [
-  { backend: 'codex', flags: MAX ? `--model ${MAX_CODEX_MODEL} --effort xhigh` : '--effort high' },
-  { backend: 'grok', flags: '--effort high' },
+  { backend: 'codex', flags: MAX ? '--effort xhigh' : '--effort medium' },
+  { backend: 'grok', flags: MAX ? '--effort medium' : '--effort low' },
+  { backend: 'kimi', flags: MAX ? '--effort high' : '--effort low', clusters: ['breakage', 'threat'], env: 'SWARM_KIMI=1 ' },
 ]
+// Units a backend actually runs: all of them, or (with `clusters`) those whose
+// lenses belong to an allowed cluster — under --max the units are single lenses,
+// so the filter goes by lens membership, not unit name.
+const unitsForBackend = (b, units) => {
+  if (!b.clusters) return units
+  const allowed = new Set(b.clusters.flatMap((c) => LENS_CLUSTERS[c] || []))
+  return units.filter((u) => u.lenses.some((l) => allowed.has(l)))
+}
 // A claude:false control run has no gate (the gate is a Claude agent), so the
 // externals keep their FULL-WIDTH coverage — per-cluster now, but over every
 // candidate lens. Without this they would inherit the empty Claude lens set and
@@ -773,8 +796,9 @@ const EXTERNAL_BACKENDS = [
 const externalUnits = runClaude ? finderUnits : unitsFor(CANDIDATE_LENSES)
 const liveExternals = EXTERNAL_BACKENDS.filter((b) => wantVoices.includes(b.backend))
 const liveBackends = liveExternals.map((b) => b.backend)
+const reviewSources = [...(runClaude ? ['claude'] : []), ...liveBackends].join('/') || 'no live backend'
 const externalVoiceSpecs = liveExternals
-  .flatMap((b) => externalUnits.map((u) => ({
+  .flatMap((b) => unitsForBackend(b, externalUnits).map((u) => ({
     backend: b.backend, unit: u.name, lenses: u.lenses, label: `${b.backend}:${u.name}`,
     // --lens-instr-sum is an INTEGRITY check on the retype: an empty value is
     // already refused, but a transport that shortened, paraphrased or reworded
@@ -798,7 +822,7 @@ const externalVoiceSpecs = liveExternals
     // caching was declined in 0.9.4 — a cached 'model absent' would outlive the CLI
     // upgrade that fixes it — and the probes are bounded and counted in
     // probe_budget_seconds, so the cost is paid in parallel, not against the margin.
-    cmd: `SWARM_TIMEOUT=${EFFECTIVE_TIMEOUT_S} SWARM_MAX_PROMPT_BYTES=${MAX_PROMPT_BYTES} SWARM_PROBE_TIMEOUT=${PROBE_TIMEOUT_S} bash ${shQuote(ADAPTER)} run ${b.backend} ${b.flags} --lens-instr ${shQuote(instrFor(u))} --lens-instr-sum ${utf8Checksum(instrFor(u))} --prompt-file ${shQuote(EXTERNAL_PROMPT)}` +
+    cmd: `${b.env || ''}SWARM_TIMEOUT=${EFFECTIVE_TIMEOUT_S} SWARM_MAX_PROMPT_BYTES=${MAX_PROMPT_BYTES} SWARM_PROBE_TIMEOUT=${PROBE_TIMEOUT_S} bash ${shQuote(ADAPTER)} run ${b.backend} ${b.flags} --lens-instr ${shQuote(instrFor(u))} --lens-instr-sum ${utf8Checksum(instrFor(u))} --prompt-file ${shQuote(EXTERNAL_PROMPT)}` +
       // Appended, not interpolated into the base string, so a run without a
       // telemetry sink produces the exact command it always did.
       // shQuote BOTH values. This string is executed as a shell command by the
@@ -810,8 +834,9 @@ const externalVoiceSpecs = liveExternals
       (TELEMETRY ? ` --unit ${shQuote(u.name)} --telemetry ${shQuote(TELEMETRY)}` : ''),
   })))
 if (externalVoiceSpecs.length) {
-  log(`External fan-out: ${externalVoiceSpecs.length} call(s) — ${liveBackends.join(' + ')} ` +
-      `× ${externalUnits.length} ${MAX ? 'lens' : 'cluster'}(es)`)
+  log(`External fan-out: ${externalVoiceSpecs.length} call(s) — ` +
+      liveExternals.map((b) => `${b.backend}×${unitsForBackend(b, externalUnits).length}`).join(' + ') +
+      ` (${externalUnits.length} ${MAX ? 'lens' : 'cluster'}(es) gated in)`)
 } else if (liveBackends.length) {
   // Live backends but zero units: the gate pruned EVERY lens. Say so explicitly —
   // otherwise a review with no external calls looks like a dropped backend rather
@@ -1002,7 +1027,7 @@ if (pool.length > 0) {
   const numbered = pool.map((f, i) => `#${i} [${f.backend}/${f.lens}] ${oneLine(f.file)}:${f.line} — ${oneLine(f.summary)} :: ${oneLine(f.failure_scenario)}`).join('\n')
   const fence = fenceFindings('FINDINGS', numbered)
   const res = await agent(
-    `Merge/dedup step for a code review. ${pool.length} raw findings from claude/codex/grok are numbered below. ` +
+    `Merge/dedup step for a code review. ${pool.length} raw findings from ${reviewSources} are numbered below. ` +
     `Cluster by UNDERLYING ISSUE (defect or improvement proposal) — same file + same mechanism/proposal = one cluster — EVEN IF line numbers differ (external tools number against the inlined diff, so match on meaning, not line). ${fence.guard}\n` +
     `Per cluster return: file, representative line, a short mechanism key, severity (max of members), summary, the strongest failure_scenario, recommendation, dominant lens, and member_indices. Every index appears in exactly one cluster.\n\n` + fence.block,
     { label: 'merge:cluster', phase: 'Merge', schema: CLUSTER_SCHEMA, effort: 'medium' }
@@ -1246,12 +1271,12 @@ findings.forEach((c, i) => { c.num = i + 1 })
 // Per-backend rollup for the balance "Agents" line: concrete short model label
 // + voice/finding counts + whether it ran clean. Wall-time (per-agent durationMs)
 // needs a registered workflow to surface — tracked as P4 wiring.
-// Display labels for the balance line. `grok` is deliberately the FAMILY name,
-// not a version: the adapter discovers the model per run, so any id hard-coded
-// here is a claim the report cannot keep — it printed "grok-4.5" for a run that
-// executed grok-4.6. A label that says less is better than one that says
-// something false; the exact model per call lives in the telemetry record.
-const MODEL_LABEL = { claude: 'opus', codex: 'gpt', grok: 'grok' }
+// Display labels for the balance line. External labels deliberately name the
+// family/CLI, not a version: adapter discovery/overrides can change the actual
+// model per run, so a hard-coded id is a claim the report cannot keep. A label
+// that says less is better than one that says something false; exact models live
+// in per-call telemetry.
+const MODEL_LABEL = { claude: 'opus', codex: 'gpt', grok: 'grok', kimi: 'kimi' }
 const agents = {}
 for (const v of voices) {
   const a = agents[v.backend] || (agents[v.backend] = { backend: v.backend, model: MODEL_LABEL[v.backend] || v.backend, voices: 0, failedVoices: 0, findings: 0, ok: true })
@@ -1309,6 +1334,10 @@ return {
     fenceDegraded,
     voices: voices.length,
     agents: Object.values(agents),
+    // Backends that actually entered the workflow with at least one surviving
+    // voice — the pr-post footer names exactly these; the skill passes the list
+    // through verbatim instead of re-deriving it from `agents` in prose.
+    participants: Object.values(agents).filter((a) => a.ok && a.failedVoices < a.voices).map((a) => a.backend),
     familiesExpected,
     familiesPresent,
     familiesLost,
