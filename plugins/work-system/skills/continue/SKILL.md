@@ -218,8 +218,11 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
    ```
    Exit **0** = go ahead. Exit **1** = recorded as out of bounds (`denied`) or not
    listed at all (`unlisted`) — stop and ask. Exit **3** = no mandate on file — ask.
-   Never collapse 1 and 3 into "no": one is a decision the user made, the other is a
-   question they were never asked.
+   Exit **2** = the file exists but cannot be read as a record (a duplicate key, an
+   unterminated frontmatter, a symlink — the script's stderr names it): a record
+   nobody can vouch for grants nothing, so stop, show the error, and ask. Never
+   collapse 1 and 3 into "no": one is a decision the user made, the other is a
+   question they were never asked — and never read 2 as either.
 
    Action names, so callers and the file agree: `commit`, `push-own-branch`,
    `open-pr`, `local-review`, `agreed-fixes`, `rebase-own-branch`, `merge`,
@@ -333,6 +336,12 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
        ```sh
        bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" round
        ```
+       Exit **0** → the round is booked; read `review_budget_exhausted` from its
+       output. Exit **4** → the round could **not** be persisted (read-only tree,
+       no space): stop and report it — reviewing on an in-session count while the
+       file is not being written is how a resumed session restarts the budget,
+       the exact thing the persisted counter exists to prevent. Exit **3** → no
+       mandate on file (nothing to bound; ask per milestone as step 3 says).
      Either way, check the remaining budget with `show` (which never consumes)
      before starting, and stop when `review_budget_exhausted=yes`: report the state
      and the findings you did not act on, and let the user extend the budget (they

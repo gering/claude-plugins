@@ -150,8 +150,23 @@ r = run(root, "allows", "open-pr", str(repo), plugin_root=False)
 check("dev layout resolves from the script's own location", r.returncode == 0)
 check("and reports the real verdict", "allowed" in r.stdout)
 
+# --- lane and actions pass through; exit 2 is not collapsed -------------------
+r = run(root, "actions")
+check("actions passes through", r.returncode == 0 and "open-pr" in r.stdout)
+r = run(root, "lane", "no-such-branch", str(repo))
+check("lane with no worktree is exit 3", r.returncode == 3)
+# The shim exec()s the real script, so a corrupt file's exit 2 must arrive as 2
+# — a caller mapping "anything else" to 3 would read a duplicate `allow:` as
+# "nothing recorded" and proceed.
+corrupt = make_repo()
+(corrupt / "MANDATE.md").write_text("---\nallow: merge\nallow: commit\n---\n")
+r = run(root, "allows", "merge", str(corrupt))
+check("a corrupt mandate is exit 2 through the shim", r.returncode == 2)
+check("its stderr survives the shim", "duplicate" in r.stderr)
+
 # --- usage ------------------------------------------------------------------
 check("unknown verb exits 2", run(root, "bogus").returncode == 2)
+check("the usage line lists lane", "lane" in run(root, "bogus").stderr)
 check("no verb exits 2", run(root).returncode == 2)
 check("a usage error is not mistaken for a verdict",
       "verdict=" not in run(root, "bogus").stdout)

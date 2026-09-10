@@ -34,6 +34,15 @@ Strip the flags first; whatever is left over is the commit message.
    - Run: `gh pr view --json number,title,url,headRefName,baseRefName 2>/dev/null`
    - If no PR exists, inform user and suggest: `gh pr create`
    - Store `PR_NUMBER`, `PR_URL`, and `BASE_BRANCH` (from baseRefName) for later use
+   - Resolve the **lane** the PR belongs to — the worktree holding its branch, which
+     is not always the session cwd (this skill may run from the main repo):
+     ```sh
+     LANE="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" lane "$(git branch --show-current)")" || LANE=.
+     ```
+     `lane` exits 3 when no worktree holds the branch (a repo without work-system
+     lanes) — the cwd is then the right answer. **Every `mandate-shim.sh` call
+     below takes `"$LANE"`**; a cwd-resolved mandate from the main repo would be a
+     different lane's, or a stale committed one.
 
 2. **Check if rebase is needed** — delegate to `/rebase --no-poll --auto`:
    - Invoke the `/rebase` skill **with `--no-poll` and `--auto`**:
@@ -92,16 +101,19 @@ Strip the flags first; whatever is left over is the commit message.
      ```
    - **`has_bot=yes`** → a comment-triggered review workflow exists. Run:
      `gh pr comment <PR_NUMBER> --body "@claude review"` and continue to step 8.
-   - **`has_bot=unknown`** → the probe could not tell (not a git repo, unreadable
-     workflows dir). Do **not** guess in either direction: say what it could not
-     determine and ask whether to trigger the bot or run the local review.
-   - **`has_bot=no`** → this repo has no comment-triggered review bot, so there is
-     nothing to trigger and nothing to poll (the `why=` line says whether nothing
-     matched at all or a claude workflow exists that only a push can fire). Do not
-     comment, do not enter step 8. Say so plainly — including that a repo driven
-     purely by the Claude GitHub App with no workflow file also lands here — and
-     take the local route:
-     - `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" allows local-review`
+   - **`has_bot=unknown`** → the probe could not tell, and its `why=` says which
+     way: no `.github/workflows` at all (a repo with no CI *or* one served only by
+     the Claude GitHub App — the App answers `@claude review` with no workflow
+     file, and that cannot be seen locally), an unreadable dir, or a
+     comment-triggered workflow that mentions `@claude` without `uses:` the
+     action. Do **not** guess in either direction: relay the reason and ask
+     whether to post `@claude review` and poll, or run the local review.
+   - **`has_bot=no`** → workflow files exist and none can answer a comment (the
+     `why=` line says whether nothing references the bot or a claude workflow
+     exists that only a push can fire). There is nothing to trigger and nothing
+     to poll: do not comment, do not enter step 8. Say so plainly and take the
+     local route:
+     - `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" allows local-review "$LANE"`
        exits **0** → run `/swarm:review --pr <PR_NUMBER>` and treat its findings as
        this round's review (loop mode included: the loop cares about findings, not
        about where they came from).
@@ -157,10 +169,13 @@ When `--loop` (alias `--auto`) is present, `/cycle` stops being a single pass an
 - Parse `--max=N`. This caps total iterations so the loop can never run forever.
   Its default comes from the lane's mandate when there is one:
   ```sh
-  bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" show
+  bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" show "$LANE"
   ```
   `review_rounds_left` (non-empty) → `MAX` = that number; otherwise `MAX = 10`. An
   explicit `--max=N` always wins — the user typing a number *is* the decision.
+  Exit **2** from `show` = the mandate file is corrupt (duplicate key, open
+  fence, symlink): stop, show stderr, ask — do not fall back to `MAX = 10` as if
+  nothing were recorded.
 - **Check the budget before the first round, not after it.** If `show` already
   reports `review_budget_exhausted=yes` (or the derived `MAX` is `0`), stop right
   here with the exhausted message — do not run one review/fix pass and discover
@@ -170,7 +185,7 @@ When `--loop` (alias `--auto`) is present, `/cycle` stops being a single pass an
 - **Consume a round from the mandate at the start of each iteration**, not just
   from an in-session counter:
   ```sh
-  bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" round
+  bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" round "$LANE"
   ```
   The in-session counter dies with the session; a resumed worker would otherwise
   restart its budget at zero and loop as long again. The recorded one is the only

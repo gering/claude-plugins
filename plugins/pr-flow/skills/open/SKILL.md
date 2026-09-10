@@ -26,17 +26,28 @@ user_invocable: true
 **Honor a recorded mandate.** If work-system's `/kickoff` recorded an autonomy
 mandate for this lane, an action it pre-authorized must not be confirmed again —
 the user already answered, and re-asking is the friction this record exists to
-remove. Read it once, up front:
+remove. Resolve the **lane** first, then read the record once, up front:
 
 ```sh
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" show
+LANE="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" lane "$(git branch --show-current)")" || LANE=.
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" show "$LANE"
 ```
 
-Then gate the decisions below on `allows <action>`: exit **0** = proceed silently,
-exit **1** = recorded as out of bounds or unlisted (stop and ask), exit **3** =
-nothing recorded, or work-system is not installed (behave exactly as before this
-paragraph — ask). Never read exit 3 as a refusal: a missing record means the
-question was never put to the user, not that they said no.
+`LANE` is the worktree that has this branch checked out. The session cwd is not
+always that worktree (a `/open` run from the main repo for a task branch), and a
+cwd-resolved mandate would then be a different lane's — or a stale committed one
+at the main root. `lane` exits 3 when no worktree holds the branch (a plain repo
+without work-system lanes); the `|| LANE=.` fallback is the cwd, which is right
+exactly then. **Pass `"$LANE"` to every `mandate-shim.sh` call in this skill.**
+
+Then gate the decisions below on `allows <action> "$LANE"`: exit **0** = proceed
+silently, exit **1** = recorded as out of bounds or unlisted (stop and ask), exit
+**3** = nothing recorded, or work-system is not installed (behave exactly as
+before this paragraph — ask). Exit **2** = the mandate file itself is unreadable
+(duplicate key, unterminated frontmatter, a symlink) — the record exists but
+cannot be trusted: show the script's stderr, stop, and ask; never read it as 1 or
+3. Never read exit 3 as a refusal: a missing record means the question was never
+put to the user, not that they said no.
 
 ## Instructions
 
@@ -134,7 +145,7 @@ question was never put to the user, not that they said no.
    **The mandate gate is not part of that branch — it applies on every path.**
    Run it once before moving on to step 6, whichever branch above was taken:
    ```sh
-   bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" allows open-pr
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" allows open-pr "$LANE"
    ```
    - exit **0** → proceed (and skip the warning confirmation, as above).
    - exit **1** → the lane's mandate records opening a PR as out of bounds
@@ -144,6 +155,8 @@ question was never put to the user, not that they said no.
      when something else already went wrong is not a gate.
    - exit **3** → nothing recorded (or work-system absent). Behave exactly as
      before: the all-green path proceeds, warnings ask once.
+   - exit **2** → the mandate file is corrupt (see the principles above). Stop,
+     show stderr, ask.
 
 5. *(merged into step 4)*
 
@@ -216,13 +229,16 @@ question was never put to the user, not that they said no.
       - **`has_bot=yes`** → a comment-triggered review workflow exists; it just has
         not fired yet. Suggest `/cycle` to trigger manually. Do NOT trigger
         automatically here — `/open` is about creation; triggering is `/cycle`'s job.
-      - **`has_bot=unknown`** → the probe could not tell. Report that and name both
-        routes rather than picking one.
-      - **`has_bot=no`** (no comment-triggered review bot — note a repo driven only
-        by the Claude GitHub App with no workflow file also reports `no`) →
+      - **`has_bot=unknown`** → the probe could not tell, and says why: no
+        `.github/workflows` at all (a repo with no CI *or* one served only by the
+        Claude GitHub App — indistinguishable locally), an unreadable dir, or a
+        comment-triggered workflow that mentions `@claude` without using the
+        action. Report the `why=` line and name both routes (`/cycle` to try the
+        bot, `/swarm:review --pr <N>` locally) rather than picking one.
+      - **`has_bot=no`** (workflow files exist and none can answer a comment) →
         `/cycle` cannot work here, and recommending it sends the user into a loop
         that fails every time. Route to the local review instead:
-        - `mandate-shim.sh allows local-review` exits **0** → run
+        - `mandate-shim.sh allows local-review "$LANE"` exits **0** → run
           `/swarm:review --pr <PR_NUMBER>` now and render its result in place of
           the bot review. Say which route you took and why ("no review bot on this
           repo — ran the local review, which your mandate covers").
