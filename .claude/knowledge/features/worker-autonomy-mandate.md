@@ -1,7 +1,7 @@
 ---
 title: "Worker Autonomy Mandate (MANDATE.md)"
 createdAt: 2026-09-07
-updatedAt: 2026-09-08
+updatedAt: 2026-09-10
 createdFrom: "branch: task/extend-worker-autonomy"
 updatedFrom: "branch: task/extend-worker-autonomy"
 pluginVersion: 1.9.0
@@ -38,6 +38,14 @@ three answers must stay three:
 - **1** — `denied` (in `deny`) or `unlisted` (in neither list)
 - **3** — no mandate recorded at all, or (through pr-flow's shim) work-system
   is not installed
+
+Two more codes joined after the second review pass, and both exist so the
+first three stay honest: **2** means the file is there but cannot be read as a
+record (duplicate key, an unterminated frontmatter, a symlink at the path) —
+a record nobody can vouch for grants nothing, and a caller mapping "anything
+else" to 3 would proceed on it; **4** (from `round`) means the increment could
+not be persisted, and looping on the in-session count instead is exactly the
+budget restart the file exists to prevent.
 
 Collapsing 1 and 3 into "not allowed" is the defect this contract exists to
 prevent: **1 is a decision the user made, 3 is a question they were never
@@ -89,6 +97,16 @@ them — and names *only* the file. An earlier version also ended with "open a P
 when the work is complete", a concrete instruction that overrode the mandate the
 same prompt had just told the worker to obey.
 
+## The lane is not the cwd
+
+`/cycle` and `/open` may run from the main repo for a PR that belongs to a
+task worktree. The has-bot probe was anchored on the repo root for exactly that
+case — while the mandate reads beside it still resolved from the cwd, i.e. a
+different lane's record or a stale committed one at the main root. Hence
+`mandate.sh lane <branch>` (the worktree holding a branch, exit 3 if none) and
+the rule that every shim call takes `"$LANE"`. The fallback `|| LANE=.` is the
+cwd, which is right exactly when no worktree holds the branch.
+
 ## Soft coupling, and what "missing" means
 
 pr-flow reaches work-system through `scripts/mandate-shim.sh`, which shares the
@@ -115,9 +133,35 @@ attempt got wrong: a bare `grep -rlie claude .github/workflows/` is **cwd-relati
 the PR belongs to a worktree), and mentioning claude is not the same as reacting
 to a comment — `@claude review` needs an `issue_comment` trigger. It answers
 `yes`/`no`/**`unknown`**; unknown is its own answer, because a probe that cannot
-tell must make the caller ask rather than pick a direction.
+tell must make the caller ask rather than pick a direction. The second pass
+sharpened what "cannot tell" covers: **no workflows dir at all** is `unknown`,
+not `no` — a repo served only by the Claude GitHub App looks exactly like that
+and does answer `@claude review`, so `no` there silently removed a working
+path; `yes` needs both `uses: anthropics/claude-code-action` and an
+`issue_comment` trigger, a loose `@claude` mention in a comment workflow is
+`unknown` too. The whole probe → answer → local-route tree now lives once in
+`plugins/pr-flow/docs/REVIEW-ROUTING.md`, followed by `/open`, `/cycle`,
+`/check` and `/rebase`.
 
-## Two bash traps found building this
+## What the second review pass taught about the first
+
+Round 1's 25 fixes produced 27 new findings in round 2, most of them in code
+the fixes had introduced (`has-bot` alone: six). Two lessons worth keeping.
+Prose that carries logic drifted *within one review round*, not over months:
+the preset allow list "minus local-review" was being retyped by hand, and the
+git-exclude recipe was a sub-step `/adopt` reached by cross-reference and could
+skip — both moved into `mandate.sh` (`--without`, exclude-in-init), and the
+routing tree into a `docs/` spec. And a scoped re-review beats a third full
+round: at 139 KiB grok lost two of five clusters; the follow-up over just the
+two scripts that held the real defects runs at 33 KiB with every family intact.
+
+## Three bash traps found building this
+
+**An unquoted `$list` of paths is a word-split waiting for a space.** `has-bot`
+handed its candidate files to a second grep as `$hits`; a checkout under
+"My Projects" split into two non-existent paths and reported a working bot as
+absent — permanently, on every run. Paths go NUL-delimited end to end, and
+every grep gets `--` before its operand.
 
 **`${VAR:-.}` is not a safe default for a path you are about to source.**
 pr-flow's shims fell back to `"${CLAUDE_PLUGIN_ROOT:-.}/scripts/lib-work-system.sh"`,
