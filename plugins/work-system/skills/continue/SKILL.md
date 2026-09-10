@@ -219,16 +219,18 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
    Exit **0** = go ahead. Exit **1** = recorded as out of bounds (`denied`) or not
    listed at all (`unlisted`) — stop and ask. Exit **3** = no mandate on file — ask.
    Exit **2** = the file exists but cannot be read as a record (a duplicate key, an
-   unterminated frontmatter, a symlink — the script's stderr names it): a record
-   nobody can vouch for grants nothing, so stop, show the error, and ask. Never
-   collapse 1 and 3 into "no": one is a decision the user made, the other is a
-   question they were never asked — and never read 2 as either.
+   unterminated or missing frontmatter, a symlink, a file git *tracks* — the
+   script's stderr names it), **or the question was malformed** (an action outside
+   `mandate.sh actions`): a record nobody can vouch for grants nothing, so stop,
+   show the error, and ask. Never collapse 1 and 3 into "no": one is a decision
+   the user made, the other is a question they were never asked — and never read
+   2 as either.
 
    Use the action names **as the mandate itself spells them** — the `allow=` and
    `deny=` lines `show` just returned are the vocabulary for this lane, and
-   `mandate.sh actions` lists the full set the script accepts. Do not work from a
-   remembered list: a token that is not in the script's vocabulary comes back
-   `unlisted` (exit 1), i.e. as a denial the user never made.
+   `mandate.sh actions` lists the full set the script accepts. A token outside
+   that vocabulary is refused as a usage error rather than answered, so a typo
+   can never read as a denial the user never made — but it still stops you.
 
 4. **Install dependencies** (detect, then install):
    Auto-detect the project type when dependencies appear to be missing:

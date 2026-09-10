@@ -276,6 +276,8 @@ answer to `MANDATE.md` beside `TASK.md`:
 ---
 mandate_version: 1
 task: add-dark-mode
+recorded_at: 2026-09-07T10:12:00Z
+recorded_by: kickoff
 authorized_by: user
 scope: dark-mode theming only; no design-system refactor
 terminal_gate: reviewed-pr
@@ -305,9 +307,10 @@ Three properties are load-bearing:
   1 and 3 apart: one is a decision the user made, the other a question they were
   never asked. **No mandate is not a lockdown** — it is the pre-mandate behavior,
   where the worker asks before each milestone. Matching is a literal whole-token
-  comparison, and the action vocabulary is fixed (`mandate.sh actions`): a typo is
-  rejected when the mandate is written, because later it would be reported as
-  `unlisted` and read as a refusal nobody made.
+  comparison, and the action vocabulary is fixed (`mandate.sh actions`): a token
+  outside it is rejected both when the mandate is written and when it is asked
+  about (exit 2, a usage error), because answering `unlisted` would report a typo
+  as a refusal nobody made.
 - **The budget outlives the session.** `review_budget` bounds review→fix rounds,
   and `review_rounds_used` is counted in the file, so a worker resumed with
   `claude -c` after a context loss does not silently restart its allowance.
@@ -315,7 +318,9 @@ Three properties are load-bearing:
 Edit `MANDATE.md` by hand to widen or narrow a running lane (raising
 `review_budget` is the usual case); `/kickoff` never rewrites an existing one, and
 refuses outright if the file on disk names a *different* task — that is what an
-accidentally committed mandate looks like when a fresh worktree inherits it.
+accidentally committed mandate looks like when a fresh worktree inherits it. A
+file git already **tracks** is refused by every verb (even `--force`): it came in
+with a branch and was never answered here; untrack it, then re-record.
 Keep each value on one line: a value carrying a newline would inject further
 frontmatter keys, so `init` rejects one, and a duplicate key is refused at read
 time rather than resolved first-one-wins. Decline the question and no file is

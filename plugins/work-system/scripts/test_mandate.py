@@ -116,14 +116,23 @@ check("unlisted action exits 1", r.returncode == 1)
 check("unlisted is reported as unlisted, not denied", "unlisted" in r.stdout)
 
 # Whole-action matching: no substring, prefix, or REGEX may satisfy a check.
-check("prefix of an allowed action is not allowed",
-      run("allows", "commi", str(repo)).returncode == 1)
-check("superstring of an allowed action is not allowed",
-      run("allows", "commit-and-merge", str(repo)).returncode == 1)
-for pattern in (".*", "co.mit", "commit|merge", "^commit$", "c[o]mmit"):
-    r = run("allows", pattern, str(repo))
-    check(f"regex metacharacters do not match: {pattern}",
-          r.returncode == 1 and "unlisted" in r.stdout)
+# And the question itself is validated: a token outside the vocabulary is a
+# usage error (exit 2), because reporting it as `unlisted` (exit 1) turns a typo
+# into a denial the user never made — the 1-vs-3 collapse re-entering sideways.
+for typo in ("commi", "commit-and-merge", ".*", "co.mit", "commit|merge",
+             "^commit$", "c[o]mmit"):
+    r = run("allows", typo, str(repo))
+    check(f"a token outside the vocabulary is a usage error, not a verdict: {typo}",
+          r.returncode == 2 and "verdict=" not in r.stdout)
+    check(f"and the error names the vocabulary: {typo}", "unknown action" in r.stderr)
+check("a malformed question is refused even where no mandate exists",
+      run("allows", "commi", str(make_repo())).returncode == 2)
+# Whitespace padding must not hide a grant; a comma-joined pair is not one action
+# (it used to match as a SUBLIST of the allow line, even with one half denied).
+check("a space-padded action finds its grant",
+      run("allows", " commit ", str(repo)).returncode == 0)
+check("a comma-joined pair is rejected, not matched as a sublist",
+      run("allows", "commit,push-own-branch", str(repo)).returncode == 2)
 
 # --- init is not a rewrite tool --------------------------------------------
 r = init(repo, "task=demo")
@@ -151,7 +160,9 @@ check("--force actually replaced the record",
 # A record with NO task on disk cannot be shown to belong to this lane. The
 # old both-non-empty guard let it through with its merge grant intact.
 notask = make_repo()
-run("init", str(notask), "--preset", "merge-delegated", "authorized_by=user")
+run("init", str(notask), "--preset", "merge-delegated", "task=x", "authorized_by=user")
+nm = notask / "MANDATE.md"
+nm.write_text(nm.read_text().replace("task: x\n", "task:\n", 1))
 r = init(notask, "task=new-lane")
 check("an existing mandate with an empty task is refused", r.returncode == 2)
 check("it is reported as a mismatch", kv(r.stdout).get("task_mismatch") == "yes")
@@ -256,8 +267,10 @@ repo3 = make_repo()
 (repo3 / "MANDATE.md").write_text(
     "# Notes\n\n---\nallow: merge\nauthorized_by: nobody\n---\n"
 )
-check("a non-leading frontmatter block grants nothing",
-      run("allows", "merge", str(repo3)).returncode == 1)
+r = run("allows", "merge", str(repo3))
+check("a non-leading frontmatter block is refused, not read as empty",
+      r.returncode == 2 and "verdict=" not in r.stdout)
+check("the refusal says the fence is missing", "does not start" in r.stderr)
 
 # --- the action vocabulary is validated at write time -----------------------
 voc = make_repo()
@@ -499,6 +512,168 @@ check("unknown init key exits 2",
           "merge_ok=yes").returncode == 2)
 check("outside a git repo exits 2",
       run("show", tempfile.mkdtemp()).returncode == 2)
+
+# --- a git-TRACKED mandate is nobody's authorization ------------------------
+# The exclude and the task guard only protect a file that is not yet in the
+# index. One that arrived with a branch (/adopt of a fork PR, main after someone
+# committed theirs) was never answered here — and its `task:` is guessable, so
+# the guard cannot tell it from this lane's own record. Every verb refuses it.
+tr = make_repo()
+run("init", str(tr), "--preset", "merge-delegated", "task=t", "authorized_by=user")
+subprocess.run(["git", "-C", str(tr), "add", "-f", "MANDATE.md"], check=True)
+subprocess.run(["git", "-C", str(tr), "-c", "user.email=t@t", "-c", "user.name=t",
+                "commit", "-qm", "oops"], check=True)
+r = run("allows", "merge", str(tr))
+check("a tracked mandate grants nothing", r.returncode == 2 and "verdict=" not in r.stdout)
+check("the refusal says it is tracked", "tracked by git" in r.stderr)
+check("and names the way out", "rm --cached" in r.stderr)
+check("show refuses a tracked mandate", run("show", str(tr)).returncode == 2)
+r = run("round", str(tr))
+check("round refuses a tracked mandate", r.returncode == 2)
+check("and consumes nothing", "review_rounds_used=" not in r.stdout)
+r = run("init", str(tr), "--preset", "standard", "task=t", "authorized_by=user")
+check("init refuses a tracked mandate for the SAME task", r.returncode == 2)
+check("even with --force",
+      run("init", str(tr), "--preset", "standard", "task=t", "authorized_by=user",
+          "--force").returncode == 2)
+check("the tracked file was not touched",
+      "merge-delegated" not in run("show", str(tr)).stdout
+      and "merge" in (tr / "MANDATE.md").read_text())
+# An index entry survives a plain `rm`; the fresh write would land as a
+# modification of the tracked file, so the check does not depend on -f.
+(tr / "MANDATE.md").unlink()
+check("a deleted-but-tracked mandate is still refused",
+      run("init", str(tr), "--preset", "standard", "task=t",
+          "authorized_by=user").returncode == 2)
+subprocess.run(["git", "-C", str(tr), "rm", "-q", "--cached", "MANDATE.md"], check=True)
+check("untracking it is enough",
+      kv(run("init", str(tr), "--preset", "standard", "task=t",
+             "authorized_by=user").stdout).get("written") == "yes")
+
+# --- task= is required ------------------------------------------------------
+# The inheritance guard compares against it; omitted, the guard did not run and
+# whatever was on disk passed as this lane's record.
+r = run("init", str(make_repo()), "--preset", "standard", "authorized_by=user")
+check("init without task= is refused", r.returncode == 2)
+check("and says why", "task=" in r.stderr)
+inh = make_repo()
+run("init", str(inh), "--preset", "merge-delegated", "task=other-lane", "authorized_by=user")
+r = run("init", str(inh), "--preset", "standard", "authorized_by=user")
+check("no task= cannot adopt another lane's record", r.returncode == 2)
+check("and the foreign record is not reported as a match",
+      kv(r.stdout).get("task_mismatch") != "no")
+
+# --- list parsing does not trip errexit ---------------------------------------
+# norm_list's loop status used to be that of its last `[ -n ] && …`, so a
+# trailing empty token killed init with exit 1 and no message at all.
+te = make_repo()
+r = run("init", str(te), "task=t", "authorized_by=user", "allow=commit,,")
+check("a trailing empty token is dropped, not fatal", r.returncode == 0)
+check("the list is written without it",
+      kv(run("show", str(te)).stdout).get("allow") == "commit")
+check("a lone trailing comma in deny= is fine too",
+      run("init", str(make_repo()), "task=t", "authorized_by=user",
+          "allow=commit", "deny=merge,").returncode == 0)
+
+# --- CRLF and BOM are normalized, a missing fence is an error -----------------
+# A hand-edited file saved with CRLF used to read as an EMPTY mandate with exit
+# 0: every action unlisted (a denial nobody made) and a round that reported a
+# count it never persisted.
+crlf = make_repo()
+run("init", str(crlf), "--preset", "standard", "task=t", "authorized_by=user",
+    "review_budget=2")
+cm = crlf / "MANDATE.md"
+cm.write_bytes(cm.read_bytes().replace(b"\n", b"\r\n"))
+check("a CRLF mandate is read", kv(run("show", str(crlf)).stdout).get("task") == "t")
+check("a CRLF mandate grants what it says",
+      run("allows", "commit", str(crlf)).returncode == 0)
+check("a CRLF value carries no stray CR",
+      kv(run("show", str(crlf)).stdout).get("terminal_gate") == "reviewed-pr")
+run("round", str(crlf))
+check("a round persists into a CRLF mandate",
+      kv(run("show", str(crlf)).stdout).get("review_rounds_used") == "1")
+bom = make_repo()
+run("init", str(bom), "--preset", "standard", "task=t", "authorized_by=user")
+bm = bom / "MANDATE.md"
+bm.write_bytes(b"\xef\xbb\xbf" + bm.read_bytes())
+check("a BOM does not hide the fence", kv(run("show", str(bom)).stdout).get("task") == "t")
+check("a BOM mandate grants what it says",
+      run("allows", "commit", str(bom)).returncode == 0)
+run("round", str(bom))
+check("a round persists past a BOM",
+      kv(run("show", str(bom)).stdout).get("review_rounds_used") == "1")
+blank = make_repo()
+(blank / "MANDATE.md").write_text("\n---\nallow: commit\n---\n")
+check("a blank line before the fence is refused, not read as empty",
+      run("allows", "commit", str(blank)).returncode == 2)
+empty = make_repo()
+(empty / "MANDATE.md").write_text("")
+check("an empty file is refused, not read as empty",
+      run("show", str(empty)).returncode == 2)
+
+# --- the parser's own markers cannot be forged by a value --------------------
+# The open-fence/duplicate verdict used to be a substring match over the whole
+# parsed output, so a scope containing the marker text made a well-formed file
+# unreadable — and scope is model-authored from TASK.md.
+mk = make_repo()
+for text in ("foo __open=1 bar", "x __dup=allow", "__verdict=open", "a __verdict=dup:allow"):
+    r = run("init", str(mk), "--force", "--preset", "standard", "task=t",
+            "authorized_by=user", f"scope={text}")
+    check(f"a value containing marker text is written: {text!r}", r.returncode == 0)
+    check(f"and read back intact: {text!r}",
+          kv(run("show", str(mk)).stdout).get("scope") == text)
+    check(f"and the file stays readable: {text!r}",
+          run("allows", "commit", str(mk)).returncode == 0)
+
+# --- a token is ONE word ---------------------------------------------------------
+# The membership test used to be a substring match over the space-joined
+# vocabulary, so two actions glued by a space passed as one (and then matched
+# nothing at read time); an unquoted --without loop split them into two.
+check("--without with two glued actions is refused as one unknown token",
+      run("init", str(make_repo()), "--preset", "standard",
+          "--without", "commit push-own-branch", "task=t",
+          "authorized_by=user").returncode == 2)
+check("allow= with two glued actions is refused",
+      run("init", str(make_repo()), "task=t", "authorized_by=user",
+          "allow=commit push-own-branch").returncode == 2)
+check("deny= with two glued actions is refused",
+      run("init", str(make_repo()), "task=t", "authorized_by=user",
+          "allow=commit", "deny=merge deploy").returncode == 2)
+check("two glued gates are refused",
+      run("init", str(make_repo()), "task=t", "authorized_by=user",
+          "allow=commit", "terminal_gate=reviewed-pr merged").returncode == 2)
+w2 = make_repo()
+run("init", str(w2), "--preset", "standard", "--without", "commit,open-pr",
+    "task=t", "authorized_by=user")
+check("--without accepts a comma list as one argument",
+      kv(run("show", str(w2)).stdout).get("allow")
+      == "push-own-branch,local-review,agreed-fixes,rebase-own-branch")
+
+# --- a directory at the path is not a file to write --------------------------
+dd = make_repo()
+(dd / "MANDATE.md").mkdir()
+r = run("init", str(dd), "--preset", "standard", "task=t", "authorized_by=user")
+check("a directory at MANDATE.md is refused", r.returncode == 2)
+check("and nothing landed inside it", not any((dd / "MANDATE.md").iterdir()))
+check("and it is not reported as written", "written=yes" not in r.stdout)
+
+# --- presets are printed from the same table init writes ---------------------
+out = run("presets").stdout
+blocks = {}
+cur = None
+for line in out.splitlines():
+    k, _, v = line.partition("=")
+    if k == "preset":
+        cur = v; blocks[cur] = {}
+    elif cur:
+        blocks[cur][k] = v
+check("presets lists all three", set(blocks) == {"standard", "draft-only", "merge-delegated"})
+for name, fields in blocks.items():
+    pr = make_repo()
+    run("init", str(pr), "--preset", name, "task=t", "authorized_by=user")
+    got = kv(run("show", str(pr)).stdout)
+    for k in ("allow", "deny", "terminal_gate", "review_budget"):
+        check(f"presets {name}.{k} matches what init writes", got.get(k) == fields.get(k))
 
 
 if FAILS:

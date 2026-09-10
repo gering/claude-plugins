@@ -254,12 +254,15 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     was launched, and not from a decision the user made in *this* session but never
     had recorded. Ask, then write down the answer.
 
-    Ask **one** question, offering the three presets `mandate.sh` implements:
+    Ask **one** question, offering the three presets `mandate.sh` implements.
+    The script is the source of truth — `mandate.sh presets` prints each
+    preset's allow/deny/gate/budget; render the question from that output.
+    The table below is the wording, not the record:
 
     | preset | pre-authorized | never without new authorization | gate |
     |--------|----------------|---------------------------------|------|
     | **standard** (recommended) | commit, push own branch, open PR, review, agreed fixes, rebase own branch | merge, deploy, force-push a shared branch, anything destructive | reviewed PR |
-    | **draft-only** | commit, push own branch | opening a PR, review, merge, deploy, … | pushed branch |
+    | **draft-only** | commit, push own branch | opening a PR, merge, deploy, … (review is not granted either) | pushed branch |
     | **merge-delegated** | the standard set **plus** merge | deploy, force-push a shared branch, anything destructive | merged |
 
     Offer a **review budget** with the same question (the presets record 2 rounds;
@@ -316,6 +319,12 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     - a symlink at `MANDATE.md` → `init` refuses to write through it at all
       (an adopted branch can commit `MANDATE.md -> ~/.zshrc`). Remove the link
       by hand first; never `--force` past it.
+    - "tracked by git" → the file is **committed** on this branch (an adopted
+      fork PR, or main after someone committed theirs). It is nobody's
+      authorization for this lane, and `--force` is refused too: overwriting it
+      would leave a tracked, modified file for the next commit. Tell the user;
+      untrack it (`git -C "<worktree>" rm --cached MANDATE.md`) only if they say
+      so, then re-ask and re-record.
     - `task_mismatch=no` → a previous kickoff already recorded this lane's mandate.
       **Show it** (`mandate.sh show "<worktree>"`) and keep it.
 

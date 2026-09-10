@@ -29,15 +29,21 @@
 #   init  [<dir>] k=v ...    Write the mandate. Refuses to clobber unless --force.
 #                            --preset standard|draft-only|merge-delegated seeds
 #                            allow/deny/terminal_gate/review_budget; explicit k=v
-#                            wins; --without <action> drops one token from allow.
-#                            Also adds /MANDATE.md to the repo's git exclude.
+#                            wins; --without <action> drops tokens from allow
+#                            (repeatable). Also adds /MANDATE.md to the repo's
+#                            git exclude. task= and authorized_by= are required.
 #   allows <action> [<dir>]  Exit 0 allowed / 1 denied or unlisted / 3 no mandate.
+#                            An <action> outside the vocabulary is a usage error
+#                            (exit 2), never a verdict.
 #   round [<dir>]            Consume one review round; emit the new counters.
 #   actions                  List the known action vocabulary, one per line.
+#   presets                  Emit each preset's allow/deny/terminal_gate/
+#                            review_budget — the source /kickoff renders from.
 #
-# Output: `key=value` lines on stdout. Exit 0 on success, 2 on usage error,
-# 3 when a mandate is required but absent, 4 when a write could not be
-# persisted. `allows` additionally uses exit 1 for a denied action — callers
+# Output: `key=value` lines on stdout. Exit 0 on success, 2 on usage error OR
+# on a record nobody can vouch for (corrupt frontmatter, a symlink, a file git
+# tracks), 3 when a mandate is required but absent, 4 when a write could not
+# be persisted. `allows` additionally uses exit 1 for a denied action — callers
 # MUST distinguish 1 (denied: stop) from 3 (unknown: ask the user), never
 # collapsing both into "not allowed".
 set -eu
@@ -56,8 +62,35 @@ KEYS="mandate_version task recorded_at recorded_by authorized_by scope terminal_
 # exists to prevent. `init` rejects anything not on this list.
 KNOWN_ACTIONS="commit push-own-branch open-pr local-review agreed-fixes rebase-own-branch merge deploy force-push-shared destructive"
 KNOWN_GATES="reviewed-pr merged pushed-branch"
+PRESETS="standard draft-only merge-delegated"
 
 die() { echo "${0##*/}: $*" >&2; exit 2; }
+
+# Exact-word membership in a space-separated vocabulary. The obvious
+# `case " $VOCAB " in *" $x "*)` looks the same but is a SUBSTRING test: a
+# malformed token made of two actions glued by a space ("commit push-own-branch")
+# satisfied it, was written as one token, and then matched nothing at read time.
+in_vocab() {
+  local want="$1" w
+  shift
+  [ -n "$want" ] || return 1
+  for w in "$@"; do [ "$w" = "$want" ] && return 0; done
+  return 1
+}
+
+# A MANDATE.md that git TRACKS is not this lane's record: it arrived with a
+# branch (/adopt of a fork PR, or main after someone committed theirs) and was
+# never answered here. The exclude and the task guard only protect a file that
+# is not yet in the index, and a guessable `task:` defeats the guard. So every
+# verb that would read or write the file refuses a tracked one — `--force`
+# included, because overwriting it just leaves a tracked, modified file for the
+# next `git add -A`. Untrack it, then re-ask.
+refuse_tracked() {
+  local dir="${MANDATE_PATH%/*}"
+  if git -C "$dir" ls-files --error-unmatch -- "$MANDATE_FILE" >/dev/null 2>&1; then
+    die "MANDATE.md is tracked by git — a committed record cannot be shown to be this lane's authorization; untrack it (git -C '$dir' rm --cached $MANDATE_FILE), then re-record ($MANDATE_PATH)"
+  fi
+}
 
 # Resolve MANDATE.md for the worktree holding <dir> into MANDATE_PATH (works
 # from the main repo and from linked worktrees). Sets a global instead of
@@ -73,7 +106,7 @@ resolve_mandate_path() {
 }
 
 # Read the whole leading frontmatter block in ONE pass and set FM_<key> for every
-# known key. One awk over the file instead of one per key: `show` is on the hot
+# key in KEYS. One awk over the file instead of one per key: `show` is on the hot
 # path of /continue, /open and every --loop round.
 #
 # A duplicate key is a hard error, not a last-one-wins merge. `read_key` used to
@@ -82,30 +115,38 @@ resolve_mandate_path() {
 # which under /adopt is summarized from someone else's commits. init now refuses
 # to write a value containing a newline, and this refuses to *read* a file that
 # somehow acquired one anyway.
-FM_mandate_version=""; FM_task=""; FM_recorded_at=""; FM_recorded_by=""
-FM_authorized_by=""; FM_scope=""; FM_terminal_gate=""; FM_allow=""; FM_deny=""
-FM_review_budget=""; FM_review_rounds_used=""
+#
+# The FM_ globals are driven by KEYS in one place (here and in do_show), not by
+# a hand-written case per key: a key added to KEYS but missed in a case arm was
+# silently dropped, or made do_show abort on an unbound variable under set -u.
+reset_fm() { local k; for k in $KEYS; do printf -v "FM_$k" '%s' ""; done; }
+reset_fm
 parse_frontmatter() {
-  local file="$1" line k v
-  FM_mandate_version=""; FM_task=""; FM_recorded_at=""; FM_recorded_by=""
-  FM_authorized_by=""; FM_scope=""; FM_terminal_gate=""; FM_allow=""; FM_deny=""
-  FM_review_budget=""; FM_review_rounds_used=""
+  local file="$1" k v parsed verdict
+  reset_fm
   [ -f "$file" ] || return 0
-  local parsed
   parsed="$(awk -v keys=" $KEYS " '
-    NR == 1 { if ($0 != "---") exit; infm = 1; next }
-    infm && $0 == "---" { closed = 1; exit }
-    # Verdicts are decided at END, not mid-scan: an open fence is reported ahead
-    # of a duplicate, and a duplicate can only be known once the fence is seen.
-    END {
-      if (infm && !closed)  print "__open=1"
-      else if (dup != "")   print "__dup=" dup
+    # Normalize BEFORE matching the fence: a CRLF file or a UTF-8 BOM made the
+    # first line miss "---", and the whole record read as EMPTY with exit 0 —
+    # every action unlisted (a denial nobody made) and a round that never
+    # persisted. The BOM is compared via index/length so it works whether this
+    # awk counts bytes or characters.
+    { sub(/\r$/, "") }
+    NR == 1 {
+      bom = "\357\273\277"
+      if (index($0, bom) == 1) $0 = substr($0, length(bom) + 1)
+      if ($0 != "---") exit
+      infm = 1; next
     }
+    infm && $0 == "---" { closed = 1; exit }
     infm {
       i = index($0, ":")
       if (i == 0) next
       name = substr($0, 1, i - 1)
       gsub(/^[ \t]+|[ \t]+$/, "", name)
+      # A name with anything but identifier characters is never a key — and
+      # "task recorded_at" would otherwise pass the substring test on keys.
+      if (name ~ /[^A-Za-z0-9_]/) next
       if (index(keys, " " name " ") == 0) next
       if (name in seen) { if (dup == "") dup = name; next }
       seen[name] = 1
@@ -113,28 +154,29 @@ parse_frontmatter() {
       gsub(/^[ \t]+|[ \t]+$/, "", val)
       print name "=" val
     }
+    # The verdict is the LAST line, and the shell inspects only that line. An
+    # earlier version substring-matched a marker over the whole output, so a
+    # scope value that happened to contain the marker text made a well-formed
+    # file unreadable. Decided at END: an open fence is reported ahead of a
+    # duplicate, and a duplicate can only be known once the fence is seen.
+    END {
+      if (!infm)          print "__verdict=nofm"
+      else if (!closed)   print "__verdict=open"
+      else if (dup != "") print "__verdict=dup:" dup
+      else                print "__verdict=ok"
+    }
   ' "$file")"
-  # Structural failure first: an open fence makes every later line suspect, so
-  # report it ahead of whatever the parser tripped over inside that body.
-  case "$parsed" in
-    *__open=1*) die "MANDATE.md's frontmatter is never closed (no second '---') — refusing to read body text as authorization ($file)" ;;
-    *__dup=*)   die "MANDATE.md has a duplicate '${parsed##*__dup=}:' key in its frontmatter — refusing to guess which one is the authorization ($file)" ;;
+  verdict="${parsed##*$'\n'}"
+  case "$verdict" in
+    __verdict=ok) ;;
+    __verdict=nofm) die "MANDATE.md does not start with a '---' frontmatter block — nothing in it can be read as authorization ($file)" ;;
+    __verdict=open) die "MANDATE.md's frontmatter is never closed (no second '---') — refusing to read body text as authorization ($file)" ;;
+    __verdict=dup:*) die "MANDATE.md has a duplicate '${verdict#__verdict=dup:}:' key in its frontmatter — refusing to guess which one is the authorization ($file)" ;;
+    *) die "internal error: the frontmatter parser returned no verdict ($file)" ;;
   esac
   while IFS='=' read -r k v; do
-    [ -n "$k" ] || continue
-    case "$k" in
-      mandate_version)    FM_mandate_version="$v" ;;
-      task)               FM_task="$v" ;;
-      recorded_at)        FM_recorded_at="$v" ;;
-      recorded_by)        FM_recorded_by="$v" ;;
-      authorized_by)      FM_authorized_by="$v" ;;
-      scope)              FM_scope="$v" ;;
-      terminal_gate)      FM_terminal_gate="$v" ;;
-      allow)              FM_allow="$v" ;;
-      deny)               FM_deny="$v" ;;
-      review_budget)      FM_review_budget="$v" ;;
-      review_rounds_used) FM_review_rounds_used="$v" ;;
-    esac
+    in_vocab "$k" $KEYS || continue
+    printf -v "FM_$k" '%s' "$v"
   done <<EOF
 $parsed
 EOF
@@ -156,8 +198,12 @@ norm_list() {
     esac
     field="${field#"${field%%[![:space:]]*}"}"
     field="${field%"${field##*[![:space:]]}"}"
-    [ -n "$field" ] && NORM="$NORM$field,"
+    # `if`, not `[ … ] && …`: the loop's status is its last body command's, so a
+    # trailing empty token ("commit,,") returned 1 and `set -e` killed init
+    # silently — exit 1, no message, no file.
+    if [ -n "$field" ]; then NORM="$NORM$field,"; fi
   done
+  return 0
 }
 
 # Is <action> a member of a comma-separated list? Pure bash, exact token match.
@@ -203,6 +249,7 @@ do_show() {
     return 0
   fi
   printf 'mandate_exists=yes\n'
+  refuse_tracked
   parse_frontmatter "$MANDATE_PATH"
   for key in $KEYS; do
     eval "val=\${FM_$key}"
@@ -213,11 +260,20 @@ do_show() {
 
 do_allows() {
   local action="$1"
+  action="${action#"${action%%[![:space:]]*}"}"
+  action="${action%"${action##*[![:space:]]}"}"
   [ -n "$action" ] || die "usage: ${0##*/} allows <action> [<dir>]"
+  # The question itself must be well-formed. `init` closes the vocabulary at
+  # write time; without the same check here a typo came back `unlisted` (exit 1,
+  # a denial the user never made), a comma-joined "a,b" matched as a sublist
+  # even with b denied, and a space-padded action missed its own grant.
+  in_vocab "$action" $KNOWN_ACTIONS \
+    || die "unknown action: '$action' (known: $KNOWN_ACTIONS) — not a verdict, the question was malformed"
   resolve_mandate_path "${2:-.}"
   # No mandate = no authorization on record. Exit 3 means "unknown, ask the
   # user" — deliberately distinct from 1 ("recorded as out of bounds").
   [ -f "$MANDATE_PATH" ] || { printf 'verdict=no-mandate\n'; exit 3; }
+  refuse_tracked
   parse_frontmatter "$MANDATE_PATH"
   if [ -n "$FM_deny" ] && list_has "$FM_deny" "$action"; then
     printf 'verdict=denied\n'; exit 1
@@ -233,6 +289,7 @@ do_round() {
   local budget used tmp
   resolve_mandate_path "${1:-.}"
   [ -f "$MANDATE_PATH" ] || { printf 'verdict=no-mandate\n'; exit 3; }
+  refuse_tracked
   parse_frontmatter "$MANDATE_PATH"
   budget="$FM_review_budget"; used="$FM_review_rounds_used"
   case "$used" in ''|*[!0-9]*) used=0 ;; esac
@@ -249,7 +306,11 @@ do_round() {
   # key is ABSENT (hand-edited away, or a mandate from another tool), insert it
   # before the closing fence — the previous version substituted only, so the
   # counter silently never persisted and the review budget became unbounded.
+  # Same CR/BOM normalization as the parser, or a CRLF file's fence is never
+  # seen and the counter silently never persists (the rewrite is LF afterwards).
   awk -v n="$used" '
+    { sub(/\r$/, "") }
+    NR == 1 { bom = "\357\273\277"; if (index($0, bom) == 1) $0 = substr($0, length(bom) + 1) }
     NR == 1 && $0 == "---" { infm = 1; print; next }
     infm && $0 == "---" {
       if (!seen) print "review_rounds_used: " n
@@ -273,8 +334,10 @@ do_round() {
 
 # Presets exist because the choice offered at kickoff is one of three named
 # grants, and prose around a single hardcoded `init` line wrote the standard
-# authorization whichever one the user picked. The triple lives here so the
-# selection is what actually reaches the file.
+# authorization whichever one the user picked. The allow/deny/gate/budget
+# quadruple lives here so the selection is what actually reaches the file, and
+# `presets` prints it so the question /kickoff asks is rendered from this
+# table, not from a prose copy that drifts.
 apply_preset() {
   case "$1" in
     standard)
@@ -289,8 +352,17 @@ apply_preset() {
       v_allow="commit,push-own-branch,open-pr,local-review,agreed-fixes,rebase-own-branch,merge"
       v_deny="deploy,force-push-shared,destructive"
       v_terminal_gate="merged"; v_review_budget="2" ;;
-    *) die "unknown preset: $1 (known: standard, draft-only, merge-delegated)" ;;
+    *) die "unknown preset: $1 (known: $PRESETS)" ;;
   esac
+}
+
+do_presets() {
+  local p v_allow v_deny v_terminal_gate v_review_budget
+  for p in $PRESETS; do
+    apply_preset "$p"
+    printf 'preset=%s\nallow=%s\ndeny=%s\nterminal_gate=%s\nreview_budget=%s\n' \
+      "$p" "$v_allow" "$v_deny" "$v_terminal_gate" "$v_review_budget"
+  done
 }
 
 # A value is written verbatim into the frontmatter, so a newline in it injects
@@ -318,11 +390,10 @@ check_actions() {
   while [ -n "$rest" ]; do
     field="${rest%%,*}"; rest="${rest#*,}"
     [ -n "$field" ] || continue
-    case " $KNOWN_ACTIONS " in
-      *" $field "*) ;;
-      *) die "unknown action in $label: $field (known: $KNOWN_ACTIONS)" ;;
-    esac
+    in_vocab "$field" $KNOWN_ACTIONS \
+      || die "unknown action in $label: '$field' (known: $KNOWN_ACTIONS)"
   done
+  return 0
 }
 
 # Remove one token from a list (used by --without). Emits the rebuilt list.
@@ -332,7 +403,7 @@ list_without() {
   rest="${NORM#,}"
   while [ -n "$rest" ]; do
     field="${rest%%,*}"; rest="${rest#*,}"
-    [ -n "$field" ] && [ "$field" != "$drop" ] && out="$out${out:+,}$field"
+    if [ -n "$field" ] && [ "$field" != "$drop" ]; then out="$out${out:+,}$field"; fi
   done
   printf '%s\n' "$out"
 }
@@ -345,15 +416,21 @@ list_without() {
 # user's tree. Emits excluded=already|yes|no — `no` is reported, never fatal:
 # the mandate is still correct, the repo just has to be told by hand.
 ensure_excluded() {
-  local dir="$1" common excl
-  if git -C "$dir" check-ignore -q MANDATE.md 2>/dev/null; then
+  local dir="$1" excl
+  if git -C "$dir" check-ignore -q -- "$MANDATE_FILE" 2>/dev/null; then
     printf 'excluded=already\n'; return 0
   fi
-  common="$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null)" || common=""
-  [ -n "$common" ] || { printf 'excluded=no\n'; return 0; }
-  case "$common" in /*) ;; *) common="$dir/$common" ;; esac
-  excl="$common/info/exclude"
-  if mkdir -p "${excl%/*}" 2>/dev/null && printf '/MANDATE.md\n' >> "$excl" 2>/dev/null; then
+  # --git-path resolves the shared info/exclude for linked worktrees itself; it
+  # answers relative to <dir> when it answers relatively at all.
+  excl="$(git -C "$dir" rev-parse --git-path info/exclude 2>/dev/null)" || excl=""
+  [ -n "$excl" ] || { printf 'excluded=no\n'; return 0; }
+  case "$excl" in /*) ;; *) excl="$dir/$excl" ;; esac
+  # Listed but not ignored means the rule cannot take effect (git ignores
+  # nothing it tracks) — report that instead of appending the line once more.
+  if [ -f "$excl" ] && grep -qxF -- "/$MANDATE_FILE" "$excl" 2>/dev/null; then
+    printf 'excluded=no\n'; return 0
+  fi
+  if mkdir -p "${excl%/*}" 2>/dev/null && printf '/%s\n' "$MANDATE_FILE" >> "$excl" 2>/dev/null; then
     printf 'excluded=yes\n'
   else
     printf 'excluded=no\n'
@@ -368,8 +445,8 @@ do_init() {
   local v_scope="" v_terminal_gate="reviewed-pr" v_allow="" v_deny=""
   local v_review_budget="" v_review_rounds_used="0"
 
-  # Two passes: --preset seeds the triple, explicit k=v then overrides it, no
-  # matter which order they were written in.
+  # Two passes: --preset seeds the quadruple, explicit k=v then overrides it,
+  # no matter which order they were written in.
   local take_preset="no"
   for arg in "$@"; do
     if [ "$take_preset" = "yes" ]; then preset="$arg"; take_preset="no"; continue; fi
@@ -384,7 +461,7 @@ do_init() {
   local expect_preset="no" expect_without="no"
   for arg in "$@"; do
     if [ "$expect_preset" = "yes" ]; then expect_preset="no"; continue; fi
-    if [ "$expect_without" = "yes" ]; then without="$without $arg"; expect_without="no"; continue; fi
+    if [ "$expect_without" = "yes" ]; then without="$without,$arg"; expect_without="no"; continue; fi
     case "$arg" in
       --force) force="yes" ;;
       --preset) expect_preset="yes" ;;
@@ -392,7 +469,7 @@ do_init() {
       # Subtract one action from the (preset's) allow list without retyping the
       # list — retyping it in prose is how a hand-derived copy dropped a token.
       --without) expect_without="yes" ;;
-      --without=*) without="$without ${arg#--without=}" ;;
+      --without=*) without="$without,${arg#--without=}" ;;
       *=*)
         key="${arg%%=*}"; val="${arg#*=}"
         check_value "$key" "$val"
@@ -415,23 +492,33 @@ do_init() {
   done
   [ -n "$want_dir" ] && dir="$want_dir"
   [ "$expect_without" = "yes" ] && die "--without needs a value: --without <action>"
-  for arg in $without; do
-    case " $KNOWN_ACTIONS " in
-      *" $arg "*) ;;
-      *) die "unknown action in --without: $arg (known: $KNOWN_ACTIONS)" ;;
-    esac
-    v_allow="$(list_without "$v_allow" "$arg")"
+  # The same membership test `allow=`/`deny=` get — one validator, one message;
+  # and as a comma list, so a value that is secretly two actions ("commit
+  # push-own-branch") is rejected as one unknown token instead of being
+  # word-split into two subtractions.
+  check_actions "$without" "--without"
+  norm_list "$without"
+  local rest="${NORM#,}" drop
+  while [ -n "$rest" ]; do
+    drop="${rest%%,*}"; rest="${rest#*,}"
+    [ -n "$drop" ] || continue
+    v_allow="$(list_without "$v_allow" "$drop")"
   done
 
   # `--preset` counts as the answer for allow/deny; authorized_by never does.
+  # task= is required because the inheritance guard below compares against it
+  # — omitted, the guard did not run, and any file on disk passed as this lane's.
+  [ -n "$v_task" ] || die "init needs task= (the lane this record belongs to)"
   [ -n "$v_authorized_by" ] || die "init needs authorized_by= (who granted this — never assume)"
   [ -n "$v_allow" ] || die "init needs allow= or --preset (an empty mandate authorizes nothing)"
   check_actions "$v_allow" "allow"
   check_actions "$v_deny" "deny"
-  case " $KNOWN_GATES " in
-    *" $v_terminal_gate "*) ;;
-    *) die "unknown terminal_gate: $v_terminal_gate (known: $KNOWN_GATES)" ;;
-  esac
+  # Write the lists in canonical form (trimmed, no empty tokens): the reader
+  # tolerates "commit,," but the file should not carry it.
+  norm_list "$v_allow"; v_allow="${NORM#,}"; v_allow="${v_allow%,}"
+  norm_list "$v_deny";  v_deny="${NORM#,}";  v_deny="${v_deny%,}"
+  in_vocab "$v_terminal_gate" $KNOWN_GATES \
+    || die "unknown terminal_gate: '$v_terminal_gate' (known: $KNOWN_GATES)"
   if [ -n "$v_review_budget" ]; then
     case "$v_review_budget" in *[!0-9]*) die "review_budget must be a whole number (got: $v_review_budget)" ;; esac
   fi
@@ -439,11 +526,19 @@ do_init() {
   [ -n "$v_recorded_at" ] || v_recorded_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
   resolve_mandate_path "$dir"
+  # Tracked is checked even when the file is gone from disk: an index entry
+  # survives a plain `rm`, and the fresh write would land as a modification.
+  refuse_tracked
   # Checked BEFORE -f: a dangling link fails -f and would be "created", a live
   # one passes it and `cat >` would follow it. An adopted branch can commit
   # `MANDATE.md -> ~/.zshrc`; the first --force then overwrites that file.
   if [ -L "$MANDATE_PATH" ]; then
     die "refusing to write through a symlink at $MANDATE_PATH — remove it first"
+  fi
+  # A directory (or anything else that is not a regular file): `mv` would drop
+  # the temp file INSIDE it and report written=yes for a mandate `show` cannot see.
+  if [ -e "$MANDATE_PATH" ] && [ ! -f "$MANDATE_PATH" ]; then
+    die "$MANDATE_PATH exists but is not a regular file — remove it first"
   fi
   if [ -f "$MANDATE_PATH" ] && [ "$force" != "yes" ]; then
     parse_frontmatter "$MANDATE_PATH"
@@ -463,7 +558,7 @@ do_init() {
       echo "${0##*/}: the existing mandate records no task — it cannot be shown to belong to this lane; re-record with --force after asking the user" >&2
       exit 2
     fi
-    if [ -n "$v_task" ] && [ "$v_task" != "$FM_task" ]; then
+    if [ "$v_task" != "$FM_task" ]; then
       printf 'task_mismatch=yes\n'
       echo "${0##*/}: the existing mandate was recorded for task '$FM_task', not '$v_task' — it does not authorize this lane; re-record with --force after asking the user" >&2
       exit 2
@@ -545,5 +640,6 @@ case "${1:-}" in
   allows)  shift || true; do_allows "${1:-}" "${2:-.}" ;;
   round)   shift || true; do_round "${1:-.}" ;;
   actions) printf '%s\n' $KNOWN_ACTIONS ;;
-  *) echo "usage: ${0##*/} {path|lane|show|init|allows|round|actions} [...]" >&2; exit 2 ;;
+  presets) do_presets ;;
+  *) echo "usage: ${0##*/} {path|lane|show|init|allows|round|actions|presets} [...]" >&2; exit 2 ;;
 esac
