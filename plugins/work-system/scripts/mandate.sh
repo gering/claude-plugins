@@ -16,9 +16,9 @@
 # error rather than a first-one-wins race (see parse_frontmatter).
 #
 # Storage: <worktree-root>/MANDATE.md, beside TASK.md (same copy-in mechanics,
-# visible and hand-editable). Like TASK.md it is ephemeral worktree state;
-# /kickoff adds it to the repo's git exclude rather than relying on every
-# consumer repo carrying a .gitignore rule.
+# visible and hand-editable). Like TASK.md it is ephemeral worktree state; `init`
+# adds it to the repo's git exclude itself rather than relying on every consumer
+# repo carrying a .gitignore rule (or on a skill remembering a sub-step).
 #
 # Subcommands:
 #   path  [<dir>]            Absolute MANDATE.md path for the worktree holding <dir>.
@@ -28,7 +28,9 @@
 #   show  [<dir>]            Emit key=value lines (always incl. mandate_exists).
 #   init  [<dir>] k=v ...    Write the mandate. Refuses to clobber unless --force.
 #                            --preset standard|draft-only|merge-delegated seeds
-#                            allow/deny/terminal_gate/review_budget; explicit k=v wins.
+#                            allow/deny/terminal_gate/review_budget; explicit k=v
+#                            wins; --without <action> drops one token from allow.
+#                            Also adds /MANDATE.md to the repo's git exclude.
 #   allows <action> [<dir>]  Exit 0 allowed / 1 denied or unlisted / 3 no mandate.
 #   round [<dir>]            Consume one review round; emit the new counters.
 #   actions                  List the known action vocabulary, one per line.
@@ -138,25 +140,35 @@ $parsed
 EOF
 }
 
-# Is <action> a member of a comma-separated list? Pure bash, exact token match
-# after trimming. It used to be `grep -qx -- "$want"`: anchored, but still a
-# REGEX with no -F, so `allows '.*'` matched every list and satisfied the
-# documented whole-action guarantee with a metacharacter. No subprocess also
-# means an `allows` question costs no forks at all.
-list_has() {
-  local list="$1" want="$2" field rest
-  [ -n "$want" ] || return 1
-  rest="$list"
+# Normalize a comma-separated list into NORM=",a,b,c," — every token trimmed,
+# empty tokens dropped. The ONE place the list format is interpreted: `list_has`,
+# `check_actions` and `--without` all consume NORM, so the format cannot drift
+# between the writer and the reader (which is what two copies of a split loop
+# had started to do).
+NORM=""
+norm_list() {
+  local rest="$1" field
+  NORM=","
   while [ -n "$rest" ]; do
     case "$rest" in
       *,*) field="${rest%%,*}"; rest="${rest#*,}" ;;
       *)   field="$rest"; rest="" ;;
     esac
-    # trim surrounding whitespace
     field="${field#"${field%%[![:space:]]*}"}"
     field="${field%"${field##*[![:space:]]}"}"
-    [ "$field" = "$want" ] && return 0
+    [ -n "$field" ] && NORM="$NORM$field,"
   done
+}
+
+# Is <action> a member of a comma-separated list? Pure bash, exact token match.
+# It used to be `grep -qx -- "$want"`: anchored, but still a REGEX with no -F,
+# so `allows '.*'` matched every list. The `case` pattern quotes the token, so a
+# metacharacter in it is literal; no subprocess means no forks per question.
+list_has() {
+  local want="$2"
+  [ -n "$want" ] || return 1
+  norm_list "$1"
+  case "$NORM" in *",$want,"*) return 0 ;; esac
   return 1
 }
 
@@ -300,15 +312,11 @@ check_value() {
 }
 
 check_actions() {
-  local list="$1" label="$2" field rest
-  rest="$list"
+  local label="$2" rest field
+  norm_list "$1"
+  rest="${NORM#,}"
   while [ -n "$rest" ]; do
-    case "$rest" in
-      *,*) field="${rest%%,*}"; rest="${rest#*,}" ;;
-      *)   field="$rest"; rest="" ;;
-    esac
-    field="${field#"${field%%[![:space:]]*}"}"
-    field="${field%"${field##*[![:space:]]}"}"
+    field="${rest%%,*}"; rest="${rest#*,}"
     [ -n "$field" ] || continue
     case " $KNOWN_ACTIONS " in
       *" $field "*) ;;
@@ -317,8 +325,43 @@ check_actions() {
   done
 }
 
+# Remove one token from a list (used by --without). Emits the rebuilt list.
+list_without() {
+  local drop="$2" rest field out=""
+  norm_list "$1"
+  rest="${NORM#,}"
+  while [ -n "$rest" ]; do
+    field="${rest%%,*}"; rest="${rest#*,}"
+    [ -n "$field" ] && [ "$field" != "$drop" ] && out="$out${out:+,}$field"
+  done
+  printf '%s\n' "$out"
+}
+
+# Keep MANDATE.md out of git for THIS repo, from inside init rather than as a
+# recipe in skill prose (a sub-step /adopt reached by cross-reference and could
+# skip). A worker told to commit as it goes would otherwise commit the record;
+# once on main, every later worktree inherits a grant recorded for another
+# lane. The exclude file is shared across worktrees and leaves no diff in the
+# user's tree. Emits excluded=already|yes|no — `no` is reported, never fatal:
+# the mandate is still correct, the repo just has to be told by hand.
+ensure_excluded() {
+  local dir="$1" common excl
+  if git -C "$dir" check-ignore -q MANDATE.md 2>/dev/null; then
+    printf 'excluded=already\n'; return 0
+  fi
+  common="$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null)" || common=""
+  [ -n "$common" ] || { printf 'excluded=no\n'; return 0; }
+  case "$common" in /*) ;; *) common="$dir/$common" ;; esac
+  excl="$common/info/exclude"
+  if mkdir -p "${excl%/*}" 2>/dev/null && printf '/MANDATE.md\n' >> "$excl" 2>/dev/null; then
+    printf 'excluded=yes\n'
+  else
+    printf 'excluded=no\n'
+  fi
+}
+
 do_init() {
-  local dir="." force="no" arg key val preset="" want_dir=""
+  local dir="." force="no" arg key val preset="" want_dir="" without=""
   # Defaults describe the *shape* of a mandate, not consent: /kickoff must fill
   # authorized_by/allow/deny from an answer the user actually gave.
   local v_task="" v_recorded_at="" v_recorded_by="kickoff" v_authorized_by=""
@@ -338,13 +381,18 @@ do_init() {
   [ "$take_preset" = "yes" ] && die "--preset needs a value: --preset <standard|draft-only|merge-delegated>"
   [ -n "$preset" ] && apply_preset "$preset"
 
-  local expect_preset="no"
+  local expect_preset="no" expect_without="no"
   for arg in "$@"; do
     if [ "$expect_preset" = "yes" ]; then expect_preset="no"; continue; fi
+    if [ "$expect_without" = "yes" ]; then without="$without $arg"; expect_without="no"; continue; fi
     case "$arg" in
       --force) force="yes" ;;
       --preset) expect_preset="yes" ;;
       --preset=*) ;;
+      # Subtract one action from the (preset's) allow list without retyping the
+      # list — retyping it in prose is how a hand-derived copy dropped a token.
+      --without) expect_without="yes" ;;
+      --without=*) without="$without ${arg#--without=}" ;;
       *=*)
         key="${arg%%=*}"; val="${arg#*=}"
         check_value "$key" "$val"
@@ -366,6 +414,14 @@ do_init() {
     esac
   done
   [ -n "$want_dir" ] && dir="$want_dir"
+  [ "$expect_without" = "yes" ] && die "--without needs a value: --without <action>"
+  for arg in $without; do
+    case " $KNOWN_ACTIONS " in
+      *" $arg "*) ;;
+      *) die "unknown action in --without: $arg (known: $KNOWN_ACTIONS)" ;;
+    esac
+    v_allow="$(list_without "$v_allow" "$arg")"
+  done
 
   # `--preset` counts as the answer for allow/deny; authorized_by never does.
   [ -n "$v_authorized_by" ] || die "init needs authorized_by= (who granted this — never assume)"
@@ -463,6 +519,7 @@ EOF
   printf 'mandate_file=%s\n' "$MANDATE_PATH"
   printf 'mandate_exists=yes\n'
   printf 'written=yes\n'
+  ensure_excluded "${MANDATE_PATH%/*}"
 }
 
 # Print the worktree that has <branch> checked out, or exit 3. pr-flow runs

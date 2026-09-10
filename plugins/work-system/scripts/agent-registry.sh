@@ -46,9 +46,11 @@
 #              is the helper, so this entry is pane-run/kind=claude, never
 #              agent-start — see the transport note below.)
 #   The bootstrap prompt (codex/grok/kimi have no work-system skills) tells the
-#   agent to read TASK.md and drive the task to a PR. `supports=` metadata records
-#   which lifecycle hooks each agent honors, so /close and /continue can degrade
-#   for non-claude workers instead of faking claude-only behavior.
+#   agent to read TASK.md and MANDATE.md and carry out only the milestones the
+#   mandate lists — whether that reaches a PR is the mandate's call, not the
+#   prompt's. `supports=` metadata records which lifecycle hooks each agent
+#   honors, so /close, /continue and the mandate's allow list can degrade for
+#   non-claude workers instead of faking claude-only behavior.
 #
 # Optional PATH helper `cc-harness-agents`. When present, `list` merges its rows;
 # when absent, one `command -v` is the only cost and behaviour is unchanged. The

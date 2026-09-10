@@ -267,24 +267,7 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     review→fix rounds the worker may run before it must come back. It is what stops
     a worker from grinding through an unbounded review loop.
 
-    **a) Keep the record out of git.** MANDATE.md is ephemeral worktree state like
-    TASK.md, and a worker told to commit as it goes will otherwise commit the
-    authorization record into the PR — after which every future worktree branched
-    off main starts with *that* lane's grant already in place. Add it to the repo's
-    git exclude (shared across worktrees, and no diff in the user's tree, unlike a
-    `.gitignore` edit) before writing anything:
-
-    ```sh
-    EXCL="$(git -C "<worktree>" rev-parse --git-common-dir)/info/exclude"
-    mkdir -p "$(dirname "$EXCL")"
-    grep -qxF '/MANDATE.md' "$EXCL" 2>/dev/null || printf '/MANDATE.md\n' >> "$EXCL"
-    ```
-
-    Skip it silently if the repo already ignores the file (`git -C "<worktree>"
-    check-ignore -q MANDATE.md`) — some repos, this one included, carry the rule in
-    a committed `.gitignore`.
-
-    **b) Write the mandate.** `<worktree>` is
+    **a) Write the mandate.** `<worktree>` is
     `<main-repo>/.claude/worktrees/<task-name>` — build it from `<main-repo>`
     (step 1) and the task name, don't carry a relative path forward:
 
@@ -303,7 +286,15 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     unknown action, an unknown gate, and any value containing a newline. It is the
     single source of truth for the format — do not hand-write `MANDATE.md`.
 
-    **c) Match the mandate to the worker.** Ask the registry rather than the CLI's
+    `init` also adds `/MANDATE.md` to the repo's git exclude itself (shared across
+    worktrees, no diff in the user's tree) and reports `excluded=yes|already|no`.
+    This is not a separate sub-step to remember: a worker told to commit as it
+    goes would otherwise commit its own authorization record, and every later
+    worktree branched off main would inherit that lane's grant. On `excluded=no`
+    (the exclude file could not be written) say so — the mandate is still valid,
+    the user just has to ignore the file by hand.
+
+    **b) Match the mandate to the worker.** Ask the registry rather than the CLI's
     name — `supports=` exists for exactly this split:
 
     ```sh
@@ -311,15 +302,20 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     ```
 
     If that list does **not** contain `continue`, the worker cannot run
-    `/swarm:review` or the pr-flow skills. Append `allow=` without `local-review`
-    (take the preset's list minus that one token) and set
-    `scope="… drive to an open PR; review happens outside this lane"`. Recording an
-    authority the worker cannot exercise is worse than recording none.
+    `/swarm:review` or the pr-flow skills. Add **`--without local-review`** to the
+    `init` call above (the script subtracts the one token; never retype the
+    preset's list — a hand-derived copy is how a token goes missing) and set
+    `scope="… drive to an open PR; review happens outside this lane"`. Recording
+    an authority the worker cannot exercise is worse than recording none.
 
-    **d) An existing mandate.** `init` exits 2 rather than clobbering:
-    - `task_mismatch=yes` → the file was recorded for a **different** task (this is
-      what an accidentally committed MANDATE.md looks like). It does not authorize
-      this lane. Say so, and re-record with `--force` only after asking the user.
+    **c) An existing mandate.** `init` exits 2 rather than clobbering:
+    - `task_mismatch=yes` → the file was recorded for a **different** task, or
+      records no task at all (this is what an accidentally committed or
+      hand-written MANDATE.md looks like). It does not authorize this lane. Say
+      so, and re-record with `--force` only after asking the user.
+    - a symlink at `MANDATE.md` → `init` refuses to write through it at all
+      (an adopted branch can commit `MANDATE.md -> ~/.zshrc`). Remove the link
+      by hand first; never `--force` past it.
     - `task_mismatch=no` → a previous kickoff already recorded this lane's mandate.
       **Show it** (`mandate.sh show "<worktree>"`) and keep it.
 

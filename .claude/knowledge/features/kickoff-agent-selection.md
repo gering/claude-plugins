@@ -254,7 +254,10 @@ backslash escape or non-ASCII char forces the unreadable `$'…'` form.
 
 ## Non-claude degradation: document, don't fake
 codex/grok/kimi have no work-system skills, so a launched worker gets a bootstrap
-prompt (read TASK.md → commit → PR) instead of `/continue`. Everything
+prompt instead of `/continue` — since 1.14.0: read TASK.md + MANDATE.md and carry
+out only the mandate's listed milestones (an earlier "→ commit → PR" ending
+overrode the mandate; see
+[worker-autonomy-mandate](worker-autonomy-mandate.md)). Everything
 git/PR-derived (`/status`, `/list`, `[ws]` statusline, `/close` tab teardown)
 is CLI-agnostic — `agent_name` comes from the registry's `name=`, never argv[0],
 and `agent_status` from herdr's own pane hooks, so kimi's `sh -c` wrapper changes

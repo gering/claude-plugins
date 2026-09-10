@@ -118,7 +118,14 @@ was shipped and caught in review.
 
 pr-flow never imports work-system: `scripts/refresh-task-glyphs.sh` *locates*
 `herdr-tab-glyph.sh` and no-ops silently when work-system or herdr is absent.
-Resolution order: (1) dev layout `../work-system/scripts/`; (2) the installed
+Since pr-flow 1.4.0 the locator itself lives in `scripts/lib-work-system.sh`
+(shared with `mandate-shim.sh`, which — unlike this shim — answers "unknown"
+rather than going silent; see
+[worker-autonomy-mandate](worker-autonomy-mandate.md)). It is sourced from the
+shim's own directory only, never from a cwd-derived default, and anchors the dev
+layer on `BASH_SOURCE` as well as `$CLAUDE_PLUGIN_ROOT`, so a hook-invoked shim
+resolves too. Resolution order: (1) dev layout `../work-system/scripts/`
+(script-relative, then env-relative); (2) the installed
 work-system from `~/.claude/plugins/installed_plugins.json`, picking the
 **highest version** across the manifest's insertion-ordered records — the
 manifest lists only installed versions, so this survives a rollback (unlike the

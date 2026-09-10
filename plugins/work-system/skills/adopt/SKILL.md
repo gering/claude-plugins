@@ -153,8 +153,8 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     generated task file first.
 
 13. **Record the task's mandate** — **identical to `skills/kickoff/SKILL.md` step
-    13; follow that one copy**, including its git-exclude sub-step and its
-    `supports=`-driven `local-review` rule. `<worktree>` is the one **this** skill
+    13; follow that one copy**, including its `supports=`-driven
+    `--without local-review` rule (the git exclude is `init`'s own doing). `<worktree>` is the one **this** skill
     created in step 9 (`<main-repo>/.claude/worktrees/<task-name>`, with
     `<main-repo>` from step 1) — kickoff's step numbers do not map onto this skill,
     so build the path, never carry a step reference across.
@@ -206,6 +206,9 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     Location:  .claude/worktrees/<task-name>
     Branch:    <current-branch-name>   (original branch, unless step 8 renamed it)
     Task file: TASK.md (drafted from the branch — review it)
+    Mandate:   MANDATE.md — <preset>, gate <terminal_gate>, <n> review round(s).
+               Edit it by hand to widen or narrow the lane.
+               (omit these two lines when step 13 recorded nothing)
 
     The new tab is already running the worker. Switch to it to work there.
     ```
@@ -226,6 +229,9 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     Location:        .claude/worktrees/<task-name>
     Branch:          <current-branch-name>
     Commits:         <count> commits ahead of <main-branch>
+    Mandate:         MANDATE.md — <preset>, gate <terminal_gate>, <n> review round(s).
+                     Edit it by hand to widen or narrow the lane.
+                     (omit these two lines when step 13 recorded nothing)
 
     👉 To start working there, open a SEPARATE terminal (not this Claude
        session — this session stays in the main repo) and run:

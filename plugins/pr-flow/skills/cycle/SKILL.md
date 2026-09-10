@@ -16,7 +16,7 @@ user_invocable: true
 `$ARGUMENTS` may carry flags and/or a commit message, in any order:
 
 - `--loop` (alias `--auto`) — **loop mode**: after each review, autonomously fix every finding you agree with (incl. 🟡 suggestions and ⚪ nits) and re-cycle, repeating until the reviewer raises nothing you still agree with. See "Loop mode" below.
-- `--max=N` — safety cap on loop iterations (default `10`). Ignored without `--loop`.
+- `--max=N` — safety cap on loop iterations. Default: the lane's remaining review budget from its mandate (`review_rounds_left`), else `10`. Ignored without `--loop`.
 - Any remaining non-flag text — commit message for the pending changes of the first iteration.
 
 Strip the flags first; whatever is left over is the commit message.
@@ -93,36 +93,16 @@ Strip the flags first; whatever is left over is the commit message.
 7. **Trigger Claude review** (only if no auto-trigger detected):
    - **First: is there a review bot at all?** `@claude review` is a comment — it
      succeeds whether or not anything is listening, and then step 8 polls until it
-     times out. Ask the shared probe (it anchors on the repo root, so it is
-     correct from a subdirectory or from the main repo while the PR belongs to a
-     worktree — a cwd-relative grep is not):
-     ```sh
-     bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" has-bot
-     ```
-   - **`has_bot=yes`** → a comment-triggered review workflow exists. Run:
-     `gh pr comment <PR_NUMBER> --body "@claude review"` and continue to step 8.
-   - **`has_bot=unknown`** → the probe could not tell, and its `why=` says which
-     way: no `.github/workflows` at all (a repo with no CI *or* one served only by
-     the Claude GitHub App — the App answers `@claude review` with no workflow
-     file, and that cannot be seen locally), an unreadable dir, or a
-     comment-triggered workflow that mentions `@claude` without `uses:` the
-     action. Do **not** guess in either direction: relay the reason and ask
-     whether to post `@claude review` and poll, or run the local review.
-   - **`has_bot=no`** → workflow files exist and none can answer a comment (the
-     `why=` line says whether nothing references the bot or a claude workflow
-     exists that only a push can fire). There is nothing to trigger and nothing
-     to poll: do not comment, do not enter step 8. Say so plainly and take the
-     local route:
-     - `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" allows local-review "$LANE"`
-       exits **0** → run `/swarm:review --pr <PR_NUMBER>` and treat its findings as
-       this round's review (loop mode included: the loop cares about findings, not
-       about where they came from).
-     - exits **1** or **3** → stop and offer it instead of running it:
-       "No `@claude` review bot is configured on this repo. `/swarm:review --pr <N>`
-       reviews it locally — want me to?" Report the gap as a missing capability,
-       not as a failure of this skill.
-     - swarm not installed → name both gaps and stop. Never leave the user with a
-       recommendation to re-run something that cannot work here.
+     times out. **Follow `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-ROUTING.md`** — read
+     it; it is the one copy of the probe → answer → local-route tree shared with
+     `/open`, `/check` and `/rebase`. This skill's stage behavior:
+     - `has_bot=yes` → run `gh pr comment <PR_NUMBER> --body "@claude review"` and
+       continue to step 8.
+     - `has_bot=no` → do not comment, do not enter step 8. Apply the spec's §2
+       with `"$LANE"`; when it runs `/swarm:review --pr <PR_NUMBER>`, treat those
+       findings as this round's review (loop mode included: the loop cares about
+       findings, not where they came from).
+     - `has_bot=unknown` → relay `why=` and ask, per the spec. Never guess.
 
 8. **Launch background polling via Bash**:
    - Use the **Bash tool** with `run_in_background: true` to invoke the shared polling script:
@@ -257,7 +237,7 @@ The review wait is a background Bash poll, so the user can interject at any time
 - `gh` not installed or not authenticated → stop with clear error in step 0
 - No uncommitted changes → skip commit, just push + trigger
 - No PR exists → inform user, suggest creating one
-- No `@claude` review bot on the repo → step 7 detects it from the workflow files
+- No `@claude` review bot on the repo → step 7 follows `docs/REVIEW-ROUTING.md`
   and routes to the local review instead of polling for a review that never comes
 - Base branch has new commits → handled by `/rebase` (delegated in step 2)
 - Branch already up-to-date with remote → skip push, just trigger review
@@ -273,5 +253,5 @@ The review wait is a background Bash poll, so the user can interject at any time
 - Steps 1-7 run in the foreground (fast, interactive)
 - Step 8 runs as a background Bash task (no permission issues, unlike background agents)
 - When the Bash task completes, the raw comment is returned and summarized by the main agent (step 10)
-- `--loop` turns the single pass into an autonomous fix-agreed → re-cycle loop (capped by `--max`, default 10); it is the autonomous counterpart to the interactive `/fix`, which never re-cycles on its own
+- `--loop` turns the single pass into an autonomous fix-agreed → re-cycle loop (capped by `--max`: the mandate's remaining review budget, else 10); it is the autonomous counterpart to the interactive `/fix`, which never re-cycles on its own
 - For deeper local analysis (silent failures, test coverage, type design), consider installing the complementary `pr-review-toolkit` plugin

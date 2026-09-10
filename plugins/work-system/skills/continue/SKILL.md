@@ -224,9 +224,11 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
    collapse 1 and 3 into "no": one is a decision the user made, the other is a
    question they were never asked — and never read 2 as either.
 
-   Action names, so callers and the file agree: `commit`, `push-own-branch`,
-   `open-pr`, `local-review`, `agreed-fixes`, `rebase-own-branch`, `merge`,
-   `deploy`, `force-push-shared`, `destructive`.
+   Use the action names **as the mandate itself spells them** — the `allow=` and
+   `deny=` lines `show` just returned are the vocabulary for this lane, and
+   `mandate.sh actions` lists the full set the script accepts. Do not work from a
+   remembered list: a token that is not in the script's vocabulary comes back
+   `unlisted` (exit 1), i.e. as a denial the user never made.
 
 4. **Install dependencies** (detect, then install):
    Auto-detect the project type when dependencies appear to be missing:

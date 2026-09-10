@@ -214,8 +214,10 @@ Helper absent → one `command -v`, no aggregate entry, no change. Setup + contr
 [docs/cc-harness-agents.md](docs/cc-harness-agents.md).
 
 **Non-Claude workers degrade honestly.** codex/grok/kimi have no work-system
-skills, so a launched worker gets a bootstrap prompt (read `TASK.md`, commit, open
-a PR) instead of `/continue`. A `cc-harness:…` worker *runs* as a full CC session —
+skills, so a launched worker gets a bootstrap prompt instead of `/continue`: read
+`TASK.md` and `MANDATE.md`, start on the first unmet requirement, carry out only
+the milestones the mandate lists (see "Task mandate" below — whether that
+includes opening a PR is the mandate's call, not the prompt's). A `cc-harness:…` worker *runs* as a full CC session —
 skills, lenses and `/close` all work, because the helper only routes the model.
 Everything git/PR-derived (`/status`, `/list`, the `[ws]` statusline, `/close`'s
 tab teardown) works for any worker; only claude-session concepts differ.

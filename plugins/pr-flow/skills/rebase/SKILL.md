@@ -129,7 +129,7 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
        bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" poll <PR_NUMBER> "<TRIGGER_ISO>"
        ```
        Use the **Bash tool** with `run_in_background: true`. When it completes, render the review following the shared format spec at `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md` — read that file before presenting. Required sections: header, status line, findings markdown table, single-line recommendation. (A post-rebase review is round 0 — no prior findings, so no `Status` column.)
-     - If output is empty → no auto-trigger detected. Inform user they can run `/cycle` to trigger a review manually. Do NOT trigger automatically — `/rebase` is a rebase tool, not a review trigger.
+     - If output is empty → no auto-trigger detected. Before recommending `/cycle`, run the probe from `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-ROUTING.md` (`claude-review.sh has-bot`): `yes` → the user can run `/cycle` to trigger a review manually; `no` → point at `/swarm:review --pr <N>` instead; `unknown` → say why and name both. Do NOT trigger or review here — `/rebase` is a rebase tool.
 
 10. **Final summary**:
     ```
@@ -139,7 +139,7 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
     <if upstream existed and pushed>    Force-pushed to origin.
     <if upstream existed but not pushed> Next: `git push --force-with-lease` when ready.
     <if auto-trigger detected>          Review polling in background — results will be presented when complete.
-    <if pushed but no auto-trigger>     No auto-triggered review — run `/cycle` to trigger one.
+    <if pushed but no auto-trigger>     No auto-triggered review — <per REVIEW-ROUTING.md: run `/cycle` / run `/swarm:review --pr <N>` / both named>.
     <if used by /open or /cycle>        Continuing with the parent skill.
     ```
 

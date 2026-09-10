@@ -299,6 +299,57 @@ for preset, gate, may_open_pr, may_merge in [
     check(f"{preset}: the =form matches the space form",
           kv(run("show", str(p2)).stdout).get("allow") == s.get("allow"))
 
+# --without subtracts from the preset without anyone retyping the list. A
+# kickoff for a codex/grok/kimi worker drops `local-review` this way.
+p = make_repo()
+r = run("init", str(p), "--preset", "standard", "--without", "local-review",
+        "task=t", "authorized_by=user")
+check("--without writes", kv(r.stdout).get("written") == "yes")
+s = kv(run("show", str(p)).stdout)
+check("--without drops the one token", "local-review" not in s.get("allow", ""))
+check("--without keeps the rest of the preset intact",
+      s.get("allow") == "commit,push-own-branch,open-pr,agreed-fixes,rebase-own-branch")
+check("the dropped action is unlisted, not denied",
+      "unlisted" in run("allows", "local-review", str(p)).stdout)
+p = make_repo()
+run("init", str(p), "--preset=standard", "--without=local-review",
+    "--without", "open-pr", "task=t", "authorized_by=user")
+check("--without stacks and accepts both forms",
+      kv(run("show", str(p)).stdout).get("allow") == "commit,push-own-branch,agreed-fixes,rebase-own-branch")
+check("--without with an unknown action is refused",
+      run("init", str(make_repo()), "--preset", "standard", "--without", "reviewing",
+          "task=t", "authorized_by=user").returncode == 2)
+check("a valueless --without is refused",
+      run("init", str(make_repo()), "--preset", "standard", "task=t",
+          "authorized_by=user", "--without").returncode == 2)
+
+# --- init keeps its own record out of git ------------------------------------
+# A worker told to commit as it goes would otherwise commit MANDATE.md; the
+# exclude is written by init itself, not by a skill sub-step that /adopt
+# reaches by cross-reference and can skip.
+ex = make_repo()
+r = run("init", str(ex), "--preset", "standard", "task=t", "authorized_by=user")
+check("init reports the exclude", kv(r.stdout).get("excluded") == "yes")
+check("MANDATE.md is ignored afterwards",
+      subprocess.run(["git", "-C", str(ex), "check-ignore", "-q", "MANDATE.md"]).returncode == 0)
+check("MANDATE.md does not show up in status",
+      "MANDATE.md" not in subprocess.run(["git", "-C", str(ex), "status", "--porcelain"],
+                                         capture_output=True, text=True).stdout)
+check("the rule is one line in info/exclude",
+      (ex / ".git" / "info" / "exclude").read_text().count("/MANDATE.md") == 1)
+r = run("init", str(ex), "--preset", "standard", "task=t", "authorized_by=user", "--force")
+check("a second init reports it as already excluded", kv(r.stdout).get("excluded") == "already")
+check("and does not duplicate the rule",
+      (ex / ".git" / "info" / "exclude").read_text().count("/MANDATE.md") == 1)
+# A repo whose committed .gitignore already covers it is left alone.
+gi = make_repo()
+(gi / ".gitignore").write_text("/MANDATE.md\n")
+r = run("init", str(gi), "--preset", "standard", "task=t", "authorized_by=user")
+check("a .gitignore rule is recognized", kv(r.stdout).get("excluded") == "already")
+check("and info/exclude is not touched",
+      not (gi / ".git" / "info" / "exclude").exists()
+      or "/MANDATE.md" not in (gi / ".git" / "info" / "exclude").read_text())
+
 # draft-only denies open-pr outright — a caller must be able to tell that from
 # "nobody mentioned it", because only one of the two is a decision.
 p = make_repo()
@@ -435,6 +486,8 @@ check("lane without a branch is a usage error", run("lane").returncode == 2)
 run("init", str(wt), "task=lane-a", "authorized_by=user", "allow=commit")
 check("the lane's mandate is NOT what the main cwd resolves",
       kv(run("show", str(main)).stdout).get("mandate_exists") == "no")
+check("the exclude written in the worktree covers the lane",
+      subprocess.run(["git", "-C", str(wt), "check-ignore", "-q", "MANDATE.md"]).returncode == 0)
 check("it IS what lane's path resolves",
       kv(run("show", run("lane", "task/lane-a", str(main)).stdout.strip()).stdout)
       .get("task") == "lane-a")

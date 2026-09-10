@@ -220,34 +220,12 @@ put to the user, not that they said no.
       ```
       Use the **Bash tool** with `run_in_background: true`. When it completes, render the review following the shared format spec at `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md` — read that file before presenting. Required sections: header, status line, findings markdown table, single-line recommendation. (`/open` is always round 0 — no prior findings, so no `Status` column.)
     - **If output is empty** → no review started. Before recommending anything,
-      find out *why* — a slow trigger and an absent bot need opposite advice. Use
-      the shared probe (repo-root anchored, comment-trigger aware; the same one
-      `/cycle` calls, so the two skills cannot drift apart):
-      ```sh
-      bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" has-bot
-      ```
-      - **`has_bot=yes`** → a comment-triggered review workflow exists; it just has
-        not fired yet. Suggest `/cycle` to trigger manually. Do NOT trigger
-        automatically here — `/open` is about creation; triggering is `/cycle`'s job.
-      - **`has_bot=unknown`** → the probe could not tell, and says why: no
-        `.github/workflows` at all (a repo with no CI *or* one served only by the
-        Claude GitHub App — indistinguishable locally), an unreadable dir, or a
-        comment-triggered workflow that mentions `@claude` without using the
-        action. Report the `why=` line and name both routes (`/cycle` to try the
-        bot, `/swarm:review --pr <N>` locally) rather than picking one.
-      - **`has_bot=no`** (workflow files exist and none can answer a comment) →
-        `/cycle` cannot work here, and recommending it sends the user into a loop
-        that fails every time. Route to the local review instead:
-        - `mandate-shim.sh allows local-review "$LANE"` exits **0** → run
-          `/swarm:review --pr <PR_NUMBER>` now and render its result in place of
-          the bot review. Say which route you took and why ("no review bot on this
-          repo — ran the local review, which your mandate covers").
-        - exits **1** or **3** → do not run it unasked. Report the missing bot as
-          a *capability gap*, name the local route, and let the user choose:
-          "No `@claude` review bot is configured on this repo, so `/cycle` has
-          nothing to trigger. `/swarm:review --pr <N>` reviews it locally instead."
-        - swarm not installed either → report both gaps plainly rather than
-          recommending a command that cannot work.
+      find out *why* — a slow trigger and an absent bot need opposite advice.
+      **Follow `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-ROUTING.md`** — read it; it is
+      the one copy of the probe → answer → local-route tree that `/cycle`,
+      `/check` and `/rebase` follow too. This skill's stage behavior: it never
+      triggers (creation, not triggering, is its job) — on `has_bot=yes` it
+      recommends `/cycle`; on `no` it applies the spec's §2 with `"$LANE"`.
 
 11. **Final summary**:
     ```
@@ -259,7 +237,8 @@ put to the user, not that they said no.
     Next step:
     - [if review auto-triggered]   Review results will appear when polling completes (~1-5 min)
     - [if bot exists, not fired]   Run `/cycle` to trigger Claude review manually
-    - [if no review bot]           <the step 10 routing: local review run, or offered>
+    - [if no review bot]           <per REVIEW-ROUTING.md §2: local review run, or offered>
+    - [if bot unknown]             <the probe's why= line, both routes named>
     - [if CI failed/missing]       Investigate CI config before pushing more work
     ```
 
@@ -275,10 +254,10 @@ put to the user, not that they said no.
 - PR already exists → redirect to `/cycle`
 - Base branch has new commits → handled by `/rebase` (delegated in step 2)
 - No commits on branch vs. base → stop: "Nothing to PR — branch is identical to <BASE_BRANCH>"
-- User declines to run checks → mark all as "skipped by user" in body, still create PR
+- A check cannot run (tool missing, hangs past the timeout) → mark it ⚠️ skipped in the body, still create the PR — checks run unasked (step 3), so there is no "declined" state
 - Linter/tests hang → timeout 5min, mark as ⚠️ skipped, let user decide
 - Repo uses a non-default base (`develop`, `staging`) → ask user if auto-detected base seems wrong
-- `@claude` bot not installed on repo → step 10 asks `claude-review.sh has-bot` (repo-root anchored, comment-trigger aware) and routes to the local review instead of recommending a `/cycle` that has nothing to trigger
+- `@claude` bot not installed on repo → step 10 follows `docs/REVIEW-ROUTING.md`: the probe says `no` and the local review is run or offered instead of recommending a `/cycle` that has nothing to trigger; an App-only repo probes as `unknown` and is asked
 
 ## Notes
 
