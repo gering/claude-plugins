@@ -21,8 +21,11 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" has-bot
 ```
 
 Repo-root anchored (a cwd-relative check is wrong from a subdirectory, or from
-the main repo while the PR belongs to a worktree). No network. Emits `has_bot=`,
-`why=`, and `matched=`.
+the main repo while the PR belongs to a worktree). No network. Always emits the
+same four keys — `has_bot=`, `why=`, `workflows_dir=`, `matched=` (empty when not
+applicable) — and exits 0 for every answer. It reads workflow *structure*: a
+`uses:` inside a `#` comment or a `run:` block, or a file in a subdirectory
+GitHub never reads, is not a bot.
 
 | `has_bot` | means | consumer does |
 |---|---|---|
@@ -33,9 +36,11 @@ the main repo while the PR belongs to a worktree). No network. Emits `has_bot=`,
 `unknown` is its own answer, not a soft `no`. It covers: no `.github/workflows`
 at all (a repo with no CI *or* one served only by the Claude GitHub App — the App
 answers comments with no workflow file, and the two are indistinguishable
-locally), an unreadable directory or file, and a comment-triggered workflow that
-mentions `@claude` without using the action. Guessing `no` there permanently
-reroutes a working bot; guessing `yes` polls for ten minutes.
+locally), an unreadable directory or file, a comment-triggered workflow that
+mentions `@claude` without using the action or delegates to a reusable workflow,
+and a claude workflow with a custom `trigger_phrase` (which `@claude review` may
+not fire). Guessing `no` there permanently reroutes a working bot; guessing `yes`
+polls for ten minutes.
 
 ## 2. Local route (only on `has_bot=no`)
 

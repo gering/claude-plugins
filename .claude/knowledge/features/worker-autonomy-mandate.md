@@ -56,10 +56,15 @@ matching is whole-action, and silence is not consent.
 Two follow-on rules fall straight out of that contract, and both were review
 findings rather than design foresight. Matching must be **literal**: an anchored
 `grep -qx` is still a regex, so `allows '.*'` satisfied every list. And the action
-vocabulary must be **closed** (`KNOWN_ACTIONS`, validated at write time): an
-unrecognized token comes back as `unlisted`, i.e. exit 1, so a typo in an allow
-list is indistinguishable from a denial the user actually chose — the exact
-collapse the three exit codes exist to prevent, re-entering through the door.
+vocabulary must be **closed** (`KNOWN_ACTIONS`) — at write time *and* at ask
+time: a token `allows` does not recognize is a usage error (exit 2), because
+answering `unlisted` (exit 1) would report a typo as a denial the user actually
+chose — the exact collapse the three exit codes exist to prevent, re-entering
+through the door. The third pass found the same collapse two more ways: a
+comma-joined `allows 'a,b'` matched as a *sublist* of the allow line even with
+`b` denied, and the membership test itself was a substring `case` over the
+space-joined vocabulary, so two actions glued by a space passed as one token.
+Membership is an exact-word loop now (`in_vocab`).
 
 ## What has to be durable, and why
 
@@ -86,7 +91,20 @@ inserts `review_rounds_used` when a hand-edit removed it (a substitute-only
 rewrite silently made the budget unbounded), values may not contain a newline
 (they would inject further keys — and `scope` is model-authored from TASK.md,
 which under `/adopt` comes from someone else's commits), and a duplicate key is
-refused rather than resolved first-one-wins.
+refused rather than resolved first-one-wins. The worst edit is the invisible
+one: a file saved with CRLF (or a BOM) made the first line miss `---`, and the
+parser returned an **empty mandate with exit 0** — every action `unlisted`, and
+`round` printing a count it never persisted. Both are normalized now, and a file
+with no leading fence is exit 2, not empty.
+
+**A tracked file is nobody's record.** The exclude and the task guard only
+protect a `MANDATE.md` that is not yet in the index. One that git tracks came in
+with a branch — an adopted fork PR, or main after someone committed theirs — and
+its `task:` is guessable, so the guard cannot tell it from the lane's own. Every
+verb refuses a tracked file (`git ls-files --error-unmatch`), `--force` included:
+overwriting it just leaves a tracked, modified file for the next `git add -A`.
+Untrack first, then re-ask. Same reason `init` now requires `task=` — omitted,
+the guard never ran.
 
 Match the mandate to the worker — from the registry's `supports=` field, not by
 matching CLI names: an agent that cannot run the review skills gets an allow list
@@ -142,6 +160,24 @@ path; `yes` needs both `uses: anthropics/claude-code-action` and an
 `unknown` too. The whole probe → answer → local-route tree now lives once in
 `plugins/pr-flow/docs/REVIEW-ROUTING.md`, followed by `/open`, `/cycle`,
 `/check` and `/rebase`.
+
+## What the third pass taught: text is not structure
+
+`has-bot`'s second version matched *text*: `grep -qi issue_comment` said yes to a
+TODO comment, and a `uses: anthropics/claude-code-action` inside a `run: |`
+heredoc counted as a step. So did an archived copy under
+`.github/workflows/old/`, which GitHub never reads. The probe now does one awk
+pass per top-level file that skips `#` comments and block scalars before testing
+the keys, and it takes two more "cannot tell" answers rather than guess: a
+custom `trigger_phrase` (`@claude review` may not fire it) and a job that
+delegates to a reusable workflow. The raw *mention* is still tracked — it only
+ever lowers a `no` to `unknown`, which is the cheap direction.
+
+On the mandate side the same pass caught the parser trusting its own markers:
+the open-fence verdict was a substring match over the whole parsed output, so a
+`scope` that happened to contain `__open=1` made a well-formed file unreadable.
+A sentinel must live on its own line (or its own channel), never be searched for
+in data.
 
 ## What the second review pass taught about the first
 

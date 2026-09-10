@@ -17,7 +17,10 @@ so the properties under test are exactly the ones that grep got wrong:
   * an incidental "claude" (a cache key, a comment) is not a bot;
   * "cannot tell" is its own answer, distinct from "no" — and covers the case
     the probe cannot see locally: a repo served only by the Claude GitHub App,
-    which has no workflow dir at all;
+    which has no workflow dir at all; a custom trigger_phrase; a job that
+    delegates to a reusable workflow;
+  * matching is STRUCTURAL: a TODO comment, a `run:` heredoc, or a file in a
+    subdirectory GitHub never reads must not add up to a working bot;
   * paths with spaces survive (the first version word-split them and reported
     a working bot as absent), the candidate set is never capped, and an I/O
     failure is "unknown", never "no".
@@ -203,6 +206,103 @@ r = kv(run(str(repo_with(INCIDENTAL, COMMENT_TRIGGERED, PUSH_TRIGGERED))).stdout
 check("one real bot among several workflows is found", r.get("has_bot") == "yes")
 check("only the comment-triggered one is matched",
       "w1.yml" in r.get("matched", "") and "w0.yml" not in r.get("matched", ""))
+
+# --- structural matching: text is not configuration --------------------------
+# Substring greps used to say "yes" to all of these — and the caller then
+# commented into the void and polled for ten minutes.
+COMMENT_ONLY = """\
+name: Claude
+on:
+  pull_request:
+# TODO: also trigger on issue_comment
+jobs:
+  review:
+    steps:
+      - uses: anthropics/claude-code-action@v1
+"""
+r = kv(run(str(repo_with(COMMENT_ONLY))).stdout)
+check("an issue_comment in a YAML comment is not a trigger", r.get("has_bot") == "no")
+check("and it is the push-only case", "issue_comment" in r.get("why", ""))
+
+HEREDOC = """\
+name: Docs
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  docs:
+    steps:
+      - run: |
+          cat <<EOF > example.yml
+            - uses: anthropics/claude-code-action@v1
+          EOF
+"""
+r = kv(run(str(repo_with(HEREDOC))).stdout)
+check("a uses: inside a run: block is not a step", r.get("has_bot") != "yes")
+check("but the mention still makes it 'cannot tell', not 'no'",
+      r.get("has_bot") == "unknown")
+
+CUSTOM_PHRASE = """\
+name: Claude Review
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  review:
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          trigger_phrase: "/review"
+"""
+r = kv(run(str(repo_with(CUSTOM_PHRASE))).stdout)
+check("a custom trigger_phrase is unknown, not yes", r.get("has_bot") == "unknown")
+check("and the reason names the phrase", "trigger_phrase" in r.get("why", ""))
+DEFAULT_PHRASE = CUSTOM_PHRASE.replace('"/review"', '"@claude"')
+check("an explicit @claude trigger_phrase is still a bot",
+      kv(run(str(repo_with(DEFAULT_PHRASE))).stdout).get("has_bot") == "yes")
+
+REUSABLE = """\
+name: Review
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  review:
+    uses: my-org/shared-ci/.github/workflows/claude-review.yml@main
+"""
+r = kv(run(str(repo_with(REUSABLE))).stdout)
+check("a reusable-workflow delegate is unknown, not no", r.get("has_bot") == "unknown")
+check("and the reason says so", "reusable" in r.get("why", ""))
+
+# GitHub reads .github/workflows itself, never a subdirectory.
+deep = repo_with()
+sub = deep / ".github" / "workflows" / "archive"
+sub.mkdir(parents=True)
+(sub / "old.yml").write_text(COMMENT_TRIGGERED)
+r = kv(run(str(deep)).stdout)
+check("a workflow in a subdirectory is not examined", r.get("has_bot") != "yes")
+(deep / ".github" / "workflows" / "ci.yml").write_text(INCIDENTAL)
+check("nor does it make a plain-CI repo a bot repo",
+      kv(run(str(deep)).stdout).get("has_bot") == "no")
+
+# A trailing comment on the real step must not hide it.
+COMMENTED_STEP = COMMENT_TRIGGERED.replace(
+    "claude-code-action@v1", "claude-code-action@v1   # pinned")
+check("a trailing comment on the uses: line is fine",
+      kv(run(str(repo_with(COMMENTED_STEP))).stdout).get("has_bot") == "yes")
+CRLF = COMMENT_TRIGGERED.replace("\n", "\r\n")
+check("a CRLF workflow is read",
+      kv(run(str(repo_with(CRLF))).stdout).get("has_bot") == "yes")
+
+# --- every path emits the same four keys -------------------------------------
+KEYS = {"has_bot", "why", "workflows_dir", "matched"}
+for label, path in (("yes", str(repo_with(COMMENT_TRIGGERED))),
+                    ("no", str(repo_with(INCIDENTAL))),
+                    ("unknown", str(repo_with())),
+                    ("not a git repo", tempfile.mkdtemp())):
+    keys = {l.partition("=")[0] for l in run(path).stdout.splitlines()}
+    check(f"all four keys on the {label} path", keys == KEYS)
+    check(f"and it exits 0 on the {label} path", run(path).returncode == 0)
 
 
 if FAILS:
