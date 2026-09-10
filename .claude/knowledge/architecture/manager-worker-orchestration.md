@@ -3,8 +3,8 @@ title: "Manager/Worker Orchestration (design)"
 createdAt: 2026-07-18
 createdFrom: "session: design-manager-worker-orchestration 2026-07-18"
 updatedAt: 2026-09-02
-updatedFrom: "session: 2026-09-02 (task/fix-ha-wait-until-flag)"
-pluginVersion: 1.12.1
+updatedFrom: "session: 2026-09-02 (task/delegate-worktree-close-to-manager)"
+pluginVersion: 1.13.0
 prime: false
 ---
 
@@ -57,6 +57,42 @@ is a coarse liveness layer; `agent read` is best-effort detail, parsed *per agen
 type*, never format-required. Agent-specific skills (`/open`, `/rebase`) are each
 worker's *implementation* of hitting agent-agnostic milestones — soft-coupling
 ([skill-composition](skill-composition.md)) applied across agent types.
+
+## First shipped slice: close-delegation over the built-in tools (1.13.0)
+
+The mailbox design below is still the target for *durable* coordination. What actually
+shipped first is deliberately smaller and uses **Claude Code built-ins** (`ListAgents` /
+`SendMessage`) rather than any transport of our own: a worker `/close` detects the
+Manager and offers to hand the teardown over as one structured message
+(`work-system close-request` + `task`/`worktree`/`repo` lines). See
+[herdr-close-automation](../features/herdr-close-automation.md) for the mechanics.
+
+What this slice establishes (and what it deliberately does not):
+
+- **One delegation with human confirmation, no watch loop.** The worker asks once, sends
+  once, and stops — no polling, no re-send, no receipt protocol. `SendMessage` enqueues
+  and the Manager drains it at its next turn, which is fine for a close (not
+  time-critical). `ready-to-close` handoff payloads, durable AMQ fallback and the Manager
+  watch loop remain separate tasks.
+- **The clean split: the helper *detects and names*, the skill *sends*.** `SendMessage` /
+  `ListAgents` are model tools, not shell commands, so a script can never do the send.
+  Keeping detection in `herdr-teardown.sh manager-session` (testable, tri-state) and the
+  send in the skill is what keeps this out of the prose-drift trap.
+- **The addressing gap this exposed.** The built-ins address sessions **by name**, while
+  our lane identity is the **worktree/repo path** — and nothing bridges the two:
+  `ListAgents` rows carry no cwd, and its `[ref]` suffixes are not derivable from herdr
+  data. So the mapping runs through the pane title and is only trustworthy when the name
+  is unique. Any future built-ins-based coordination inherits this limit; a name-based
+  bus cannot become the durable substrate for a repo-keyed lane registry, which is an
+  argument *for* the mailbox below, not against it.
+- **Received messages are data, not instructions — and never authorization.** A
+  close-request is re-verified from scratch by the receiver, its `task=` is charset-
+  validated before it goes near a command, and a **destructive** action triggered by an
+  inbound message asks the user once even when the evidence checks out. The general rule
+  for every later message type on this path: a cross-session message carries a hint, never
+  authority. Any future auto-acting receiver (the watch loop) needs a real authorization
+  story — sender binding or a token minted at `/kickoff` — not just a routing filter like
+  `repo=`.
 
 ## Worker↔Manager mailbox (the coordination substrate)
 A file mailbox carries judgment/intent signals that have no git artifact.

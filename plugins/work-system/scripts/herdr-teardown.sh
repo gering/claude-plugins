@@ -38,6 +38,17 @@
 #       can focus it before a self-close. Falls back to the workspace's first
 #       pane *other than* exclude-tab (the self tab) so the user is never focused
 #       onto the dying tab. Exit 1 only when unreachable or no candidate pane.
+#   manager-session <workspace> <main-repo-abs-path>
+#       Tri-state detection of a live MANAGER session for this repo — the claude
+#       agent whose cwd IS the main-repo root — so a worker /close can offer to
+#       delegate the teardown to it (Scenario A from a session that survives the
+#       close) instead of self-closing (Scenario B). Prints `name=<session-name>`,
+#       `none` (a populated, fully readable agent list has no agent at the root) or
+#       `unverified` (anything we cannot rule out, incl. TWO candidates — the skill
+#       must never guess which session to message). Always exit 0. An empty
+#       <workspace> searches all workspaces of the current herdr server. The name
+#       is only a CANDIDATE address: the skill resolves it against ListAgents and
+#       drops the offer when it is missing or ambiguous there.
 #   close-tab <tab-id> [workspace]
 #                               Scenario A: close the tab ONCE, then VERIFY it is
 #                               gone (polls until gone; does NOT re-issue the close).
@@ -229,6 +240,103 @@ for p in panes:
         print("present"); sys.exit(0)
 print("gone")'
 
+# Pick THE Manager session out of `herdr agent list` (stdin). Needs match_roots /
+# classify_cwd from $HERDR_MATCH_PRELUDE, prepended by the caller, so the cwd match
+# is the SAME one lanes.sh and herdr-tab-glyph.sh use (exact realpath; a mere subdir
+# is not the root). argv: <main-repo-path> [workspace]. Prints name=<x>|none|unverified.
+# Fail-closed by construction: every branch we cannot fully rule out prints
+# `unverified`, because a wrong `none` only costs the offer while a wrong `name=`
+# would send a close request to a stranger session.
+extract_manager='import sys, json, re, unicodedata
+main = sys.argv[1] if len(sys.argv) > 1 else ""
+ws = sys.argv[2] if len(sys.argv) > 2 else ""
+# herdr 0.8 statuses: idle|working|blocked|done|unknown (the same vocabulary
+# ha_wait validates for --until). `unknown` is DELIBERATELY absent here: it means
+# herdr cannot tell, which is not a confirmed live session. Keep the two in sync by
+# hand — they are different SETS of the same vocabulary, not one shared constant.
+LIVE = ("idle", "working", "blocked", "done")
+
+def session_name(a):
+    # The SendMessage address is the CLAUDE SESSION name, which Claude writes into
+    # the terminal title — NOT the herdr agent name (verified live: a herdr agent
+    # named gcp-auth-159 hosts the session "answer-gcp-auth-questions-buchhalter-159").
+    # herdr strips only its own status glyph from the title, so drop one leading
+    # symbol+space here too (the working spinner: ◐/◑/✳ …). The space is required, so
+    # a name that genuinely starts with punctuation (e.g. /habemus-event) keeps it; a
+    # wrong strip costs only the offer (no ListAgents match), never a misdirected message.
+    # NO fallback to herdr agent `name`: it is a launch label (verified live: agent
+    # gcp-auth-159 hosts session answer-gcp-auth-questions-buchhalter-159), so emitting
+    # it would hand the caller a string that is not an address — and a namesake in
+    # ANOTHER repo could then pass the uniqueness check. No title -> no candidate.
+    t = str(a.get("terminal_title_stripped") or a.get("terminal_title") or "")
+    # Blank EVERY control/format char first (Cc/Cf, plus surrogates/private use):
+    # newlines and tabs would forge extra output lines, and ANSI escapes or a bidi
+    # override (U+202E) could make the printed name read differently than it matches.
+    # A mangled name simply fails the caller ListAgents match — fail closed, as intended.
+    t = "".join(" " if unicodedata.category(c) in ("Cc", "Cf", "Cs", "Co") else c for c in t)
+    # Then drop ONE leading symbol+space (the herdr/claude spinner glyph) and collapse.
+    t = re.sub(r"^[^\w\s]\s+", "", t.strip())
+    t = re.sub(r"\s+", " ", t).strip()
+    # 64 chars, not 200: the value is echoed into the caller prompt (the confirmation
+    # question and the SendMessage address) BEFORE any gate runs, and a pane title is
+    # settable by any process in that pane. A real session name is short; a long one is
+    # prose, and prose in that slot is an injection surface, not an address.
+    return "" if len(t) > 64 else t
+
+root, wtdir = match_roots(main)
+try:
+    agents = json.load(sys.stdin)["result"]["agents"]
+except Exception:
+    agents = None
+# None = malformed; [] = an empty/repopulating list (same reason extract_tab_present
+# refuses to read an empty list as "gone") — neither can rule out a Manager.
+if root is None or not agents:
+    print("unverified"); sys.exit(0)
+
+found = []
+unknown = False   # something at/near the root we could not classify → fail closed
+for a in agents:
+    if not isinstance(a, dict):
+        unknown = True          # a junk element may have BEEN the Manager row
+        continue
+    cwd = a.get("cwd")
+    if not cwd or not str(cwd).strip():
+        unknown = True          # unreadable cwd — cannot rule out that it is the root
+        continue
+    kind, key, resolved = classify_cwd(str(cwd), root, wtdir)
+    if kind != "main":
+        continue
+    # From here on the agent SITS AT THE ROOT: anything unusable about it makes the
+    # answer unverified, never a confident `none`. The workspace filter runs HERE, not
+    # before the cwd match: a root row whose workspace_id is missing/unreadable would
+    # otherwise be filtered away silently and let the answer read `none`, breaking the
+    # fail-closed contract. A row in a DIFFERENT workspace is a legitimate skip.
+    if ws:
+        aws = str(a.get("workspace_id") or "")
+        if not aws:
+            unknown = True      # at the root, but we cannot tell which workspace
+            continue
+        if aws != ws:
+            continue
+    if str(a.get("agent") or "").lower() != "claude":
+        unknown = True          # codex/grok/shell at the root: no SendMessage address
+        continue
+    if str(a.get("agent_status") or "").lower() not in LIVE:
+        unknown = True          # unknown/absent status — not a confirmed live session
+        continue
+    n = session_name(a)
+    if not n:
+        unknown = True
+        continue
+    found.append(n)
+
+if unknown or len(found) > 1:
+    print("unverified")         # ambiguous or partly unreadable → no offer
+elif found:
+    print("name=" + found[0])
+else:
+    print("none")'
+
 # herdr pane list for a workspace (empty ws → unscoped). Empty string on failure.
 pane_list() {
   local ws="${1:-}"
@@ -304,6 +412,27 @@ case "$cmd" in
     [ $# -ge 3 ] && [ $# -le 4 ] || { echo "usage: ${0##*/} main-tab <workspace> <main-repo-path> [exclude-tab]" >&2; exit 2; }
     if [ $# -eq 4 ] && [ -n "$4" ]; then lookup_tab "$2" "$3" --first --exclude "$4"
     else lookup_tab "$2" "$3" --first; fi
+    ;;
+  manager-session)
+    # Manager detection for /close delegation. Uses `herdr agent list` (NOT pane
+    # list): only the agent list tells a live claude session from a bare shell, and
+    # carries the terminal title the SendMessage address is derived from. ha_list
+    # (sourced from the sibling wrapper) already bounds the call and validates the
+    # JSON shape, so every degrade path lands on `unverified`. Sourced INSIDE this
+    # branch so the SessionEnd-hook path stays untouched. ALWAYS exits 0.
+    [ $# -eq 3 ] || { echo "usage: ${0##*/} manager-session <workspace> <main-repo-path>" >&2; exit 2; }
+    # An empty root would match nothing and read as `none` (fail open); refuse it.
+    [ -n "$3" ] || { echo unverified; exit 0; }
+    SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)" || SCRIPT_DIR=""
+    if [ -z "$SCRIPT_DIR" ] || [ ! -f "$SCRIPT_DIR/herdr-agent.sh" ]; then echo unverified; exit 0; fi
+    # shellcheck source=herdr-agent.sh
+    . "$SCRIPT_DIR/herdr-agent.sh"
+    # No python3 guard here: ha_list fails (code 3) when either tool is missing.
+    agents_json="$(ha_list)" || { echo unverified; exit 0; }
+    out="$(printf '%s' "$agents_json" | PYTHONUTF8=1 python3 -c "$HERDR_MATCH_PRELUDE
+$extract_manager" "$3" "$2" 2>/dev/null || true)"
+    [ -n "$out" ] || out=unverified
+    printf '%s\n' "$out"
     ;;
   close-tab)
     # Scenario A: close the tab ONCE, then CONFIRM it's gone — a bare `herdr tab
@@ -447,7 +576,7 @@ case "$cmd" in
     exit 0
     ;;
   *)
-    echo "usage: ${0##*/} {worktree-tab|worktree-tab-state|own-tab|main-tab|close-tab|focus-tab|inject-exit|self-exit|arm-self-close|on-session-end} ..." >&2
+    echo "usage: ${0##*/} {worktree-tab|worktree-tab-state|own-tab|main-tab|manager-session|close-tab|focus-tab|inject-exit|self-exit|arm-self-close|on-session-end} ..." >&2
     exit 2
     ;;
 esac
