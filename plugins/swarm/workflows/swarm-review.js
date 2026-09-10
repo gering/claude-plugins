@@ -311,7 +311,7 @@ if (!ADAPTER || !DIFF_FILE || !EXTERNAL_PROMPT) {
   return {
     error: 'swarm-review requires args.adapter, args.diffFile, args.externalPromptFile',
     gate: null, findings: [], refuted: [], backendErrors: [], fenceDegraded: false,
-    balance: { total: 0, design: 0, consensus: 0, solo: 0, refuted: 0, redactions: 0, fenceDegraded: false, voices: 0, agents: [], backendErrors: [], rawPerLens: {}, survivingPerLens: {}, familiesExpected: [], familiesPresent: [], familiesLost: [], unitsDegraded: [], consensusReachable: false, coverageNotes: [] },
+    balance: { total: 0, design: 0, consensus: 0, solo: 0, refuted: 0, redactions: 0, fenceDegraded: false, voices: 0, voicesReturned: 0, agents: [], backendErrors: [], rawPerLens: {}, survivingPerLens: {}, familiesExpected: [], familiesPresent: [], familiesLost: [], unitsDegraded: [], consensusReachable: false, coverageNotes: [] },
   }
 }
 
@@ -931,6 +931,33 @@ const familiesPresent = Array.from(new Set(
   voices.filter((v) => v.ok !== false).map((v) => familyOf(v.backend))
 )).sort()
 const familiesLost = familiesExpected.filter((f) => !familiesPresent.includes(f))
+// HOW MUCH each family lost, not just whether it survived. A family flag is
+// binary, but the damage is not: "grok lost" and "grok lost 1 of 5 clusters" are
+// different reviews, and `backendErrors` lists the dead calls without ever
+// saying how large a share of that family's coverage they were. Count PLANNED
+// vs RETURNED per family — `voices` is now the full plan, so planned is knowable
+// even when every single call of a family vanished.
+const familyTally = new Map()
+for (const v of voices) {
+  const f = familyOf(v.backend)
+  const t = familyTally.get(f) || { planned: 0, returned: 0 }
+  t.planned++
+  if (v.ok !== false) t.returned++
+  familyTally.set(f, t)
+}
+const tallyOf = (f) => familyTally.get(f) || { planned: 0, returned: 0 }
+const lostCallsPhrase = (f) => { const t = tallyOf(f); return `${f} (${t.planned - t.returned}/${t.planned} Aufrufe ohne Ergebnis)` }
+// Families that DID return, but not from every cluster they were sent to. They
+// never reach `familiesLost`, so before this they were invisible in the coverage
+// block — the partial-loss case (2 of 8 calls through) read as a healthy run.
+const familiesPartial = familiesExpected
+  .filter((f) => !familiesLost.includes(f))
+  .filter((f) => { const t = tallyOf(f); return t.returned < t.planned })
+// Voices that actually reviewed, as opposed to the ones we planned to run. Kept
+// apart deliberately: `voices.length` is the TOPOLOGY (what the fan-out was
+// meant to be) and must not double as the participation count now that a lost
+// voice stays in the list instead of being filtered away.
+const voicesReturned = voices.filter((v) => v.ok !== false).length
 // Run-global presence is NOT the whole story, because consensus is decided per
 // (file, mechanism) — i.e. inside a cluster. A family that survived in one
 // cluster and timed out in three is "present" globally while three quarters of
@@ -980,7 +1007,7 @@ const coverageNotes = []
 if (familiesLost.length) {
   // ONE sentence, not two: the previous pair stated the same "N of M families"
   // fact twice (once in German, once in English) and the skill printed both.
-  coverageNotes.push(`Konsens-Basis reduziert: ${familiesLost.join(', ')} lieferte nichts — ${familiesPresent.length} von ${familiesExpected.length} Modellfamilien haben reviewt, "Konsens" heißt in diesem Lauf Übereinstimmung von ${familiesPresent.join(', ')}.`)
+  coverageNotes.push(`Konsens-Basis reduziert: ${familiesLost.map(lostCallsPhrase).join(', ')} lieferte nichts — ${familiesPresent.length} von ${familiesExpected.length} Modellfamilien haben reviewt, "Konsens" heißt in diesem Lauf Übereinstimmung von ${familiesPresent.join(', ')}.`)
 }
 // Scoped to actual LOSS, and worded for what happened. Gated on
 // `!consensusReachable` alone this fired on a stock Claude-only install — where
@@ -995,6 +1022,15 @@ if (!consensusReachable && familiesExpected.length >= 2) {
   coverageNotes.push(`Nur eine Modellfamilie (${familiesPresent.join(', ')}) ist in diesem Lauf konfiguriert — Konsens ist per Definition nicht anwendbar; jedes Finding läuft über solo + adversarialen Verifier.`)
 } else if (unitsDegraded.length) {
   coverageNotes.push(`Cluster ${unitsDegraded.join(', ')}: weniger als 2 Familien haben geliefert — Findings DORT fallen auf solo + Verifier zurück. Die übrigen Cluster sind unberührt.`)
+}
+// PARTIAL loss, scoped to families that survived: gated on returned < planned,
+// so it can only fire when calls actually died — a healthy run of any shape
+// (including a stock Claude-only install) produces nothing here. Separate note
+// rather than folded into the ones above: those describe what CONSENSUS can
+// still mean, this one describes which coverage was silently not reviewed.
+if (familiesPartial.length) {
+  coverageNotes.push(`Teilausfall: ${familiesPartial.map(lostCallsPhrase).join(', ')} — die betroffenen Cluster wurden von dieser Familie nicht reviewt, ihre Findings dort stützen sich auf die übrigen Familien.`)
+  log(`Partial coverage: ${familiesPartial.map((f) => { const t = tallyOf(f); return `${f} ${t.returned}/${t.planned} calls returned` }).join(', ')}`)
 }
 // Gated on consensus being reachable AT ALL, like the notes above: with a single
 // family configured every cluster trivially has "fewer than 2 families", so this
@@ -1035,7 +1071,7 @@ for (const v of voices) {
     pool.push({ ...f, backend: v.backend, family: familyOf(v.backend), lens, kind: lensKind(lens) })
   }
 }
-log(`Fan-out: ${pool.length} raw findings from ${voices.length} voices` +
+log(`Fan-out: ${pool.length} raw findings from ${voicesReturned} of ${voices.length} voices` +
     // Name the UNIT, not just the backend: with every backend multi-voice, the
     // bare name hides which cluster lost coverage — the reason unit/lenses were
     // added to backendErrors in the first place.
@@ -1374,7 +1410,11 @@ return {
     refuted: gatedRefuted.length,
     redactions,
     fenceDegraded,
+    // PLANNED voices (the fan-out topology) and how many of them actually came
+    // back. Two numbers, because a lost voice now stays in the list: reporting
+    // only `voices` would repeat the exact overstatement this fix removes.
     voices: voices.length,
+    voicesReturned,
     agents: Object.values(agents),
     // Backends that actually entered the workflow with at least one surviving
     // voice — the pr-post footer names exactly these; the skill passes the list
