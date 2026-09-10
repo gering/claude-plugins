@@ -23,6 +23,32 @@ user_invocable: true
 
 **If everything is green, just proceed.** After all checks and auto-resolutions: if there are zero ❌ blockers and zero ⚠️ warnings, create the PR automatically without asking. Only ask for confirmation when at least one ⚠️ warning remains (something needed judgment). ❌ blockers always stop the skill — never proceed with blockers.
 
+**Honor a recorded mandate.** If work-system's `/kickoff` recorded an autonomy
+mandate for this lane, an action it pre-authorized must not be confirmed again —
+the user already answered, and re-asking is the friction this record exists to
+remove. Resolve the **lane** first, then read the record once, up front:
+
+```sh
+LANE="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" lane "$(git branch --show-current)")" || LANE=.
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" show "$LANE"
+```
+
+`LANE` is the worktree that has this branch checked out. The session cwd is not
+always that worktree (a `/open` run from the main repo for a task branch), and a
+cwd-resolved mandate would then be a different lane's — or a stale committed one
+at the main root. `lane` exits 3 when no worktree holds the branch (a plain repo
+without work-system lanes); the `|| LANE=.` fallback is the cwd, which is right
+exactly then. **Pass `"$LANE"` to every `mandate-shim.sh` call in this skill.**
+
+Then gate the decisions below on `allows <action> "$LANE"`: exit **0** = proceed
+silently, exit **1** = recorded as out of bounds or unlisted (stop and ask), exit
+**3** = nothing recorded, or work-system is not installed (behave exactly as
+before this paragraph — ask). Exit **2** = the mandate file itself is unreadable
+(duplicate key, unterminated frontmatter, a symlink) — the record exists but
+cannot be trusted: show the script's stderr, stop, and ask; never read it as 1 or
+3. Never read exit 3 as a refusal: a missing record means the question was never
+put to the user, not that they said no.
+
 ## Instructions
 
 0. **Preflight (tooling)**:
@@ -110,6 +136,27 @@ user_invocable: true
      - `y` (default): continue to step 6
      - `n`: stop, leave state as-is
      - No other options. No "fix" branch. No alternatives.
+     - **Unless `mandate-shim.sh allows open-pr` exits 0** — then the warnings are
+       reported, not asked about: print the table, name the warnings in one line,
+       and continue to step 6. A warning is information; opening the PR was already
+       authorized. (A ❌ blocker still stops, mandate or not — it is a broken tree,
+       not a judgment call.)
+
+   **The mandate gate is not part of that branch — it applies on every path.**
+   Run it once before moving on to step 6, whichever branch above was taken:
+   ```sh
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" allows open-pr "$LANE"
+   ```
+   - exit **0** → proceed (and skip the warning confirmation, as above).
+   - exit **1** → the lane's mandate records opening a PR as out of bounds
+     (`denied`) or never granted (`unlisted`). **Stop and ask** — do not create the
+     PR. An all-green tree is not authorization; the draft-only mandate exists
+     precisely so a worker pushes without opening a PR, and a gate that only fires
+     when something else already went wrong is not a gate.
+   - exit **3** → nothing recorded (or work-system absent). Behave exactly as
+     before: the all-green path proceeds, warnings ask once.
+   - exit **2** → the mandate file is corrupt (see the principles above). Stop,
+     show stderr, ask.
 
 5. *(merged into step 4)*
 
@@ -172,7 +219,13 @@ user_invocable: true
       bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" poll <PR_NUMBER> "<TRIGGER_ISO>"
       ```
       Use the **Bash tool** with `run_in_background: true`. When it completes, render the review following the shared format spec at `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md` — read that file before presenting. Required sections: header, status line, findings markdown table, single-line recommendation. (`/open` is always round 0 — no prior findings, so no `Status` column.)
-    - **If output is empty** → no auto-trigger detected. Inform the user and suggest `/cycle` to trigger manually. Do NOT trigger automatically here — `/open` is about creation; triggering is `/cycle`'s job.
+    - **If output is empty** → no review started. Before recommending anything,
+      find out *why* — a slow trigger and an absent bot need opposite advice.
+      **Follow `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-ROUTING.md`** — read it; it is
+      the one copy of the probe → answer → local-route tree that `/cycle`,
+      `/check` and `/rebase` follow too. This skill's stage behavior: it never
+      triggers (creation, not triggering, is its job) — on `has_bot=yes` it
+      recommends `/cycle`; on `no` it applies the spec's §2 with `"$LANE"`.
 
 11. **Final summary**:
     ```
@@ -183,7 +236,9 @@ user_invocable: true
 
     Next step:
     - [if review auto-triggered]   Review results will appear when polling completes (~1-5 min)
-    - [if NOT auto-triggered]      Run `/cycle` to trigger Claude review manually
+    - [if bot exists, not fired]   Run `/cycle` to trigger Claude review manually
+    - [if no review bot]           <per REVIEW-ROUTING.md §2: local review run, or offered>
+    - [if bot unknown]             <the probe's why= line, both routes named>
     - [if CI failed/missing]       Investigate CI config before pushing more work
     ```
 
@@ -199,14 +254,16 @@ user_invocable: true
 - PR already exists → redirect to `/cycle`
 - Base branch has new commits → handled by `/rebase` (delegated in step 2)
 - No commits on branch vs. base → stop: "Nothing to PR — branch is identical to <BASE_BRANCH>"
-- User declines to run checks → mark all as "skipped by user" in body, still create PR
+- A check cannot run (tool missing, hangs past the timeout) → mark it ⚠️ skipped in the body, still create the PR — checks run unasked (step 3), so there is no "declined" state
 - Linter/tests hang → timeout 5min, mark as ⚠️ skipped, let user decide
 - Repo uses a non-default base (`develop`, `staging`) → ask user if auto-detected base seems wrong
-- `@claude` bot not installed on repo → auto-trigger check returns 0, normal fallback to `/cycle` (which will also fail gracefully)
+- `@claude` bot not installed on repo → step 10 follows `docs/REVIEW-ROUTING.md`: the probe says `no` and the local review is run or offered instead of recommending a `/cycle` that has nothing to trigger; an App-only repo probes as `unknown` and is asked
 
 ## Notes
 
-- This skill is **interactive** — every expensive check (tests, lint, build) asks first
+- Expensive checks (tests, lint, build) **run without asking** — step 3 says so
+  explicitly, and a mandate that pre-authorized the review makes it doubly settled.
+  Announce what is running; do not ask whether to run it
 - Readiness checks are **advisory**: the user can override and create a draft PR even with failures
 - The generated PR body includes the readiness snapshot so reviewers see what was verified
 - Designed to be run **once** per PR; for subsequent updates use `/cycle`

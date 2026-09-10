@@ -11,7 +11,8 @@
 # lives there, not here); a transition caller (/open, /merge, /cycle) needs the
 # post-change state. With --cached it is cache-only + a non-blocking background
 # refresh — for a pure-survey caller (/check) that must not block. All real
-# logic is in work-system's herdr-tab-glyph.sh; this shim only locates it.
+# logic is in work-system's herdr-tab-glyph.sh; this shim only calls it, and
+# lib-work-system.sh does the locating.
 #
 # Usage: refresh-task-glyphs.sh [--cached] [<dir>]   (dir defaults to $PWD)
 set -u
@@ -20,54 +21,18 @@ set -u
 cached=""
 [ "${1:-}" = "--cached" ] && { cached="--cached"; shift; }
 dir="${1:-$PWD}"
-root="${CLAUDE_PLUGIN_ROOT:-}"
-[ -n "$root" ] || exit 0
+
+# Source the locator from THIS script's own directory only — a
+# `${CLAUDE_PLUGIN_ROOT:-.}` fallback would execute a lib-work-system.sh out of
+# whatever repo the shell happens to be in.
+# shellcheck source=lib-work-system.sh
+WS_SHIM_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" || exit 0
+[ -f "$WS_SHIM_DIR/lib-work-system.sh" ] || exit 0
+. "$WS_SHIM_DIR/lib-work-system.sh" || exit 0
+
+t="$(ws_find scripts/herdr-tab-glyph.sh)"
+[ -n "$t" ] || exit 0
 
 # $cached unquoted so an empty value expands to no argument.
-run_helper() { bash "$1" refresh $cached "$dir" 2>/dev/null || true; exit 0; }
-
-# Dev layout (repo checkout): plugins/pr-flow and plugins/work-system siblings.
-t="$root/../work-system/scripts/herdr-tab-glyph.sh"
-[ -f "$t" ] && run_helper "$t"
-
-# Marketplace layout — resolve the installed work-system from Claude Code's
-# installed-plugins manifest, which lists only INSTALLED versions (unlike the
-# version cache, which is never pruned, so a newest-cached glob keeps executing
-# a version the user rolled back from). The manifest holds every historical
-# record in insertion order across scopes, so pick the HIGHEST version (not
-# entries[0], an arbitrary first record) — that matches a rollback (the
-# rolled-back-from version leaves the manifest even while it lingers in cache).
-if command -v python3 >/dev/null 2>&1; then
-  t="$(python3 - <<'PY' 2>/dev/null
-import json, os, re
-p = os.path.expanduser("~/.claude/plugins/installed_plugins.json")
-try:
-    plugins = json.load(open(p))["plugins"]
-except Exception:
-    raise SystemExit
-def vkey(v):
-    # numeric-aware version sort; non-numeric segments sink below any real version
-    return [int(x) if x.isdigit() else -1 for x in re.split(r"[.\-+]", str(v))]
-best = None
-for key, entries in plugins.items():
-    if key.split("@", 1)[0] != "work-system":
-        continue
-    for e in entries or []:
-        ip = e.get("installPath") or ""
-        if ip and (best is None or vkey(e.get("version", "")) > best[0]):
-            best = (vkey(e.get("version", "")), ip)
-if best:
-    print(os.path.join(best[1], "scripts", "herdr-tab-glyph.sh"))
-PY
-)"
-  [ -n "$t" ] && [ -f "$t" ] && run_helper "$t"
-fi
-
-# Fallback (manifest missing/unparsable): newest cached work-system version —
-# <cache>/<marketplace>/{pr-flow,work-system}/<version>/…; paths differ only in
-# the version segment, so a line-wise sort -V orders them. Heuristic: after a
-# rollback this can pick a newer-than-enabled version (accepted limitation —
-# the manifest path above is the accurate one).
-t="$(printf '%s\n' "$root"/../../work-system/*/scripts/herdr-tab-glyph.sh 2>/dev/null | sort -V | tail -1)"
-[ -n "$t" ] && [ -f "$t" ] && run_helper "$t"
+bash "$t" refresh $cached "$dir" 2>/dev/null || true
 exit 0

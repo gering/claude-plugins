@@ -46,9 +46,11 @@
 #              is the helper, so this entry is pane-run/kind=claude, never
 #              agent-start — see the transport note below.)
 #   The bootstrap prompt (codex/grok/kimi have no work-system skills) tells the
-#   agent to read TASK.md and drive the task to a PR. `supports=` metadata records
-#   which lifecycle hooks each agent honors, so /close and /continue can degrade
-#   for non-claude workers instead of faking claude-only behavior.
+#   agent to read TASK.md and MANDATE.md and carry out only the milestones the
+#   mandate lists — whether that reaches a PR is the mandate's call, not the
+#   prompt's. `supports=` metadata records which lifecycle hooks each agent
+#   honors, so /close, /continue and the mandate's allow list can degrade for
+#   non-claude workers instead of faking claude-only behavior.
 #
 # Optional PATH helper `cc-harness-agents`. When present, `list` merges its rows;
 # when absent, one `command -v` is the only cost and behaviour is unchanged. The
@@ -151,8 +153,17 @@ HARNESS_HERDR_MODE="pane-run"
 HARNESS_HERDR_KIND="claude"
 
 # The bootstrap prompt for CLIs without work-system skills (codex, grok, kimi). One
-# argv word; the launch helper passes it verbatim.
-BOOTSTRAP_PROMPT='Read TASK.md in this worktree and continue the task. Commit on the current branch as you go, and open a PR when the work is complete.'
+# argv word; the launch helper passes it verbatim. It names MANDATE.md because a
+# non-claude worker has no /continue to read it: without this line the worker would
+# have to infer its authority from TASK.md prose, which is exactly what the mandate
+# exists to prevent.
+#
+# The milestone list is NOT spelled out here. An earlier version ended with
+# "Commit on the current branch as you go, and open a PR when the work is
+# complete" — a concrete instruction that overrode the mandate the same prompt had
+# just told the worker to obey, so a draft-only lane opened a PR anyway. The
+# milestones live in MANDATE.md; this prompt only points at it.
+BOOTSTRAP_PROMPT='Read TASK.md and MANDATE.md in this worktree, then start on the first unmet requirement. MANDATE.md is the record of what you may do without asking again and where you must stop: carry out only the milestones listed under allow, and ask before anything else, including anything it does not mention. If there is no MANDATE.md, nothing was pre-authorized -- ask before each milestone (committing, pushing, opening a PR).'
 
 # The ASCII marker a wrapper worker prints when its seed phase fails. It names the
 # failure unambiguously and states that TASK.md was never started, where the
@@ -205,10 +216,10 @@ KIMI_LAUNCH_SCRIPT='if kimi -m "$1" -p "$2"; then exec kimi -c --auto; else rc=$
 #   close-exit -> /close may inject `/exit` for a clean self-teardown
 #   statusline -> the `[ws]` statusline segment tracks its session
 # codex/grok/kimi get commit,pr only — they drive git + a PR but have none of the
-# claude-session lifecycle hooks. RESERVED / not yet consumed: the skills
-# currently hardcode the claude-vs-non-claude distinction in prose; this field is
-# the seed for the manager/worker-orchestration design to read per-agent
-# capabilities from one place. Keep it in sync when that lands.
+# claude-session lifecycle hooks. CONSUMED by /kickoff and /adopt when recording
+# the lane's mandate: an agent whose `supports` lacks `continue` cannot run
+# /swarm:review or the pr-flow skills, so `local-review` is dropped from its
+# allow list. Read the field, never re-derive the split by matching CLI names.
 #
 # `herdr_mode|herdr_kind` is the modern-herdr transport contract (see the header):
 # agent-start entries hand their argv TAIL to `--kind <herdr_kind>` (so argv[0]

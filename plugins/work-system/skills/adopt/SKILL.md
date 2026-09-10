@@ -16,7 +16,7 @@ user_invocable: true
 - `$ARGUMENTS` — `<branch> [agent-selector]`: optional branch name to adopt, plus an
   optional worker-agent selector (same set as `/kickoff`: `--fable`, `--opus`, `--sol`,
   `--grok`, `--codex`, `--kimi`, `--agent <cli[:model]|cc-harness:<id>>`, `--pick`). The
-  selector chooses the worker the herdr auto-launch (step 13) starts; omit it to use the
+  selector chooses the worker the herdr auto-launch (step 14) starts; omit it to use the
   repo default. The **branch is the token that does not start with `-`**; step 2 separates
   the two.
 
@@ -143,7 +143,7 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     - no selector token → the repo default (`SELECTOR="$(bash "$REG" default get)"`);
       empty default, or `--pick`, → the picker.
 
-    The helper (step 13) resolves and validates `SELECTOR`, so don't resolve
+    The helper (step 14) resolves and validates `SELECTOR`, so don't resolve
     models/availability yourself.
 
     **If the resolved worker is `kimi:…`, warn before launching** (announce, don't
@@ -152,7 +152,20 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     unattended worker acts on content the user did not write. Suggest reading the
     generated task file first.
 
-13. **Launch the worktree session** — automate inside herdr, otherwise show the
+13. **Record the task's mandate** — **identical to `skills/kickoff/SKILL.md` step
+    13; follow that one copy**, including its `supports=`-driven
+    `--without local-review` rule (the git exclude is `init`'s own doing). `<worktree>` is the one **this** skill
+    created in step 9 (`<main-repo>/.claude/worktrees/<task-name>`, with
+    `<main-repo>` from step 1) — kickoff's step numbers do not map onto this skill,
+    so build the path, never carry a step reference across.
+
+    One difference worth stating out loud: an adopted TASK.md is *generated from
+    someone else's commits*, so it is even less a source of consent than a
+    hand-written one — and its `scope=` text lands in a file the worker reads.
+    Ask the user, record the answer, and if they decline, skip the file — the
+    worker then asks per milestone.
+
+14. **Launch the worktree session** — automate inside herdr, otherwise show the
     manual block. Inside herdr this replaces the old "print manual instructions" final
     step: `/adopt` now opens the task's tab for you, exactly like `/kickoff`.
 
@@ -177,7 +190,7 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
 
     This is the **same helper and call `/kickoff` uses** — the single source of truth
     for selector resolution, the herdr launch transport, rollback, and exit codes.
-    **Read `skills/kickoff/SKILL.md` step 13a and follow its result branching in the
+    **Read `skills/kickoff/SKILL.md` step 14a and follow its result branching in the
     order given there** — every outcome, including the `OFFER_DEFAULT=yes` persistence
     rule. Do **not** restate that list here: a second prose copy of the launcher's
     outcome contract is exactly what drifts when the helper grows an outcome, and a
@@ -193,6 +206,9 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     Location:  .claude/worktrees/<task-name>
     Branch:    <current-branch-name>   (original branch, unless step 8 renamed it)
     Task file: TASK.md (drafted from the branch — review it)
+    Mandate:   MANDATE.md — <preset>, gate <terminal_gate>, <n> review round(s).
+               Edit it by hand to widen or narrow the lane.
+               (omit these two lines when step 13 recorded nothing)
 
     The new tab is already running the worker. Switch to it to work there.
     ```
@@ -213,6 +229,9 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     Location:        .claude/worktrees/<task-name>
     Branch:          <current-branch-name>
     Commits:         <count> commits ahead of <main-branch>
+    Mandate:         MANDATE.md — <preset>, gate <terminal_gate>, <n> review round(s).
+                     Edit it by hand to widen or narrow the lane.
+                     (omit these two lines when step 13 recorded nothing)
 
     👉 To start working there, open a SEPARATE terminal (not this Claude
        session — this session stays in the main repo) and run:
@@ -227,11 +246,11 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     resume flow (load TASK.md, commits, progress).
     Use the plugin-qualified form: a Claude Code built-in `/continue` shadows the bare
     skill. **codex/grok/kimi** get the bootstrap prompt instead; kimi's is a two-phase
-    form the registry emits (see `/kickoff` step 13b). Do **not**
+    form the registry emits (see `/kickoff` step 14b). Do **not**
     execute the `cd` yourself — it is for the user's new terminal. If `resolve` exits
     non-zero (2 unknown / 3 unavailable), surface that instead and re-offer the picker.
     On the picker's "save default" path, persist only after the user confirms the worker
-    is up (see kickoff step 13b) — you (this main-repo session) then run
+    is up (see kickoff step 14b) — you (this main-repo session) then run
     `bash "$REG" default set "<name>"`; it writes the committed `.claude/work-system-agent`.
 
 ## Remember

@@ -76,7 +76,7 @@ If a clear pattern emerges (e.g. 18 of 20 last PRs were squashed), `/merge` sugg
 
 ### Autonomous review loop — converge the PR hands-off
 
-**What it does.** `/cycle --loop` runs the full review cycle in a loop. Each round it fixes every finding it agrees with (including 🟡 suggestions and ⚪ nits), re-pushes, re-triggers the review, and waits — repeating until the reviewer raises nothing it still agrees with. It prints per-round stats (round, total fixes, open disagreements), stops at `--max` rounds (default 10) or whenever you say "stop", and at the end offers to squash all the loop's fix commits into one via `--force-with-lease` so the PR history stays clean (`Apply review-loop fixes (N rounds, M fixes)` instead of 20 noisy commits).
+**What it does.** `/cycle --loop` runs the full review cycle in a loop. Each round it fixes every finding it agrees with (including 🟡 suggestions and ⚪ nits), re-pushes, re-triggers the review, and waits — repeating until the reviewer raises nothing it still agrees with. It prints per-round stats (round, total fixes, open disagreements), stops at `--max` rounds (default: the lane's remaining review budget from its work-system mandate, else 10) or whenever you say "stop", and at the end offers to squash all the loop's fix commits into one via `--force-with-lease` so the PR history stays clean (`Apply review-loop fixes (N rounds, M fixes)` instead of 20 noisy commits).
 
 **Why it matters.** Trivial review churn — nits, polish, small suggestions — eats iterations. The loop converges them autonomously while still surfacing (and never silently dropping) anything it disagrees with. Invoking it is the authorization for the autonomous commit/push cycle; only the final squash asks first.
 
@@ -164,7 +164,7 @@ For each picked item, Claude gives its own take first (may disagree with the rev
 > /cycle --loop
 ```
 
-Each round fixes everything it agrees with (nits included), re-cycles, and repeats until the review is clean or only disagreements remain — capped at 10 rounds (`--max=20` to raise it). Say "stop" any time. Per-round stats keep you oriented; at the end it offers to squash the fix commits into one.
+Each round fixes everything it agrees with (nits included), re-cycles, and repeats until the review is clean or only disagreements remain — capped at the mandate's remaining review budget, or 10 without one (`--max=20` to override). Say "stop" any time. Per-round stats keep you oriented; at the end it offers to squash the fix commits into one.
 
 ### Check status without changing anything
 
@@ -185,7 +185,7 @@ Verifies CI green, required approvals present, no open blocking Claude issues, b
 ## Requirements
 
 - `gh` CLI installed and authenticated (`gh auth login`)
-- GitHub repo with the `@claude` review bot installed (Claude GitHub App or a workflow that responds to `@claude` mentions)
+- A GitHub repo. An `@claude` review bot (a workflow using `anthropics/claude-code-action` on `issue_comment`) is what `/cycle` triggers — **optional**: a repo without one is routed to the local `/swarm:review --pr <N>` instead (see `docs/REVIEW-ROUTING.md`). The probe reads workflow files, so a repo served only by the Claude GitHub App with no workflow of its own reports `unknown` and is asked which route to take
 - Active PR on a non-default branch
 
 Each skill runs a preflight check and stops with a clear message if requirements are missing.
@@ -193,6 +193,13 @@ Each skill runs a preflight check and stops with a clear message if requirements
 ## Design principles
 
 - **Interactive by default, silent when risk-free** — no silent commits or fixes without user confirmation; decisions are real selection menus, not free-text prompts. Two deliberate exceptions where the invocation itself is the authorization: `/cycle --loop` (autonomous cycle; the final squash still asks) and `/rebase` with zero file overlap (conflict-free catch-up, aborts cleanly if a conflict appears anyway)
+- **Never re-ask what was already answered** — when work-system's `/kickoff`
+  recorded a mandate for the lane (`MANDATE.md`), `/open` and `/cycle` read it and
+  treat its pre-authorized actions as settled. A missing work-system yields
+  "unknown" (ask), never a refusal
+- **Recommend only what can work** — before pointing at `/cycle`, `/open` checks
+  whether the repo has an `@claude` review workflow at all, and routes a bot-less
+  repo to the local review instead of into a command that fails every time
 - **Read-only where it matters** — `/check` never mutates anything
 - **User stays in control** — `/fix` does not auto-trigger `/cycle`; you decide when to re-push (or hand the wheel to `/cycle --loop` deliberately)
 - **Root cause over workaround** — `/merge` refuses `--admin` bypass. A failing required check is a signal to fix the check, not to skip it
@@ -201,7 +208,8 @@ Each skill runs a preflight check and stops with a clear message if requirements
 
 ## Relationship to other plugins
 
-- **`work-system`** — finish a task with `/close`, then `/open` to create the PR and `/cycle` for the review loop before `/merge`
+- **`work-system`** — finish a task with `/close`, then `/open` to create the PR and `/cycle` for the review loop before `/merge`. Soft-coupled both ways (detected, never required): PR state changes refresh work-system's herdr tab glyphs, and `/open`/`/cycle` read the lane's autonomy mandate so a pre-authorized step is not confirmed twice. `--loop`'s round cap defaults to the mandate's remaining review budget
+- **`swarm`** — the local review route when a repo has no `@claude` bot: `/open` and `/cycle` fall back to `/swarm:review --pr <N>` rather than recommending a review that cannot run
 - **`pr-review-toolkit`** (external, Anthropic) — local analysis agents. Complementary, not required. Install via `/plugin install pr-review-toolkit@claude-plugins-official`
 
 ## Installation

@@ -203,10 +203,11 @@ Rules:
      for the user; guessing risks `close-tab` killing the live session's own tab
      mid-turn. Reading ids removes nothing — the teardown itself is step 12, after cleanup.
    - First check for untracked/modified files: `git -C <worktree-path> status --short`
-   - If the only difference is `TASK.md` (untracked, copied by kickoff), use `--force` directly:
+   - If the only differences are `TASK.md` and/or `MANDATE.md` (both untracked,
+     both written by kickoff/adopt as ephemeral lane state), use `--force` directly:
      `git -C <main-repo-path> worktree remove <worktree-path> --force`
    - Otherwise try: `git -C <main-repo-path> worktree remove <worktree-path>`
-   - If fails (uncommitted changes beyond TASK.md):
+   - If fails (uncommitted changes beyond those two):
      - Show full status: `git -C <worktree-path> status`
      - Ask: "Force remove? (uncommitted changes will be lost)"
      - If yes: `git -C <main-repo-path> worktree remove <worktree-path> --force`

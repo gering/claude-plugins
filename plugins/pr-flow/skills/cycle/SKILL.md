@@ -16,7 +16,7 @@ user_invocable: true
 `$ARGUMENTS` may carry flags and/or a commit message, in any order:
 
 - `--loop` (alias `--auto`) — **loop mode**: after each review, autonomously fix every finding you agree with (incl. 🟡 suggestions and ⚪ nits) and re-cycle, repeating until the reviewer raises nothing you still agree with. See "Loop mode" below.
-- `--max=N` — safety cap on loop iterations (default `10`). Ignored without `--loop`.
+- `--max=N` — safety cap on loop iterations. Default: the lane's remaining review budget from its mandate (`review_rounds_left`), else `10`. Ignored without `--loop`.
 - Any remaining non-flag text — commit message for the pending changes of the first iteration.
 
 Strip the flags first; whatever is left over is the commit message.
@@ -34,6 +34,15 @@ Strip the flags first; whatever is left over is the commit message.
    - Run: `gh pr view --json number,title,url,headRefName,baseRefName 2>/dev/null`
    - If no PR exists, inform user and suggest: `gh pr create`
    - Store `PR_NUMBER`, `PR_URL`, and `BASE_BRANCH` (from baseRefName) for later use
+   - Resolve the **lane** the PR belongs to — the worktree holding its branch, which
+     is not always the session cwd (this skill may run from the main repo):
+     ```sh
+     LANE="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" lane "$(git branch --show-current)")" || LANE=.
+     ```
+     `lane` exits 3 when no worktree holds the branch (a repo without work-system
+     lanes) — the cwd is then the right answer. **Every `mandate-shim.sh` call
+     below takes `"$LANE"`**; a cwd-resolved mandate from the main repo would be a
+     different lane's, or a stale committed one.
 
 2. **Check if rebase is needed** — delegate to `/rebase --no-poll --auto`:
    - Invoke the `/rebase` skill **with `--no-poll` and `--auto`**:
@@ -82,7 +91,18 @@ Strip the flags first; whatever is left over is the commit message.
    - If output is empty: trigger manually in step 7
 
 7. **Trigger Claude review** (only if no auto-trigger detected):
-   - Run: `gh pr comment <PR_NUMBER> --body "@claude review"`
+   - **First: is there a review bot at all?** `@claude review` is a comment — it
+     succeeds whether or not anything is listening, and then step 8 polls until it
+     times out. **Follow `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-ROUTING.md`** — read
+     it; it is the one copy of the probe → answer → local-route tree shared with
+     `/open`, `/check` and `/rebase`. This skill's stage behavior:
+     - `has_bot=yes` → run `gh pr comment <PR_NUMBER> --body "@claude review"` and
+       continue to step 8.
+     - `has_bot=no` → do not comment, do not enter step 8. Apply the spec's §2
+       with `"$LANE"`; when it runs `/swarm:review --pr <PR_NUMBER>`, treat those
+       findings as this round's review (loop mode included: the loop cares about
+       findings, not where they came from).
+     - `has_bot=unknown` → relay `why=` and ask, per the spec. Never guess.
 
 8. **Launch background polling via Bash**:
    - Use the **Bash tool** with `run_in_background: true` to invoke the shared polling script:
@@ -126,7 +146,34 @@ When `--loop` (alias `--auto`) is present, `/cycle` stops being a single pass an
 
 ### Setup (once, before the loop)
 
-- Parse `--max=N` (default `10`). This caps total iterations so the loop can never run forever.
+- Parse `--max=N`. This caps total iterations so the loop can never run forever.
+  Its default comes from the lane's mandate when there is one:
+  ```sh
+  bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" show "$LANE"
+  ```
+  `review_rounds_left` (non-empty) → `MAX` = that number; otherwise `MAX = 10`. An
+  explicit `--max=N` always wins — the user typing a number *is* the decision.
+  Exit **2** from `show` = the mandate file is corrupt (duplicate key, open
+  fence, symlink): stop, show stderr, ask — do not fall back to `MAX = 10` as if
+  nothing were recorded.
+- **Check the budget before the first round, not after it.** If `show` already
+  reports `review_budget_exhausted=yes` (or the derived `MAX` is `0`), stop right
+  here with the exhausted message — do not run one review/fix pass and discover
+  the cap afterwards. `/cycle --loop` is the **owner** of the counter for a lane
+  that reviews this way: `/continue` deliberately does not book a round when it
+  hands the review to this loop, so every increment below is the only one.
+- **Consume a round from the mandate at the start of each iteration**, not just
+  from an in-session counter:
+  ```sh
+  bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" round "$LANE"
+  ```
+  The in-session counter dies with the session; a resumed worker would otherwise
+  restart its budget at zero and loop as long again. The recorded one is the only
+  count that survives a `claude -c`. Exit **3** (no mandate, or no work-system) →
+  fall back to `MAX` alone. Exit **4** means the round could NOT be persisted
+  (read-only tree, no space): the budget would silently restart on the next
+  resume, so surface the error and stop rather than looping on a counter that is
+  not being written.
 - Initialize counters: `ROUND = 0`, `FIXES_TOTAL = 0`, `FIX_COMMITS = 0`, and an `OPEN` list (findings you disagreed with, deduped across rounds).
 - Initialize `SEEN` — the loop's in-session store of prior findings, keyed by `(file, mechanism)`, each holding its stable `#`, verdict, and disposition (🔧 fixed / ⏭️ skipped / 🔁 recurred / ❌ disagreed). This is the **only** source for the re-review `Status` column and stable `#` (the poll returns just the raw latest review with no memory) — see the format spec's "Status column" section.
 - **Reuse a fresh review if one already exists**: if the latest `@claude` review on the PR is newer than the latest push (not stale) and has findings, skip the initial commit/push/trigger and go straight to "Fix agreed" with that review. Otherwise run one normal cycle (steps 1–10 above) to obtain the first review.
@@ -148,6 +195,11 @@ When `--loop` (alias `--auto`) is present, `/cycle` stops being a single pass an
    - **Nothing was agreed** this round (every finding is a ❌ disagree) → only disagreements remain.
    - **No files changed** this round (everything agreed turned out to be comment-rot / already-fixed) → nothing actionable left.
    - `ROUND + 1 >= MAX` → safety cap hit.
+   - The `round` call reported `review_budget_exhausted=yes` → the authorized
+     review budget is spent. Stop and say so explicitly — name the findings you did
+     not get to, and that the user can extend the budget by raising
+     `review_budget` in `MANDATE.md`. Do not silently keep going, and do not ask
+     for one more round: the limit was the answer to that question.
    - The user said to stop (see "Interruptible").
 4. **Re-cycle** — run steps 3–10 above (commit the fixes → push → hide outdated → trigger → poll). Use a terse commit message, e.g. `Address review round <ROUND+1>`. Increment `FIX_COMMITS += 1`.
 5. `ROUND += 1`, then loop back to step 1 with the fresh review.
@@ -185,6 +237,8 @@ The review wait is a background Bash poll, so the user can interject at any time
 - `gh` not installed or not authenticated → stop with clear error in step 0
 - No uncommitted changes → skip commit, just push + trigger
 - No PR exists → inform user, suggest creating one
+- No `@claude` review bot on the repo → step 7 follows `docs/REVIEW-ROUTING.md`
+  and routes to the local review instead of polling for a review that never comes
 - Base branch has new commits → handled by `/rebase` (delegated in step 2)
 - Branch already up-to-date with remote → skip push, just trigger review
 - Review auto-triggered after push → skip manual trigger, go straight to polling
@@ -199,5 +253,5 @@ The review wait is a background Bash poll, so the user can interject at any time
 - Steps 1-7 run in the foreground (fast, interactive)
 - Step 8 runs as a background Bash task (no permission issues, unlike background agents)
 - When the Bash task completes, the raw comment is returned and summarized by the main agent (step 10)
-- `--loop` turns the single pass into an autonomous fix-agreed → re-cycle loop (capped by `--max`, default 10); it is the autonomous counterpart to the interactive `/fix`, which never re-cycles on its own
+- `--loop` turns the single pass into an autonomous fix-agreed → re-cycle loop (capped by `--max`: the mandate's remaining review budget, else 10); it is the autonomous counterpart to the interactive `/fix`, which never re-cycles on its own
 - For deeper local analysis (silent failures, test coverage, type design), consider installing the complementary `pr-review-toolkit` plugin

@@ -13,7 +13,7 @@ user_invocable: true
 
 ## Critical: never persist a `cd` into the worktree
 
-This skill runs **in the user's main-repo session**. Its job is to *create* the worktree, not to enter it. The user opens the worktree in a separate terminal/Claude session (see step 13).
+This skill runs **in the user's main-repo session**. Its job is to *create* the worktree, not to enter it. The user opens the worktree in a separate terminal/Claude session (see step 14).
 
 Because the Bash tool persists working directory between calls, a bare `cd .claude/worktrees/<task>` would silently trap the entire session inside the worktree — every subsequent `git status`, relative path, or check would target the worktree instead of the main repo. This has caused real user-visible bugs.
 
@@ -43,7 +43,7 @@ and `add-dark-mode` is the task. Every other selector is valueless. An optional
 | `--fable` / `--opus` | claude on fable / opus |
 | `--codex` / `--sol` | codex on gpt-5.6-terra / gpt-5.6-sol |
 | `--grok` | grok-4.5 |
-| `--kimi` | kimi-code on k3-256k (two-phase launch — see step 13b) |
+| `--kimi` | kimi-code on k3-256k (two-phase launch — see step 14b) |
 | `--agent <cli[:model]>` | any registry entry, e.g. `--agent claude:sonnet` or `--agent codex` |
 | `--agent cc-harness:<id>` | foreign model *inside* the CC harness (only when `cc-harness-agents` is on PATH; e.g. `cc-harness:grok`) |
 
@@ -118,7 +118,7 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     - If they differ, **stop and report an error**: "Session CWD drifted into the worktree during kickoff — investigate which step ran a persistent `cd`." Do not silently continue; a contaminated session will mislead every subsequent command.
 
 12. **Select the worker agent** — turn the argument selector into a concrete
-    `SELECTOR`, which step 13 passes straight to the launch helper. Also set
+    `SELECTOR`, which step 14 passes straight to the launch helper. Also set
     `OFFER_DEFAULT=no` (flipped to `yes` only on the picker path below).
     `REG="${CLAUDE_PLUGIN_ROOT}/scripts/agent-registry.sh"`.
 
@@ -237,11 +237,102 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
       helper did not print, and do not show the aggregate when the harness set is empty.
 
     Do not resolve models, the default, or availability yourself — the helper owns
-    that. Step 13 passes `SELECTOR` to `herdr-launch.sh`, which resolves +
+    that. Step 14 passes `SELECTOR` to `herdr-launch.sh`, which resolves +
     validates it (and reports a clear error if it is unavailable), so an
     unavailable pick is handled there, not here.
 
-13. **Launch the worktree session** — automate it inside herdr, otherwise show
+13. **Record the task's mandate** — the autonomy the user actually granted,
+    written down so it survives into the worker's process.
+
+    A worker that has to guess its own authority either asks about everything or
+    assumes too much. Both fail. So the grant is recorded **once, here**, in
+    `MANDATE.md` beside `TASK.md`, and every later step (`/continue`, pr-flow)
+    reads it instead of re-deriving it.
+
+    **Consent is never inferred.** Not from TASK.md prose ("this task should end in
+    a merged PR" is a description, not permission), not from the fact that a worker
+    was launched, and not from a decision the user made in *this* session but never
+    had recorded. Ask, then write down the answer.
+
+    Ask **one** question, offering the three presets `mandate.sh` implements.
+    The script is the source of truth — `mandate.sh presets` prints each
+    preset's allow/deny/gate/budget; render the question from that output.
+    The table below is the wording, not the record:
+
+    | preset | pre-authorized | never without new authorization | gate |
+    |--------|----------------|---------------------------------|------|
+    | **standard** (recommended) | commit, push own branch, open PR, review, agreed fixes, rebase own branch | merge, deploy, force-push a shared branch, anything destructive | reviewed PR |
+    | **draft-only** | commit, push own branch | opening a PR, merge, deploy, … (review is not granted either) | pushed branch |
+    | **merge-delegated** | the standard set **plus** merge | deploy, force-push a shared branch, anything destructive | merged |
+
+    Offer a **review budget** with the same question (the presets record 2 rounds;
+    `draft-only` records 0 because it authorizes no review) — the number of
+    review→fix rounds the worker may run before it must come back. It is what stops
+    a worker from grinding through an unbounded review loop.
+
+    **a) Write the mandate.** `<worktree>` is
+    `<main-repo>/.claude/worktrees/<task-name>` — build it from `<main-repo>`
+    (step 1) and the task name, don't carry a relative path forward:
+
+    ```sh
+    bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" init "<worktree>" \
+      --preset <standard|draft-only|merge-delegated> \
+      task="<task-name>" \
+      authorized_by="user" \
+      scope="<one line: what this lane is and is not>"
+    ```
+
+    The preset owns the allow/deny/terminal-gate/budget quadruple, so the answer
+    the user gave is what actually reaches the file — restating the lists here is
+    how three choices turned into one recorded outcome. Override a single field by
+    appending it as `key=value` (e.g. `review_budget=4`); the script rejects an
+    unknown action, an unknown gate, and any value containing a newline. It is the
+    single source of truth for the format — do not hand-write `MANDATE.md`.
+
+    `init` also adds `/MANDATE.md` to the repo's git exclude itself (shared across
+    worktrees, no diff in the user's tree) and reports `excluded=yes|already|no`.
+    This is not a separate sub-step to remember: a worker told to commit as it
+    goes would otherwise commit its own authorization record, and every later
+    worktree branched off main would inherit that lane's grant. On `excluded=no`
+    (the exclude file could not be written) say so — the mandate is still valid,
+    the user just has to ignore the file by hand.
+
+    **b) Match the mandate to the worker.** Ask the registry rather than the CLI's
+    name — `supports=` exists for exactly this split:
+
+    ```sh
+    bash "$REG" resolve "$SELECTOR" | sed -n 's/^supports=//p'
+    ```
+
+    If that list does **not** contain `continue`, the worker cannot run
+    `/swarm:review` or the pr-flow skills. Add **`--without local-review`** to the
+    `init` call above (the script subtracts the one token; never retype the
+    preset's list — a hand-derived copy is how a token goes missing) and set
+    `scope="… drive to an open PR; review happens outside this lane"`. Recording
+    an authority the worker cannot exercise is worse than recording none.
+
+    **c) An existing mandate.** `init` exits 2 rather than clobbering:
+    - `task_mismatch=yes` → the file was recorded for a **different** task, or
+      records no task at all (this is what an accidentally committed or
+      hand-written MANDATE.md looks like). It does not authorize this lane. Say
+      so, and re-record with `--force` only after asking the user.
+    - a symlink at `MANDATE.md` → `init` refuses to write through it at all
+      (an adopted branch can commit `MANDATE.md -> ~/.zshrc`). Remove the link
+      by hand first; never `--force` past it.
+    - "tracked by git" → the file is **committed** on this branch (an adopted
+      fork PR, or main after someone committed theirs). It is nobody's
+      authorization for this lane, and `--force` is refused too: overwriting it
+      would leave a tracked, modified file for the next commit. Tell the user;
+      untrack it (`git -C "<worktree>" rm --cached MANDATE.md`) only if they say
+      so, then re-ask and re-record.
+    - `task_mismatch=no` → a previous kickoff already recorded this lane's mandate.
+      **Show it** (`mandate.sh show "<worktree>"`) and keep it.
+
+    If the user declines to grant anything, skip this step and say so: without
+    `MANDATE.md` the worker falls back to asking before each milestone, which is
+    the pre-mandate behavior and always safe.
+
+14. **Launch the worktree session** — automate it inside herdr, otherwise show
     the manual block.
 
     Detect herdr: automate **only** when `[ "${HERDR_ENV:-}" = "1" ]`, a non-empty
@@ -348,6 +439,9 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     Branch:   task/<task-name>
     Agent:    <cli:model from the `name=` line>
     Task file: TASK.md (copied into the worktree)
+    Mandate:   MANDATE.md — <preset>, gate <terminal_gate>, <n> review round(s).
+               Edit it by hand to widen or narrow the lane.
+               (omit these two lines when step 13 recorded nothing)
 
     👉 To start working there, open a SEPARATE terminal (not this Claude
        session — this session stays in the main repo) and run:
@@ -360,7 +454,8 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     worker, which is still a full CC session — the helper only routes the model)
     resumes via `/work-system:continue` (plugin-qualified, since a CC built-in
     `/continue` shadows the skill); **codex/grok/kimi** have no work-system skills
-    and get the bootstrap prompt instead (read TASK.md, drive to a PR), with
+    and get the bootstrap prompt instead (read TASK.md + MANDATE.md, start on the
+    first unmet requirement, carry out only the milestones the mandate lists), with
     **kimi** launching in two phases because it has no positional launch prompt
     and `-p` cannot be combined with `--auto`. Do **not** execute the `cd`
     yourself — it is for the user's new terminal. If `resolve` exits non-zero
@@ -376,7 +471,7 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     the worktree). It writes the committed `.claude/work-system-agent` in the main
     repo; mention it's an uncommitted change to commit when ready.
 
-14. **Sync herdr tab glyphs** (best-effort, silent):
+15. **Sync herdr tab glyphs** (best-effort, silent):
     - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-tab-glyph.sh" refresh --cached "<main-repo>"`
       (the `<main-repo>` path from step 1) — after the launch, so the freshly-created
       tab is included.

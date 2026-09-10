@@ -43,7 +43,12 @@ user_invocable: true
      - Extract issue count and summary
      - Show timestamp (how old is it?)
      - If older than the latest push (`gh pr view <PR_NUMBER> --json commits --jq '.commits | last | .commit.committedDate'`), mark as **stale** → suggest `/cycle` to refresh. Use `committedDate` (not `authoredDate`) so a rebase or amend correctly invalidates the prior review.
-   - If none, note: "No Claude review yet — run `/cycle` to trigger one"
+   - If none: before recommending `/cycle`, run the probe from
+     `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-ROUTING.md` (`claude-review.sh has-bot` —
+     local, no network, so it respects this skill's never-block rule). `yes` →
+     "No Claude review yet — run `/cycle` to trigger one"; `no` → "No review bot on
+     this repo — `/swarm:review --pr <N>` reviews it locally"; `unknown` → say why
+     and name both.
 
 5. **Uncommitted local changes**:
    - Run: `git status --porcelain`
@@ -78,7 +83,7 @@ user_invocable: true
 
 8. **Recommendation** — exactly one line, picked per the rules in `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md` (Recommendation section). Adapt to this skill's context:
    - If all green + approved + no local drift: "Ready to merge — run `/merge`"
-   - If stale Claude review or unpushed work: "Run `/cycle` to refresh"
+   - If stale Claude review or unpushed work: "Run `/cycle` to refresh" — or, when the step-5 probe said `no`, "Run `/swarm:review --pr <N>` to re-review locally" (see `docs/REVIEW-ROUTING.md`)
    - If open issues from last review: "Run `/fix` to work through them"
    - If CI failing: list the failures and suggest fixing before re-triggering
 
