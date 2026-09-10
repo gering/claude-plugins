@@ -449,6 +449,13 @@ class TestFailClosedDegrade(unittest.TestCase):
             pf.flush()
             cred.write(CRED_JSON)
             cred.flush()
+            # run_grok links the host auth file into its ephemeral GROK_HOME and
+            # exits 1 when it is missing or empty. A fake next to the Kimi
+            # credential keeps these argv assertions off the host's login state
+            # (they passed on a logged-in laptop and failed on CI, which has none).
+            grok_auth = os.path.join(os.path.dirname(cred.name), "auth.json")
+            with open(grok_auth, "w") as fh:
+                fh.write('{"access_token":"tok"}\n')
             jail_fn = "_jail_available() { return 0; }" if jail \
                 else "_jail_available() { return 1; }"
             r = _source(
@@ -463,7 +470,8 @@ class TestFailClosedDegrade(unittest.TestCase):
                 # The subshell owns the exit → it owns the EXIT trap (else the
                 # ephemeral kimi HOME set inside it is never removed).
                 f'( trap cleanup EXIT; run_{backend} "{pf.name}" high "" "{SCHEMA}" ) >/dev/null 2>&1 || true',
-                env_extra={"ARGV": tf.name, "KIMI_CREDENTIALS_FILE": cred.name},
+                env_extra={"ARGV": tf.name, "KIMI_CREDENTIALS_FILE": cred.name,
+                           "GROK_AUTH_FILE": grok_auth},
             )
             self.assertEqual(r.returncode, 0, f"harness failed: {r.stderr!r}")
             return Path(tf.name).read_text()
