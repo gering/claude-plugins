@@ -675,6 +675,77 @@ for name, fields in blocks.items():
     for k in ("allow", "deny", "terminal_gate", "review_budget"):
         check(f"presets {name}.{k} matches what init writes", got.get(k) == fields.get(k))
 
+# --- a symlink is refused by EVERY verb, not just init -----------------------
+# init refused one from the start, but show/allows/round followed the link — so
+# a record whose bytes live outside the lane answered `allowed`, and a DANGLING
+# link answered `no-mandate` (exit 3, "nobody was asked") instead of naming a
+# record nobody can vouch for.
+sl = make_repo()
+outside = sl / "outside.md"
+outside.write_text("---\nallow: commit,merge\nauthorized_by: nobody\ntask: t\n---\n")
+(sl / "MANDATE.md").symlink_to(outside)
+for verb, args in (("allows", ("merge",)), ("allows", ("commit",)), ("show", ()), ("round", ())):
+    r = run(verb, *args, str(sl))
+    check(f"{verb} {' '.join(args)} refuses a symlinked mandate", r.returncode == 2)
+    check(f"{verb} {' '.join(args)} names the symlink", "symlink" in r.stderr)
+    check(f"{verb} {' '.join(args)} emits no verdict", "verdict=" not in r.stdout)
+check("the link target is untouched", "allow: commit,merge" in outside.read_text())
+check("no temp file was written beside a symlink",
+      not any(x.name.startswith(".MANDATE.") for x in sl.iterdir()))
+dang = make_repo()
+(dang / "MANDATE.md").symlink_to(dang / "nowhere.md")
+r = run("allows", "commit", str(dang))
+check("a DANGLING symlink is a corrupt record (2), not 'no mandate' (3)",
+      r.returncode == 2)
+check("and it is not reported as an unasked question", "no-mandate" not in r.stdout)
+check("show agrees with allows on a dangling link",
+      run("show", str(dang)).returncode == 2)
+
+# --- keys live at column 0; a block scalar is refused ------------------------
+# `scope: |` with an indented `allow: merge` under it has no top-level allow —
+# the parser used to trim the indent off the name and record the grant anyway.
+bs = make_repo()
+(bs / "MANDATE.md").write_text(
+    "---\ntask: t\nauthorized_by: user\nallow: commit\nscope: |\n"
+    "  a note\n  allow: merge\n  deny: commit\n---\n"
+)
+r = run("allows", "merge", str(bs))
+check("a block scalar in the frontmatter is refused", r.returncode == 2)
+check("the refusal names the block scalar", "block scalar" in r.stderr)
+check("and grants nothing through it", "verdict=allowed" not in r.stdout)
+ind = make_repo()
+(ind / "MANDATE.md").write_text(
+    "---\ntask: t\nauthorized_by: user\nallow: commit\nnested:\n  allow: merge\n---\n"
+)
+check("an indented allow: under an unknown key grants nothing",
+      run("allows", "merge", str(ind)).returncode == 1)
+check("while the real column-0 grant still reads",
+      run("allows", "commit", str(ind)).returncode == 0)
+# A leading space on a REAL key means it is not top-level either — the record
+# then simply lacks that key rather than silently honoring it.
+lead = make_repo()
+(lead / "MANDATE.md").write_text("---\ntask: t\n  allow: merge\n---\n")
+check("an indented top-level key is not read as one",
+      run("allows", "merge", str(lead)).returncode == 1)
+
+# --- the temp pattern is excluded too ----------------------------------------
+# round/init write `.MANDATE.XXXXXX` beside the record; a kill -9 no trap can
+# catch leaves one behind for the next `git add -A`.
+tmpx = make_repo()
+run("init", str(tmpx), "--preset", "standard", "task=t", "authorized_by=user")
+(tmpx / ".MANDATE.orphan").write_text("junk\n")
+check("an orphaned temp file is git-ignored",
+      subprocess.run(["git", "-C", str(tmpx), "check-ignore", "-q", ".MANDATE.orphan"]).returncode == 0)
+check("it does not show up in status",
+      ".MANDATE." not in subprocess.run(["git", "-C", str(tmpx), "status", "--porcelain"],
+                                        capture_output=True, text=True).stdout)
+check("the mandate itself is still excluded and reported",
+      kv(run("init", str(tmpx), "--preset", "standard", "task=t", "authorized_by=user",
+             "--force").stdout).get("excluded") == "already")
+check("neither rule is duplicated",
+      (tmpx / ".git" / "info" / "exclude").read_text().count("/.MANDATE.*") == 1
+      and (tmpx / ".git" / "info" / "exclude").read_text().count("/MANDATE.md") == 1)
+
 
 if FAILS:
     print("FAIL:")

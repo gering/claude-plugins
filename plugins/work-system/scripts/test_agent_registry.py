@@ -865,6 +865,54 @@ check("the clean harness row survives too",
       any(r["name"] == "cc-harness:ok" for r in rows))
 e.close()
 
+# --- the bootstrap prompt routes through mandate.sh, not the raw file --------
+# A codex/grok/kimi worker has no /continue, so the prompt carries the mechanism.
+# Pointing it at MANDATE.md handed it the file and none of the guards: a record
+# committed on an adopted fork branch (which `init` refuses as tracked), a
+# symlink, a duplicate `allow:` key, an indented block-scalar grant, or a `deny`
+# that must beat a matching `allow` — a raw `cat` honors every one of those.
+e = Env()
+for sel in ("codex", "grok", "kimi"):
+    out = e.run("resolve", sel).stdout
+    check(f"{sel}: the prompt names mandate.sh", "mandate.sh allows" in out)
+    check(f"{sel}: it tells the worker NOT to read the file itself",
+          "Do NOT read MANDATE.md yourself" in out)
+    check(f"{sel}: the four exit codes are spelled out",
+          all(t in out for t in ("exit 0", "1 means", "2 means", "3 means")))
+    check(f"{sel}: the path is absolute", "/mandate.sh allows" in out)
+check("claude gets the skill, not the bootstrap prompt",
+      "/work-system:continue" in e.run("resolve", "claude").stdout
+      and "mandate.sh allows" not in e.run("resolve", "claude").stdout)
+
+# --- mandate-flags: the capability -> mandate mapping lives in the registry --
+# Recording an authority the worker cannot exercise is worse than recording
+# none: pr-flow's local-review route auto-runs a review for a lane whose mandate
+# allows it, for a worker that has no such skill.
+check("a worker without `continue` drops local-review",
+      e.run("mandate-flags", "codex").stdout.strip() == "--without local-review")
+check("grok too", e.run("mandate-flags", "grok").stdout.strip() == "--without local-review")
+check("kimi too", e.run("mandate-flags", "kimi").stdout.strip() == "--without local-review")
+check("a full-capability worker drops nothing",
+      e.run("mandate-flags", "claude").stdout.strip() == "")
+check("the flag it prints is one the mandate script accepts",
+      "local-review" in subprocess.run(
+          ["bash", str(HERE / "mandate.sh"), "actions"],
+          capture_output=True, text=True).stdout.split())
+r = e.run("mandate-flags")
+check("mandate-flags without a selector is a usage error", r.returncode == 2)
+check("an unknown selector is rejected, not answered",
+      e.run("mandate-flags", "nosuchagent").returncode == 2)
+e.close()
+
+# An agent that is listed but not available right now still has a capability
+# answer — the mandate is matched to what the agent IS, not to whether it can
+# start this second.
+e = Env(codex_authed=False)
+r = e.run("mandate-flags", "codex")
+check("an unavailable agent still answers with its capability flags",
+      r.returncode == 0 and r.stdout.strip() == "--without local-review")
+e.close()
+
 
 if FAILS:
     print("FAIL:")

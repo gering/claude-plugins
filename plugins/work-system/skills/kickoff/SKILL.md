@@ -270,17 +270,41 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     review→fix rounds the worker may run before it must come back. It is what stops
     a worker from grinding through an unbounded review loop.
 
-    **a) Write the mandate.** `<worktree>` is
+    **a) Match the mandate to the worker — BEFORE writing it.** An agent that
+    cannot run the review skills must not be recorded as authorized to run them.
+    Ask the registry, which owns the `supports=` field, for the flags:
+
+    ```sh
+    WITHOUT="$(bash "$REG" mandate-flags "$SELECTOR")"
+    ```
+
+    It prints `--without local-review` for a worker whose `supports=` lacks
+    `continue` (codex/grok/kimi), and nothing for one that has it. The mapping
+    lives in the registry, not here: it used to be prose in this step that
+    `/adopt` reached by cross-reference and could skip, and a second capability
+    gap would have meant editing two SKILL.md files instead of one script.
+
+    This runs **before** step b, not after it. The old order wrote the mandate
+    first and then told you to "add `--without` to the call above" — which had
+    already run, and `init` refuses to re-record without `--force`, so the lane
+    kept a `local-review` grant for a worker that could never exercise it.
+
+    **b) Write the mandate.** `<worktree>` is
     `<main-repo>/.claude/worktrees/<task-name>` — build it from `<main-repo>`
     (step 1) and the task name, don't carry a relative path forward:
 
     ```sh
     bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" init "<worktree>" \
       --preset <standard|draft-only|merge-delegated> \
+      $WITHOUT \
       task="<task-name>" \
       authorized_by="user" \
       scope="<one line: what this lane is and is not>"
     ```
+
+    `$WITHOUT` is unquoted on purpose — it is either empty or exactly the two
+    words from step a. When it is non-empty, also set
+    `scope="… drive to an open PR; review happens outside this lane"`.
 
     The preset owns the allow/deny/terminal-gate/budget quadruple, so the answer
     the user gave is what actually reaches the file — restating the lists here is
@@ -289,27 +313,14 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     unknown action, an unknown gate, and any value containing a newline. It is the
     single source of truth for the format — do not hand-write `MANDATE.md`.
 
-    `init` also adds `/MANDATE.md` to the repo's git exclude itself (shared across
-    worktrees, no diff in the user's tree) and reports `excluded=yes|already|no`.
-    This is not a separate sub-step to remember: a worker told to commit as it
-    goes would otherwise commit its own authorization record, and every later
-    worktree branched off main would inherit that lane's grant. On `excluded=no`
-    (the exclude file could not be written) say so — the mandate is still valid,
-    the user just has to ignore the file by hand.
-
-    **b) Match the mandate to the worker.** Ask the registry rather than the CLI's
-    name — `supports=` exists for exactly this split:
-
-    ```sh
-    bash "$REG" resolve "$SELECTOR" | sed -n 's/^supports=//p'
-    ```
-
-    If that list does **not** contain `continue`, the worker cannot run
-    `/swarm:review` or the pr-flow skills. Add **`--without local-review`** to the
-    `init` call above (the script subtracts the one token; never retype the
-    preset's list — a hand-derived copy is how a token goes missing) and set
-    `scope="… drive to an open PR; review happens outside this lane"`. Recording
-    an authority the worker cannot exercise is worse than recording none.
+    `init` also adds `/MANDATE.md` (and the `.MANDATE.*` temp pattern) to the
+    repo's git exclude itself (shared across worktrees, no diff in the user's
+    tree) and reports `excluded=yes|already|no`. This is not a separate sub-step
+    to remember: a worker told to commit as it goes would otherwise commit its own
+    authorization record, and every later worktree branched off main would inherit
+    that lane's grant. On `excluded=no` (the exclude file could not be written, or
+    the file is already listed yet still not ignored) say so — the mandate is
+    still valid, the user just has to ignore the file by hand.
 
     **c) An existing mandate.** `init` exits 2 rather than clobbering:
     - `task_mismatch=yes` → the file was recorded for a **different** task, or
@@ -330,7 +341,11 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
 
     If the user declines to grant anything, skip this step and say so: without
     `MANDATE.md` the worker falls back to asking before each milestone, which is
-    the pre-mandate behavior and always safe.
+    the pre-mandate behavior and always safe. The same holds when `init` refused
+    a record it cannot vouch for (tracked, symlinked, corrupt): launching is
+    still correct — the worker asks — but **say which file was refused and why**,
+    because the file is still sitting in the worktree and only the recorder knows
+    it grants nothing.
 
 14. **Launch the worktree session** — automate it inside herdr, otherwise show
     the manual block.

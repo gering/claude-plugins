@@ -153,17 +153,52 @@ HARNESS_HERDR_MODE="pane-run"
 HARNESS_HERDR_KIND="claude"
 
 # The bootstrap prompt for CLIs without work-system skills (codex, grok, kimi). One
-# argv word; the launch helper passes it verbatim. It names MANDATE.md because a
-# non-claude worker has no /continue to read it: without this line the worker would
-# have to infer its authority from TASK.md prose, which is exactly what the mandate
-# exists to prevent.
+# argv word; the launch helper passes it verbatim. A non-claude worker has no
+# /continue to read the mandate for it, so the prompt has to carry the mechanism.
+#
+# It points the worker at `mandate.sh`, NOT at MANDATE.md. An earlier version said
+# "read TASK.md and MANDATE.md", which handed the worker the file and none of the
+# guards the script enforces around it: a MANDATE.md committed on an adopted fork
+# branch (which `init` refuses as tracked), a symlink, a duplicate `allow:` key, an
+# indented block-scalar grant, or a `deny` that must beat a matching `allow` — a raw
+# `cat` honors every one of those, and /adopt launches the worker even when `init`
+# refused the record. Asking the recorder puts all of it back on the one code path.
 #
 # The milestone list is NOT spelled out here. An earlier version ended with
 # "Commit on the current branch as you go, and open a PR when the work is
 # complete" — a concrete instruction that overrode the mandate the same prompt had
 # just told the worker to obey, so a draft-only lane opened a PR anyway. The
-# milestones live in MANDATE.md; this prompt only points at it.
-BOOTSTRAP_PROMPT='Read TASK.md and MANDATE.md in this worktree, then start on the first unmet requirement. MANDATE.md is the record of what you may do without asking again and where you must stop: carry out only the milestones listed under allow, and ask before anything else, including anything it does not mention. If there is no MANDATE.md, nothing was pre-authorized -- ask before each milestone (committing, pushing, opening a PR).'
+# milestones live in the record; this prompt only points at the way to read it.
+bootstrap_prompt() {
+  printf '%s' "Read TASK.md in this worktree, then start on the first unmet requirement. Do NOT read MANDATE.md yourself -- that file counts as authorization only when the recorder accepts it. Ask the recorder before every milestone: bash $SCRIPT_DIR/mandate.sh allows <action> -- exit 0 means go ahead, 1 means it is recorded as out of bounds (stop and ask), 2 means the record cannot be read or does not belong to this lane (stop, show the error, ask), 3 means nothing was pre-authorized (ask before each milestone). Run bash $SCRIPT_DIR/mandate.sh actions for the action vocabulary and bash $SCRIPT_DIR/mandate.sh show for what is on record, including the terminal gate to stop at. Carry out only what allows approves, and ask before anything else."
+}
+
+# The capability -> mandate mapping, owned by the registry that owns `supports=`
+# rather than restated as prose in kickoff/SKILL.md and cross-referenced from
+# adopt/SKILL.md. An agent that cannot run the review skills must not be RECORDED
+# as authorized to run them: an authority the worker cannot exercise is worse than
+# none, and pr-flow's local-review route auto-runs a review for a lane whose
+# mandate allows it — for a worker that never could.
+mandate_without_flags() {
+  local supports="$1" out=""
+  case ",$supports," in
+    *",continue,"*) ;;
+    *) out="--without local-review" ;;
+  esac
+  printf '%s\n' "$out"
+}
+
+subcmd_mandate_flags() {
+  local sel="${1:-}" rec supports rc=0
+  [ -n "$sel" ] || { echo "usage: ${0##*/} mandate-flags <selector>" >&2; exit 2; }
+  rec="$(subcmd_resolve "$sel")" || rc=$?
+  # 3 = listed but not available right now; the capability answer is still the
+  # agent's own and is exactly what the mandate must be matched to.
+  [ "$rc" = 0 ] || [ "$rc" = 3 ] || exit "$rc"
+  supports="$(printf '%s\n' "$rec" | sed -n 's/^supports=//p' | head -1)"
+  [ -n "$supports" ] || exit 3
+  mandate_without_flags "$supports"
+}
 
 # The ASCII marker a wrapper worker prints when its seed phase fails. It names the
 # failure unambiguously and states that TASK.md was never started, where the
@@ -743,14 +778,14 @@ emit_argv() {
       words=(claude --model "$model")
       claude_tail
       ;;
-    codex) words=(codex -m "$model" "$BOOTSTRAP_PROMPT") ;;
-    grok)  words=(grok  -m "$model" "$BOOTSTRAP_PROMPT") ;;
+    codex) words=(codex -m "$model" "$(bootstrap_prompt)") ;;
+    grok)  words=(grok  -m "$model" "$(bootstrap_prompt)") ;;
     kimi)
       # Two-phase seed+continue (see the launch-shape note in the header). The
       # model and the prompt are passed as "$1"/"$2" positionals — NOT spliced
       # into the script text — so no amount of prompt content can reorder the
       # flags or be absorbed by `-p`.
-      words=(sh -c "$KIMI_LAUNCH_SCRIPT" kimi-worker "$model" "$BOOTSTRAP_PROMPT")
+      words=(sh -c "$KIMI_LAUNCH_SCRIPT" kimi-worker "$model" "$(bootstrap_prompt)")
       ;;
     cc-harness)
       # Foreign model inside the CC harness. $2 is the BARE agent id (grok), not
@@ -1021,6 +1056,7 @@ main() {
     list)     subcmd_list "$@" ;;
     resolve)  subcmd_resolve "$@" ;;
     default)  subcmd_default "$@" ;;
+    mandate-flags) subcmd_mandate_flags "$@" ;;
     -h|--help) usage ;;
     "")       usage ;;
     *)        echo "Unknown subcommand: $cmd" >&2; usage ;;

@@ -92,6 +92,19 @@ refuse_tracked() {
   fi
 }
 
+# A symlink at MANDATE.md is refused by EVERY verb, not just `init`. The record
+# has to live in the lane; a link makes its bytes come from somewhere the lane
+# does not control — an adopted branch can commit `MANDATE.md -> ../wider.md`,
+# and `refuse_tracked` cannot see an untracked one. Checked BEFORE the `-f`
+# existence test, so a DANGLING link reads as a corrupt record (exit 2) rather
+# than as "no mandate" (exit 3), which would send the caller to legacy prompting
+# instead of reporting the record it cannot vouch for.
+refuse_symlink() {
+  if [ -L "$MANDATE_PATH" ]; then
+    die "MANDATE.md is a symlink — a mandate must live in the lane itself, not behind a link; remove it first ($MANDATE_PATH)"
+  fi
+}
+
 # Resolve MANDATE.md for the worktree holding <dir> into MANDATE_PATH (works
 # from the main repo and from linked worktrees). Sets a global instead of
 # printing: called inside `$( )` a failing `die` would only kill the subshell,
@@ -140,10 +153,17 @@ parse_frontmatter() {
     }
     infm && $0 == "---" { closed = 1; exit }
     infm {
+      # A top-level frontmatter key sits at COLUMN 0. Indented text belongs to
+      # whatever stands above it — the body of a block scalar, a nested
+      # mapping — never an authorization. Trimming the indent off the name made
+      # `scope: |` followed by an indented `allow: merge` record a grant the
+      # document does not make; same class as the block-scalar text that read as
+      # a workflow step in claude-review.sh.
+      if ($0 ~ /^[ \t]/) next
       i = index($0, ":")
       if (i == 0) next
       name = substr($0, 1, i - 1)
-      gsub(/^[ \t]+|[ \t]+$/, "", name)
+      gsub(/[ \t]+$/, "", name)
       # A name with anything but identifier characters is never a key — and
       # "task recorded_at" would otherwise pass the substring test on keys.
       if (name ~ /[^A-Za-z0-9_]/) next
@@ -152,6 +172,11 @@ parse_frontmatter() {
       seen[name] = 1
       val = substr($0, i + 1)
       gsub(/^[ \t]+|[ \t]+$/, "", val)
+      # `key: |` puts the real value on the following indented lines, which we
+      # now correctly ignore — so recording "|" as the value would silently
+      # mis-read the key. Refuse the file instead: a record nobody can read as
+      # written grants nothing.
+      if (val ~ /^[|>][-+0-9]*$/) { if (blk == "") blk = name; next }
       print name "=" val
     }
     # The verdict is the LAST line, and the shell inspects only that line. An
@@ -163,6 +188,7 @@ parse_frontmatter() {
       if (!infm)          print "__verdict=nofm"
       else if (!closed)   print "__verdict=open"
       else if (dup != "") print "__verdict=dup:" dup
+      else if (blk != "") print "__verdict=blk:" blk
       else                print "__verdict=ok"
     }
   ' "$file")"
@@ -172,6 +198,7 @@ parse_frontmatter() {
     __verdict=nofm) die "MANDATE.md does not start with a '---' frontmatter block — nothing in it can be read as authorization ($file)" ;;
     __verdict=open) die "MANDATE.md's frontmatter is never closed (no second '---') — refusing to read body text as authorization ($file)" ;;
     __verdict=dup:*) die "MANDATE.md has a duplicate '${verdict#__verdict=dup:}:' key in its frontmatter — refusing to guess which one is the authorization ($file)" ;;
+    __verdict=blk:*) die "MANDATE.md writes '${verdict#__verdict=blk:}:' as a block scalar — a mandate value is one line; indented text is not read as authorization ($file)" ;;
     *) die "internal error: the frontmatter parser returned no verdict ($file)" ;;
   esac
   while IFS='=' read -r k v; do
@@ -243,6 +270,7 @@ emit_budget() {
 do_show() {
   local key val
   resolve_mandate_path "${1:-.}"
+  refuse_symlink
   printf 'mandate_file=%s\n' "$MANDATE_PATH"
   if [ ! -f "$MANDATE_PATH" ]; then
     printf 'mandate_exists=no\n'
@@ -270,6 +298,7 @@ do_allows() {
   in_vocab "$action" $KNOWN_ACTIONS \
     || die "unknown action: '$action' (known: $KNOWN_ACTIONS) — not a verdict, the question was malformed"
   resolve_mandate_path "${2:-.}"
+  refuse_symlink
   # No mandate = no authorization on record. Exit 3 means "unknown, ask the
   # user" — deliberately distinct from 1 ("recorded as out of bounds").
   [ -f "$MANDATE_PATH" ] || { printf 'verdict=no-mandate\n'; exit 3; }
@@ -288,6 +317,7 @@ do_allows() {
 do_round() {
   local budget used tmp
   resolve_mandate_path "${1:-.}"
+  refuse_symlink
   [ -f "$MANDATE_PATH" ] || { printf 'verdict=no-mandate\n'; exit 3; }
   refuse_tracked
   parse_frontmatter "$MANDATE_PATH"
@@ -300,7 +330,12 @@ do_round() {
   # it behind for an autonomous `git add -A` to commit.
   tmp="$(mktemp "${MANDATE_PATH%/*}/.MANDATE.XXXXXX")" \
     || { echo "${0##*/}: could not persist the consumed round — no temp file could be created beside $MANDATE_PATH" >&2; exit 4; }
+  # INT/TERM/HUP as well as EXIT: an untrapped signal skips the EXIT trap, and
+  # the orphan `.MANDATE.XXXXXX` is untracked in the worktree root — exactly what
+  # a worker authorized to `git add -A` would commit. `ensure_excluded` covers
+  # the pattern too, for the kill -9 the shell can never catch.
   trap 'rm -f "$tmp"' EXIT
+  trap 'rm -f "$tmp"; exit 4' INT TERM HUP
 
   # Rewrite the counter in place, keeping prose and any hand-written body. If the
   # key is ABSENT (hand-edited away, or a mandate from another tool), insert it
@@ -415,26 +450,36 @@ list_without() {
 # lane. The exclude file is shared across worktrees and leaves no diff in the
 # user's tree. Emits excluded=already|yes|no — `no` is reported, never fatal:
 # the mandate is still correct, the repo just has to be told by hand.
-ensure_excluded() {
-  local dir="$1" excl
-  if git -C "$dir" check-ignore -q -- "$MANDATE_FILE" 2>/dev/null; then
-    printf 'excluded=already\n'; return 0
-  fi
-  # --git-path resolves the shared info/exclude for linked worktrees itself; it
-  # answers relative to <dir> when it answers relatively at all.
+# Append one pattern to the repo's git exclude unless git already ignores it.
+# Returns 0 = already ignored, 1 = written, 2 = could not write.
+exclude_one() {
+  local dir="$1" pat="$2" excl
+  git -C "$dir" check-ignore -q -- "$pat" 2>/dev/null && return 0
   excl="$(git -C "$dir" rev-parse --git-path info/exclude 2>/dev/null)" || excl=""
-  [ -n "$excl" ] || { printf 'excluded=no\n'; return 0; }
+  [ -n "$excl" ] || return 2
   case "$excl" in /*) ;; *) excl="$dir/$excl" ;; esac
   # Listed but not ignored means the rule cannot take effect (git ignores
-  # nothing it tracks) — report that instead of appending the line once more.
-  if [ -f "$excl" ] && grep -qxF -- "/$MANDATE_FILE" "$excl" 2>/dev/null; then
-    printf 'excluded=no\n'; return 0
-  fi
-  if mkdir -p "${excl%/*}" 2>/dev/null && printf '/%s\n' "$MANDATE_FILE" >> "$excl" 2>/dev/null; then
-    printf 'excluded=yes\n'
-  else
-    printf 'excluded=no\n'
-  fi
+  # nothing it tracks) — say so instead of appending the line once more.
+  if [ -f "$excl" ] && grep -qxF -- "/$pat" "$excl" 2>/dev/null; then return 2; fi
+  mkdir -p "${excl%/*}" 2>/dev/null || return 2
+  printf '/%s\n' "$pat" >> "$excl" 2>/dev/null || return 2
+  return 1
+}
+
+ensure_excluded() {
+  local dir="$1" rc=0
+  # The temp pattern goes in too, best-effort and unreported: `round`/`init`
+  # write `.MANDATE.XXXXXX` beside the record, and a `kill -9` no trap can catch
+  # leaves one behind for the next `git add -A`.
+  exclude_one "$dir" ".MANDATE.*" || true
+  # `|| rc=$?`, never `; rc=$?`: a bare function call returning non-zero trips
+  # `set -e` (line 43) and kills init before it can report anything.
+  exclude_one "$dir" "$MANDATE_FILE" || rc=$?
+  case "$rc" in
+    0) printf 'excluded=already\n' ;;
+    1) printf 'excluded=yes\n' ;;
+    *) printf 'excluded=no\n' ;;
+  esac
 }
 
 do_init() {
@@ -532,9 +577,7 @@ do_init() {
   # Checked BEFORE -f: a dangling link fails -f and would be "created", a live
   # one passes it and `cat >` would follow it. An adopted branch can commit
   # `MANDATE.md -> ~/.zshrc`; the first --force then overwrites that file.
-  if [ -L "$MANDATE_PATH" ]; then
-    die "refusing to write through a symlink at $MANDATE_PATH — remove it first"
-  fi
+  refuse_symlink
   # A directory (or anything else that is not a regular file): `mv` would drop
   # the temp file INSIDE it and report written=yes for a mandate `show` cannot see.
   if [ -e "$MANDATE_PATH" ] && [ ! -f "$MANDATE_PATH" ]; then
@@ -572,6 +615,7 @@ do_init() {
   tmp="$(mktemp "${MANDATE_PATH%/*}/.MANDATE.XXXXXX")" \
     || { echo "${0##*/}: could not create a temp file beside $MANDATE_PATH" >&2; exit 4; }
   trap 'rm -f "$tmp"' EXIT
+  trap 'rm -f "$tmp"; exit 4' INT TERM HUP
   cat > "$tmp" <<EOF
 ---
 mandate_version: $MANDATE_VERSION
