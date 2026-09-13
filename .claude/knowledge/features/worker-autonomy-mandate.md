@@ -1,7 +1,7 @@
 ---
 title: "Worker Autonomy Mandate (MANDATE.md)"
 createdAt: 2026-09-07
-updatedAt: 2026-09-10
+updatedAt: 2026-09-13
 createdFrom: "branch: task/extend-worker-autonomy"
 updatedFrom: "branch: task/extend-worker-autonomy"
 pluginVersion: 1.9.0
@@ -97,6 +97,17 @@ parser returned an **empty mandate with exit 0** — every action `unlisted`, an
 `round` printing a count it never persisted. Both are normalized now, and a file
 with no leading fence is exit 2, not empty.
 
+**A symlink is nobody's record either, and the guard has to sit on every
+verb.** `init` refused one from the first review pass, and four rounds of docs
+repeated "exit 2 covers a symlink" — while `show`, `allows` and `round` happily
+followed the link, so a file outside the lane answered `allowed`. A *dangling*
+link was worse: it failed the `-f` test and came back as exit 3, "nobody was
+asked", sending the caller to legacy prompting instead of reporting a record it
+cannot vouch for. The lesson is not about symlinks: **a guard that lives in the
+writer is not a guard on the record.** Every read path has to ask the same
+question, which is why `refuse_tracked` and `refuse_symlink` are now both called
+by all four verbs, before the existence test.
+
 **A tracked file is nobody's record.** The exclude and the task guard only
 protect a `MANDATE.md` that is not yet in the index. One that git tracks came in
 with a branch — an adopted fork PR, or main after someone committed theirs — and
@@ -110,10 +121,16 @@ Match the mandate to the worker — from the registry's `supports=` field, not b
 matching CLI names: an agent that cannot run the review skills gets an allow list
 without `local-review`, because recording an authority the worker cannot exercise
 is worse than recording nothing. Their bootstrap prompt (`agent-registry.sh`)
-names `MANDATE.md` precisely because they have no `/continue` to read it for
-them — and names *only* the file. An earlier version also ended with "open a PR
-when the work is complete", a concrete instruction that overrode the mandate the
-same prompt had just told the worker to obey.
+points at `mandate.sh`, not at `MANDATE.md`, precisely because they have no
+`/continue` to read it for them. Naming the file handed the worker the bytes and
+none of the guards — a record committed on an adopted fork branch, a symlink, a
+duplicate key, a block-scalar grant, a `deny` that must beat a matching `allow` —
+all of which a `cat` honors and the recorder refuses. The prompt also names
+*only* the mechanism: an earlier version ended with "open a PR when the work is
+complete", a concrete instruction that overrode the mandate the same prompt had
+just told the worker to obey. And the capability→mandate mapping moved into
+`agent-registry.sh mandate-flags`, since prose in `kickoff` that `/adopt` reached
+by cross-reference is the shape that goes missing.
 
 ## The lane is not the cwd
 
@@ -160,6 +177,51 @@ path; `yes` needs both `uses: anthropics/claude-code-action` and an
 `unknown` too. The whole probe → answer → local-route tree now lives once in
 `plugins/pr-flow/docs/REVIEW-ROUTING.md`, followed by `/open`, `/cycle`,
 `/check` and `/rebase`.
+
+## Indentation is structure too
+
+The same pass that taught `has-bot` to skip block scalars found the mandate
+parser reading them: it trimmed leading whitespace off a key name, so a
+hand-edited `scope: |` with an indented `allow: merge` under it recorded a grant
+the YAML does not make. Top-level keys live at column 0; anything indented
+belongs to whatever stands above it. Two parsers, the same bug, found a round
+apart — worth remembering that "trim the whitespace and match" is exactly how a
+nested value gets promoted to a top-level one.
+
+## A scan proves presence, never absence
+
+`has-bot` answered `no` whenever no workflow mentioned claude. That reads as a
+proof of absence, and it is not one: the Claude GitHub **App** answers
+`@claude review` with no workflow file at all, so a repo with unrelated CI looks
+identical to a bot-less one. This very repo is the counterexample — one
+`structure-checks.yml`, no claude workflow, and `claude[bot]` answering PR
+comments. Since `no` is the one answer no consumer asks about, that guess
+permanently and silently rerouted a working bot, which is the failure
+[REVIEW-ROUTING.md](../../../plugins/pr-flow/docs/REVIEW-ROUTING.md) was written
+to prevent. `no` now needs positive evidence (a claude workflow that cannot
+answer a comment); everything else is `unknown`.
+
+The same probe was also reading the wrong **ref**. GitHub runs an
+`issue_comment` workflow from the **default branch**, so scanning the checked-out
+task branch answered a question nobody asked — a branch that adds the workflow
+probed `yes` and polled into the void, one that removes it probed `no`. Anchoring
+on the repo root fixed the *directory*; the ref dimension was never considered
+until a reviewer named it.
+
+## Shell variables do not survive a tool call
+
+The skills resolved `LANE=` in step 1 and wrote `"$LANE"` in step 7 — a
+different Bash call, where the variable is simply unset. It expanded to the empty
+string, and both `mandate-shim.sh` and `claude-review.sh` fall back to `.`, so
+the whole lane mechanism silently resolved the cwd: exactly the bug `lane` was
+added to fix, reintroduced by the prose that consumes it. Anything a skill
+computes in one tool call and uses in another has to be recomputed in the second
+one. It is now a numbered section (§0) of the routing spec rather than a habit.
+
+Its sibling: the bot-less local route ran `/swarm:review` without calling
+`round`, so `review_budget` bounded nothing on that path while the doc explained
+at length why the counter must outlive the session. A budget is only a budget
+where it is booked.
 
 ## What the third pass taught: text is not structure
 

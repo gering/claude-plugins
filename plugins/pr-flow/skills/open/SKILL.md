@@ -38,16 +38,21 @@ always that worktree (a `/open` run from the main repo for a task branch), and a
 cwd-resolved mandate would then be a different lane's — or a stale committed one
 at the main root. `lane` exits 3 when no worktree holds the branch (a plain repo
 without work-system lanes); the `|| LANE=.` fallback is the cwd, which is right
-exactly then. **Pass `"$LANE"` to every `mandate-shim.sh` call in this skill.**
+exactly then. **Pass `"$LANE"` to every `mandate-shim.sh` and
+`claude-review.sh has-bot` call in this skill** — and ⚠️ **re-run the `LANE=`
+line inside each of those Bash calls**: shell state does not survive between
+tool calls, so a `"$LANE"` carried from here expands empty and the script
+silently resolves the cwd instead (`docs/REVIEW-ROUTING.md` §0).
 
 Then gate the decisions below on `allows <action> "$LANE"`: exit **0** = proceed
 silently, exit **1** = recorded as out of bounds or unlisted (stop and ask), exit
 **3** = nothing recorded, or work-system is not installed (behave exactly as
-before this paragraph — ask). Exit **2** = the mandate file itself is unreadable
-(duplicate key, unterminated frontmatter, a symlink) — the record exists but
-cannot be trusted: show the script's stderr, stop, and ask; never read it as 1 or
-3. Never read exit 3 as a refusal: a missing record means the question was never
-put to the user, not that they said no.
+before this paragraph — ask). Exit **2** = the record cannot be vouched for, or
+the question itself was malformed — the authoritative list of causes is
+`mandate.sh`'s header, not this line; either way the record grants nothing, so
+show the script's stderr, stop, and ask, and never read it as 1 or 3. Never read
+exit 3 as a refusal: a missing record means the question was never put to the
+user, not that they said no.
 
 ## Instructions
 
@@ -225,7 +230,9 @@ put to the user, not that they said no.
       the one copy of the probe → answer → local-route tree that `/cycle`,
       `/check` and `/rebase` follow too. This skill's stage behavior: it never
       triggers (creation, not triggering, is its job) — on `has_bot=yes` it
-      recommends `/cycle`; on `no` it applies the spec's §2 with `"$LANE"`.
+      recommends `/cycle`; on `no` it applies the spec's §2 (re-resolving `LANE`
+      in each call, per §0) and books a round there if it actually runs the
+      local review.
 
 11. **Final summary**:
     ```

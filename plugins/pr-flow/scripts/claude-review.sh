@@ -174,7 +174,11 @@ read -r -d '' HAS_BOT_AWK <<'AWK' || true
   tl = tolower(line)
   if (tl ~ /^[ \t]*-?[ \t]*uses:[ \t]*["']?anthropics\/claude-code-action/) action = 1
   else if (tl ~ /^[ \t]*uses:[ \t]*["']?[^"' \t]+\.ya?ml(@|["' \t]|$)/) reusable = 1
-  if (tl ~ /^[ \t]*-?[ \t]*issue_comment[ \t]*(:.*)?$/ || tl ~ /^[ \t]*on:[ \t]*(\[.*issue_comment|issue_comment[ \t]*$)/) comment = 1
+  # Keys may be quoted in valid YAML (`"issue_comment":`, `"on":`), and `on:`
+  # also takes flow style (`on: [issue_comment]`). An unquoted-only pattern
+  # answered `no` for a bot that works.
+  q = tl; gsub(/["']/, "", q)
+  if (q ~ /^[ \t]*-?[ \t]*issue_comment[ \t]*(:.*)?$/ || q ~ /^[ \t]*on[ \t]*:[ \t]*(\[.*issue_comment|issue_comment[ \t]*$)/) comment = 1
   if (tl ~ /^[ \t]*trigger_phrase:/) {
     v = tl; sub(/^[ \t]*trigger_phrase:[ \t]*/, "", v)
     if (v !~ /@claude/) phrase = 1
@@ -183,8 +187,27 @@ read -r -d '' HAS_BOT_AWK <<'AWK' || true
 END { printf "%d %d %d %d %d\n", action, comment, phrase, reusable, mention }
 AWK
 
+# The ref an issue_comment workflow would actually run from. GitHub resolves
+# `issue_comment`-triggered workflows from the repository DEFAULT BRANCH, not
+# from the PR head — so probing the checked-out tree answers a question nobody
+# asked: a task branch that adds the workflow would probe `yes` and poll into
+# the void, one that removes it would probe `no` and reroute a working bot.
+# Empty output = no default branch resolvable (a fresh `git init`, no remote);
+# the caller then falls back to the working tree and says so.
+probe_ref() {
+  local dir="$1" cand head
+  head="$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+  for cand in "$head" origin/main origin/master main master; do
+    [[ -n "$cand" ]] || continue
+    if git -C "$dir" rev-parse --verify --quiet "$cand^{commit}" >/dev/null 2>&1; then
+      printf '%s\n' "$cand"; return 0
+    fi
+  done
+  return 0
+}
+
 subcmd_has_bot() {
-  local dir="${1:-.}" root wf="" f a c p r m
+  local dir="${1:-.}" root wf="" ref="" src f a c p r m
   local strict="" phrase="" loose="" reusable="" pushonly="" n_files=0
   # One emitter, so every path prints the same four keys in the same order —
   # a consumer that greps a promised key must never get silence on some verdicts.
@@ -198,21 +221,38 @@ subcmd_has_bot() {
   if [[ -z "$root" ]]; then
     emit unknown "not inside a git repository"; return 0
   fi
-  wf="$root/.github/workflows"
-  if [[ ! -e "$wf" ]]; then
-    emit unknown "no .github/workflows directory — a repo with no CI, or one served only by the Claude GitHub App; cannot tell locally"; return 0
+  ref="$(probe_ref "$root")"
+  if [[ -n "$ref" ]]; then
+    src="$ref"
+    wf="$ref:.github/workflows"
+    if ! git -C "$root" ls-tree --name-only -z "$ref:.github/workflows" >/dev/null 2>&1; then
+      emit unknown "no .github/workflows on the default branch ($ref) — a repo with no CI, or one served only by the Claude GitHub App; cannot tell locally"; return 0
+    fi
+  else
+    # No default branch to read (fresh repo, no remote): the working tree is
+    # the only thing there is. Say which ref was inspected either way, or a
+    # wrong answer is unfalsifiable from the output.
+    src="worktree"
+    wf="$root/.github/workflows"
+    if [[ ! -e "$wf" ]]; then
+      emit unknown "no .github/workflows directory (no default branch to read; inspected the working tree) — a repo with no CI, or one served only by the Claude GitHub App; cannot tell locally"; return 0
+    fi
+    if [[ ! -d "$wf" || ! -r "$wf" || ! -x "$wf" ]]; then
+      emit unknown ".github/workflows exists but is not readable"; return 0
+    fi
   fi
-  if [[ ! -d "$wf" || ! -r "$wf" || ! -x "$wf" ]]; then
-    emit unknown ".github/workflows exists but is not readable"; return 0
-  fi
-  # Top level only (-maxdepth 1): GitHub reads workflows from this directory
-  # itself, never from a subdirectory — an archived copy under workflows/old/
-  # is not a bot. NUL-delimited so a path with spaces, globs or newlines stays
-  # one path.
+  # Top level only: GitHub reads workflows from that directory itself, never
+  # from a subdirectory — an archived copy under workflows/old/ is not a bot.
+  # NUL-delimited so a name with spaces, globs or newlines stays one name.
   while IFS= read -r -d '' f; do
+    case "$f" in *.yml|*.yaml) ;; *) continue ;; esac
     n_files=$(( n_files + 1 ))
-    [[ -r "$f" ]] || { emit unknown "unreadable workflow file: $f"; return 0; }
-    read -r a c p r m <<<"$(awk "$HAS_BOT_AWK" "$f")"
+    if [[ "$src" = "worktree" ]]; then
+      [[ -r "$wf/$f" ]] || { emit unknown "unreadable workflow file: $wf/$f"; return 0; }
+      read -r a c p r m <<<"$(awk "$HAS_BOT_AWK" "$wf/$f")"
+    else
+      read -r a c p r m <<<"$(git -C "$root" show "$ref:.github/workflows/$f" 2>/dev/null | awk "$HAS_BOT_AWK")"
+    fi
     if (( a && c )); then
       if (( p )); then phrase="$phrase$f "; else strict="$strict$f "; fi
     elif (( a )); then
@@ -222,13 +262,20 @@ subcmd_has_bot() {
     elif (( c && m )); then
       loose="$loose$f "
     fi
-  done < <(find "$wf" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 2>/dev/null)
+  done < <(
+    if [[ "$src" = "worktree" ]]; then
+      find "$wf" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 2>/dev/null \
+        | while IFS= read -r -d '' f; do printf '%s\0' "${f##*/}"; done
+    else
+      git -C "$root" ls-tree --name-only -z "$ref:.github/workflows" 2>/dev/null
+    fi
+  )
 
   if (( n_files == 0 )); then
-    emit unknown ".github/workflows holds no workflow files — same as no directory; cannot tell locally"; return 0
+    emit unknown ".github/workflows holds no workflow files (inspected $src) — same as no directory; cannot tell locally"; return 0
   fi
   if [[ -n "$strict" ]]; then
-    emit yes "a comment-triggered workflow uses anthropics/claude-code-action" "$strict"; return 0
+    emit yes "a comment-triggered workflow uses anthropics/claude-code-action (inspected $src)" "$strict"; return 0
   fi
   if [[ -n "$phrase" ]]; then
     emit unknown "a comment-triggered claude workflow sets a custom trigger_phrase — @claude review may not fire it" "$phrase"; return 0
@@ -240,9 +287,15 @@ subcmd_has_bot() {
     emit unknown "a comment-triggered workflow mentions the bot but does not use anthropics/claude-code-action — cannot tell whether @claude review reaches anything" "$loose"; return 0
   fi
   if [[ -n "$pushonly" ]]; then
-    emit no "claude workflow(s) present but none triggered by issue_comment" "$pushonly"; return 0
+    emit no "claude workflow(s) present but none triggered by issue_comment (inspected $src)" "$pushonly"; return 0
   fi
-  emit no "no workflow references the review bot"
+  # NOT `no`. A workflow scan can PROVE a bot (a matching workflow is there) but
+  # never disprove one: the Claude GitHub App answers @claude review with no
+  # workflow file of its own, and unrelated CI in the same directory says
+  # nothing about whether the App is installed. Answering `no` here rerouted a
+  # working bot permanently and silently — the exact failure REVIEW-ROUTING.md
+  # warns about — because `no` is the one answer no consumer asks about.
+  emit unknown "no workflow references the review bot (inspected $src) — but the Claude GitHub App needs none, so its absence cannot be shown locally"
 }
 
 main() {

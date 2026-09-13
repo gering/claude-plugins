@@ -40,9 +40,15 @@ Strip the flags first; whatever is left over is the commit message.
      LANE="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" lane "$(git branch --show-current)")" || LANE=.
      ```
      `lane` exits 3 when no worktree holds the branch (a repo without work-system
-     lanes) — the cwd is then the right answer. **Every `mandate-shim.sh` call
-     below takes `"$LANE"`**; a cwd-resolved mandate from the main repo would be a
-     different lane's, or a stale committed one.
+     lanes) — the cwd is then the right answer. **Every `mandate-shim.sh` and
+     `claude-review.sh has-bot` call below takes `"$LANE"`**; a cwd-resolved
+     mandate from the main repo would be a different lane's, or a stale committed
+     one.
+     ⚠️ **Shell state does not survive between Bash tool calls.** This assignment
+     is for *reporting* the lane here; it does **not** reach step 7 or the loop.
+     Every later block re-runs the `LANE=` line in the same call as the command
+     that uses it — see `docs/REVIEW-ROUTING.md` §0. A bare `"$LANE"` in a later
+     call expands empty and the shim silently reads the cwd instead.
 
 2. **Check if rebase is needed** — delegate to `/rebase --no-poll --auto`:
    - Invoke the `/rebase` skill **with `--no-poll` and `--auto`**:
@@ -99,9 +105,11 @@ Strip the flags first; whatever is left over is the commit message.
      - `has_bot=yes` → run `gh pr comment <PR_NUMBER> --body "@claude review"` and
        continue to step 8.
      - `has_bot=no` → do not comment, do not enter step 8. Apply the spec's §2
-       with `"$LANE"`; when it runs `/swarm:review --pr <PR_NUMBER>`, treat those
-       findings as this round's review (loop mode included: the loop cares about
-       findings, not where they came from).
+       (re-resolving `LANE` in each call, per §0); when it runs
+       `/swarm:review --pr <PR_NUMBER>`, treat those findings as this round's
+       review (loop mode included: the loop cares about findings, not where they
+       came from). **Book the round** per §2 on a plain `/cycle`; under `--loop`
+       Setup already booked this iteration, so do not book twice.
      - `has_bot=unknown` → relay `why=` and ask, per the spec. Never guess.
 
 8. **Launch background polling via Bash**:

@@ -53,8 +53,17 @@ try:
 except Exception:
     raise SystemExit
 def vkey(v):
-    # numeric-aware version sort; non-numeric segments sink below any real version
-    return [int(x) if x.isdigit() else -1 for x in re.split(r"[.\-+]", str(v))]
+    # SemVer precedence. Splitting the whole string on [.-+] made a prerelease
+    # sort ABOVE its own release (1.14.0-rc.1 -> [1,14,0,-1,1] > [1,14,0]), so
+    # the locator ran the shim against an rc the user had already moved off.
+    # Build metadata is not part of precedence; a release beats its prereleases.
+    v = str(v).split("+", 1)[0]
+    core, _, pre = v.partition("-")
+    nums = [int(x) if x.isdigit() else -1 for x in core.split(".")]
+    if not pre:
+        return (nums, 1, [])
+    # Numeric identifiers rank below alphanumeric ones, and never compare to them.
+    return (nums, 0, [(0, int(x)) if x.isdigit() else (1, x) for x in pre.split(".")])
 best = None
 for key, entries in plugins.items():
     if key.split("@", 1)[0] != "work-system":

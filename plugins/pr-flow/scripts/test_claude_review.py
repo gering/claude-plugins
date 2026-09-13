@@ -14,7 +14,11 @@ so the properties under test are exactly the ones that grep got wrong:
   * a bot is a workflow that BOTH `uses:` the claude action AND is triggered
     by issue_comment; a push-triggered claude workflow is not one, and a
     comment workflow that merely mentions @claude is "cannot tell";
-  * an incidental "claude" (a cache key, a comment) is not a bot;
+  * an incidental "claude" (a cache key, a comment) is not a bot — but it is
+    not proof of ABSENCE either: a scan can prove `yes` and never `no`, since
+    the Claude GitHub App answers comments with no workflow file at all;
+  * the probe reads the DEFAULT BRANCH, because that is the ref GitHub runs an
+    issue_comment workflow from — not the checked-out task branch;
   * "cannot tell" is its own answer, distinct from "no" — and covers the case
     the probe cannot see locally: a repo served only by the Claude GitHub App,
     which has no workflow dir at all; a custom trigger_phrase; a job that
@@ -161,10 +165,18 @@ check("and the reason distinguishes it from 'nothing found'",
 check("the near-miss workflow is still named", "w0.yml" in r.get("matched", ""))
 
 # --- an incidental mention of claude ----------------------------------------
+# Not a bot — but not provably bot-LESS either. The Claude GitHub App answers
+# `@claude review` with no workflow file of its own, so unrelated CI in the same
+# directory says nothing about whether it is installed. Answering `no` here
+# rerouted a working bot permanently, and `no` is the one answer no consumer
+# asks about. Verified in this very repo, which is served by the App and carries
+# only structure-checks.yml.
 r = kv(run(str(repo_with(INCIDENTAL))).stdout)
-check("a cache key mentioning claude is not a bot", r.get("has_bot") == "no")
-check("and it reads as 'nothing references the bot'",
-      "references" in r.get("why", ""))
+check("a cache key mentioning claude is not a yes", r.get("has_bot") != "yes")
+check("nothing-references-the-bot is 'cannot tell', not 'no'",
+      r.get("has_bot") == "unknown")
+check("and the reason names the App as the thing it cannot see",
+      "App" in r.get("why", ""))
 
 # --- a comment workflow that only mentions @claude ---------------------------
 # issue_comment + a stray "@claude" used to add up to "yes"; that comments into
@@ -283,7 +295,7 @@ r = kv(run(str(deep)).stdout)
 check("a workflow in a subdirectory is not examined", r.get("has_bot") != "yes")
 (deep / ".github" / "workflows" / "ci.yml").write_text(INCIDENTAL)
 check("nor does it make a plain-CI repo a bot repo",
-      kv(run(str(deep)).stdout).get("has_bot") == "no")
+      kv(run(str(deep)).stdout).get("has_bot") != "yes")
 
 # A trailing comment on the real step must not hide it.
 COMMENTED_STEP = COMMENT_TRIGGERED.replace(
@@ -303,6 +315,93 @@ for label, path in (("yes", str(repo_with(COMMENT_TRIGGERED))),
     keys = {l.partition("=")[0] for l in run(path).stdout.splitlines()}
     check(f"all four keys on the {label} path", keys == KEYS)
     check(f"and it exits 0 on the {label} path", run(path).returncode == 0)
+
+# --- `no` is reachable only on positive evidence ------------------------------
+# The one case left: the repo demonstrably drives claude through a workflow, and
+# that workflow cannot answer a comment. Everywhere else the honest answer is
+# "cannot tell" — a local scan proves presence, never absence.
+r = kv(run(str(repo_with(PUSH_TRIGGERED))).stdout)
+check("a push-only claude workflow is still a definite no", r.get("has_bot") == "no")
+check("and it names the ref it inspected", "inspected" in r.get("why", ""))
+
+# --- the probe reads the DEFAULT BRANCH, not the checkout --------------------
+# GitHub runs an issue_comment workflow from the default branch. A task branch
+# that adds one would otherwise probe `yes`, and /cycle would comment into the
+# void and poll for ten minutes; one that removes it would probe `no`.
+def repo_with_committed(*workflows, branch=None):
+    repo = repo_with(*workflows)
+    (repo / "README.md").write_text("x\n")   # a commit needs content
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "init"], check=True)
+    if branch:
+        subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", branch], check=True)
+    return repo
+
+base = repo_with_committed(INCIDENTAL, branch="task/add-bot")
+wf = base / ".github" / "workflows"
+(wf / "claude.yml").write_text(COMMENT_TRIGGERED)
+subprocess.run(["git", "-C", str(base), "add", "-A"], check=True)
+subprocess.run(["git", "-C", str(base), "-c", "user.email=t@t", "-c", "user.name=t",
+                "commit", "-qm", "add bot"], check=True)
+r = kv(run(str(base)).stdout)
+check("a bot added only on the task branch is not reported as live",
+      r.get("has_bot") != "yes")
+check("and the probed ref is named in workflows_dir",
+      r.get("workflows_dir", "").startswith(("main:", "master:")))
+
+gone = repo_with_committed(COMMENT_TRIGGERED, branch="task/remove-bot")
+(gone / ".github" / "workflows" / "w0.yml").unlink()
+subprocess.run(["git", "-C", str(gone), "add", "-A"], check=True)
+subprocess.run(["git", "-C", str(gone), "-c", "user.email=t@t", "-c", "user.name=t",
+                "commit", "-qm", "drop bot"], check=True)
+check("a bot removed only on the task branch is still found on the default branch",
+      kv(run(str(gone)).stdout).get("has_bot") == "yes")
+
+live = repo_with_committed(COMMENT_TRIGGERED)
+check("on the default branch itself the answer is unchanged",
+      kv(run(str(live)).stdout).get("has_bot") == "yes")
+sub = live / "deep" / "nested"
+sub.mkdir(parents=True)
+check("and a subdirectory still gets the same answer",
+      kv(run(str(sub)).stdout).get("has_bot") == "yes")
+# A committed workflow in a subdirectory GitHub ignores stays ignored on the ref
+# path too (ls-tree is non-recursive, and a tree entry is not a *.yml name).
+arch = repo_with_committed()
+awf = arch / ".github" / "workflows" / "archive"
+awf.mkdir(parents=True)
+(awf / "old.yml").write_text(COMMENT_TRIGGERED)
+subprocess.run(["git", "-C", str(arch), "add", "-A"], check=True)
+subprocess.run(["git", "-C", str(arch), "-c", "user.email=t@t", "-c", "user.name=t",
+                "commit", "-qm", "archive"], check=True)
+check("a committed subdirectory workflow is not read from the ref either",
+      kv(run(str(arch)).stdout).get("has_bot") != "yes")
+
+# --- quoted YAML keys ---------------------------------------------------------
+# `"issue_comment":` and `"on":` are valid YAML; an unquoted-only pattern
+# answered no for a bot that works.
+QUOTED = """\
+name: Claude Review
+"on":
+  "issue_comment":
+    types: [created]
+jobs:
+  review:
+    steps:
+      - uses: anthropics/claude-code-action@v1
+"""
+check("a quoted issue_comment key is still a trigger",
+      kv(run(str(repo_with(QUOTED))).stdout).get("has_bot") == "yes")
+FLOW = """\
+name: Claude Review
+on: [issue_comment, pull_request]
+jobs:
+  review:
+    steps:
+      - uses: anthropics/claude-code-action@v1
+"""
+check("flow-style on: [issue_comment] is a trigger",
+      kv(run(str(repo_with(FLOW))).stdout).get("has_bot") == "yes")
 
 
 if FAILS:
