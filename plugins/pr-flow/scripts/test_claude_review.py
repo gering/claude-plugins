@@ -12,8 +12,10 @@ so the properties under test are exactly the ones that grep got wrong:
   * it is anchored on the repo ROOT, not $PWD — /cycle may run from a
     subdirectory, or from the main repo while the PR belongs to a worktree;
   * a bot is a workflow that BOTH `uses:` the claude action AND is triggered
-    by issue_comment; a push-triggered claude workflow is not one, and a
-    comment workflow that merely mentions @claude is "cannot tell";
+    by issue_comment, as a DIRECT child of the top-level `on:` — not a branch
+    name, not a workflow input that happens to be called issue_comment;
+  * a push- or pull_request-triggered claude workflow is not a comment bot, but
+    it is not proof of one's absence either: the App can serve the same repo;
   * an incidental "claude" (a cache key, a comment) is not a bot — but it is
     not proof of ABSENCE either: a scan can prove `yes` and never `no`, since
     the Claude GitHub App answers comments with no workflow file at all;
@@ -158,8 +160,13 @@ check("a subdirectory gets the same answer",
       kv(run(str(sub)).stdout).get("has_bot") == "yes")
 
 # --- a claude workflow that no comment can trigger --------------------------
+# Not a bot — and still not proof that none exists. Anthropic ships a
+# `pull_request`-triggered review workflow, and a repo can run that AND be served
+# by the GitHub App for `@claude` mentions. `no` there would permanently reroute
+# a working bot, so this is `unknown` like every other can't-tell.
 r = kv(run(str(repo_with(PUSH_TRIGGERED))).stdout)
-check("a push-only claude workflow is not a comment bot", r.get("has_bot") == "no")
+check("a push-only claude workflow is not a comment bot", r.get("has_bot") != "yes")
+check("but it is 'cannot tell', not 'no'", r.get("has_bot") == "unknown")
 check("and the reason distinguishes it from 'nothing found'",
       "issue_comment" in r.get("why", ""))
 check("the near-miss workflow is still named", "w0.yml" in r.get("matched", ""))
@@ -233,7 +240,7 @@ jobs:
       - uses: anthropics/claude-code-action@v1
 """
 r = kv(run(str(repo_with(COMMENT_ONLY))).stdout)
-check("an issue_comment in a YAML comment is not a trigger", r.get("has_bot") == "no")
+check("an issue_comment in a YAML comment is not a trigger", r.get("has_bot") != "yes")
 check("and it is the push-only case", "issue_comment" in r.get("why", ""))
 
 HEREDOC = """\
@@ -309,7 +316,7 @@ check("a CRLF workflow is read",
 # --- every path emits the same four keys -------------------------------------
 KEYS = {"has_bot", "why", "workflows_dir", "matched"}
 for label, path in (("yes", str(repo_with(COMMENT_TRIGGERED))),
-                    ("no", str(repo_with(PUSH_TRIGGERED))),
+                    ("unknown (push-only claude workflow)", str(repo_with(PUSH_TRIGGERED))),
                     ("unknown (nothing references the bot)", str(repo_with(INCIDENTAL))),
                     ("unknown (no workflows dir)", str(repo_with())),
                     ("not a git repo", tempfile.mkdtemp())):
@@ -317,13 +324,15 @@ for label, path in (("yes", str(repo_with(COMMENT_TRIGGERED))),
     check(f"all four keys on the {label} path", keys == KEYS)
     check(f"and it exits 0 on the {label} path", run(path).returncode == 0)
 
-# --- `no` is reachable only on positive evidence ------------------------------
-# The one case left: the repo demonstrably drives claude through a workflow, and
-# that workflow cannot answer a comment. Everywhere else the honest answer is
-# "cannot tell" — a local scan proves presence, never absence.
-r = kv(run(str(repo_with(PUSH_TRIGGERED))).stdout)
-check("a push-only claude workflow is still a definite no", r.get("has_bot") == "no")
-check("and it names the ref it inspected", "inspected" in r.get("why", ""))
+# --- a local scan can prove presence, never absence --------------------------
+# Every non-`yes` verdict is `unknown`: the GitHub App answers `@claude review`
+# with no workflow file, so nothing on disk can rule it out. `no` stays in the
+# vocabulary for a future authoritative signal, but is not emitted today.
+for fixture in (PUSH_TRIGGERED, INCIDENTAL, COMMENT_ONLY):
+    r = kv(run(str(repo_with(fixture))).stdout)
+    check("a non-bot workflow set never answers 'no'", r.get("has_bot") != "no")
+    check("it answers 'cannot tell'", r.get("has_bot") == "unknown")
+    check("and it names the ref it inspected", "inspected" in r.get("why", ""))
 
 # --- the probe reads the DEFAULT BRANCH, not the checkout --------------------
 # GitHub runs an issue_comment workflow from the default branch. A task branch
@@ -423,7 +432,7 @@ jobs:
           issue_comment: true
 """
 r = kv(run(str(repo_with(NESTED_INPUT))).stdout)
-check("an issue_comment step INPUT is not a trigger", r.get("has_bot") == "no")
+check("an issue_comment step INPUT is not a trigger", r.get("has_bot") != "yes")
 check("and it reads as the push-only case", "issue_comment" in r.get("why", ""))
 
 NESTED_ENV = """\
@@ -437,7 +446,7 @@ jobs:
       - uses: anthropics/claude-code-action@v1
 """
 check("an issue_comment env entry is not a trigger either",
-      kv(run(str(repo_with(NESTED_ENV))).stdout).get("has_bot") == "no")
+      kv(run(str(repo_with(NESTED_ENV))).stdout).get("has_bot") != "yes")
 
 # The real thing still works in both spellings, one level under `on:`.
 check("a nested issue_comment under on: is still a trigger",
@@ -518,6 +527,56 @@ for name in ("my workflow.yml", "wörkflow.yml"):
                     "commit", "-qm", "init"], check=True)
     check(f"a committed workflow named {name!r} is read from the ref",
           kv(run(str(sp)).stdout).get("has_bot") == "yes")
+
+# --- issue_comment must be a DIRECT child of `on:` ---------------------------
+# Matching anywhere below `on:` made a branch NAME and a workflow input read as
+# comment triggers, so /cycle commented into the void and polled to the timeout.
+BRANCH_NAMED = """\
+name: Claude Nightly
+on:
+  push:
+    branches: [issue_comment]
+jobs:
+  review:
+    steps:
+      - uses: anthropics/claude-code-action@v1
+"""
+check("a BRANCH named issue_comment is not a trigger",
+      kv(run(str(repo_with(BRANCH_NAMED))).stdout).get("has_bot") != "yes")
+
+CALL_INPUT = """\
+name: Reusable Claude
+on:
+  workflow_call:
+    inputs:
+      issue_comment:
+        type: boolean
+jobs:
+  review:
+    steps:
+      - uses: anthropics/claude-code-action@v1
+"""
+check("a workflow_call INPUT named issue_comment is not a trigger",
+      kv(run(str(repo_with(CALL_INPUT))).stdout).get("has_bot") != "yes")
+
+FLOW_BRANCH = """\
+name: Claude Nightly
+on: {push: {branches: [issue_comment]}}
+jobs:
+  review:
+    steps:
+      - uses: anthropics/claude-code-action@v1
+"""
+check("flow style naming a branch issue_comment is not a trigger",
+      kv(run(str(repo_with(FLOW_BRANCH))).stdout).get("has_bot") != "yes")
+
+# The real trigger still reads, in every spelling.
+for fixture, label in ((COMMENT_TRIGGERED, "block mapping"),
+                       (ON_LIST, "block sequence"),
+                       (FLOW, "flow list"),
+                       (QUOTED, "quoted keys")):
+    check(f"a real issue_comment trigger still reads: {label}",
+          kv(run(str(repo_with(fixture))).stdout).get("has_bot") == "yes")
 
 
 if FAILS:

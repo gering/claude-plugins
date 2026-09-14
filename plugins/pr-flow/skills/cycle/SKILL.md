@@ -34,21 +34,14 @@ Strip the flags first; whatever is left over is the commit message.
    - Run: `gh pr view --json number,title,url,headRefName,baseRefName 2>/dev/null`
    - If no PR exists, inform user and suggest: `gh pr create`
    - Store `PR_NUMBER`, `PR_URL`, and `BASE_BRANCH` (from baseRefName) for later use
-   - Resolve the **lane** the PR belongs to — the worktree holding its branch, which
-     is not always the session cwd (this skill may run from the main repo):
-     ```sh
-     LANE="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" lane "$(git branch --show-current)")" || LANE=.
-     ```
-     `lane` exits 3 when no worktree holds the branch (a repo without work-system
-     lanes) — the cwd is then the right answer. **Every `mandate-shim.sh` and
-     `claude-review.sh has-bot` call below takes `"$LANE"`**; a cwd-resolved
-     mandate from the main repo would be a different lane's, or a stale committed
-     one.
-     ⚠️ **Shell state does not survive between Bash tool calls.** This assignment
-     is for *reporting* the lane here; it does **not** reach step 7 or the loop.
-     Every later block re-runs the `LANE=` line in the same call as the command
-     that uses it — see `docs/REVIEW-ROUTING.md` §0. A bare `"$LANE"` in a later
-     call expands empty and the shim silently reads the cwd instead.
+   - The PR's **lane** — the worktree holding its branch — is not always the
+     session cwd (this skill may run from the main repo). Every mandate call
+     below therefore passes `--branch "$(git branch --show-current)"` and lets
+     the script resolve it; see `docs/REVIEW-ROUTING.md` §0. Nothing is carried
+     in a shell variable, because shell state does not survive between Bash tool
+     calls — that is how earlier versions silently read the cwd's mandate.
+     Each call reports `lane=` and `lane_source=`; on `lane_source=cwd`, compare
+     the `task=` line before acting on the verdict.
 
 2. **Check if rebase is needed** — delegate to `/rebase --no-poll --auto`:
    - Invoke the `/rebase` skill **with `--no-poll` and `--auto`**:
@@ -104,22 +97,18 @@ Strip the flags first; whatever is left over is the commit message.
      `/open`, `/check` and `/rebase`. This skill's stage behavior:
      - `has_bot=yes` → run `gh pr comment <PR_NUMBER> --body "@claude review"` and
        continue to step 8.
-     - `has_bot=no` → do not comment, do not enter step 8. Apply the spec's §2
-       (re-resolving `LANE` in each call, per §0); when it runs
-       `/swarm:review --pr <PR_NUMBER>`, treat those findings as this round's
-       review (loop mode included: the loop cares about findings, not where they
-       came from). **Book the round** per §2 on a plain `/cycle`; under `--loop`
-       Setup already booked this iteration, so do not book twice.
-     - `has_bot=unknown` → **try the bot, do not ask.** This is the common
-       answer (a scan cannot see the GitHub App), and `/cycle` is the one
-       consumer that can settle it empirically: post the comment, enter step 8,
-       and let the bounded poll decide. If the poll times out, nothing was
-       listening — say so and fall back to the spec's §2 local route for this
-       round. Asking here instead would stop `--loop` on *every* iteration, since
-       steps 3–10 re-run each round, which is exactly the re-confirmation the
-       mandate exists to remove. Recommend-only skills (`/open`, `/check`,
-       `/rebase`) still name both routes on `unknown`; only a triggering skill
-       gets to run the experiment.
+     - `has_bot=no` → not emitted today (see §1); if it ever is, do not comment
+       and apply the spec's §2 directly.
+     - `has_bot=unknown` → **try the bot, do not ask** (the spec's §1 split:
+       a triggering consumer settles it empirically, a recommend-only one names
+       both routes). Post the comment, enter step 8, and let the bounded poll
+       decide. If the poll times out, nothing was listening — say so and fall
+       through to §2 for this round. Asking here would stop `--loop` on *every*
+       iteration, since steps 3–10 re-run each round.
+     - **Booking:** on a plain `/cycle`, book the round per §2 **before** you
+       trigger, on whichever route you take — the bot path consumes the lane's
+       budget exactly as the local one does. Under `--loop` the loop body has
+       already booked this iteration; do not book twice.
 
 8. **Launch background polling via Bash**:
    - Use the **Bash tool** with `run_in_background: true` to invoke the shared polling script:
@@ -164,12 +153,9 @@ When `--loop` (alias `--auto`) is present, `/cycle` stops being a single pass an
 ### Setup (once, before the loop)
 
 - Parse `--max=N`. This caps total iterations so the loop can never run forever.
-  Its default comes from the lane's mandate when there is one. Resolve the lane
-  **in this same Bash call** — step 1's assignment is long gone (§0 of
-  `docs/REVIEW-ROUTING.md`), and a bare `"$LANE"` here silently reads the cwd:
+  Its default comes from the lane's mandate when there is one:
   ```sh
-  LANE="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" lane "$(git branch --show-current)")" || LANE=.
-  bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" show "$LANE"
+  bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" show --branch "$(git branch --show-current)"
   ```
   `review_rounds_left` (non-empty) → `MAX` = that number; otherwise `MAX = 10`. An
   explicit `--max=N` always wins — the user typing a number *is* the decision.
@@ -182,12 +168,21 @@ When `--loop` (alias `--auto`) is present, `/cycle` stops being a single pass an
   the cap afterwards. `/cycle --loop` is the **owner** of the counter for a lane
   that reviews this way: `/continue` deliberately does not book a round when it
   hands the review to this loop, so every increment below is the only one.
-- **Consume a round from the mandate at the start of each iteration**, not just
-  from an in-session counter:
+- *(The per-iteration booking is **not** part of Setup — it is step 0 of the loop
+  body below. It used to sit here, under a heading that says "once", while the
+  loop's stop condition depends on a `round` call happening every iteration.)*
+
+### Loop body
+
+**0. Book this iteration's round** — before anything else in the iteration, and
+  once per iteration, not once per loop:
   ```sh
-  LANE="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" lane "$(git branch --show-current)")" || LANE=.
-  bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" round "$LANE"
+  bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" round --branch "$(git branch --show-current)"
   ```
+  Branch on **`round_authorized`**: `yes` → run this iteration; `no` → the budget
+  is spent and nothing was charged, so stop the loop here and report it. A
+  `review_budget_exhausted=yes` next to `round_authorized=yes` means "this
+  iteration may run, then stop".
   The in-session counter dies with the session; a resumed worker would otherwise
   restart its budget at zero and loop as long again. The recorded one is the only
   count that survives a `claude -c`. Exit **3** (no mandate, or no work-system) →
@@ -258,8 +253,9 @@ The review wait is a background Bash poll, so the user can interject at any time
 - `gh` not installed or not authenticated → stop with clear error in step 0
 - No uncommitted changes → skip commit, just push + trigger
 - No PR exists → inform user, suggest creating one
-- No `@claude` review bot on the repo → step 7 follows `docs/REVIEW-ROUTING.md`
-  and routes to the local review instead of polling for a review that never comes
+- No `@claude` review bot on the repo → the probe cannot prove that locally, so
+  step 7 follows `docs/REVIEW-ROUTING.md`: it posts the comment, and only a
+  timed-out poll routes to the local review
 - Base branch has new commits → handled by `/rebase` (delegated in step 2)
 - Branch already up-to-date with remote → skip push, just trigger review
 - Review auto-triggered after push → skip manual trigger, go straight to polling

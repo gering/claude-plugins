@@ -48,8 +48,8 @@ user_invocable: true
      the same answer. Local, no network, so it respects this skill's never-block
      rule — and both lines go in ONE Bash call (`docs/REVIEW-ROUTING.md` §0):
      ```sh
-     LANE="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" lane "$(git branch --show-current)")" || LANE=.
-     bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" has-bot "$LANE"
+     bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" has-bot \
+       "$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" lane "$(git branch --show-current)" 2>/dev/null || echo .)"
      ```
      Keep the answer for step 8. `yes` →
      "run `/cycle`"; `no` → "No review bot on this repo — `/swarm:review --pr <N>`

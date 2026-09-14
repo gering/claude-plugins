@@ -178,6 +178,27 @@ path; `yes` needs both `uses: anthropics/claude-code-action` and an
 `plugins/pr-flow/docs/REVIEW-ROUTING.md`, followed by `/open`, `/cycle`,
 `/check` and `/rebase`.
 
+## The shell a skill's snippet runs in is not bash
+
+`/kickoff` built `--without local-review` in a variable and passed it **unquoted**,
+relying on the shell to split it into two argv words. The tool shell is **zsh**,
+which does not word-split unquoted parameters. So `init` got one argv word, hit
+its `unknown flag` arm, and every codex/grok/kimi lane launched with no mandate —
+the feature completely dead for exactly the workers it was built for, shipped in
+a "fix" whose own commit message described fixing the previous version of the
+same line.
+
+Two rules fall out. **Never let a skill snippet depend on word splitting**: if an
+option needs several argv words, the script must assemble them (`--for-agent
+<selector>` now does the registry lookup internally). And **a snippet is code —
+run it in the real shell before shipping it**; three rounds of review read that
+line and only the one that executed it found the bug.
+
+The same call also ignored the lookup's exit status, so an unresolvable selector
+produced an empty flag set and recorded the *wider* mandate. Any capability
+lookup that narrows a grant has to **fail closed**: no answer means no write, not
+a default.
+
 ## A reader rule is half a rule until the writer knows it
 
 The pass that taught the parser to read keys only at column 0 left the *writer*
@@ -197,6 +218,17 @@ miss — have the writer **read its work back** and fail loudly if it is not
 there. `round` now re-parses after `mv`, because reporting a round the file
 never recorded is precisely the failure the persisted counter exists to prevent,
 and it happens silently.
+
+## Booking is not charging
+
+The local-review route booked a round and then read `review_budget_exhausted=yes`
+as "stop" — so on a budget of 1, the one authorized round was charged to a review
+that never ran, and repeat invocations walked the counter past the limit forever.
+One flag was carrying two meanings ("this round may run, no more after" for the
+loop; "you may not run" for the route). `round` now refuses to book past the
+budget and answers `round_authorized=yes|no`, which is the question the caller
+actually has. A counter that can be incremented for an action that does not
+happen is not a budget.
 
 ## The invariant that the fix itself broke
 
@@ -252,6 +284,19 @@ task branch answered a question nobody asked — a branch that adds the workflow
 probed `yes` and polled into the void, one that removes it probed `no`. Anchoring
 on the repo root fixed the *directory*; the ref dimension was never considered
 until a reviewer named it.
+
+## Move the resolution into the script, not the prose
+
+`$LANE` was the recurring wound: two commands, a `|| LANE=.` fallback and a
+`"$LANE"` argument, repeated at ~10 sites, where dropping any one piece silently
+reads the cwd's mandate. Rounds 4, 5 and 6 each found a different site missing a
+different piece — the rule was documented, restated, and still not followed,
+because prose cannot enforce a three-part invariant across ten copies.
+`--branch <name>` ends it: one flag, resolved inside `mandate.sh`, which also
+reports `lane=`/`lane_source=` so a cwd fallback is visible instead of silent.
+The same move fixed the `--without` bug above. **When a rule has to be obeyed at
+N call sites, the fix is an interface that has no way to get it wrong, not a
+clearer sentence.**
 
 ## Shell variables do not survive a tool call
 

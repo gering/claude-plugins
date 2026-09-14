@@ -14,120 +14,145 @@ spec, `/open` and `/cycle` each carried their own copy of the decision; a repo
 with no review bot was sent to `/cycle`, which commented into the void and polled
 for ten minutes, every time.
 
-## 0. `$LANE`, and why every block re-resolves it
+## 0. The lane is a flag, not a variable
 
-Every snippet here takes the **lane** — the worktree holding the PR's branch —
+Every call here concerns the **lane** — the worktree holding the PR's branch —
 because the session cwd is often not that worktree (`/cycle` run from the main
-repo for a task branch). **Shell variables do not survive between Bash tool
-calls.** A skill that sets `LANE` in step 1 and writes `"$LANE"` in step 7 sends
-an *empty* argument, and both scripts then silently resolve the cwd — the exact
-wrong-lane read `lane` was added to prevent, with no error to notice. So every
-block below resolves it **in the same call** that uses it:
+repo for a task branch).
+
+**Pass `--branch "$(git branch --show-current)"`. That is the whole rule.** Both
+scripts resolve the worktree themselves and report which one answered:
 
 ```sh
-LANE="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" lane "$(git branch --show-current)")" || LANE=.
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" allows open-pr --branch "$(git branch --show-current)"
 ```
 
-`lane` exits 3 when no worktree holds the branch (a plain repo with no
-work-system lanes); `|| LANE=.` is the cwd, which is right exactly then. Never
-carry `$LANE` across tool calls, and never drop the argument.
+This replaced a two-line incantation (`LANE="$(… lane …)" || LANE=.`, then a
+`"$LANE"` argument) that appeared at about ten sites. Three consecutive review
+rounds each found a site that had dropped one of the three pieces — and a dropped
+piece is silent: the script falls back to the cwd and answers with a **different
+lane's mandate**, which is the wrong-lane read this mechanism exists to prevent.
+A flag cannot be half-copied.
+
+Every verb that takes `--branch` emits two extra lines:
+
+- `lane=` — the directory that actually answered.
+- `lane_source=branch|cwd` — `cwd` means no worktree holds that branch. That is
+  normal in a plain repo with no lanes, and suspicious anywhere else: on `cwd`,
+  compare the `task=` line (see §2) before acting on the verdict.
+
+A detached HEAD makes `git branch --show-current` empty, which is not an error —
+it resolves to the cwd and says so via `lane_source=cwd`.
 
 ## 1. Probe
 
 ```sh
-LANE="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" lane "$(git branch --show-current)")" || LANE=.
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" has-bot "$LANE"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" has-bot "$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" lane "$(git branch --show-current)" 2>/dev/null || echo .)"
 ```
 
 Anchored on the lane's repo root (a cwd-relative check is wrong from a
-subdirectory, or from the main repo while the PR belongs to a worktree) — hence
-the `"$LANE"` argument, which is not optional. No network. Always emits the same
-four keys — `has_bot=`, `why=`, `workflows_dir=`, `matched=` (empty when not
-applicable) — and exits 0 for every answer.
+subdirectory, or from the main repo while the PR belongs to a worktree). No
+network. Always emits the same four keys — `has_bot=`, `why=`, `workflows_dir=`,
+`matched=` (empty when not applicable) — and exits 0 for every answer.
 
 It reads the **default branch**, not the checkout: GitHub runs an
 `issue_comment` workflow from the default branch, so a task branch that adds one
-would otherwise probe `yes` and poll into the void, and one that removes it would
-probe `no`. `why=` and `workflows_dir=` name the ref actually inspected. It reads
-workflow *structure*: a `uses:` inside a `#` comment or a `run:` block, or a file
-in a subdirectory GitHub never reads, is not a bot.
+would otherwise probe `yes` and poll into the void. `why=` and `workflows_dir=`
+name the ref actually inspected. It reads workflow *structure*: a `uses:` inside
+a `#` comment or a `run:` block, a file in a subdirectory GitHub never reads, a
+branch or input merely *named* `issue_comment` — none of those is a bot.
 
 | `has_bot` | means | consumer does |
 |---|---|---|
-| `yes` | a workflow both `uses:` `anthropics/claude-code-action` **and** is triggered by `issue_comment` — the comment will reach it | trigger (`/cycle`) or recommend `/cycle` |
-| `no` | a claude workflow is there and demonstrably cannot answer a comment (push-triggered only) | do **not** trigger, do **not** recommend `/cycle`; go to §2 |
-| `unknown` | cannot be told locally — see below | relay `why=`, name both routes, **ask**; never pick silently |
+| `yes` | a workflow both `uses:` `anthropics/claude-code-action` **and** is triggered by `issue_comment` as a direct child of `on:` | trigger (`/cycle`) or recommend `/cycle` |
+| `unknown` | cannot be told locally — the normal answer | **depends on the consumer, see below** |
+| `no` | reserved; not emitted today | — |
 
-`unknown` is its own answer, not a soft `no` — and it is the **common** one. A
-local scan can prove a bot is there; it can never prove one is absent, because
-the Claude GitHub App answers `@claude review` with no workflow file of its own
-and unrelated CI in the same directory says nothing about whether it is
-installed. So `no` is reserved for the single case with positive evidence
-(a claude workflow exists and is not comment-triggered); everything else —
-**including "no workflow mentions claude"** — is `unknown`, together with: no
-`.github/workflows` at all, an unreadable directory or file, a comment-triggered
-workflow that mentions `@claude` without using the action or delegates to a
-reusable workflow, and a claude workflow with a custom `trigger_phrase` (which
-`@claude review` may not fire). Guessing `no` permanently reroutes a working bot,
-silently, because `no` is the one answer no consumer asks about; guessing `yes`
-polls for ten minutes.
+### `unknown` is the normal answer, and it is not "ask"
 
-## 2. Local route (only on `has_bot=no`)
+A local scan can prove a bot is there. It can **never** prove one is absent: the
+Claude GitHub App answers `@claude review` with no workflow file of its own, so
+nothing on disk distinguishes "no bot" from "App installed". That makes `unknown`
+the answer for every repo without a comment-triggered claude workflow — including
+a repo whose only claude workflow is `pull_request`-triggered (Anthropic ships
+one), an unreadable directory, a reusable-workflow delegate, and a custom
+`trigger_phrase`. `no` stays in the vocabulary for a future authoritative source
+(an API probe) and is not emitted.
 
-The local review is `/swarm:review --pr <N>` (the swarm plugin). Whether to run
-it *unasked* is a mandate question:
+Because `unknown` is normal, what to do with it **splits by consumer**, and this
+is the split — do not restate it elsewhere:
+
+- **A consumer that TRIGGERS (`/cycle`) does not ask.** It posts `@claude review`
+  and lets its bounded poll settle the question empirically; that is strictly
+  more information than the probe can give. If the poll times out, nothing was
+  listening: say so and fall through to §2 for this round. Asking instead would
+  stop `--loop` on every iteration, since its steps re-run each round.
+- **A recommend-only consumer (`/open`, `/check`, `/rebase`) names both routes**
+  and lets the user pick. It has no poll to learn from.
+
+## 2. Local route
+
+Reached on `has_bot=no` (today: never) and, in practice, from `/cycle`'s
+`unknown` fallback after the poll found nothing listening. The local review is
+`/swarm:review --pr <N>` (the swarm plugin). Whether to run it *unasked* is a
+mandate question:
 
 ```sh
-LANE="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" lane "$(git branch --show-current)")" || LANE=.
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" allows local-review "$LANE"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" allows local-review --branch "$(git branch --show-current)"
 ```
 
 | exit | meaning | consumer does |
 |---|---|---|
-| `0` | the lane's mandate pre-authorized a local review | **book a round** (below), then run `/swarm:review --pr <N>`; say which route was taken and why ("no review bot on this repo — ran the local review, which your mandate covers") |
-| `1` | recorded as out of bounds, or never granted | **offer**, don't run: "No `@claude` review bot is configured on this repo. `/swarm:review --pr <N>` reviews it locally — want me to?" |
+| `0` | the lane's mandate pre-authorized a local review | **book a round** (below), then run `/swarm:review --pr <N>`; say which route was taken and why |
+| `1` | recorded as out of bounds, or never granted | **offer**, don't run: "No `@claude` review answered this PR. `/swarm:review --pr <N>` reviews it locally — want me to?" |
 | `3` | no mandate recorded, or work-system not installed | same as `1` — offer. A missing record is an unasked question, not a refusal |
 | `2` | the record cannot be vouched for, or the question was malformed | show stderr, stop, ask — never read as `1` or `3` |
 
 The authoritative list of what each code covers is `mandate.sh`'s own header —
 **read it there rather than trusting this gloss**, which exists only to say what
-a consumer does. Exit 2 has grown twice already (a git-tracked file, a symlink on
-every verb, a block scalar, an action outside the vocabulary), and every prose
-copy that enumerated causes went stale within a release.
+a consumer does. Exit 2 has grown three times already, and every prose copy that
+enumerated causes went stale within a release.
 
-**Booking the round.** A local review consumes the lane's `review_budget` exactly
-as a bot review does — otherwise the budget bounds nothing on this path and
-`review_rounds_used` stays 0 forever:
+**Check `task=` when `lane_source=cwd`.** The verdict lines carry the record's
+own `task:`. If the lane fell back to the cwd, a leftover `MANDATE.md` from a
+removed worktree can answer for a branch it was never recorded for — compare the
+task before acting, and treat a mismatch as "no mandate" (offer, don't run).
+
+**Booking the round.** An autonomous review consumes the lane's `review_budget`:
 
 ```sh
-LANE="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" lane "$(git branch --show-current)")" || LANE=.
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" round "$LANE"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" round --branch "$(git branch --show-current)"
 ```
 
-Book it **once per review**, and only if your own stage does not already book —
-`/cycle --loop` books each iteration in its Setup, so it must not book again
-here. §3 says which consumer books.
+Branch on **`round_authorized`**, not on the exhaustion flag:
 
-**Then branch on what `round` reported**, exactly as the bot route does:
-`review_budget_exhausted=yes` means the lane has spent its allowance, so **stop
-and ask instead of running the review** — booking a round and reviewing anyway
-lets a spent budget fund one more review every time and walks the counter past
-its own limit. Exit 4 = the round could not be persisted (read-only tree, a lock
-held by another session): say so and do not review on an in-session count.
+- `round_authorized=yes` → the round is yours; run the review. A
+  `review_budget_exhausted=yes` alongside it means "this one may run, no further
+  ones" — finish, then stop.
+- `round_authorized=no` → the budget is spent and **nothing was charged**. Stop
+  and ask; do not review.
+- exit `4` → the round could not be persisted (read-only tree, or a lock another
+  session holds). Say so and do not review on an in-session count. The message
+  names the lock and the command to clear an abandoned one.
 
-swarm not installed → name both gaps plainly (no bot, no local reviewer). Never
-leave the user with a recommendation to run something that cannot work here.
+Book **once per review**, and only if your own stage does not already book — §3
+says which consumer books where.
+
+swarm not installed → name both gaps plainly (no bot answered, no local
+reviewer). Never leave the user with a recommendation to run something that
+cannot work here.
 
 ## 3. What each consumer adds
 
-- **`/cycle` step 7** — on `yes`, posts `@claude review` and polls. On `no` with
-  exit `0`, treats the swarm findings as this round's review (loop mode
-  included: the loop cares about findings, not where they came from).
-  **Books the round** on a plain `/cycle`; under `--loop` it does **not** book
-  here, because Setup already booked this iteration.
+- **`/cycle` step 7** — on `yes` and on `unknown` alike it posts `@claude review`
+  and polls; only a timed-out poll falls through to §2, whose swarm findings are
+  then this round's review (loop mode included: the loop cares about findings,
+  not where they came from). **Booking:** `--loop` books once per iteration in
+  the loop body; a plain `/cycle` books once, before it triggers. Either way the
+  round is booked **once per review**, on whichever route it takes.
 - **`/open` step 10** — never triggers (creation, not triggering, is its job):
-  on `yes` it recommends `/cycle`; on `no` it applies §2 and **books the round**
-  when it actually runs the local review.
+  on `yes` it recommends `/cycle`; on `unknown` it names both routes; it applies
+  §2 and **books the round** only when it actually runs the local review.
 - **`/check`, `/rebase`** — recommend-only skills. Where they would say "run
-  `/cycle`", they run the probe first and recommend per the table; they never
-  run the local review themselves, and therefore **never book a round**.
+  `/cycle`", they run the probe first and recommend per §1; they never run the
+  local review themselves, and therefore **never book a round**.

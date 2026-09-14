@@ -25,10 +25,11 @@
 #         yes      a top-level workflow both `uses:` anthropics/claude-code-action
 #                  AND is triggered by issue_comment, as structure (not in a
 #                  comment or a run: block) — @claude review will reach it
-#         no       a claude workflow IS there and demonstrably cannot answer a
-#                  comment (push-triggered only). This is the only case a local
-#                  scan can turn into a `no`.
-#         unknown  everything else, and it is the COMMON answer: a scan proves
+#         no       reserved, and in practice unreachable: no local signal can
+#                  rule out the GitHub App, which answers comments with no
+#                  workflow file at all. Kept as a verdict for a future
+#                  authoritative source (an API probe), not emitted today.
+#         unknown  everything else, and it is the NORMAL answer: a scan proves
 #                  presence, never absence — the Claude GitHub App answers with
 #                  no workflow file at all, so "no workflow references the bot"
 #                  cannot be told apart from "the App is installed". Also: no
@@ -189,12 +190,22 @@ read -r -d '' HAS_BOT_AWK <<'AWK' || true
   q = tl; gsub(/["]/, "", q); gsub(/\047/, "", q)
   if (q ~ /^on[ \t]*:/) {
     rest = q; sub(/^on[ \t]*:[ \t]*/, "", rest)
-    if (rest ~ /issue_comment/) comment = 1
+    # Flow style: `on: [issue_comment, push]`. Match the TOKEN, not a substring —
+    # `on: {push: {branches: [issue_comment]}}` names a branch, not a trigger.
+    if (rest ~ /^\[/ && rest ~ /(^|[\[, ])issue_comment([],]|[ \t]*$)/) comment = 1
     in_on = (rest ~ /^$/) ? 1 : 0
+    on_ind = -1
   } else if (q ~ /^[^ \t]/) {
     in_on = 0            # any other column-0 key ends the on: block
-  } else if (in_on && q ~ /^[ \t]+-?[ \t]*issue_comment[ \t]*(:.*)?$/) {
-    comment = 1
+  } else if (in_on) {
+    # Only a DIRECT child of `on:` is a trigger. Matching at ANY depth below it
+    # made `push: { branches: [issue_comment] }` and a `workflow_call` input
+    # named issue_comment read as comment triggers, so the caller commented into
+    # the void and polled to the timeout. The first indented line fixes the
+    # child depth; anything deeper belongs to that child, not to `on:`.
+    match(q, /^[ \t]*/); qind = RLENGTH
+    if (on_ind < 0) on_ind = qind
+    if (qind == on_ind && q ~ /^[ \t]*-?[ \t]*issue_comment[ \t]*(:.*)?$/) comment = 1
   }
   if (tl ~ /^[ \t]*trigger_phrase:/) {
     v = tl; sub(/^[ \t]*trigger_phrase:[ \t]*/, "", v)
@@ -209,11 +220,10 @@ AWK
 # from the PR head — so probing the checked-out tree answers a question nobody
 # asked: a task branch that adds the workflow would probe `yes` and poll into
 # the void, one that removes it would probe `no` and reroute a working bot.
-# Empty output = no default branch resolvable (a fresh `git init`, no remote);
-# the caller then falls back to the working tree and says so.
 # Prints "<ref> <how>": the ref to read, and whether it is the repo's actual
-# default branch (`head`) or a guess (`guess`). Empty output = nothing
-# resolvable, and the caller falls back to the working tree.
+# default branch (`head`) or a guess (`guess`). Empty output = no default branch
+# resolvable (a fresh `git init`, no remote), and the caller then falls back to
+# the working tree and says so.
 #
 # Two things this gets right that the first version did not. The remote is the
 # CURRENT BRANCH's upstream remote, not a hardcoded `origin` — a repo tracking
@@ -290,8 +300,11 @@ subcmd_has_bot() {
   fi
   # Top level only: GitHub reads workflows from that directory itself, never
   # from a subdirectory — an archived copy under workflows/old/ is not a bot.
-  # NUL-delimited so a name with spaces, globs or newlines stays one name.
+  # Newline-delimited on BOTH paths (see the ls-tree note above for why NUL
+  # cannot survive the ref path). Spaces and UTF-8 are fine; a name containing a
+  # literal newline is the one case that degrades, and it degrades to `unknown`.
   while IFS= read -r f; do
+    f="${f##*/}"          # the worktree path arrives absolute, the ref name bare
     [[ -n "$f" ]] || continue
     case "$f" in *.yml|*.yaml) ;; *) continue ;; esac
     n_files=$(( n_files + 1 ))
@@ -312,8 +325,7 @@ subcmd_has_bot() {
     fi
   done < <(
     if [[ "$src" = "worktree" ]]; then
-      find "$wf" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 2>/dev/null \
-        | while IFS= read -r -d '' f; do printf '%s\n' "${f##*/}"; done
+      find "$wf" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print 2>/dev/null
     else
       printf '%s\n' "$tree"
     fi
@@ -335,7 +347,12 @@ subcmd_has_bot() {
     emit unknown "a comment-triggered workflow mentions the bot but does not use anthropics/claude-code-action — cannot tell whether @claude review reaches anything" "$loose"; return 0
   fi
   if [[ -n "$pushonly" ]]; then
-    emit no "claude workflow(s) present but none triggered by issue_comment (inspected $src)" "$pushonly"; return 0
+    # NOT `no`. A `pull_request`-triggered claude workflow (Anthropic ships one)
+    # is evidence about that WORKFLOW, not about the GitHub App — a repo can run
+    # both, and `no` is the one verdict no consumer is allowed to question. The
+    # same "a scan proves presence, never absence" rule that governs the
+    # fall-through below governs here.
+    emit unknown "a claude workflow is present but not triggered by issue_comment (inspected $src) — the Claude GitHub App may still answer comments, which cannot be seen locally" "$pushonly"; return 0
   fi
   # NOT `no`. A workflow scan can PROVE a bot (a matching workflow is there) but
   # never disprove one: the Claude GitHub App answers @claude review with no

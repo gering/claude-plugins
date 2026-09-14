@@ -29,20 +29,18 @@ the user already answered, and re-asking is the friction this record exists to
 remove. Resolve the **lane** first, then read the record once, up front:
 
 ```sh
-LANE="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" lane "$(git branch --show-current)")" || LANE=.
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" show "$LANE"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" show --branch "$(git branch --show-current)"
 ```
 
-`LANE` is the worktree that has this branch checked out. The session cwd is not
-always that worktree (a `/open` run from the main repo for a task branch), and a
-cwd-resolved mandate would then be a different lane's — or a stale committed one
-at the main root. `lane` exits 3 when no worktree holds the branch (a plain repo
-without work-system lanes); the `|| LANE=.` fallback is the cwd, which is right
-exactly then. **Pass `"$LANE"` to every `mandate-shim.sh` and
-`claude-review.sh has-bot` call in this skill** — and ⚠️ **re-run the `LANE=`
-line inside each of those Bash calls**: shell state does not survive between
-tool calls, so a `"$LANE"` carried from here expands empty and the script
-silently resolves the cwd instead (`docs/REVIEW-ROUTING.md` §0).
+`--branch` makes the script resolve the worktree holding this branch. The session
+cwd is not always that worktree (a `/open` run from the main repo for a task
+branch), and a cwd-resolved mandate would then be a different lane's — or a stale
+one left at the main root. **Every mandate call in this skill passes the same
+flag**; nothing is carried in a shell variable, because shell state does not
+survive between Bash tool calls (`docs/REVIEW-ROUTING.md` §0). Read `lane=` and
+`lane_source=` from the output: on `lane_source=cwd` no worktree holds the
+branch, so compare the `task=` line against this task before trusting the
+verdict.
 
 Then gate the decisions below on `allows <action> "$LANE"`: exit **0** = proceed
 silently, exit **1** = recorded as out of bounds or unlisted (stop and ask), exit
@@ -148,14 +146,9 @@ user, not that they said no.
        not a judgment call.)
 
    **The mandate gate is not part of that branch — it applies on every path.**
-   Run it once before moving on to step 6, whichever branch above was taken.
-   Resolve the lane **in this same Bash call** — step 3's assignment does not
-   survive to here (`docs/REVIEW-ROUTING.md` §0), and a bare `"$LANE"` would read
-   the cwd's mandate, which on a `/open` run from the main repo is a different
-   lane's record or none at all:
+   Run it once before moving on to step 6, whichever branch above was taken:
    ```sh
-   LANE="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" lane "$(git branch --show-current)")" || LANE=.
-   bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" allows open-pr "$LANE"
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" allows open-pr --branch "$(git branch --show-current)"
    ```
    - exit **0** → proceed (and skip the warning confirmation, as above).
    - exit **1** → the lane's mandate records opening a PR as out of bounds
@@ -235,9 +228,9 @@ user, not that they said no.
       the one copy of the probe → answer → local-route tree that `/cycle`,
       `/check` and `/rebase` follow too. This skill's stage behavior: it never
       triggers (creation, not triggering, is its job) — on `has_bot=yes` it
-      recommends `/cycle`; on `no` it applies the spec's §2 (re-resolving `LANE`
-      in each call, per §0) and books a round there if it actually runs the
-      local review.
+      recommends `/cycle`; on `unknown` (the normal answer) it names both routes
+      and lets the user pick, per §1's consumer split. It books a round only if
+      it actually runs the local review.
 
 11. **Final summary**:
     ```
@@ -269,7 +262,7 @@ user, not that they said no.
 - A check cannot run (tool missing, hangs past the timeout) → mark it ⚠️ skipped in the body, still create the PR — checks run unasked (step 3), so there is no "declined" state
 - Linter/tests hang → timeout 5min, mark as ⚠️ skipped, let user decide
 - Repo uses a non-default base (`develop`, `staging`) → ask user if auto-detected base seems wrong
-- `@claude` bot not installed on repo → step 10 follows `docs/REVIEW-ROUTING.md`. A local scan can only *prove* a bot, so an ordinary repo with no claude workflow probes `unknown` (both routes named, user asked) — `no`, and with it the automatic local route, is reserved for a claude workflow that demonstrably cannot answer a comment
+- `@claude` bot not installed on repo → step 10 follows `docs/REVIEW-ROUTING.md`. A local scan can only *prove* a bot, never rule one out (the GitHub App needs no workflow file), so this probes `unknown` and `/open` names both routes rather than picking
 
 ## Notes
 
