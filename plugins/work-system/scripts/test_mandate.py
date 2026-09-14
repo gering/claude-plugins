@@ -746,6 +746,101 @@ check("neither rule is duplicated",
       (tmpx / ".git" / "info" / "exclude").read_text().count("/.MANDATE.*") == 1
       and (tmpx / ".git" / "info" / "exclude").read_text().count("/MANDATE.md") == 1)
 
+# --- the round rewriter must not promote nested data to a top-level key ------
+# The reader ignores an indented `review_rounds_used:` (nested data); the writer
+# used to rewrite it UNINDENTED, producing a second column-0 key. One normal
+# booking then bricked the lane: every later verb died on "duplicate key".
+nest = make_repo()
+run("init", str(nest), "--preset", "standard", "task=t", "authorized_by=user",
+    "review_budget=2")
+m = nest / "MANDATE.md"
+body = m.read_text().replace("review_rounds_used: 0",
+                             "meta:\n  review_rounds_used: 9\nreview_rounds_used: 0", 1)
+m.write_text(body)
+check("a nested same-named key parses cleanly to begin with",
+      kv(run("show", str(nest)).stdout).get("review_rounds_used") == "0")
+r = run("round", str(nest))
+check("booking a round succeeds with nested data present", r.returncode == 0)
+check("and it reports the real count", kv(r.stdout).get("review_rounds_used") == "1")
+check("the nested line is left where it was",
+      "  review_rounds_used: 9" in m.read_text())
+check("exactly one top-level counter remains",
+      len([l for l in m.read_text().splitlines() if l.startswith("review_rounds_used:")]) == 1)
+check("the record is still readable afterwards",
+      run("allows", "commit", str(nest)).returncode == 0)
+check("a second booking still works",
+      kv(run("round", str(nest)).stdout).get("review_rounds_used") == "2")
+
+# --- init must never write a value its own reader refuses -------------------
+for bad in ("|", ">", "|-", ">2"):
+    r = run("init", str(make_repo()), "--preset", "standard", "task=t",
+            "authorized_by=user", f"scope={bad}")
+    check(f"a bare block-scalar indicator is refused at write time: {bad!r}",
+          r.returncode == 2)
+    check(f"and the refusal explains why: {bad!r}", "block-scalar" in r.stderr)
+ok = make_repo()
+check("a value that merely CONTAINS a pipe is still fine",
+      run("init", str(ok), "--preset", "standard", "task=t", "authorized_by=user",
+          "scope=parser | writer split").returncode == 0)
+check("and reads back intact",
+      kv(run("show", str(ok)).stdout).get("scope") == "parser | writer split")
+
+# --- round is a locked read-modify-write ------------------------------------
+# `lane <branch>` exists so a Manager session can act on a worker's worktree, so
+# one lane really can have two writers: the worker's own review loop and the
+# Manager's /cycle --loop. Unlocked, both read the same count and one booking is
+# lost — a budget of N funding an unbounded number of reviews.
+import concurrent.futures
+conc = make_repo()
+init(conc, "task=conc", "review_budget=20")
+with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+    results = list(pool.map(lambda _: run("round", str(conc)), range(8)))
+check("every concurrent booking succeeded", all(r.returncode == 0 for r in results))
+check("no booking was lost to a race",
+      kv(run("show", str(conc)).stdout).get("review_rounds_used") == "8")
+counts = sorted(kv(r.stdout).get("review_rounds_used") for r in results)
+check("and each caller was told a distinct round number",
+      counts == [str(i) for i in range(1, 9)])
+check("the lock directory is cleaned up",
+      not (conc / ".MANDATE.lock").exists())
+check("a held lock is refused rather than ignored",
+      (conc / ".MANDATE.lock").mkdir() or run("round", str(conc)).returncode == 4)
+check("and the refusal names the lock", ".MANDATE.lock" in run("round", str(conc)).stderr)
+(conc / ".MANDATE.lock").rmdir()
+check("removing the stale lock unblocks the lane",
+      run("round", str(conc)).returncode == 0)
+check("the lock is covered by the git exclude",
+      subprocess.run(["git", "-C", str(conc), "check-ignore", "-q", ".MANDATE.lock"]).returncode == 0)
+
+# --- round verifies what it wrote before reporting it -----------------------
+# A reader/writer desync is silent by construction: the write succeeds, `mv`
+# succeeds, and stdout reports a round the file never recorded — an unbounded
+# budget after the next `claude -c`. Re-reading the file is what makes it loud.
+vr = make_repo()
+init(vr, "task=verify", "review_budget=3")
+before = (vr / "MANDATE.md").read_text()
+r = run("round", str(vr))
+check("a booking that persisted reports success", r.returncode == 0)
+check("and the file really changed", (vr / "MANDATE.md").read_text() != before)
+check("what it reports is what the file says",
+      kv(r.stdout).get("review_rounds_used")
+      == kv(run("show", str(vr)).stdout).get("review_rounds_used"))
+
+# --- allows names the record that answered ----------------------------------
+# It cannot verify the record belongs to this lane (only init knows the expected
+# task), but a caller whose lane resolution fell back to the cwd can at least SEE
+# it is reading a mandate recorded for another task.
+nm = make_repo()
+run("init", str(nm), "--preset", "standard", "task=some-other-lane", "authorized_by=user")
+r = run("allows", "commit", str(nm))
+check("allows reports the recorded task", kv(r.stdout).get("task") == "some-other-lane")
+check("on a denial too",
+      kv(run("allows", "merge", str(nm)).stdout).get("task") == "some-other-lane")
+check("and on an unlisted action",
+      kv(run("allows", "deploy", str(nm)).stdout).get("task") == "some-other-lane")
+check("a missing mandate reports no task to compare",
+      "task=" not in run("allows", "commit", str(make_repo())).stdout)
+
 
 if FAILS:
     print("FAIL:")

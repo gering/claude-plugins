@@ -255,45 +255,53 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     had recorded. Ask, then write down the answer.
 
     Ask **one** question, offering the three presets `mandate.sh` implements.
-    The script is the source of truth — `mandate.sh presets` prints each
-    preset's allow/deny/gate/budget; render the question from that output.
-    The table below is the wording, not the record:
+    **Read the concrete grants out of the script, not out of this file:**
 
-    | preset | pre-authorized | never without new authorization | gate |
-    |--------|----------------|---------------------------------|------|
-    | **standard** (recommended) | commit, push own branch, open PR, review, agreed fixes, rebase own branch | merge, deploy, force-push a shared branch, anything destructive | reviewed PR |
-    | **draft-only** | commit, push own branch | opening a PR, merge, deploy, … (review is not granted either) | pushed branch |
-    | **merge-delegated** | the standard set **plus** merge | deploy, force-push a shared branch, anything destructive | merged |
+    ```sh
+    bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" presets
+    ```
+
+    It prints `preset=`, `allow=`, `deny=`, `terminal_gate=` and `review_budget=`
+    for each. Build the question from that output, so what the user consents to is
+    what `init` will actually write. A hardcoded copy of the lists stood here and
+    is deliberately gone: the user would otherwise agree to a set the script no
+    longer writes, and the worker would then stop to ask about an action the user
+    believes they granted.
+
+    What each preset is *for* — the characterization, which is what the user is
+    really choosing between:
+
+    | preset | what it means |
+    |--------|---------------|
+    | **standard** (recommended) | work autonomously up to a reviewed PR; the merge decision stays human |
+    | **draft-only** | commit and push only; even opening a PR comes back for a decision |
+    | **merge-delegated** | as standard, and the worker may merge as well |
 
     Offer a **review budget** with the same question (the presets record 2 rounds;
     `draft-only` records 0 because it authorizes no review) — the number of
     review→fix rounds the worker may run before it must come back. It is what stops
     a worker from grinding through an unbounded review loop.
 
-    **a) Match the mandate to the worker — BEFORE writing it.** An agent that
-    cannot run the review skills must not be recorded as authorized to run them.
-    Ask the registry, which owns the `supports=` field, for the flags:
+    **a) Match the mandate to the worker.** An agent that cannot run the review
+    skills must not be recorded as authorized to run them. The registry owns the
+    `supports=` field and answers with the flags to pass (`mandate-flags`), which
+    step b calls in the same breath as `init` — the old order wrote the mandate
+    first and then said to "add `--without` to the call above", which had already
+    run, leaving a `local-review` grant for a worker that could never use it.
 
-    ```sh
-    WITHOUT="$(bash "$REG" mandate-flags "$SELECTOR")"
-    ```
-
-    It prints `--without local-review` for a worker whose `supports=` lacks
-    `continue` (codex/grok/kimi), and nothing for one that has it. The mapping
-    lives in the registry, not here: it used to be prose in this step that
+    `mandate-flags` prints `--without local-review` for a worker whose `supports=`
+    lacks `continue` (codex/grok/kimi), and nothing for one that has it. The
+    mapping lives in the registry, not here: it used to be prose in this step that
     `/adopt` reached by cross-reference and could skip, and a second capability
     gap would have meant editing two SKILL.md files instead of one script.
 
-    This runs **before** step b, not after it. The old order wrote the mandate
-    first and then told you to "add `--without` to the call above" — which had
-    already run, and `init` refuses to re-record without `--force`, so the lane
-    kept a `local-review` grant for a worker that could never exercise it.
-
-    **b) Write the mandate.** `<worktree>` is
+    **b) Write the mandate — in the SAME Bash call.** `<worktree>` is
     `<main-repo>/.claude/worktrees/<task-name>` — build it from `<main-repo>`
     (step 1) and the task name, don't carry a relative path forward:
 
     ```sh
+    REG="${CLAUDE_PLUGIN_ROOT}/scripts/agent-registry.sh"
+    WITHOUT="$(bash "$REG" mandate-flags "<selector>")"
     bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" init "<worktree>" \
       --preset <standard|draft-only|merge-delegated> \
       $WITHOUT \
@@ -302,8 +310,14 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
       scope="<one line: what this lane is and is not>"
     ```
 
-    `$WITHOUT` is unquoted on purpose — it is either empty or exactly the two
-    words from step a. When it is non-empty, also set
+    ⚠️ **Both commands go in ONE Bash call**, and `$REG` is re-derived here.
+    Shell state does not survive between tool calls, so a `WITHOUT=` assigned in
+    an earlier call expands to nothing and the flag is silently dropped — the
+    lane then records `local-review` for a worker that has no such skill, and
+    `init` refuses to re-record without `--force`. Same rule as `$LANE` in
+    pr-flow's `docs/REVIEW-ROUTING.md` §0. `$WITHOUT` is unquoted on purpose: it
+    is either empty or exactly the two words `mandate-flags` printed. When it is
+    non-empty, also set
     `scope="… drive to an open PR; review happens outside this lane"`.
 
     The preset owns the allow/deny/terminal-gate/budget quadruple, so the answer
@@ -469,8 +483,10 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     worker, which is still a full CC session — the helper only routes the model)
     resumes via `/work-system:continue` (plugin-qualified, since a CC built-in
     `/continue` shadows the skill); **codex/grok/kimi** have no work-system skills
-    and get the bootstrap prompt instead (read TASK.md + MANDATE.md, start on the
-    first unmet requirement, carry out only the milestones the mandate lists), with
+    and get the bootstrap prompt instead (read TASK.md, start on the first unmet
+    requirement, and ask the recorder — `mandate.sh allows <action>` — before every
+    milestone; reading `MANDATE.md` directly is deliberately forbidden, because a
+    raw read honors a committed, symlinked or malformed record the script refuses), with
     **kimi** launching in two phases because it has no positional launch prompt
     and `-p` cannot be combined with `--auto`. Do **not** execute the `cd`
     yourself — it is for the user's new terminal. If `resolve` exits non-zero

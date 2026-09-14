@@ -215,9 +215,9 @@ Helper absent → one `command -v`, no aggregate entry, no change. Setup + contr
 
 **Non-Claude workers degrade honestly.** codex/grok/kimi have no work-system
 skills, so a launched worker gets a bootstrap prompt instead of `/continue`: read
-`TASK.md` and `MANDATE.md`, start on the first unmet requirement, carry out only
-the milestones the mandate lists (see "Task mandate" below — whether that
-includes opening a PR is the mandate's call, not the prompt's). A `cc-harness:…` worker *runs* as a full CC session —
+`TASK.md`, start on the first unmet requirement, and ask the recorder
+(`mandate.sh allows <action>`) before every milestone (see "Task mandate" below —
+whether that includes opening a PR is the mandate's call, not the prompt's). A `cc-harness:…` worker *runs* as a full CC session —
 skills, lenses and `/close` all work, because the helper only routes the model.
 Everything git/PR-derived (`/status`, `/list`, the `[ws]` statusline, `/close`'s
 tab teardown) works for any worker; only claude-session concepts differ.
@@ -330,7 +330,9 @@ written — a supported answer, not a degraded one.
 no diff in your tree, and it covers every worktree), because a worker told to
 commit as it goes would otherwise commit the authorization record into the PR.
 
-Non-claude workers get the file named in their bootstrap prompt. Whether their
+Non-claude workers are pointed at `mandate.sh`, **not** at the file: a raw read
+would honor a committed, symlinked, duplicate-keyed or block-scalar record and
+miss `deny` beating `allow` — every guard the script owns. Whether their
 mandate keeps `local-review` is read from the registry's `supports=` field, not
 from the CLI's name: an agent that cannot run the review skills gets an allow list
 without it, because recording an authority the worker cannot exercise is worse

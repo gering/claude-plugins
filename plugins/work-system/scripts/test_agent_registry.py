@@ -874,15 +874,36 @@ e.close()
 e = Env()
 for sel in ("codex", "grok", "kimi"):
     out = e.run("resolve", sel).stdout
-    check(f"{sel}: the prompt names mandate.sh", "mandate.sh allows" in out)
+    check(f"{sel}: the prompt names mandate.sh", "mandate.sh' allows" in out)
     check(f"{sel}: it tells the worker NOT to read the file itself",
           "Do NOT read MANDATE.md yourself" in out)
     check(f"{sel}: the four exit codes are spelled out",
           all(t in out for t in ("exit 0", "1 means", "2 means", "3 means")))
-    check(f"{sel}: the path is absolute", "/mandate.sh allows" in out)
+    # A status outside the documented four means the recorder was never reached,
+    # which is not permission — the worker has no other way to check its mandate.
+    check(f"{sel}: an unexpected exit status is not read as permission",
+          "NOT permission" in out)
+    # SHELL-QUOTED, not bare: a checkout under "/Users/me/My Projects/..." handed
+    # the worker `bash /Users/me/My`, exit 127, and it could not check at all.
+    check(f"{sel}: the path is absolute and quoted", "bash '/" in out)
 check("claude gets the skill, not the bootstrap prompt",
       "/work-system:continue" in e.run("resolve", "claude").stdout
-      and "mandate.sh allows" not in e.run("resolve", "claude").stdout)
+      and "mandate.sh' allows" not in e.run("resolve", "claude").stdout)
+
+# A plugin path containing a space must survive into the prompt as ONE word.
+import shutil
+spacey = Path(tempfile.mkdtemp()) / "My Projects" / "scripts"
+spacey.mkdir(parents=True)
+for f in ("agent-registry.sh", "lib-bounded.sh"):
+    src = HERE / f
+    if src.exists():
+        shutil.copy(src, spacey / f)
+out = subprocess.run(["bash", str(spacey / "agent-registry.sh"), "resolve", "codex"],
+                     capture_output=True, text=True).stdout
+check("a plugin path with a space is quoted as one word in the prompt",
+      "bash '" in out and "My Projects/scripts/mandate.sh'" in out)
+check("and it is never handed over bare",
+      "bash /var" not in out and "bash /Users" not in out)
 
 # --- mandate-flags: the capability -> mandate mapping lives in the registry --
 # Recording an authority the worker cannot exercise is worse than recording

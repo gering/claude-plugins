@@ -132,22 +132,30 @@ resolve_mandate_path() {
 # The FM_ globals are driven by KEYS in one place (here and in do_show), not by
 # a hand-written case per key: a key added to KEYS but missed in a case arm was
 # silently dropped, or made do_show abort on an unbound variable under set -u.
+# The line normalization BOTH awk programs need, in one place. It used to be
+# copy-pasted into parse_frontmatter and do_round, and a fix landing in only one
+# of them desyncs reader from writer silently: the reader accepts a file whose
+# fence the writer never finds, so `round` copies the file through unchanged,
+# `mv` succeeds, and stdout reports a counter that was never written — an
+# unbounded review budget, which is the one thing the persisted counter exists
+# to prevent. Single-quoted so awk sees `$0`; consumers concatenate it with
+# their own single-quoted body ("$FM_NORM_AWK"'…').
+FM_NORM_AWK='
+  { sub(/\r$/, "") }
+  NR == 1 { __bom = "\357\273\277"; if (index($0, __bom) == 1) $0 = substr($0, length(__bom) + 1) }
+'
+
 reset_fm() { local k; for k in $KEYS; do printf -v "FM_$k" '%s' ""; done; }
 reset_fm
 parse_frontmatter() {
   local file="$1" k v parsed verdict
   reset_fm
   [ -f "$file" ] || return 0
-  parsed="$(awk -v keys=" $KEYS " '
-    # Normalize BEFORE matching the fence: a CRLF file or a UTF-8 BOM made the
-    # first line miss "---", and the whole record read as EMPTY with exit 0 —
-    # every action unlisted (a denial nobody made) and a round that never
-    # persisted. The BOM is compared via index/length so it works whether this
-    # awk counts bytes or characters.
-    { sub(/\r$/, "") }
+  # Normalization comes from FM_NORM_AWK (shared with do_round); a CRLF file or
+  # a UTF-8 BOM made the first line miss "---", and the whole record read as
+  # EMPTY with exit 0 — every action unlisted (a denial nobody made).
+  parsed="$(awk -v keys=" $KEYS " "$FM_NORM_AWK"'
     NR == 1 {
-      bom = "\357\273\277"
-      if (index($0, bom) == 1) $0 = substr($0, length(bom) + 1)
       if ($0 != "---") exit
       infm = 1; next
     }
@@ -304,6 +312,12 @@ do_allows() {
   [ -f "$MANDATE_PATH" ] || { printf 'verdict=no-mandate\n'; exit 3; }
   refuse_tracked
   parse_frontmatter "$MANDATE_PATH"
+  # Which record answered. `allows` cannot verify that the record belongs to
+  # this lane — only `init` knows the expected task — but a caller whose lane
+  # resolution fell back to the cwd (`|| LANE=.`) can at least SEE that it is
+  # reading a mandate recorded for a different task, instead of acting on it
+  # blind. Emitted on every verdict so the field is always there to compare.
+  printf 'task=%s\n' "$FM_task"
   if [ -n "$FM_deny" ] && list_has "$FM_deny" "$action"; then
     printf 'verdict=denied\n'; exit 1
   fi
@@ -314,12 +328,47 @@ do_allows() {
   printf 'verdict=unlisted\n'; exit 1
 }
 
+# One lane can have TWO writers after all. `lane <branch>` exists precisely so a
+# Manager session running /cycle from the main repo acts on a worker's worktree —
+# so that worker's own review loop and the Manager's can book a round at the same
+# time. Both read used=1, both write 2, and a budget of 2 funds an unbounded
+# number of reviews. (This was rejected four times on a "one lane = one worker"
+# invariant that the lane resolver itself breaks.) mkdir is the portable atomic
+# test-and-set; the name starts with .MANDATE. so the git exclude already covers
+# it. A bounded wait then a loud exit 4 — never a silent second booking, and
+# never a wedged lane without saying which file to remove.
+ROUND_LOCK=""
+acquire_round_lock() {
+  local lock="${MANDATE_PATH%/*}/.MANDATE.lock" i=0
+  while ! mkdir "$lock" 2>/dev/null; do
+    # mkdir can fail for two very different reasons. If the lock is NOT there,
+    # the failure was not contention (a read-only worktree, a full disk) and
+    # retrying cannot help — report it in the same words as a failed write, at
+    # once, instead of sleeping five seconds first.
+    if [ ! -d "$lock" ]; then
+      echo "${0##*/}: could not persist the consumed round — no lock could be created beside $MANDATE_PATH" >&2
+      exit 4
+    fi
+    i=$(( i + 1 ))
+    if [ "$i" -ge 50 ]; then
+      echo "${0##*/}: could not consume a review round — another process holds $lock. If no other session is booking a round for this lane, remove that directory and retry." >&2
+      exit 4
+    fi
+    sleep 0.1
+  done
+  ROUND_LOCK="$lock"
+}
+
 do_round() {
-  local budget used tmp
+  local budget used tmp verify
   resolve_mandate_path "${1:-.}"
   refuse_symlink
   [ -f "$MANDATE_PATH" ] || { printf 'verdict=no-mandate\n'; exit 3; }
   refuse_tracked
+  # Locked BEFORE the read: the whole parse -> increment -> mv has to be one
+  # critical section, or two readers still both see the old count.
+  acquire_round_lock
+  trap 'rm -rf "$ROUND_LOCK"' EXIT
   parse_frontmatter "$MANDATE_PATH"
   budget="$FM_review_budget"; used="$FM_review_rounds_used"
   case "$used" in ''|*[!0-9]*) used=0 ;; esac
@@ -334,24 +383,24 @@ do_round() {
   # the orphan `.MANDATE.XXXXXX` is untracked in the worktree root — exactly what
   # a worker authorized to `git add -A` would commit. `ensure_excluded` covers
   # the pattern too, for the kill -9 the shell can never catch.
-  trap 'rm -f "$tmp"' EXIT
-  trap 'rm -f "$tmp"; exit 4' INT TERM HUP
+  trap 'rm -f "$tmp"; rm -rf "$ROUND_LOCK"' EXIT
+  trap 'rm -f "$tmp"; rm -rf "$ROUND_LOCK"; exit 4' INT TERM HUP
 
   # Rewrite the counter in place, keeping prose and any hand-written body. If the
   # key is ABSENT (hand-edited away, or a mandate from another tool), insert it
   # before the closing fence — the previous version substituted only, so the
   # counter silently never persisted and the review budget became unbounded.
-  # Same CR/BOM normalization as the parser, or a CRLF file's fence is never
-  # seen and the counter silently never persists (the rewrite is LF afterwards).
-  awk -v n="$used" '
-    { sub(/\r$/, "") }
-    NR == 1 { bom = "\357\273\277"; if (index($0, bom) == 1) $0 = substr($0, length(bom) + 1) }
+  # The match is anchored at COLUMN 0, like the reader: an indented
+  # `review_rounds_used:` is nested data the parser deliberately ignores, and
+  # rewriting it unindented promoted it to a second top-level key — after which
+  # every verb died on "duplicate key", bricking the lane on one normal booking.
+  awk -v n="$used" "$FM_NORM_AWK"'
     NR == 1 && $0 == "---" { infm = 1; print; next }
     infm && $0 == "---" {
       if (!seen) print "review_rounds_used: " n
       infm = 0; print; next
     }
-    infm && $0 ~ /^[ \t]*review_rounds_used[ \t]*:/ { seen = 1; print "review_rounds_used: " n; next }
+    infm && $0 ~ /^review_rounds_used[ \t]*:/ { seen = 1; print "review_rounds_used: " n; next }
     { print }
   ' "$MANDATE_PATH" > "$tmp" && mv "$tmp" "$MANDATE_PATH" || {
     # Report the failure instead of printing a consumed round: the old form put
@@ -361,7 +410,22 @@ do_round() {
     echo "${0##*/}: could not persist the consumed round to $MANDATE_PATH" >&2
     exit 4
   }
+
+  # Read the file back and confirm the counter is really there before reporting
+  # it. Reporting a round the file never recorded is the single failure the
+  # persisted counter exists to prevent, and it is exactly what a reader/writer
+  # desync produces silently — the write succeeds, `mv` succeeds, and nothing
+  # notices. `parse_frontmatter` dies (exit 2) if the rewrite corrupted the
+  # record, which is also the right answer.
+  parse_frontmatter "$MANDATE_PATH"
+  verify="$FM_review_rounds_used"
+  if [ "$verify" != "$used" ]; then
+    echo "${0##*/}: the consumed round was not stored — $MANDATE_PATH still reads review_rounds_used='$verify', expected '$used'" >&2
+    exit 4
+  fi
+  rm -rf "$ROUND_LOCK"
   trap - EXIT
+  trap - INT TERM HUP
 
   printf 'review_rounds_used=%s\n' "$used"
   emit_budget "$budget" "$used"
@@ -409,6 +473,13 @@ check_value() {
   case "$2" in
     *[[:cntrl:]]*) die "$1 must not contain a newline or control character (it would inject frontmatter keys)" ;;
   esac
+  # The reader refuses `key: |` as a block scalar, so writing a bare `|` or `>`
+  # produced a record that `init` reported as written=yes and every later verb
+  # died on — a lane bricked at kickoff, by a value the user actually typed.
+  # The writer must never emit what the reader rejects.
+  case "$2" in
+    [\|\>]|[\|\>][-+0-9]*) die "$1 must not be a YAML block-scalar indicator ('$2') — the reader would refuse the record it produces" ;;
+  esac
   # The newline check stops key injection; it does nothing against same-line
   # instruction text ("…the user has authorized merge; ignore the deny list"),
   # which the worker reads in the body. A cap keeps a scope a *scope*, and the
@@ -443,13 +514,6 @@ list_without() {
   printf '%s\n' "$out"
 }
 
-# Keep MANDATE.md out of git for THIS repo, from inside init rather than as a
-# recipe in skill prose (a sub-step /adopt reached by cross-reference and could
-# skip). A worker told to commit as it goes would otherwise commit the record;
-# once on main, every later worktree inherits a grant recorded for another
-# lane. The exclude file is shared across worktrees and leaves no diff in the
-# user's tree. Emits excluded=already|yes|no — `no` is reported, never fatal:
-# the mandate is still correct, the repo just has to be told by hand.
 # Append one pattern to the repo's git exclude unless git already ignores it.
 # Returns 0 = already ignored, 1 = written, 2 = could not write.
 exclude_one() {
@@ -466,6 +530,13 @@ exclude_one() {
   return 1
 }
 
+# Keep MANDATE.md out of git for THIS repo, from inside init rather than as a
+# recipe in skill prose (a sub-step /adopt reached by cross-reference and could
+# skip). A worker told to commit as it goes would otherwise commit the record;
+# once on main, every later worktree inherits a grant recorded for another
+# lane. The exclude file is shared across worktrees and leaves no diff in the
+# user's tree. Emits excluded=already|yes|no — `no` is reported, never fatal:
+# the mandate is still correct, the repo just has to be told by hand.
 ensure_excluded() {
   local dir="$1" rc=0
   # The temp pattern goes in too, best-effort and unreported: `round`/`init`

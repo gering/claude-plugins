@@ -7,6 +7,10 @@
 # launch helper never hardcode a CLI list or an alias `if` chain.
 #
 # Subcommands:
+#   mandate-flags <selector>      The `--without` flags /kickoff must pass to
+#                                 mandate.sh for this agent, derived from its
+#                                 `supports=` field (empty for a full-capability
+#                                 worker). Exit 2 unknown selector, 3 unresolvable.
 #   list [--json|--tsv]           Probe every entry -> human table (display only),
 #                                 JSON array, or raw TSV. Columns are the same
 #                                 five everywhere: name, cli, model, available,
@@ -46,9 +50,12 @@
 #              is the helper, so this entry is pane-run/kind=claude, never
 #              agent-start — see the transport note below.)
 #   The bootstrap prompt (codex/grok/kimi have no work-system skills) tells the
-#   agent to read TASK.md and MANDATE.md and carry out only the milestones the
-#   mandate lists — whether that reaches a PR is the mandate's call, not the
-#   prompt's. `supports=` metadata records which lifecycle hooks each agent
+#   agent to read TASK.md and to ask the RECORDER — `mandate.sh allows <action>` —
+#   before every milestone. It deliberately forbids reading MANDATE.md directly:
+#   a raw read honors a committed, symlinked, duplicate-keyed or block-scalar
+#   record and ignores `deny` beating `allow`, i.e. every guard the script owns.
+#   Whether the work reaches a PR is the mandate's call, not the prompt's.
+#   `supports=` metadata records which lifecycle hooks each agent
 #   honors, so /close, /continue and the mandate's allow list can degrade for
 #   non-claude workers instead of faking claude-only behavior.
 #
@@ -170,7 +177,14 @@ HARNESS_HERDR_KIND="claude"
 # just told the worker to obey, so a draft-only lane opened a PR anyway. The
 # milestones live in the record; this prompt only points at the way to read it.
 bootstrap_prompt() {
-  printf '%s' "Read TASK.md in this worktree, then start on the first unmet requirement. Do NOT read MANDATE.md yourself -- that file counts as authorization only when the recorder accepts it. Ask the recorder before every milestone: bash $SCRIPT_DIR/mandate.sh allows <action> -- exit 0 means go ahead, 1 means it is recorded as out of bounds (stop and ask), 2 means the record cannot be read or does not belong to this lane (stop, show the error, ask), 3 means nothing was pre-authorized (ask before each milestone). Run bash $SCRIPT_DIR/mandate.sh actions for the action vocabulary and bash $SCRIPT_DIR/mandate.sh show for what is on record, including the terminal gate to stop at. Carry out only what allows approves, and ask before anything else."
+  # The path is SHELL-QUOTED into the prompt. Unquoted, a checkout under
+  # "/Users/me/My Projects/..." handed the worker `bash /Users/me/My` -> exit 127,
+  # a status the prompt does not define; and since the same prompt forbids reading
+  # MANDATE.md, the worker had no way left to check its mandate at all. Hence also
+  # the closing rule: any status outside 0/1/2/3 means the question was never
+  # answered, which is not permission.
+  local q="${SCRIPT_DIR//\'/\'\\\'\'}"
+  printf '%s' "Read TASK.md in this worktree, then start on the first unmet requirement. Do NOT read MANDATE.md yourself -- that file counts as authorization only when the recorder accepts it. Ask the recorder before every milestone: bash '$q/mandate.sh' allows <action> -- exit 0 means go ahead, 1 means it is recorded as out of bounds (stop and ask), 2 means the record cannot be read or does not belong to this lane (stop, show the error, ask), 3 means nothing was pre-authorized (ask before each milestone). Any other exit status means the recorder could not be reached, which is NOT permission: stop and ask. Run bash '$q/mandate.sh' actions for the action vocabulary and bash '$q/mandate.sh' show for what is on record, including the terminal gate to stop at. Carry out only what allows approves, and ask before anything else."
 }
 
 # The capability -> mandate mapping, owned by the registry that owns `supports=`
