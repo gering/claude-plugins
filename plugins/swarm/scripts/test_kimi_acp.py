@@ -93,6 +93,8 @@ for raw in sys.stdin:
     method = message.get("method")
     request_id = message.get("id")
     params = message.get("params", {})
+    if scenario == "tools-event" and method == os.environ.get("FAKE_TOOL_STAGE", "session/prompt"):
+        emit(json.loads(os.environ["FAKE_TOOL_EVENT"]))
     if method == "initialize":
         response(request_id, {"protocolVersion": 1})
     elif method == "session/new":
@@ -104,7 +106,36 @@ for raw in sys.stdin:
         response(request_id, {"configOptions": config_options()})
     elif method == "session/prompt":
         log({"prompt": params["prompt"], "state": state.copy()})
-        if scenario == "permission":
+        if scenario == "many-tools":
+            for index in range(12):
+                emit(tool_update("tool_call", f"read-{index}", "read", "completed"))
+        elif scenario in {"metrics-mixed", "metrics-mixed-error"}:
+            emit(tool_update("tool_call", "m1", "read", "pending"))
+            for tool_id in ("m1", "m2", "permission-only"):
+                emit({"jsonrpc": "2.0", "id": 799, "method": "session/request_permission",
+                      "params": {"sessionId": "fake-session", "toolCall": {"toolCallId": tool_id},
+                                 "options": []}})
+                log({"permission_response": json.loads(sys.stdin.readline())})
+                metrics_path = os.environ.get("FAKE_METRICS")
+                if metrics_path:
+                    with open(metrics_path, encoding="utf-8") as handle:
+                        log({"metrics_progress": json.load(handle)})
+            # Permission-first m2 and notification-only m3, with repeated
+            # announcements/status snapshots: updates never inflate attempts.
+            for tool_id in ("m1", "m2", "m3", "m3"):
+                emit(tool_update("tool_call", tool_id, "read", "pending"))
+                emit(tool_update("tool_call_update", tool_id, None, "in_progress"))
+                emit(tool_update("tool_call_update", tool_id, None, "completed"))
+            if scenario == "metrics-mixed-error":
+                response_error(request_id, -32000, "fake failure after tools")
+                continue
+        elif scenario == "metrics-invalid-permission-id":
+            emit({"jsonrpc": "2.0", "id": 799, "method": "session/request_permission",
+                  "params": {"sessionId": "fake-session", "toolCall": {}, "options": []}})
+            log({"permission_response": json.loads(sys.stdin.readline())})
+        elif scenario == "metrics-invalid-notification-id":
+            emit(tool_update("tool_call", ["not-a-string"], "read", "pending"))
+        elif scenario == "permission":
             emit(tool_update("tool_call", "tool-1", "execute", "pending"))
             emit({
                 "jsonrpc": "2.0",
@@ -352,6 +383,10 @@ for raw in sys.stdin:
                         },
                     },
                 })
+        if scenario == "tools-event" and os.environ.get("FAKE_TOOL_STAGE") == "before-final":
+            # Even a fully buffered valid empty findings object cannot hide a
+            # tool event emitted immediately before the final RPC response.
+            emit(json.loads(os.environ["FAKE_TOOL_EVENT"]))
         response(request_id, {"stopReason": "end_turn"})
         log({"prompt_done": True})
     else:
@@ -365,7 +400,8 @@ for raw in sys.stdin:
 class KimiAcpTests(unittest.TestCase):
     def run_helper(self, scenario: str = "valid", *, schema: Path = SCHEMA,
                    env_extra: dict | None = None, prompt_bytes: bytes | None = None,
-                   effort: str = "max", make_symlink: bool = False):
+                   effort: str = "max", make_symlink: bool = False,
+                   metrics_file: Path | None = None, tools: str | None = None):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
@@ -391,6 +427,8 @@ class KimiAcpTests(unittest.TestCase):
         })
         if env_extra:
             env.update(env_extra)
+        if metrics_file is not None:
+            env["FAKE_METRICS"] = str(metrics_file)
         result = subprocess.run(
             [
                 sys.executable,
@@ -402,7 +440,8 @@ class KimiAcpTests(unittest.TestCase):
                 "--effort", effort,
                 "--kimi-bin", str(fake),
                 "--deny-path", str(root / ".kimi-code"),
-            ],
+            ] + (["--metrics-file", str(metrics_file)] if metrics_file is not None else [])
+              + (["--tools", tools] if tools is not None else []),
             capture_output=True,
             text=True,
             env=env,
@@ -412,6 +451,228 @@ class KimiAcpTests(unittest.TestCase):
         if log.exists():
             records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
         return result, records
+
+    def run_measured(self, scenario="valid", **kwargs):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        path = Path(temp.name) / "metrics.json"
+        result, records = self.run_helper(scenario, metrics_file=path, **kwargs)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(set(payload), {"tool_calls", "complete"})
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(list(path.parent.iterdir()), [path], "temporary sidecar leaked")
+        return result, records, payload
+
+    def test_metrics_deduplicate_mixed_events_and_preserve_stdout(self):
+        plain, _ = self.run_helper("metrics-mixed")
+        result, records, metrics = self.run_measured("metrics-mixed")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(metrics, {"tool_calls": 4, "complete": True})
+        self.assertEqual(result.stdout, plain.stdout)
+        self.assertEqual(result.stdout, '{"findings":[]}\n')
+        self.assertEqual(result.stderr, plain.stderr)
+        self.assertEqual([r["metrics_progress"] for r in records if "metrics_progress" in r], [
+            {"tool_calls": 1, "complete": False},
+            {"tool_calls": 2, "complete": False},
+            {"tool_calls": 3, "complete": False},
+        ])
+
+    def test_metrics_zero_is_measured_not_missing(self):
+        result, _, metrics = self.run_measured()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(metrics, {"tool_calls": 0, "complete": True})
+
+    def test_metrics_keep_partial_attempts_on_failures(self):
+        for scenario, count, rc in (("metrics-mixed-error", 4, 10),
+                                    ("unsafe-in-progress", 1, 13),
+                                    ("orphan-completed-update", 1, 13),
+                                    ("exec-rewrite", 1, 13),
+                                    ("read-credentials", 1, 13)):
+            with self.subTest(scenario=scenario):
+                result, _, metrics = self.run_measured(scenario)
+                self.assertEqual(result.returncode, rc, result.stderr)
+                self.assertEqual(metrics, {"tool_calls": count, "complete": False})
+                self.assertEqual(result.stdout, "")
+
+    def test_metrics_count_rejected_and_streamed_attempts_once(self):
+        for scenario in ("permission", "exec-snapshots", "exec-permission"):
+            with self.subTest(scenario=scenario):
+                result, _, metrics = self.run_measured(scenario)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(metrics, {"tool_calls": 1, "complete": True})
+
+    def test_metrics_invalid_ids_are_unknown_not_zero(self):
+        for scenario, rc in (("metrics-invalid-permission-id", 0),
+                             ("metrics-invalid-notification-id", 13)):
+            with self.subTest(scenario=scenario):
+                result, _, metrics = self.run_measured(scenario)
+                self.assertEqual(result.returncode, rc, result.stderr)
+                self.assertEqual(metrics, {"tool_calls": None, "complete": False})
+
+    def test_metrics_survive_response_schema_rejection(self):
+        result, _, metrics = self.run_measured("wrong-shape")
+        self.assertEqual(result.returncode, 11)
+        self.assertEqual(metrics, {"tool_calls": 0, "complete": True})
+        self.assertEqual(result.stdout, "")
+
+    def test_metrics_before_prompt_are_unknown(self):
+        result, _, metrics = self.run_measured("model-missing")
+        self.assertEqual(result.returncode, 12)
+        self.assertEqual(metrics, {"tool_calls": None, "complete": False})
+        with tempfile.TemporaryDirectory() as td:
+            schema = Path(td) / "schema.json"
+            schema.write_text('{"type":"object","patternProperties":{}}')
+            result, records, metrics = self.run_measured(schema=schema)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(records, [])
+        self.assertEqual(metrics, {"tool_calls": None, "complete": False})
+
+    def test_metrics_write_failure_does_not_change_findings(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            target = root / "existing.txt"
+            target.write_text("must remain unchanged")
+            link = root / "metrics.json"
+            link.symlink_to(target)
+            for path in (link, root / "missing" / "metrics.json"):
+                with self.subTest(path=path):
+                    result, _ = self.run_helper(metrics_file=path)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, '{"findings":[]}\n')
+                    self.assertEqual(result.stderr.count("metrics unavailable"), 1)
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(target.read_text(), "must remain unchanged")
+
+    @staticmethod
+    def tool_event(update_type="tool_call", tool_id="no-tools-1", kind="read", status="pending"):
+        return {"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "fake-session", "update": {
+                "sessionUpdate": update_type, "toolCallId": tool_id, "kind": kind, "status": status,
+            },
+        }}
+
+    def assert_tools_event_rejected(self, event, *, stage="session/prompt", count=1):
+        result, _, metrics = self.run_measured("tools-event", tools="false", env_extra={
+            "FAKE_TOOL_EVENT": json.dumps(event), "FAKE_TOOL_STAGE": stage,
+        })
+        expected_rc = 13 if stage in {"session/prompt", "before-final"} else 12
+        self.assertEqual(result.returncode, expected_rc, result.stderr)
+        self.assertIn("tool use is disabled (--tools false)", result.stderr)
+        self.assertEqual(result.stdout, "", "empty valid final findings hid a tool violation")
+        self.assertEqual(metrics, {"tool_calls": count, "complete": False})
+
+    def test_no_tools_rejects_every_kind_status_and_update(self):
+        # No safe kind, pending/failed status or update-only orphan exemption.
+        for update_type in ("tool_call", "tool_call_update"):
+            for kind in ("read", "search", "fetch", "think", "execute", "edit", "teleport", None):
+                for status in ("pending", "in_progress", "completed", "failed", "cancelled", None):
+                    with self.subTest(update_type=update_type, kind=kind, status=status):
+                        self.assert_tools_event_rejected(self.tool_event(update_type, kind=kind, status=status))
+
+    def test_no_tools_rejects_malformed_events_without_claiming_zero(self):
+        for update_type in ("tool_call", "tool_call_update"):
+            for tool_id in (None, "", "  ", 1, [], {}):
+                with self.subTest(update_type=update_type, tool_id=tool_id):
+                    self.assert_tools_event_rejected(self.tool_event(update_type, tool_id=tool_id), count=None)
+        for params in (None, [], {}, {"update": None}, {"update": []}, {"update": {}},
+                       {"update": {"sessionUpdate": []}}):
+            with self.subTest(params=params):
+                self.assert_tools_event_rejected(
+                    {"jsonrpc": "2.0", "method": "session/update", "params": params}, count=None)
+
+    def test_no_tools_rejects_permission_only_even_allowlisted_shell(self):
+        for kind in ("read", "execute", None):
+            for options in ([], [{"kind": "allow_once", "optionId": "allow"}],
+                            [{"kind": "reject_once", "optionId": "reject"}],
+                            [{"kind": [], "optionId": "bad"}], {"malformed": True}):
+                event = {"jsonrpc": "2.0", "id": 800, "method": "session/request_permission", "params": {
+                    "sessionId": "fake-session", "options": options,
+                    "toolCall": {"toolCallId": "permission-only", "kind": kind,
+                                 "rawInput": {"command": "git log -1"}},
+                }}
+                with self.subTest(kind=kind, options=options):
+                    self.assert_tools_event_rejected(event)
+        for params in (None, [], {}, {"toolCall": []}, {"toolCall": {"toolCallId": []}}):
+            with self.subTest(params=params):
+                self.assert_tools_event_rejected({"jsonrpc": "2.0", "id": 800,
+                    "method": "session/request_permission", "params": params}, count=None)
+
+    def test_no_tools_rejects_tool_events_with_wrong_rpc_envelopes(self):
+        notification_with_id = dict(self.tool_event(), id=800)
+        permission_without_id = {"jsonrpc": "2.0", "method": "session/request_permission",
+                                 "params": {"toolCall": {"toolCallId": "p"}}}
+        for event in (notification_with_id, permission_without_id):
+            with self.subTest(event=event):
+                self.assert_tools_event_rejected(event)
+
+    def test_no_tools_applies_before_collect_output_and_before_final_response(self):
+        events = [self.tool_event(), self.tool_event("tool_call_update"), {
+            "jsonrpc": "2.0", "id": 800, "method": "session/request_permission",
+            "params": {"toolCall": {"toolCallId": "early-permission"}, "options": []},
+        }]
+        for stage in ("initialize", "session/new", "session/set_config_option", "before-final"):
+            for event in events:
+                with self.subTest(stage=stage, event=event):
+                    self.assert_tools_event_rejected(event, stage=stage)
+
+    def test_no_tools_sends_rejection_and_ignores_previous_approval_exemptions(self):
+        # Capture the client's writes directly: an immediately killed fake peer
+        # need not get CPU time to log the rejection even though it was flushed.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("kimi_acp_no_tools", HELPER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for options, outcome in (([{"kind": "reject_once", "optionId": "reject"}],
+                                  {"outcome": "selected", "optionId": "reject"}),
+                                 ([{"kind": "allow_once", "optionId": "allow"}],
+                                  {"outcome": "cancelled"})):
+            client = module.AcpClient("unused", tools=False)
+            sent = []
+            client._send = sent.append
+            with self.assertRaises(module.ProtocolError):
+                client._handle_server_request({"id": 800, "method": "session/request_permission", "params": {
+                    "options": options, "toolCall": {"toolCallId": "p", "kind": "execute",
+                                                     "rawInput": {"command": "git log -1"}},
+                }})
+            self.assertEqual(sent, [{"jsonrpc": "2.0", "id": 800, "result": {"outcome": outcome}}])
+            self.assertEqual(client.metrics.ids, {"p"})
+        for exemption in ("allowed_exec_ids", "rejected_tool_ids"):
+            client = module.AcpClient("unused", tools=False)
+            getattr(client, exemption).add("no-tools-1")
+            with self.assertRaises(module.ProtocolError):
+                client._handle_notification(self.tool_event("tool_call_update", kind="execute", status="failed"))
+            self.assertEqual(client.metrics.ids, {"no-tools-1"})
+
+    def test_no_tools_accepts_tool_free_output_without_server_mode_changes(self):
+        plain, plain_records = self.run_helper()
+        result, records, metrics = self.run_measured(tools="false")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, plain.stdout)
+        self.assertEqual(metrics, {"tool_calls": 0, "complete": True})
+        self.assertEqual(records[0]["argv"], ["acp"])
+        # Only the same model/thinking/default-mode configuration is sent.
+        self.assertEqual([r["set"] for r in records if "set" in r],
+                         [r["set"] for r in plain_records if "set" in r])
+
+    def test_tools_true_preserves_default_policy_and_has_no_positive_budget_cap(self):
+        for scenario in ("exec-snapshots", "exec-permission", "permission", "many-tools"):
+            with self.subTest(scenario=scenario):
+                plain, _ = self.run_helper(scenario)
+                result, _, metrics = self.run_measured(scenario, tools="true")
+                self.assertEqual(result.returncode, plain.returncode)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, plain.stdout)
+                self.assertEqual(metrics, {"tool_calls": 12 if scenario == "many-tools" else 1,
+                                           "complete": True})
+
+    def test_tools_cli_values_are_strict(self):
+        for value in ("False", "0", "1", "yes", "", "TRUE"):
+            with self.subTest(value=value):
+                result, records = self.run_helper(tools=value)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("invalid choice", result.stderr)
+                self.assertEqual(records, [])
+                self.assertEqual(result.stdout, "")
 
     def test_valid_prompt_is_out_of_band_and_configured(self):
         result, records = self.run_helper()

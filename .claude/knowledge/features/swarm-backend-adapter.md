@@ -1,9 +1,9 @@
 ---
 title: "Swarm Backend Adapter Layer"
 createdAt: 2026-07-03
-updatedAt: 2026-09-21
+updatedAt: 2026-09-22
 createdFrom: "PR #21"
-updatedFrom: "auto-select-latest-grok"
+updatedFrom: "auto-select-latest-grok + add-swarm-review-profiles"
 pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
@@ -146,6 +146,31 @@ agent read the diff file itself was considered there and REJECTED — delivery
 stops being verifiable, the untrusted diff arrives outside the nonce fence, and
 each voice pays an extra round-trip.
 
+## Profile tool policy and measurements
+
+The capability descriptions below apply to tool-enabled calls. Profiles now
+supply explicit tools/budget arguments; quick Kimi requests supplied-diff-only
+review, while Kimi stays opt-in on every profile. Positive budgets are advisory
+prompt instructions, not turn-limit truncation. The actual policy contracts are
+`_tool_budget_contract` and `_kimi_output_contract` in `scripts/agents.sh`.
+Kimi's prompt schema is compacted without deleting validation constraints or
+instance properties; the caller's original schema still validates the response.
+
+The optional ACP metrics sidecar contains observations only: distinct tool IDs
+across permission requests/updates, plus completeness. `agents.sh` imports it
+before scratch cleanup into `tool_calls` / `tool_calls_complete`. Unknown is
+not zero and an interrupted stream may only have a partial count. Prompt bytes
+and observed calls do not measure billing or prove a provider retransmission
+multiplier. The live comparison was blocked before execution; see
+`plugins/swarm/docs/profile-measurements.md` for measured contract bytes and
+pending validation, rather than claiming token savings.
+
+No server-side all-tools-off contract was established for the installed Kimi
+ACP implementation; its plan-mode label is not such a guarantee. The quick
+policy therefore rejects the session on observed tool use. As with the existing
+ACP security gate, notification-time detection does not establish that an
+auto-approved server-side tool never executed; the OS jail remains necessary.
+
 ## Kimi ACP contract (swarm 0.11.0; kimi-code 0.41.0; first wired on 0.32.0)
 
 Kimi is the schema-asymmetric backend: the CLI has no structured-output flag.
@@ -232,8 +257,10 @@ read+web Kimi can open. The jail (`_read_web_safe`) is part of Kimi's
 `ready_check`, and so is the **opt-in** (`SWARM_KIMI=1`, exactly `1`; the
 skill's `--kimi` exports it for one run and the workflow carries it onto the
 transport command): even limited to two clusters at `low`, Kimi drained the
-entry plan's 5-hour window in one review, because every ACP tool round-trip
-re-sends the whole ~370 KiB cluster context. The gate comes first in the arm so
+entry plan's 5-hour window in a historical review. Context amplification from
+tool loops was the working explanation, not a measured billing multiplier;
+ACP byte/call observations cannot establish provider caching or quota usage.
+The gate comes first in the arm so
 a stock `list` spends no probe on it. So `list --json` never advertises a Kimi the clusters would
 refuse. ACP is defense-in-depth:
 the client advertises neither filesystem-write nor terminal capability,
@@ -472,13 +499,24 @@ backend rc null.
   ACP `thinking` `low|high|max` (the `kimi-for-coding` models only `on`) → the
   adapter maps `medium`→`low`, `xhigh`→`high`. All mappings degrade a stale
   caller instead of erroring.
-- **codex model is pinned** to `CODEX_DEFAULT_MODEL` (`gpt-5.6-sol` since 0.11.0,
-  `gpt-5.6-terra` before; the adapter passes `-m` on every call), overridable per
-  call via `--model` — so a review is reproducible instead of tracking the user's
-  ambient `~/.codex/config` default. The pipeline runs codex at `medium` normally
-  and `xhigh` under `--max` — the model is the adapter's on both profiles, only
-  the effort is a profile knob — see
-  [swarm-review-pipeline](swarm-review-pipeline.md).
+- **Codex model ownership moved to profiles:** the pipeline passes `--model`
+  explicitly from the central workflow map in every profile. `CODEX_DEFAULT_MODEL`
+  remains only the direct-adapter fallback, not a second workflow default.
+  Prep's `list --json --codex-model` and execution read the same staged map;
+  see [swarm-review-pipeline](swarm-review-pipeline.md).
+- **Codex's picker catalog is not an access oracle.** Version-pinned upstream
+  research for CLI 0.153.4 found that `model/list` swallows refresh failures into
+  bundled/cached data and permits custom IDs absent from the picker. The new
+  `scripts/codex-models.py` reads all pages within one bounded non-generative
+  transaction and labels the result non-authoritative. Missing/failed/malformed
+  catalogs therefore produce an audible auth-only hint, also in ready=true
+  listing rows, never a false absent-model rejection or substituted model.
+  Catalog hits still require a real model-load test. Authentication failures
+  remain not-ready; do not confuse this model-uncertainty fallback with the
+  intentionally strict auth-probe behavior below. The CLI may refresh its own
+  auth/cache even though the probe generates no review.
+  Evidence and pending live-validation status live in
+  `plugins/swarm/docs/profile-measurements.md`.
 - **Model-aware readiness beats an auth-only check** (swarm 0.4.3). grok drops
   and renames models between releases — 0.2.101 removed
   `grok-composer-2.5-fast`, which swarm had shipped as a second grok voice; the
@@ -486,9 +524,9 @@ backend rc null.
   `Invalid params: "unknown model id"`. `ready`/`list` now also require
   a schema-verified model in `grok models` (originally the pinned `grok-4.5`;
   since the discovery rework it is "any verified id on offer" — see the
-  discovery notes in this section, which supersede the pin described here) (grok is the one backend with a usable model-list
-  command; codex has none, so its model is trusted). The gotchas, all live-
-  verified:
+  discovery notes in this section, which supersede the pin described here).
+  Codex's advisory picker needs the different absence semantics above. The
+  historical Grok gotchas, live-verified:
   - **Parse the bullet list by SHAPE — and pick the failure direction on
     purpose.** Lines read `  * grok-4.5 (default)`, but 1.0.3 marks only the
     default with `*`, so a `*`-only matcher loses every other model. The shipped

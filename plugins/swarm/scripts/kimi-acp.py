@@ -16,6 +16,13 @@ whose command fails the policy. That is defense-in-depth only: the outer
 agents.sh jail is the hard boundary — secret reads denied, writes denied
 everywhere except the scratch/temp dirs and Kimi's own auth state. The
 network stays open (a documented residual, not a boundary).
+
+With `--tools false`, every permission request is rejected and every observed
+ACP tool attempt aborts the session, including safe, pending, and malformed
+attempts before the prompt. This is detection/session rejection, NOT prevention:
+auto-approved tools may execute before their notification reaches the client.
+No server-side all-tools-off ACP contract is assumed; advertised plan mode is
+not one (the installed implementation still permits planning/read-only tools).
 """
 from __future__ import annotations
 
@@ -27,6 +34,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -260,6 +268,7 @@ def _find_option(options: Any, kinds: set[str]) -> dict[str, Any] | None:
             option
             for option in options
             if isinstance(option, dict)
+            and isinstance(option.get("kind"), str)
             and option.get("kind") in kinds
             and isinstance(option.get("optionId"), str)
         ),
@@ -434,9 +443,78 @@ def _validate_instance(value: Any, schema: dict[str, Any], path: str = "$") -> N
             raise ResponseError(f"{path}: integer is below minimum {minimum}")
 
 
+class ToolMetrics:
+    """Observed tool attempts, not executions, model turns, or billed tokens.
+
+    A stable ID counts once across permission requests and notifications, even
+    when the attempt is rejected or first seen in an orphan update. A missing
+    ID makes the count unknown (null), never an invented zero. `complete` is
+    true only after an end-turn with no protocol/policy violation; response
+    schema rejection does not invalidate an otherwise complete observation.
+    Progress survives ordinary failures where possible, not arbitrary SIGKILL.
+    """
+
+    def __init__(self, path: Path | None) -> None:
+        self.path = path
+        self.ids: set[str] = set()
+        self.started = False
+        self.valid = True
+        self.complete = False
+        self.write()
+
+    def begin(self) -> None:
+        self.started = True
+        self.write()
+
+    def observe(self, tool_id: Any) -> None:
+        if not isinstance(tool_id, str) or not tool_id.strip():
+            changed = self.valid
+            self.valid = False
+        else:
+            changed = tool_id not in self.ids
+            self.ids.add(tool_id)
+        if changed:
+            self.write()
+
+    def write(self) -> None:
+        if self.path is None:
+            return
+        payload = {
+            "tool_calls": len(self.ids) if self.valid and (self.started or self.ids) else None,
+            "complete": self.complete and self.valid,
+        }
+        temporary = None
+        try:
+            # The caller supplies a path in its jailed scratch directory. A
+            # sibling 0600 temporary + rename avoids partial JSON and never
+            # follows a destination symlink or modifies a hardlink's target.
+            # No mkdir, provider data, tool IDs, or raw frames in this sink.
+            if self.path.is_symlink():
+                raise OSError("metrics destination is a symlink")
+            fd, temporary = tempfile.mkstemp(prefix=".kimi-metrics-", dir=self.path.parent)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, separators=(",", ":"))
+                handle.write("\n")
+            os.replace(temporary, self.path)
+        except OSError:
+            # Diagnostics must not change review behavior. Warn once, with no
+            # caller path or provider material, then stop trying this sink.
+            _safe_error("metrics unavailable: could not write private sidecar")
+            self.path = None
+        finally:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+
+
 class AcpClient:
-    def __init__(self, executable: str) -> None:
+    def __init__(self, executable: str, metrics_file: Path | None = None,
+                 *, tools: bool = True) -> None:
         self.executable = executable
+        self.metrics = ToolMetrics(metrics_file)
+        self.tools = tools
         self.process: subprocess.Popen[str] | None = None
         self.next_id = 1
         self.collect_output = False
@@ -578,13 +656,19 @@ class AcpClient:
     def _handle_server_request(self, message: dict[str, Any]) -> None:
         method = message.get("method")
         request_id = message.get("id")
+        if not self.tools and method == "session/update":
+            # A malformed tool notification carrying an RPC id is still a tool
+            # attempt; do not defer its rejection to the end-of-turn sweep.
+            self._handle_notification(message)
         if method == "session/request_permission":
-            self._trace(message)
             params = message.get("params")
             options = params.get("options", []) if isinstance(params, dict) else []
             tool_call = params.get("toolCall") if isinstance(params, dict) else None
             tool_id = tool_call.get("toolCallId") if isinstance(tool_call, dict) else None
-            if isinstance(tool_call, dict) and isinstance(tool_id, str) and tool_id:
+            self.metrics.observe(tool_id)
+            if self.tools:
+                self._trace(message)
+            if self.tools and isinstance(tool_call, dict) and isinstance(tool_id, str) and tool_id:
                 # Approve ONCE a shell command the read-only policy accepts —
                 # `git log` Kimi chose to ask about must not be lost to a blanket
                 # rejection. Every other kind, and any other command, is rejected.
@@ -612,7 +696,13 @@ class AcpClient:
                         "optionId": reject["optionId"],
                     }
                 }
-            self._send({"jsonrpc": "2.0", "id": request_id, "result": result})
+            try:
+                self._send({"jsonrpc": "2.0", "id": request_id, "result": result})
+            finally:
+                # Reject when possible; a closed peer input must not hide this
+                # policy violation behind a secondary transport error.
+                if not self.tools:
+                    self._abort_tools_disabled()
             return
 
         # The client advertises no fs or terminal capabilities. Any such request
@@ -627,17 +717,37 @@ class AcpClient:
             }
         )
 
+    def _abort_tools_disabled(self) -> None:
+        self.close(force=True)
+        raise ProtocolError("tool use is disabled (--tools false); session rejected")
+
     def _handle_notification(self, message: dict[str, Any]) -> None:
-        # Diagnostics only: KIMI_ACP_TRACE=<file> appends every tool frame
-        # verbatim. Off by default — the frames carry model-chosen commands.
-        self._trace(message)
+        if not self.tools and message.get("method") == "session/request_permission":
+            # A permission request with no RPC id cannot evade the gate by
+            # being dispatched as a notification instead.
+            self._handle_server_request(message)
         if message.get("method") != "session/update":
             return
         params = message.get("params")
         update = params.get("update") if isinstance(params, dict) else None
         if not isinstance(update, dict):
+            if not self.tools:
+                self.metrics.observe(None)
+                self._abort_tools_disabled()
             return
         update_type = update.get("sessionUpdate")
+        if not self.tools and not isinstance(update_type, str):
+            self.metrics.observe(None)
+            self._abort_tools_disabled()
+        if update_type in {"tool_call", "tool_call_update"}:
+            self.metrics.observe(update.get("toolCallId"))
+            # No kind/status/ID/approval exemption and no collect_output guard:
+            # this also rejects events during initialization or configuration.
+            if not self.tools:
+                self._abort_tools_disabled()
+        # Diagnostics only: tracing raw tool frames is opt-in. The no-tools
+        # gate above does not depend on the trace parser accepting the frame.
+        self._trace(message)
         if self.collect_output and update_type == "agent_message_chunk":
             content = update.get("content")
             if isinstance(content, dict) and content.get("type") == "text":
@@ -994,9 +1104,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prompt-file", required=True, type=Path)
     parser.add_argument("--schema", required=True, type=Path)
+    parser.add_argument("--metrics-file", type=Path,
+                        help="optional private scalar JSON sink: tool_calls (integer/null), complete (boolean)")
     parser.add_argument("--cwd", required=True, type=Path)
     parser.add_argument("--model", required=True)
     parser.add_argument("--effort", required=True, choices=("low", "high", "max"))
+    parser.add_argument("--tools", choices=("true", "false"), default="true",
+                        help="false rejects the session on any observed tool attempt (default: true)")
     # The adapter resolves the executable ONCE ($KIMI_BIN, probed for readiness)
     # and hands it over explicitly — no second env lookup with its own default
     # here, so `ready` and `run` can never start two different binaries.
@@ -1019,6 +1133,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str]) -> int:
     args = _parse_args(argv)
+    client = AcpClient(args.kimi_bin, args.metrics_file, tools=args.tools == "true")
     try:
         schema = _load_json(args.schema, "schema")
         _validate_schema_node(schema)
@@ -1027,7 +1142,6 @@ def main(argv: list[str]) -> int:
         _safe_error(str(exc))
         return 2
 
-    client = AcpClient(args.kimi_bin)
     client.deny_paths = [os.path.realpath(p) for p in args.deny_path if p]
     client.cwd = os.path.realpath(str(args.cwd))
     prompt_started = False
@@ -1081,6 +1195,7 @@ def main(argv: list[str]) -> int:
 
         client.collect_output = True
         prompt_started = True
+        client.metrics.begin()
         result = client.request(
             "session/prompt",
             {
@@ -1103,6 +1218,7 @@ def main(argv: list[str]) -> int:
                 "unsafe tool(s) announced and never rejected: " + ", ".join(unsettled)
             )
 
+        client.metrics.complete = True
         response_text = "".join(client.output_chunks)
         if not response_text.strip():
             raise ResponseError("Kimi produced no assistant text")
@@ -1121,6 +1237,7 @@ def main(argv: list[str]) -> int:
         _safe_error(f"protocol/policy failure: {exc}")
         return EXIT_POLICY_RESPONSE if prompt_started else EXIT_PROTOCOL
     finally:
+        client.metrics.write()
         client.close()
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)

@@ -24,7 +24,7 @@ user_invocable: true
 
    - `available: false` → Installed ❌, Notes = "not installed"
    - `available: true, ready: false` → Ready ❌, Notes = the `hint` field (e.g. "run: codex login")
-   - both true → ✅ ✅, Notes empty
+   - both true → ✅ ✅, Notes = `hint` when nonempty (model availability may be unverified); otherwise empty
 3. Close with one line stating which backends are live (`available && ready`),
    e.g.:
    `Live backends: claude + codex + grok + kimi — full ensemble.`
@@ -34,7 +34,13 @@ user_invocable: true
 
 ## Notes
 
-- Read-only, no side effects — safe to run anytime.
+- No repository edits or review generation. Probes may refresh a CLI's own auth/cache.
+- **Codex model readiness is advisory.** This status command checks the adapter
+  fallback model; review prep supplies its profile-selected model instead.
+  `model/list` may use cached/bundled data and omit custom aliases, so unknown
+  selections produce an auth-only `hint`, even with `ready:true`. Preserve that
+  hint; a catalog hit is not proof that the model can generate. Auth-probe
+  failures still mean not-ready.
 - `claude` is always ready when Claude Code runs (reviews happen in-session
   via the Agent tool; the external CLIs are called through the adapter).
 - **`kimi` Ready is model/transport-aware** — it requires the real

@@ -6,12 +6,15 @@ import re
 import sys
 from pathlib import Path
 
+from profiles import load_profiles
+
 HERE = Path(__file__).resolve().parent
 PLUGIN = HERE.parent
 ADAPTER = (HERE / "agents.sh").read_text(encoding="utf-8")
 WORKFLOW = (PLUGIN / "workflows" / "swarm-review.js").read_text(encoding="utf-8")
 SKILL = (PLUGIN / "skills" / "review" / "SKILL.md").read_text(encoding="utf-8")
 AGENTS_SKILL = (PLUGIN / "skills" / "agents" / "SKILL.md").read_text(encoding="utf-8")
+PROFILES = load_profiles(PLUGIN / "workflows" / "swarm-review.js")
 FAILS: list[str] = []
 
 
@@ -78,14 +81,12 @@ check("adapter ready_check gates Kimi on the jail",
 check("agent status does not re-derive a Kimi jail gate",
       "plus `jail=yes` for Kimi" not in AGENTS_SKILL)
 
-kimi_backend = re.search(r"\{ backend: 'kimi', flags: ([^}]+)\}", WORKFLOW)
-check("workflow registers Kimi effort flags", bool(kimi_backend))
+kimi_backend = re.search(r"\{ backend: 'kimi', \.\.\.PROFILE\.externals\.kimi, ([^}]+)\}", WORKFLOW)
+check("workflow registers Kimi from the profile map", bool(kimi_backend))
 if kimi_backend:
-    # Kimi's k3 thinking ladder is low|high|max (no medium); `high` ran 99–458 s
-    # per ~290 KiB cluster, so it is --max only. Pin the exact arms.
-    check("Kimi normal profile uses low", ": '--effort low'" in kimi_backend.group(1))
     check("Kimi reviews only breakage + threat (quota)", "clusters: ['breakage', 'threat']" in kimi_backend.group(1))
-    check("Kimi max profile uses high", "MAX ? '--effort high'" in kimi_backend.group(1))
+for profile, effort in (("quick", "low"), ("default", "low"), ("max", "high")):
+    check(f"Kimi {profile} profile effort", PROFILES[profile]["externals"]["kimi"]["effort"] == effort)
 
 PR_POST = (HERE / "pr-post.py").read_text(encoding="utf-8")
 _labels = re.search(r"_AGENT_LABELS = \{(.*?)\}", PR_POST, re.S)
@@ -112,7 +113,7 @@ check("codex without a jail keeps its own read-only sandbox", "sandbox_args=(-s 
 # hand-mirrors the policy in kimi-acp.py; every program and git subcommand the
 # brief NAMES must be one the policy accepts, or the model is told a command is
 # fine that the gate then kills the session for.
-_brief = re.search(r"TOOLS: read-only session\.(.*?)\\n' &&", ADAPTER, re.S)
+_brief = re.search(r"TOOLS: read-only\.(.*?)\\n'", ADAPTER, re.S)
 check("Kimi tool brief present", bool(_brief))
 if _brief:
     text = _brief.group(1)
@@ -127,13 +128,9 @@ if _brief:
     check("brief programs are on the policy allowlist", named_programs <= progs)
     check("brief git subcommands are on the policy read list", named_subs <= (subs | listing))
 
-grok_backend = re.search(r"\{ backend: 'grok', flags: ([^}]+)\}", WORKFLOW)
-check("workflow registers grok effort flags", bool(grok_backend))
-if grok_backend:
-    # `high` blew the 540 s wall on a ~190 KiB cluster prompt and `medium` on a
-    # ~290 KiB one; the normal profile runs `low`, `medium` is --max only.
-    check("grok normal profile uses low", ": '--effort low'" in grok_backend.group(1))
-    check("grok max profile uses medium", "MAX ? '--effort medium'" in grok_backend.group(1))
+check("workflow registers grok from the profile map", "backend: 'grok', ...PROFILE.externals.grok" in WORKFLOW)
+for profile, effort in (("quick", "low"), ("default", "low"), ("max", "medium")):
+    check(f"grok {profile} profile effort", PROFILES[profile]["externals"]["grok"]["effort"] == effort)
 
 if FAILS:
     print("backend-sync tests FAILED:")

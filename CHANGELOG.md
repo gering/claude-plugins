@@ -328,6 +328,13 @@ entries are grouped per plugin, newest first.
 
 ## swarm
 
+### 0.13.0 — 2026-09-22
+- Add mutually exclusive `--quick` / `--max` profiles with one central per-stage model/effort/tool-budget map. Quick/default preserve clustered fan-out; max splits to lenses. Strict `profile` inputs replace the old `max` boolean and invalid inputs cannot escalate cost. Codex uses Sol/low, Sol/medium, and GPT-6-astra/medium respectively; no Terra.
+- Use the same staged profile data for Codex readiness and execution. Probe the selected model through a bounded, non-generative picker catalog; unavailable/absent models get an audible unverified/auth-only hint, not a silent model substitution. Codex's cached catalog is not authoritative for custom aliases or proof of generation access.
+- Keep Kimi opt-in in every profile. Quick requests diff-only review and rejects sessions on observed tool use; this is detection, not proof that an auto-approved server-side tool never ran. Positive per-backend tool budgets are advisory (initially eight), with no truncating turn limit. Preserve the OS jail and schema validation.
+- Compact Kimi's schema contract without changing validation constraints. Add distinct observed tool-call counts and completeness to telemetry, preserving unknown and partial measurements rather than inventing zeros.
+- Add hermetic profile/flag/stage, adapter, catalog, ACP and telemetry regressions. Live validation is still pending: the 2026-09-14 Kimi baseline was blocked before execution by Auto Mode; no token/quota savings or verified Astra execution are claimed. Grok's longer runtime depends on async transport, not this profile map. See `plugins/swarm/docs/profile-measurements.md`.
+
 ### 0.12.0 — 2026-09-21
 - **Grok model selection without a version allowlist.** The hand-edited `GROK_SCHEMA_VERIFIED` table and the baked-in `grok-4.5` default are gone. The adapter selects the newest canonical `grok-4.x/5.x` the CLI offers (`scripts/lib-grok-latest.sh`, shared byte-identically with work-system) whose `--json-schema` enforcement was **measured** by `scripts/grok-compat.py`: one bounded synthetic call (no repo data, no tools, no web, empty temp cwd; the prompt never mentions JSON, so only real enforcement passes — a successful exit or a model listing proves nothing).
 - Verdicts are cached per (model, CLI version, probe contract) in a private store (0700/0600, atomic replace, every record re-validated on read, symlinks/oversize/foreign/future-dated records rejected, non-private directories refused rather than chmod-ed). Passes stand 14 d, failures 1 d, inconclusive probes 10 min; a lock makes concurrent processes share ONE probe.
