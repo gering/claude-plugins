@@ -45,10 +45,13 @@ user_invocable: true
      - If older than the latest push (`gh pr view <PR_NUMBER> --json commits --jq '.commits | last | .commit.committedDate'`), mark as **stale** → suggest `/cycle` to refresh. Use `committedDate` (not `authoredDate`) so a rebase or amend correctly invalidates the prior review.
    - **Run the probe on BOTH branches**, not only when no review exists: step 8
      recommends `/cycle` for a *stale* review too, and that recommendation needs
-     the same answer. Use the probe from
-     `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-ROUTING.md` §1 (`claude-review.sh has-bot
-     "$LANE"` — local, no network, so it respects this skill's never-block rule;
-     resolve `LANE` in the same call, per §0). Keep the answer for step 8. `yes` →
+     the same answer. Local, no network, so it respects this skill's never-block
+     rule — and both lines go in ONE Bash call (`docs/REVIEW-ROUTING.md` §0):
+     ```sh
+     LANE="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" lane "$(git branch --show-current)")" || LANE=.
+     bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" has-bot "$LANE"
+     ```
+     Keep the answer for step 8. `yes` →
      "run `/cycle`"; `no` → "No review bot on this repo — `/swarm:review --pr <N>`
      reviews it locally"; `unknown` → say why and name both.
 

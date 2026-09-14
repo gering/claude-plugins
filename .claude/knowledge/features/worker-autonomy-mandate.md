@@ -1,7 +1,7 @@
 ---
 title: "Worker Autonomy Mandate (MANDATE.md)"
 createdAt: 2026-09-07
-updatedAt: 2026-09-13
+updatedAt: 2026-09-14
 createdFrom: "branch: task/extend-worker-autonomy"
 updatedFrom: "branch: task/extend-worker-autonomy"
 pluginVersion: 1.9.0
@@ -178,6 +178,37 @@ path; `yes` needs both `uses: anthropics/claude-code-action` and an
 `plugins/pr-flow/docs/REVIEW-ROUTING.md`, followed by `/open`, `/cycle`,
 `/check` and `/rebase`.
 
+## A reader rule is half a rule until the writer knows it
+
+The pass that taught the parser to read keys only at column 0 left the *writer*
+matching `review_rounds_used:` at any indentation. So a frontmatter carrying
+nested data with that name parsed cleanly, and the first ordinary `round`
+rewrote the nested line unindented — two top-level keys, and every later verb
+died on "duplicate key". One booking bricked the lane. The same pass also let
+`init` write a bare `|` as a value, which its own reader then refused: a record
+reported as `written=yes` that nothing could ever read.
+
+Both are the same shape: **a format rule added to one side of a
+parse/serialize pair.** Three defenses, in order of value: share the code the
+two sides must agree on (one normalization prelude, used by both awk programs),
+make the writer refuse what the reader refuses (`check_value` rejects the
+block-scalar indicator), and — the one that catches whatever the first two
+miss — have the writer **read its work back** and fail loudly if it is not
+there. `round` now re-parses after `mv`, because reporting a round the file
+never recorded is precisely the failure the persisted counter exists to prevent,
+and it happens silently.
+
+## The invariant that the fix itself broke
+
+"One lane, one worker" justified rejecting a lock on `round` four times. It is
+false, and `mandate.sh lane <branch>` is why: that resolver exists so a Manager
+session running `/cycle` from the main repo can act on a *worker's* worktree. The
+worker's own review loop and the Manager's can therefore book a round at the same
+instant, both read the same count, and a budget of two funds an unbounded number
+of reviews. The lock is eight lines of `mkdir`. Worth re-reading a standing
+rejection whenever the surrounding design moves under it — the argument was sound
+when first made and quietly stopped being true.
+
 ## Indentation is structure too
 
 The same pass that taught `has-bot` to skip block scalars found the mandate
@@ -187,6 +218,20 @@ the YAML does not make. Top-level keys live at column 0; anything indented
 belongs to whatever stands above it. Two parsers, the same bug, found a round
 apart — worth remembering that "trim the whitespace and match" is exactly how a
 nested value gets promoted to a top-level one.
+
+## "Cannot tell" has to stay cheap for the caller
+
+Making `unknown` the honest answer made it the *common* answer — and the routing
+spec said `unknown` means "ask the user". That turned `/cycle --loop`, whose
+steps re-run every iteration, into something that stopped and asked every round:
+the exact re-confirmation this whole feature exists to remove, reintroduced by a
+correctness fix two passes later. The resolution separates the two kinds of
+caller. A skill that *triggers* can settle the question empirically — post the
+comment, let the bounded poll answer, fall back to the local route on a timeout —
+so for it `unknown` means "find out". A recommend-only skill has nothing to run,
+so for it `unknown` still means "name both routes". Whenever a tri-state answer
+gets more honest, check what the new distribution does to every consumer's
+control flow, not just to the truth of the answer.
 
 ## A scan proves presence, never absence
 
@@ -209,6 +254,14 @@ on the repo root fixed the *directory*; the ref dimension was never considered
 until a reviewer named it.
 
 ## Shell variables do not survive a tool call
+
+(And knowing the rule is not the same as applying it. The pass that wrote this
+section for `$LANE` introduced a fresh instance of the identical bug one file
+over, in `/kickoff`: `WITHOUT=` assigned in step 13a, consumed in 13b's separate
+call, silently empty — recording a `local-review` grant for a worker with no such
+skill. The durable fix is not a rule to remember but a shape to copy: **the
+assignment and its use live in one code block**, always, and a review should grep
+for `"$VAR"` in a snippet whose `VAR=` is not visible three lines above it.)
 
 The skills resolved `LANE=` in step 1 and wrote `"$LANE"` in step 7 — a
 different Bash call, where the variable is simply unset. It expanded to the empty

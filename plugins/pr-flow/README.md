@@ -185,7 +185,7 @@ Verifies CI green, required approvals present, no open blocking Claude issues, b
 ## Requirements
 
 - `gh` CLI installed and authenticated (`gh auth login`)
-- A GitHub repo. An `@claude` review bot (a workflow using `anthropics/claude-code-action` on `issue_comment`) is what `/cycle` triggers — **optional**: a repo without one is routed to the local `/swarm:review --pr <N>` instead (see `docs/REVIEW-ROUTING.md`). The probe reads workflow files, so a repo served only by the Claude GitHub App with no workflow of its own reports `unknown` and is asked which route to take
+- A GitHub repo. An `@claude` review bot (a workflow using `anthropics/claude-code-action` on `issue_comment`) is what `/cycle` triggers — **optional**: the local `/swarm:review --pr <N>` covers a repo that has none (see `docs/REVIEW-ROUTING.md`). The probe reads workflow files from the default branch, which can prove a bot but never its absence: the Claude GitHub App answers comments with no workflow of its own, so an ordinary repo with no claude workflow reports `unknown`. `/cycle` then tries the bot and lets a bounded poll settle it; the recommend-only skills name both routes
 - Active PR on a non-default branch
 
 Each skill runs a preflight check and stops with a clear message if requirements are missing.

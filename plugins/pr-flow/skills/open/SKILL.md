@@ -148,8 +148,13 @@ user, not that they said no.
        not a judgment call.)
 
    **The mandate gate is not part of that branch — it applies on every path.**
-   Run it once before moving on to step 6, whichever branch above was taken:
+   Run it once before moving on to step 6, whichever branch above was taken.
+   Resolve the lane **in this same Bash call** — step 3's assignment does not
+   survive to here (`docs/REVIEW-ROUTING.md` §0), and a bare `"$LANE"` would read
+   the cwd's mandate, which on a `/open` run from the main repo is a different
+   lane's record or none at all:
    ```sh
+   LANE="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" lane "$(git branch --show-current)")" || LANE=.
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" allows open-pr "$LANE"
    ```
    - exit **0** → proceed (and skip the warning confirmation, as above).
@@ -264,7 +269,7 @@ user, not that they said no.
 - A check cannot run (tool missing, hangs past the timeout) → mark it ⚠️ skipped in the body, still create the PR — checks run unasked (step 3), so there is no "declined" state
 - Linter/tests hang → timeout 5min, mark as ⚠️ skipped, let user decide
 - Repo uses a non-default base (`develop`, `staging`) → ask user if auto-detected base seems wrong
-- `@claude` bot not installed on repo → step 10 follows `docs/REVIEW-ROUTING.md`: the probe says `no` and the local review is run or offered instead of recommending a `/cycle` that has nothing to trigger; an App-only repo probes as `unknown` and is asked
+- `@claude` bot not installed on repo → step 10 follows `docs/REVIEW-ROUTING.md`. A local scan can only *prove* a bot, so an ordinary repo with no claude workflow probes `unknown` (both routes named, user asked) — `no`, and with it the automatic local route, is reserved for a claude workflow that demonstrably cannot answer a comment
 
 ## Notes
 

@@ -110,7 +110,16 @@ Strip the flags first; whatever is left over is the commit message.
        review (loop mode included: the loop cares about findings, not where they
        came from). **Book the round** per §2 on a plain `/cycle`; under `--loop`
        Setup already booked this iteration, so do not book twice.
-     - `has_bot=unknown` → relay `why=` and ask, per the spec. Never guess.
+     - `has_bot=unknown` → **try the bot, do not ask.** This is the common
+       answer (a scan cannot see the GitHub App), and `/cycle` is the one
+       consumer that can settle it empirically: post the comment, enter step 8,
+       and let the bounded poll decide. If the poll times out, nothing was
+       listening — say so and fall back to the spec's §2 local route for this
+       round. Asking here instead would stop `--loop` on *every* iteration, since
+       steps 3–10 re-run each round, which is exactly the re-confirmation the
+       mandate exists to remove. Recommend-only skills (`/open`, `/check`,
+       `/rebase`) still name both routes on `unknown`; only a triggering skill
+       gets to run the experiment.
 
 8. **Launch background polling via Bash**:
    - Use the **Bash tool** with `run_in_background: true` to invoke the shared polling script:
@@ -155,8 +164,11 @@ When `--loop` (alias `--auto`) is present, `/cycle` stops being a single pass an
 ### Setup (once, before the loop)
 
 - Parse `--max=N`. This caps total iterations so the loop can never run forever.
-  Its default comes from the lane's mandate when there is one:
+  Its default comes from the lane's mandate when there is one. Resolve the lane
+  **in this same Bash call** — step 1's assignment is long gone (§0 of
+  `docs/REVIEW-ROUTING.md`), and a bare `"$LANE"` here silently reads the cwd:
   ```sh
+  LANE="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" lane "$(git branch --show-current)")" || LANE=.
   bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" show "$LANE"
   ```
   `review_rounds_left` (non-empty) → `MAX` = that number; otherwise `MAX = 10`. An
@@ -173,6 +185,7 @@ When `--loop` (alias `--auto`) is present, `/cycle` stops being a single pass an
 - **Consume a round from the mandate at the start of each iteration**, not just
   from an in-session counter:
   ```sh
+  LANE="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" lane "$(git branch --show-current)")" || LANE=.
   bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" round "$LANE"
   ```
   The in-session counter dies with the session; a resumed worker would otherwise

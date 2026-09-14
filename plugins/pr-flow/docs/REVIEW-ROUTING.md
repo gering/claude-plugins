@@ -106,8 +106,14 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" round "$LANE"
 
 Book it **once per review**, and only if your own stage does not already book —
 `/cycle --loop` books each iteration in its Setup, so it must not book again
-here. §3 says which consumer books. Exit 4 = the round could not be persisted:
-say so and do not loop on an in-session count.
+here. §3 says which consumer books.
+
+**Then branch on what `round` reported**, exactly as the bot route does:
+`review_budget_exhausted=yes` means the lane has spent its allowance, so **stop
+and ask instead of running the review** — booking a round and reviewing anyway
+lets a spent budget fund one more review every time and walks the counter past
+its own limit. Exit 4 = the round could not be persisted (read-only tree, a lock
+held by another session): say so and do not review on an in-session count.
 
 swarm not installed → name both gaps plainly (no bot, no local reviewer). Never
 leave the user with a recommendation to run something that cannot work here.

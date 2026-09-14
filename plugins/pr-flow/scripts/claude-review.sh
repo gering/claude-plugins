@@ -25,14 +25,20 @@
 #         yes      a top-level workflow both `uses:` anthropics/claude-code-action
 #                  AND is triggered by issue_comment, as structure (not in a
 #                  comment or a run: block) — @claude review will reach it
-#         no       workflow files exist and none can answer a comment (nothing
-#                  references the bot, or only push-triggered claude workflows)
-#         unknown  could not tell: no git repo, unreadable workflows dir, NO
-#                  workflows dir at all (a repo served only by the Claude GitHub
-#                  App looks exactly like that), a comment-triggered workflow
-#                  that mentions @claude without using the action or delegates
-#                  to a reusable workflow, or a custom trigger_phrase
-#       unknown is its own answer — callers must ASK, never reroute on it.
+#         no       a claude workflow IS there and demonstrably cannot answer a
+#                  comment (push-triggered only). This is the only case a local
+#                  scan can turn into a `no`.
+#         unknown  everything else, and it is the COMMON answer: a scan proves
+#                  presence, never absence — the Claude GitHub App answers with
+#                  no workflow file at all, so "no workflow references the bot"
+#                  cannot be told apart from "the App is installed". Also: no
+#                  git repo, unreadable workflows dir, no workflows dir, a
+#                  comment-triggered workflow that mentions @claude without
+#                  using the action or delegates to a reusable workflow, and a
+#                  custom trigger_phrase.
+#       unknown is its own answer — never reroute on it. A caller that TRIGGERS
+#       may try the bot and let a bounded poll settle it; a recommend-only
+#       caller names both routes.
 #
 # Exit codes:
 #   0 = success (output contains the body, possibly empty for `latest`)
@@ -174,11 +180,22 @@ read -r -d '' HAS_BOT_AWK <<'AWK' || true
   tl = tolower(line)
   if (tl ~ /^[ \t]*-?[ \t]*uses:[ \t]*["']?anthropics\/claude-code-action/) action = 1
   else if (tl ~ /^[ \t]*uses:[ \t]*["']?[^"' \t]+\.ya?ml(@|["' \t]|$)/) reusable = 1
+  # `issue_comment` counts as a TRIGGER only under the top-level `on:` mapping.
+  # Matching it at any indentation made a `with:\n  issue_comment: true` step, or
+  # a job `env:` entry, look like a comment trigger on a push-only workflow —
+  # and the caller then commented into the void and polled to the timeout.
   # Keys may be quoted in valid YAML (`"issue_comment":`, `"on":`), and `on:`
-  # also takes flow style (`on: [issue_comment]`). An unquoted-only pattern
-  # answered `no` for a bot that works.
-  q = tl; gsub(/["']/, "", q)
-  if (q ~ /^[ \t]*-?[ \t]*issue_comment[ \t]*(:.*)?$/ || q ~ /^[ \t]*on[ \t]*:[ \t]*(\[.*issue_comment|issue_comment[ \t]*$)/) comment = 1
+  # also takes flow style (`on: [issue_comment]`).
+  q = tl; gsub(/["]/, "", q); gsub(/\047/, "", q)
+  if (q ~ /^on[ \t]*:/) {
+    rest = q; sub(/^on[ \t]*:[ \t]*/, "", rest)
+    if (rest ~ /issue_comment/) comment = 1
+    in_on = (rest ~ /^$/) ? 1 : 0
+  } else if (q ~ /^[^ \t]/) {
+    in_on = 0            # any other column-0 key ends the on: block
+  } else if (in_on && q ~ /^[ \t]+-?[ \t]*issue_comment[ \t]*(:.*)?$/) {
+    comment = 1
+  }
   if (tl ~ /^[ \t]*trigger_phrase:/) {
     v = tl; sub(/^[ \t]*trigger_phrase:[ \t]*/, "", v)
     if (v !~ /@claude/) phrase = 1
@@ -194,20 +211,39 @@ AWK
 # the void, one that removes it would probe `no` and reroute a working bot.
 # Empty output = no default branch resolvable (a fresh `git init`, no remote);
 # the caller then falls back to the working tree and says so.
+# Prints "<ref> <how>": the ref to read, and whether it is the repo's actual
+# default branch (`head`) or a guess (`guess`). Empty output = nothing
+# resolvable, and the caller falls back to the working tree.
+#
+# Two things this gets right that the first version did not. The remote is the
+# CURRENT BRANCH's upstream remote, not a hardcoded `origin` — a repo tracking
+# `upstream` whose default is `trunk` was probed against a stale `origin/main`.
+# And candidates are verified as FULLY-QUALIFIED refs: `rev-parse main` resolves
+# a *tag* named main ahead of the branch, so an auto-fetched tag decided the
+# answer. (`archive-task.sh` already encodes the qualified-ref rule.)
 probe_ref() {
-  local dir="$1" cand head
-  head="$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
-  for cand in "$head" origin/main origin/master main master; do
-    [[ -n "$cand" ]] || continue
+  local dir="$1" branch remote head cand
+  branch="$(git -C "$dir" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  remote=""
+  [[ -n "$branch" ]] && remote="$(git -C "$dir" config --get "branch.$branch.remote" 2>/dev/null || true)"
+  [[ -n "$remote" ]] || remote=origin
+  head="$(git -C "$dir" symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null || true)"
+  if [[ -n "$head" ]] \
+     && git -C "$dir" rev-parse --verify --quiet "refs/remotes/$head^{commit}" >/dev/null 2>&1; then
+    printf '%s head\n' "refs/remotes/$head"; return 0
+  fi
+  for cand in "refs/remotes/$remote/main" "refs/remotes/$remote/master" \
+              refs/remotes/origin/main refs/remotes/origin/master \
+              refs/heads/main refs/heads/master; do
     if git -C "$dir" rev-parse --verify --quiet "$cand^{commit}" >/dev/null 2>&1; then
-      printf '%s\n' "$cand"; return 0
+      printf '%s guess\n' "$cand"; return 0
     fi
   done
   return 0
 }
 
 subcmd_has_bot() {
-  local dir="${1:-.}" root wf="" ref="" src f a c p r m
+  local dir="${1:-.}" root wf="" ref="" how="" src tree="" f a c p r m
   local strict="" phrase="" loose="" reusable="" pushonly="" n_files=0
   # One emitter, so every path prints the same four keys in the same order —
   # a consumer that greps a promised key must never get silence on some verdicts.
@@ -221,12 +257,23 @@ subcmd_has_bot() {
   if [[ -z "$root" ]]; then
     emit unknown "not inside a git repository"; return 0
   fi
-  ref="$(probe_ref "$root")"
+  read -r ref how <<<"$(probe_ref "$root")"
   if [[ -n "$ref" ]]; then
     src="$ref"
+    [[ "$how" = head ]] || src="$ref (guessed: the repo does not record a default branch)"
     wf="$ref:.github/workflows"
-    if ! git -C "$root" ls-tree --name-only -z "$ref:.github/workflows" >/dev/null 2>&1; then
-      emit unknown "no .github/workflows on the default branch ($ref) — a repo with no CI, or one served only by the Claude GitHub App; cannot tell locally"; return 0
+    # ONE ls-tree, reused. Running it once as an existence probe and again to
+    # list meant a concurrent fetch between the two could make `why=` claim the
+    # directory exists while the listing came back empty.
+    #
+    # Newline-delimited, NOT -z: a command substitution cannot carry NUL bytes
+    # (bash drops them), so `-z` here produced one unterminated field and the
+    # loop below saw NO files at all — a working bot reported as absent.
+    # `core.quotePath=false` keeps UTF-8 names literal; a name containing a real
+    # newline still comes back C-quoted, fails the *.yml test, and is skipped —
+    # which yields `unknown`, the safe direction.
+    if ! tree="$(git -C "$root" -c core.quotePath=false ls-tree --name-only "$ref:.github/workflows" 2>/dev/null)"; then
+      emit unknown "no .github/workflows on the default branch ($src) — a repo with no CI, or one served only by the Claude GitHub App; cannot tell locally"; return 0
     fi
   else
     # No default branch to read (fresh repo, no remote): the working tree is
@@ -244,7 +291,8 @@ subcmd_has_bot() {
   # Top level only: GitHub reads workflows from that directory itself, never
   # from a subdirectory — an archived copy under workflows/old/ is not a bot.
   # NUL-delimited so a name with spaces, globs or newlines stays one name.
-  while IFS= read -r -d '' f; do
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
     case "$f" in *.yml|*.yaml) ;; *) continue ;; esac
     n_files=$(( n_files + 1 ))
     if [[ "$src" = "worktree" ]]; then
@@ -265,9 +313,9 @@ subcmd_has_bot() {
   done < <(
     if [[ "$src" = "worktree" ]]; then
       find "$wf" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 2>/dev/null \
-        | while IFS= read -r -d '' f; do printf '%s\0' "${f##*/}"; done
+        | while IFS= read -r -d '' f; do printf '%s\n' "${f##*/}"; done
     else
-      git -C "$root" ls-tree --name-only -z "$ref:.github/workflows" 2>/dev/null
+      printf '%s\n' "$tree"
     fi
   )
 

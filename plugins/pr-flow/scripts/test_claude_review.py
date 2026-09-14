@@ -309,8 +309,9 @@ check("a CRLF workflow is read",
 # --- every path emits the same four keys -------------------------------------
 KEYS = {"has_bot", "why", "workflows_dir", "matched"}
 for label, path in (("yes", str(repo_with(COMMENT_TRIGGERED))),
-                    ("no", str(repo_with(INCIDENTAL))),
-                    ("unknown", str(repo_with())),
+                    ("no", str(repo_with(PUSH_TRIGGERED))),
+                    ("unknown (nothing references the bot)", str(repo_with(INCIDENTAL))),
+                    ("unknown (no workflows dir)", str(repo_with())),
                     ("not a git repo", tempfile.mkdtemp())):
     keys = {l.partition("=")[0] for l in run(path).stdout.splitlines()}
     check(f"all four keys on the {label} path", keys == KEYS)
@@ -348,7 +349,10 @@ r = kv(run(str(base)).stdout)
 check("a bot added only on the task branch is not reported as live",
       r.get("has_bot") != "yes")
 check("and the probed ref is named in workflows_dir",
-      r.get("workflows_dir", "").startswith(("main:", "master:")))
+      r.get("workflows_dir", "").startswith("refs/heads/"))
+check("the ref is fully qualified, so a same-named tag cannot shadow it",
+      ":" in r.get("workflows_dir", "")
+      and r.get("workflows_dir", "").split(":")[0].startswith("refs/"))
 
 gone = repo_with_committed(COMMENT_TRIGGERED, branch="task/remove-bot")
 (gone / ".github" / "workflows" / "w0.yml").unlink()
@@ -402,6 +406,118 @@ jobs:
 """
 check("flow-style on: [issue_comment] is a trigger",
       kv(run(str(repo_with(FLOW))).stdout).get("has_bot") == "yes")
+
+# --- issue_comment counts only under the top-level `on:` ---------------------
+# Matching it at any indentation made an ordinary step input look like a comment
+# trigger, so /cycle commented into the void and polled to the timeout.
+NESTED_INPUT = """\
+name: Claude Nightly
+on:
+  push:
+    branches: [main]
+jobs:
+  review:
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          issue_comment: true
+"""
+r = kv(run(str(repo_with(NESTED_INPUT))).stdout)
+check("an issue_comment step INPUT is not a trigger", r.get("has_bot") == "no")
+check("and it reads as the push-only case", "issue_comment" in r.get("why", ""))
+
+NESTED_ENV = """\
+name: Claude Nightly
+on: [push]
+jobs:
+  review:
+    env:
+      issue_comment: "no"
+    steps:
+      - uses: anthropics/claude-code-action@v1
+"""
+check("an issue_comment env entry is not a trigger either",
+      kv(run(str(repo_with(NESTED_ENV))).stdout).get("has_bot") == "no")
+
+# The real thing still works in both spellings, one level under `on:`.
+check("a nested issue_comment under on: is still a trigger",
+      kv(run(str(repo_with(COMMENT_TRIGGERED))).stdout).get("has_bot") == "yes")
+ON_LIST = """\
+name: Claude Review
+on:
+  - issue_comment
+  - pull_request
+jobs:
+  review:
+    steps:
+      - uses: anthropics/claude-code-action@v1
+"""
+check("a block-sequence on: list is a trigger",
+      kv(run(str(repo_with(ON_LIST))).stdout).get("has_bot") == "yes")
+
+# --- the probed ref is fully qualified --------------------------------------
+# `rev-parse main` resolves a TAG named main ahead of the branch, so an
+# auto-fetched tag used to decide the answer for the whole repo.
+shadow = repo_with_committed(COMMENT_TRIGGERED)
+subprocess.run(["git", "-C", str(shadow), "rm", "-q", "-r", ".github"], check=True)
+subprocess.run(["git", "-C", str(shadow), "-c", "user.email=t@t", "-c", "user.name=t",
+                "commit", "-qm", "drop"], check=True)
+# A tag named like the default branch, pointing at the bot-less commit.
+default = subprocess.run(["git", "-C", str(shadow), "symbolic-ref", "--short", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+subprocess.run(["git", "-C", str(shadow), "tag", default + "-shadow"], check=True)
+subprocess.run(["git", "-C", str(shadow), "reset", "-q", "--hard", "HEAD~1"], check=True)
+subprocess.run(["git", "-C", str(shadow), "tag", default], check=True)
+subprocess.run(["git", "-C", str(shadow), "reset", "-q", "--hard", default + "-shadow"], check=True)
+r = kv(run(str(shadow)).stdout)
+check("a tag named like the branch does not decide the answer",
+      r.get("workflows_dir", "").startswith("refs/heads/"))
+check("the branch content is what was read", r.get("has_bot") != "yes")
+
+# --- the default branch comes from the branch's own upstream remote ----------
+# A repo tracking `upstream` whose default is `trunk` was probed against a stale
+# `origin/main`, i.e. a branch GitHub never runs the workflow from.
+up = repo_with_committed(INCIDENTAL)
+subprocess.run(["git", "-C", str(up), "update-ref",
+                "refs/remotes/origin/main", "HEAD"], check=True)
+subprocess.run(["git", "-C", str(up), "checkout", "-q", "-b", "work"], check=True)
+wf = up / ".github" / "workflows"
+(wf / "claude.yml").write_text(COMMENT_TRIGGERED)
+subprocess.run(["git", "-C", str(up), "add", "-A"], check=True)
+subprocess.run(["git", "-C", str(up), "-c", "user.email=t@t", "-c", "user.name=t",
+                "commit", "-qm", "bot on trunk"], check=True)
+subprocess.run(["git", "-C", str(up), "update-ref",
+                "refs/remotes/upstream/trunk", "HEAD"], check=True)
+subprocess.run(["git", "-C", str(up), "symbolic-ref",
+                "refs/remotes/upstream/HEAD", "refs/remotes/upstream/trunk"], check=True)
+subprocess.run(["git", "-C", str(up), "config", "branch.work.remote", "upstream"], check=True)
+r = kv(run(str(up)).stdout)
+check("the branch's own upstream remote decides the default branch",
+      r.get("workflows_dir", "").startswith("refs/remotes/upstream/trunk:"))
+check("and the bot on that branch is found", r.get("has_bot") == "yes")
+check("a resolved default branch is not reported as a guess",
+      "guess" not in r.get("why", ""))
+
+# When nothing records a default branch, say that the ref was guessed rather
+# than presenting it as authoritative.
+g = repo_with_committed(INCIDENTAL)
+check("a fallback ref is labelled as guessed",
+      "guess" in kv(run(str(g)).stdout).get("why", ""))
+
+# --- names with spaces and non-ASCII survive the listing ---------------------
+# The first version of the ref path passed NUL-delimited names through a command
+# substitution, which drops NUL — the loop saw no files and a working bot was
+# reported absent. These names also exercise git's path quoting.
+for name in ("my workflow.yml", "wörkflow.yml"):
+    sp = repo_with()
+    (sp / ".github" / "workflows").mkdir(parents=True, exist_ok=True)
+    (sp / ".github" / "workflows" / name).write_text(COMMENT_TRIGGERED)
+    (sp / "README.md").write_text("x\n")
+    subprocess.run(["git", "-C", str(sp), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(sp), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "init"], check=True)
+    check(f"a committed workflow named {name!r} is read from the ref",
+          kv(run(str(sp)).stdout).get("has_bot") == "yes")
 
 
 if FAILS:

@@ -46,7 +46,7 @@ ws_find() {
   # lingers in cache).
   if command -v python3 >/dev/null 2>&1; then
     t="$(WS_REL="$rel" python3 - <<'PY' 2>/dev/null
-import json, os, re
+import json, os
 p = os.path.expanduser("~/.claude/plugins/installed_plugins.json")
 try:
     plugins = json.load(open(p))["plugins"]
