@@ -300,24 +300,29 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     (step 1) and the task name, don't carry a relative path forward:
 
     ```sh
-    REG="${CLAUDE_PLUGIN_ROOT}/scripts/agent-registry.sh"
-    WITHOUT="$(bash "$REG" mandate-flags "<selector>")"
     bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" init "<worktree>" \
       --preset <standard|draft-only|merge-delegated> \
-      $WITHOUT \
+      --for-agent "<selector>" \
       task="<task-name>" \
       authorized_by="user" \
       scope="<one line: what this lane is and is not>"
     ```
 
-    ⚠️ **Both commands go in ONE Bash call**, and `$REG` is re-derived here.
-    Shell state does not survive between tool calls, so a `WITHOUT=` assigned in
-    an earlier call expands to nothing and the flag is silently dropped — the
-    lane then records `local-review` for a worker that has no such skill, and
-    `init` refuses to re-record without `--force`. Same rule as `$LANE` in
-    pr-flow's `docs/REVIEW-ROUTING.md` §0. `$WITHOUT` is unquoted on purpose: it
-    is either empty or exactly the two words `mandate-flags` printed. When it is
-    non-empty, also set
+    `--for-agent` is what matches the mandate to the worker: `init` asks the
+    registry itself and drops what that agent cannot exercise. Pass the same
+    selector step 12 resolved.
+
+    ⚠️ **Do not build the flags in a shell variable.** An earlier version ran
+    `WITHOUT="$(… mandate-flags …)"` and passed `$WITHOUT` unquoted, relying on
+    the shell to split it into two argv words. The tool shell is **zsh**, which
+    does not word-split unquoted parameters, so `init` received one argv word,
+    died on `unknown flag`, and every codex/grok/kimi lane launched with **no
+    mandate at all**. The same form also swallowed the registry's exit status, so
+    an unresolvable selector produced an empty flag set and recorded the *full*
+    allow list — failing open in the one place that must fail closed. `init` now
+    does both parts itself and refuses to write when the capability lookup fails.
+
+    When the worker is a non-claude one, also set
     `scope="… drive to an open PR; review happens outside this lane"`.
 
     The preset owns the allow/deny/terminal-gate/budget quadruple, so the answer

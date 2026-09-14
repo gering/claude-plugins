@@ -198,7 +198,15 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
    ```sh
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" show
    ```
-   Read `mandate_exists`, `scope`, `terminal_gate`, `allow`, `deny`,
+   **Check the exit code before the output.** Exit **2** means the record exists
+   but cannot be vouched for (tracked by git, a symlink, a duplicate key, a
+   block scalar, a non-numeric budget — the script's stderr names it). On exit 2
+   the output stops after `mandate_exists=yes`, with no `allow=` line at all, so
+   reading it as "a mandate exists" would have the worker proceed on a record the
+   script refused: **treat exit 2 as no usable mandate**, show the reason, and
+   ask before each milestone. Exit **0** is the normal case.
+
+   Then read `mandate_exists`, `scope`, `terminal_gate`, `allow`, `deny`,
    `review_rounds_left`, `review_budget_exhausted`. `/kickoff` (or `/adopt`) wrote
    this from an answer the user actually gave; it is the **only** source of
    authorization for this lane.

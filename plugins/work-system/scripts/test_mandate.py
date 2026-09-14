@@ -21,6 +21,7 @@ The tests run against real git repos because mandate.sh anchors MANDATE.md at
 the worktree root, not at $PWD.
 """
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -173,7 +174,7 @@ check("the old file was not rewritten", kv(run("show", str(notask)).stdout).get(
 
 # --- init never writes through a symlink ------------------------------------
 # An adopted branch can commit `MANDATE.md -> ~/.zshrc`; the first `--force`
-# (which kickoff step 13d tells the operator to run) then overwrote that file.
+# (which kickoff step 13c tells the operator to run) then overwrote that file.
 sym = make_repo()
 victim = sym / "victim.txt"
 victim.write_text("precious\n")
@@ -398,11 +399,21 @@ check("first round is not exhaustion", r.get("review_budget_exhausted") == "no")
 r = kv(run("round", str(repo4)).stdout)
 check("second round increments", r.get("review_rounds_used") == "2")
 check("second round exhausts the budget", r.get("review_budget_exhausted") == "yes")
+# Booking past the budget is not a booking. The old form incremented anyway and
+# left the caller to notice `exhausted=yes` afterwards — so the LAST authorized
+# round was charged to a review that then did not run, and repeat calls walked
+# the counter to 3, 4, 5 on a budget of 2.
 r = kv(run("round", str(repo4)).stdout)
+check("a round past the budget is refused, not booked", r.get("round_authorized") == "no")
+check("and the counter does not move", r.get("review_rounds_used") == "2")
 check("rounds past the budget never go negative", r.get("review_rounds_left") == "0")
-check("overrun still counts up", r.get("review_rounds_used") == "3")
-check("a consumed round survives in the file",
-      kv(run("show", str(repo4)).stdout).get("review_rounds_used") == "3")
+check("the refusal is not an error the caller must interpret",
+      run("round", str(repo4)).returncode == 0)
+check("the file still holds the authorized count",
+      kv(run("show", str(repo4)).stdout).get("review_rounds_used") == "2")
+check("repeat calls do not drift the counter",
+      (run("round", str(repo4)), run("round", str(repo4)),
+       kv(run("show", str(repo4)).stdout).get("review_rounds_used"))[2] == "2")
 check("round kept the human body intact",
       "# Mandate" in (repo4 / "MANDATE.md").read_text())
 check("round left no temp file behind",
@@ -840,6 +851,137 @@ check("and on an unlisted action",
       kv(run("allows", "deploy", str(nm)).stdout).get("task") == "some-other-lane")
 check("a missing mandate reports no task to compare",
       "task=" not in run("allows", "commit", str(make_repo())).stdout)
+
+# --- the budget's LAST round is usable, not merely charged -------------------
+# `review_budget: 1` must yield one review, not zero.
+one = make_repo()
+init(one, "task=one", "review_budget=1")
+r = kv(run("round", str(one)).stdout)
+check("the only authorized round IS authorized", r.get("round_authorized") == "yes")
+check("and it is the last one", r.get("review_budget_exhausted") == "yes")
+check("the next is refused", kv(run("round", str(one)).stdout).get("round_authorized") == "no")
+# No budget recorded is unbounded, not exhausted — every round is authorized.
+nb = make_repo()
+init(nb, "task=nobudget")
+for i in (1, 2, 3):
+    r = kv(run("round", str(nb)).stdout)
+    check(f"an unbounded budget authorizes round {i}", r.get("round_authorized") == "yes")
+check("and it never reports exhaustion",
+      kv(run("show", str(nb)).stdout).get("review_budget_exhausted") == "")
+
+# --- a budget nobody can read is not an absent budget ------------------------
+for bad_key, bad_val in (("review_budget", "two"), ("review_rounds_used", "nope")):
+    bd = make_repo()
+    init(bd, "task=b", "review_budget=2")
+    m = bd / "MANDATE.md"
+    m.write_text(re.sub(rf"^{bad_key}: .*$", f"{bad_key}: {bad_val}", m.read_text(),
+                        count=1, flags=re.M))
+    r = run("show", str(bd))
+    check(f"a non-numeric {bad_key} is a corrupt record", r.returncode == 2)
+    check(f"and the refusal names it: {bad_key}", bad_key in r.stderr)
+    check(f"round refuses it too: {bad_key}", run("round", str(bd)).returncode == 2)
+    check(f"and allows refuses it: {bad_key}",
+          run("allows", "commit", str(bd)).returncode == 2)
+
+# --- an abandoned lock must not wedge the lane forever -----------------------
+# The traps do not survive kill -9, and the .MANDATE.* exclude hides the lock
+# from `git status`, so nothing would point at the cause.
+st = make_repo()
+init(st, "task=stale", "review_budget=5")
+lock = st / ".MANDATE.lock"
+lock.mkdir()
+(lock / "pid").write_text("999999\n")      # a pid that cannot be running
+r = run("round", str(st))
+check("a lock whose owner is gone is broken", r.returncode == 0)
+check("and the round is actually booked", kv(r.stdout).get("round_authorized") == "yes")
+check("the lock is released afterwards", not lock.exists())
+# A lock held by a LIVE process is respected, not broken.
+import subprocess as _sp
+lock.mkdir()
+(lock / "pid").write_text(f"{os.getpid()}\n")
+r = run("round", str(st))
+check("a live holder is waited for, then reported", r.returncode == 4)
+check("and the message names the recovery", ".MANDATE.lock" in r.stderr)
+check("nothing was booked while blocked",
+      kv(run("show", str(st)).stdout).get("review_rounds_used") == "1")
+import shutil as _sh
+_sh.rmtree(lock)
+# A lock with no pid file at all falls back to the age bound: recent = respected.
+lock.mkdir()
+check("a fresh pidless lock is still respected", run("round", str(st)).returncode == 4)
+_sh.rmtree(lock)
+
+# --- init resolves the worker's capabilities itself --------------------------
+# The skill used to build `--without local-review` in a variable and rely on the
+# SHELL word-splitting it into argv. The tool shell is zsh, which does not split
+# unquoted parameters, so `init` saw one argv word and died on `unknown flag` —
+# every codex/grok/kimi lane launched with no mandate at all.
+fa = make_repo()
+r = run("init", str(fa), "--preset", "standard", "--for-agent", "codex",
+        "task=t", "authorized_by=user")
+check("--for-agent writes the mandate", r.returncode == 0 and kv(r.stdout).get("written") == "yes")
+check("and drops what the worker cannot run",
+      "local-review" not in kv(run("show", str(fa)).stdout).get("allow", ""))
+check("while keeping the rest of the preset",
+      kv(run("show", str(fa)).stdout).get("allow")
+      == "commit,push-own-branch,open-pr,agreed-fixes,rebase-own-branch")
+fc = make_repo()
+run("init", str(fc), "--preset", "standard", "--for-agent", "claude",
+    "task=t", "authorized_by=user")
+check("a full-capability worker keeps local-review",
+      run("allows", "local-review", str(fc)).returncode == 0)
+# Fails CLOSED: an unresolvable selector must not quietly record a WIDER mandate.
+fx = make_repo()
+r = run("init", str(fx), "--preset", "standard", "--for-agent", "codex:nope",
+        "task=t", "authorized_by=user")
+check("an unresolvable selector is refused", r.returncode == 2)
+check("and nothing is written", not (fx / "MANDATE.md").exists())
+check("the refusal says the capability set is the problem",
+      "could not resolve" in r.stderr)
+check("a valueless --for-agent is refused",
+      run("init", str(make_repo()), "--preset", "standard", "task=t",
+          "authorized_by=user", "--for-agent").returncode == 2)
+
+# --- --branch: the script resolves the lane, not the caller ------------------
+# The two-line `LANE="$(… lane …)" || LANE=.` pattern plus a `"$LANE"` argument
+# was repeated at ~10 documented sites, and three review rounds each found a
+# site that had dropped one of the three pieces — which reads the CWD's mandate
+# silently, the wrong-lane read the whole mechanism exists to prevent.
+mainr = make_repo()
+(mainr / "f").write_text("x\n")
+subprocess.run(["git", "-C", str(mainr), "add", "f"], check=True)
+subprocess.run(["git", "-C", str(mainr), "-c", "user.email=t@t", "-c", "user.name=t",
+                "commit", "-qm", "init"], check=True)
+lane = Path(tempfile.mkdtemp()) / "lane-b"
+subprocess.run(["git", "-C", str(mainr), "worktree", "add", "-q", str(lane),
+                "-b", "task/lane-b"], check=True)
+run("init", str(lane), "--preset", "merge-delegated", "task=lane-b", "authorized_by=user")
+
+r = run("allows", "merge", "--branch", "task/lane-b", str(mainr))
+check("--branch reads the lane's mandate from the main repo", r.returncode == 0)
+check("and reports which lane answered",
+      Path(kv(r.stdout).get("lane", "/nope")).resolve() == lane.resolve())
+check("and that it came from the branch", kv(r.stdout).get("lane_source") == "branch")
+check("without --branch the main repo has no mandate",
+      run("allows", "merge", str(mainr)).returncode == 3)
+s2 = kv(run("show", "--branch", "task/lane-b", str(mainr)).stdout)
+check("show --branch reads the lane too", s2.get("task") == "lane-b")
+check("round --branch books in the lane",
+      kv(run("round", "--branch", "task/lane-b", str(mainr)).stdout).get("round_authorized") == "yes")
+check("and the lane's file is what changed",
+      kv(run("show", str(lane)).stdout).get("review_rounds_used") == "1")
+
+# A branch no worktree holds is NOT an error — a plain repo with no lanes is the
+# normal case — but the caller is told the cwd answered.
+r = kv(run("show", "--branch", "no-such-branch", str(mainr)).stdout)
+check("an unheld branch falls back to the cwd", r.get("lane_source") == "cwd")
+check("and names the directory it used",
+      Path(r.get("lane", "/nope")).resolve() == mainr.resolve())
+check("an empty --branch is the same as none",
+      kv(run("show", "--branch", "", str(mainr)).stdout).get("lane_source") == "cwd")
+check("a valueless --branch is a usage error", run("show", "--branch").returncode == 2)
+check("--branch=<name> works too",
+      kv(run("show", "--branch=task/lane-b", str(mainr)).stdout).get("task") == "lane-b")
 
 
 if FAILS:

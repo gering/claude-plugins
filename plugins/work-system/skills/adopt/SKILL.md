@@ -162,6 +162,12 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     One difference worth stating out loud: an adopted TASK.md is *generated from
     someone else's commits*, so it is even less a source of consent than a
     hand-written one — and its `scope=` text lands in a file the worker reads.
+    **Show the operator the exact `scope=` line before writing it** and let them
+    edit or clear it. Unlike `/kickoff`, where the scope paraphrases what the
+    user just said, an adopted scope is derived from *somebody else's* commit
+    messages, and it is quoted back into the worker's context at every resume.
+    The frontmatter is what grants, and the body labels the line as data — but a
+    line nobody read is still a line nobody read.
     Ask the user, record the answer, and if they decline, skip the file — the
     worker then asks per milestone.
 

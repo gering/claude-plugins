@@ -26,7 +26,17 @@
 #                            none) — pass it as <dir> when the session cwd is not
 #                            the lane, e.g. /cycle run from the main repo.
 #   show  [<dir>]            Emit key=value lines (always incl. mandate_exists).
+#
+#   show/allows/round also take `--branch <name>` INSTEAD of <dir>: the script
+#   then resolves the worktree holding that branch itself and reports it as
+#   `lane=`. Consumers used to do this in prose — two commands, a `|| LANE=.`
+#   fallback, and a `"$LANE"` argument — repeated at about ten sites. Every
+#   review round found another site that had dropped one of the three, and a
+#   dropped piece reads the CWD's mandate silently, which is the wrong-lane read
+#   the whole mechanism exists to prevent. One flag, resolved once, in code.
 #   init  [<dir>] k=v ...    Write the mandate. Refuses to clobber unless --force.
+#                            --for-agent <selector> asks the registry which
+#                            actions that worker cannot exercise and drops them.
 #                            --preset standard|draft-only|merge-delegated seeds
 #                            allow/deny/terminal_gate/review_budget; explicit k=v
 #                            wins; --without <action> drops tokens from allow
@@ -63,6 +73,8 @@ KEYS="mandate_version task recorded_at recorded_by authorized_by scope terminal_
 KNOWN_ACTIONS="commit push-own-branch open-pr local-review agreed-fixes rebase-own-branch merge deploy force-push-shared destructive"
 KNOWN_GATES="reviewed-pr merged pushed-branch"
 PRESETS="standard draft-only merge-delegated"
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
 die() { echo "${0##*/}: $*" >&2; exit 2; }
 
@@ -215,6 +227,16 @@ parse_frontmatter() {
   done <<EOF
 $parsed
 EOF
+  # A budget field that is not a number is a CORRUPT record, not an absent one.
+  # Coercing `review_budget: two` to empty made the budget unbounded and the
+  # loop fall back to its own default of 10 — the recorded limit silently gone,
+  # with no diagnostic anywhere. Same rule as every other unreadable record.
+  case "$FM_review_budget" in ''|*[!0-9]*)
+    [ -z "$FM_review_budget" ] || die "MANDATE.md has a non-numeric review_budget ('$FM_review_budget') — a limit nobody can read is not an absent limit ($file)" ;;
+  esac
+  case "$FM_review_rounds_used" in ''|*[!0-9]*)
+    [ -z "$FM_review_rounds_used" ] || die "MANDATE.md has a non-numeric review_rounds_used ('$FM_review_rounds_used') — refusing to guess how much of the budget is spent ($file)" ;;
+  esac
 }
 
 # Normalize a comma-separated list into NORM=",a,b,c," — every token trimmed,
@@ -279,6 +301,8 @@ do_show() {
   local key val
   resolve_mandate_path "${1:-.}"
   refuse_symlink
+  printf 'lane=%s\n' "${MANDATE_PATH%/*}"
+  printf 'lane_source=%s\n' "$LANE_SOURCE"
   printf 'mandate_file=%s\n' "$MANDATE_PATH"
   if [ ! -f "$MANDATE_PATH" ]; then
     printf 'mandate_exists=no\n'
@@ -307,6 +331,8 @@ do_allows() {
     || die "unknown action: '$action' (known: $KNOWN_ACTIONS) — not a verdict, the question was malformed"
   resolve_mandate_path "${2:-.}"
   refuse_symlink
+  printf 'lane=%s\n' "${MANDATE_PATH%/*}"
+  printf 'lane_source=%s\n' "$LANE_SOURCE"
   # No mandate = no authorization on record. Exit 3 means "unknown, ask the
   # user" — deliberately distinct from 1 ("recorded as out of bounds").
   [ -f "$MANDATE_PATH" ] || { printf 'verdict=no-mandate\n'; exit 3; }
@@ -338,8 +364,27 @@ do_allows() {
 # it. A bounded wait then a loud exit 4 — never a silent second booking, and
 # never a wedged lane without saying which file to remove.
 ROUND_LOCK=""
+# Is the lock abandoned? Its owner recorded a pid; if that process is gone, or
+# the directory is older than the bound, nobody is coming back for it. Without
+# this a `kill -9` (or a herdr tab torn down mid-round) wedged the lane
+# permanently — every later round exits 4, and the `.MANDATE.*` exclude hides
+# the lock from `git status`, so nothing points at the cause.
+LOCK_STALE_MINUTES=5
+lock_is_stale() {
+  local lock="$1" pid=""
+  [ -d "$lock" ] || return 1
+  [ -f "$lock/pid" ] && pid="$(cat "$lock/pid" 2>/dev/null || true)"
+  case "$pid" in
+    ''|*[!0-9]*) ;;
+    *) if ! kill -0 "$pid" 2>/dev/null; then return 0; fi ;;
+  esac
+  # Age is the backstop: a pid can be reused, and `kill -0` cannot see a live
+  # process owned by another user.
+  [ -n "$(find "$lock" -maxdepth 0 -mmin "+$LOCK_STALE_MINUTES" 2>/dev/null)" ]
+}
+
 acquire_round_lock() {
-  local lock="${MANDATE_PATH%/*}/.MANDATE.lock" i=0
+  local lock="${MANDATE_PATH%/*}/.MANDATE.lock" i=0 broke=no
   while ! mkdir "$lock" 2>/dev/null; do
     # mkdir can fail for two very different reasons. If the lock is NOT there,
     # the failure was not contention (a read-only worktree, a full disk) and
@@ -349,13 +394,21 @@ acquire_round_lock() {
       echo "${0##*/}: could not persist the consumed round — no lock could be created beside $MANDATE_PATH" >&2
       exit 4
     fi
+    if [ "$broke" = no ] && lock_is_stale "$lock"; then
+      # Break it ONCE. A second staleness verdict in the same call would mean we
+      # are racing another breaker, and then waiting is the safer answer.
+      rm -rf "$lock" 2>/dev/null || true
+      broke=yes
+      continue
+    fi
     i=$(( i + 1 ))
     if [ "$i" -ge 50 ]; then
-      echo "${0##*/}: could not consume a review round — another process holds $lock. If no other session is booking a round for this lane, remove that directory and retry." >&2
+      echo "${0##*/}: could not consume a review round — another process holds $lock and it does not look abandoned. If no other session is booking a round for this lane, remove it and retry: rm -rf '$lock'" >&2
       exit 4
     fi
     sleep 0.1
   done
+  printf '%s\n' "$$" > "$lock/pid" 2>/dev/null || true
   ROUND_LOCK="$lock"
 }
 
@@ -372,6 +425,20 @@ do_round() {
   parse_frontmatter "$MANDATE_PATH"
   budget="$FM_review_budget"; used="$FM_review_rounds_used"
   case "$used" in ''|*[!0-9]*) used=0 ;; esac
+  # Refuse to book what the budget does not cover, instead of incrementing past
+  # it. The old form always incremented and left the caller to notice
+  # `exhausted=yes` afterwards — so the LAST authorized round was charged to a
+  # review that then did not run, and repeat invocations walked the counter to
+  # 3, 4, 5 on a budget of 2. `round_authorized` is the field to branch on;
+  # `review_budget_exhausted` keeps its one meaning, "no further rounds after
+  # this one".
+  if [ -n "$budget" ] && [ "$used" -ge "$budget" ]; then
+    rm -rf "$ROUND_LOCK"; trap - EXIT
+    printf 'round_authorized=no\n'
+    printf 'review_rounds_used=%s\n' "$used"
+    emit_budget "$budget" "$used"
+    return 0
+  fi
   used=$(( used + 1 ))
 
   # mktemp beside the file, not a fixed "$file.tmp": the fixed name is a
@@ -427,6 +494,7 @@ do_round() {
   trap - EXIT
   trap - INT TERM HUP
 
+  printf 'round_authorized=yes\n'
   printf 'review_rounds_used=%s\n' "$used"
   emit_budget "$budget" "$used"
 }
@@ -544,7 +612,8 @@ ensure_excluded() {
   # leaves one behind for the next `git add -A`.
   exclude_one "$dir" ".MANDATE.*" || true
   # `|| rc=$?`, never `; rc=$?`: a bare function call returning non-zero trips
-  # `set -e` (line 43) and kills init before it can report anything.
+  # the `set -eu` at the top of this file and kills init before it can report
+  # anything.
   exclude_one "$dir" "$MANDATE_FILE" || rc=$?
   case "$rc" in
     0) printf 'excluded=already\n' ;;
@@ -554,7 +623,7 @@ ensure_excluded() {
 }
 
 do_init() {
-  local dir="." force="no" arg key val preset="" want_dir="" without=""
+  local dir="." force="no" arg key val preset="" want_dir="" without="" for_agent=""
   # Defaults describe the *shape* of a mandate, not consent: /kickoff must fill
   # authorized_by/allow/deny from an answer the user actually gave.
   local v_task="" v_recorded_at="" v_recorded_by="kickoff" v_authorized_by=""
@@ -574,10 +643,11 @@ do_init() {
   [ "$take_preset" = "yes" ] && die "--preset needs a value: --preset <standard|draft-only|merge-delegated>"
   [ -n "$preset" ] && apply_preset "$preset"
 
-  local expect_preset="no" expect_without="no"
+  local expect_preset="no" expect_without="no" expect_agent="no"
   for arg in "$@"; do
     if [ "$expect_preset" = "yes" ]; then expect_preset="no"; continue; fi
     if [ "$expect_without" = "yes" ]; then without="$without,$arg"; expect_without="no"; continue; fi
+    if [ "$expect_agent" = "yes" ]; then for_agent="$arg"; expect_agent="no"; continue; fi
     case "$arg" in
       --force) force="yes" ;;
       --preset) expect_preset="yes" ;;
@@ -586,6 +656,17 @@ do_init() {
       # list — retyping it in prose is how a hand-derived copy dropped a token.
       --without) expect_without="yes" ;;
       --without=*) without="$without,${arg#--without=}" ;;
+      # Ask the registry which actions this worker cannot exercise, HERE rather
+      # than in skill prose. The prose form built the flags in one command
+      # substitution and relied on the shell word-splitting them into argv — but
+      # the tool shell is zsh, which does not split unquoted parameters, so
+      # `init` saw one argv word "--without local-review", died on `unknown
+      # flag`, and every codex/grok/kimi lane launched with NO mandate at all.
+      # It also swallowed the registry's exit status, so an unresolvable
+      # selector silently produced an EMPTY flag set and recorded the full allow
+      # list — failing open, in the one place that must fail closed.
+      --for-agent) expect_agent="yes" ;;
+      --for-agent=*) for_agent="${arg#--for-agent=}" ;;
       *=*)
         key="${arg%%=*}"; val="${arg#*=}"
         check_value "$key" "$val"
@@ -608,6 +689,25 @@ do_init() {
   done
   [ -n "$want_dir" ] && dir="$want_dir"
   [ "$expect_without" = "yes" ] && die "--without needs a value: --without <action>"
+  [ "$expect_agent" = "yes" ] && die "--for-agent needs a value: --for-agent <selector>"
+  if [ -n "$for_agent" ]; then
+    local reg="$SCRIPT_DIR/agent-registry.sh" reg_out reg_rc=0
+    [ -f "$reg" ] || die "--for-agent needs agent-registry.sh beside this script (looked in $SCRIPT_DIR)"
+    reg_out="$(bash "$reg" mandate-flags "$for_agent" 2>&1)" || reg_rc=$?
+    # Fail CLOSED. Recording a full allow list because the capability lookup
+    # failed is the outcome the registry itself calls worse than recording none.
+    [ "$reg_rc" = 0 ] || die "could not resolve what '$for_agent' can do, so its mandate cannot be matched to it: $reg_out"
+    for arg in $reg_out; do
+      case "$arg" in --without=*) without="$without,${arg#--without=}" ;; esac
+    done
+    # `--without local-review` arrives as two words; take the action after each
+    # flag without depending on how any shell splits a variable.
+    local prev=""
+    for arg in $reg_out; do
+      if [ "$prev" = "--without" ]; then without="$without,$arg"; fi
+      prev="$arg"
+    done
+  fi
   # The same membership test `allow=`/`deny=` get — one validator, one message;
   # and as a comma list, so a value that is secretly two actions ("commit
   # push-own-branch") is rejected as one unknown token instead of being
@@ -724,12 +824,32 @@ on one line and each key unique — a duplicate key is refused rather than
 resolved.
 EOF
   mv "$tmp" "$MANDATE_PATH" || { echo "${0##*/}: could not persist $MANDATE_PATH" >&2; exit 4; }
-  trap - EXIT
+  # All four, not just EXIT: the INT/TERM/HUP trap exits 4, so a signal arriving
+  # after the record is already on disk reported a failed persist for a mandate
+  # that exists — and the caller then tells the user there is none.
+  trap - EXIT INT TERM HUP
 
   printf 'mandate_file=%s\n' "$MANDATE_PATH"
   printf 'mandate_exists=yes\n'
   printf 'written=yes\n'
   ensure_excluded "${MANDATE_PATH%/*}"
+}
+
+# Resolve the directory a verb should read, from an optional --branch. Sets
+# LANE_DIR and LANE_SOURCE (branch|cwd). An empty or unheld branch is NOT an
+# error: a plain repo with no task worktrees is the normal case, and the cwd is
+# then the right answer — but the caller is told which happened via `lane=`.
+LANE_DIR="."
+LANE_SOURCE="cwd"
+resolve_lane_dir() {
+  local branch="$1" dir="$2" wt=""
+  LANE_DIR="$dir"; LANE_SOURCE="cwd"
+  [ -n "$branch" ] || return 0
+  wt="$(git -C "$dir" worktree list --porcelain 2>/dev/null | awk -v b="refs/heads/$branch" '
+    /^worktree / { w = substr($0, 10) }
+    /^branch /   { if ($2 == b) { print w; exit } }')"
+  if [ -n "$wt" ]; then LANE_DIR="$wt"; LANE_SOURCE="branch"; fi
+  return 0
 }
 
 # Print the worktree that has <branch> checked out, or exit 3. pr-flow runs
@@ -747,14 +867,31 @@ do_lane() {
   printf '%s\n' "$wt"
 }
 
+# Pull `--branch <name>` out of the argument list before the verbs see it, so a
+# consumer makes ONE call with no lane boilerplate. `path`/`lane`/`init` do not
+# take it: the first two ARE the resolution, and init is always given the
+# worktree it is writing into.
+CLI_BRANCH=""; CLI_HAS_BRANCH="no"
+CLI_ARGS=()
+for _a in "$@"; do
+  if [ "$CLI_HAS_BRANCH" = "pending" ]; then CLI_BRANCH="$_a"; CLI_HAS_BRANCH="yes"; continue; fi
+  case "$_a" in
+    --branch)   CLI_HAS_BRANCH="pending" ;;
+    --branch=*) CLI_BRANCH="${_a#--branch=}"; CLI_HAS_BRANCH="yes" ;;
+    *)          CLI_ARGS+=("$_a") ;;
+  esac
+done
+[ "$CLI_HAS_BRANCH" = "pending" ] && die "--branch needs a value: --branch <name>"
+set -- ${CLI_ARGS+"${CLI_ARGS[@]}"}
+
 case "${1:-}" in
   path)    shift || true; resolve_mandate_path "${1:-.}"; printf '%s\n' "$MANDATE_PATH" ;;
   lane)    shift || true; do_lane "${1:-}" "${2:-.}" ;;
-  show)    shift || true; do_show "${1:-.}" ;;
+  show)    shift || true; resolve_lane_dir "$CLI_BRANCH" "${1:-.}"; do_show "$LANE_DIR" ;;
   init)    shift || true; do_init "$@" ;;
-  allows)  shift || true; do_allows "${1:-}" "${2:-.}" ;;
-  round)   shift || true; do_round "${1:-.}" ;;
+  allows)  shift || true; resolve_lane_dir "$CLI_BRANCH" "${2:-.}"; do_allows "${1:-}" "$LANE_DIR" ;;
+  round)   shift || true; resolve_lane_dir "$CLI_BRANCH" "${1:-.}"; do_round "$LANE_DIR" ;;
   actions) printf '%s\n' $KNOWN_ACTIONS ;;
   presets) do_presets ;;
-  *) echo "usage: ${0##*/} {path|lane|show|init|allows|round|actions|presets} [...]" >&2; exit 2 ;;
+  *) echo "usage: ${0##*/} {path|lane|show|init|allows|round|actions|presets} [--branch <name>] [...]" >&2; exit 2 ;;
 esac
