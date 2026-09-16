@@ -14,8 +14,9 @@ reindexedAt: 2026-07-12
 Inside a herdr session, `/kickoff` replaces its manual "open a terminal yourself"
 block with an automated tab launch. The launch lives in one shared, testable
 helper — `plugins/work-system/scripts/herdr-launch.sh` — with two subcommands:
-`launch` (called from **both** `skills/kickoff/SKILL.md` step 13 and
-`skills/adopt/SKILL.md` step 13 — see the adopt note below) and `resume` (called from
+`launch` (called from **both** `skills/kickoff/SKILL.md` step 14 and
+`skills/adopt/SKILL.md` step 14 — see the adopt note below; both were step 13
+before work-system 1.14.0 inserted mandate recording ahead of the launch) and `resume` (called from
 `skills/continue/SKILL.md`'s reopen path — the main session with a `<task>` arg, or
 a *different* task's name given from inside a worktree). The helper is the source of
 truth; this entry captures the durable design and one non-obvious gotcha.
@@ -234,7 +235,7 @@ meant to stay byte-identical.
 ## `/adopt` auto-launch: reference kickoff's prose, don't duplicate it
 
 work-system 1.9.3 gave `/adopt` the same in-herdr tab launch as `/kickoff`: after it
-builds the worktree from an existing branch, `skills/adopt/SKILL.md` step 13 calls the
+builds the worktree from an existing branch, `skills/adopt/SKILL.md` step 14 calls the
 identical `herdr-launch.sh launch "$LABEL" "$WORKTREE" "$HERDR_WORKSPACE_ID" "$SELECTOR"`
 (step 12 resolves the worker selector exactly as kickoff does — `/adopt` grew an
 optional `[agent-selector]` arg for it). Two durable decisions:
@@ -242,8 +243,8 @@ optional `[agent-selector]` arg for it). Two durable decisions:
 - **One copy of the intricate branching.** The launch *helper* is already the single
   source of truth for the mechanics, but the *skill prose* around it (the picker/announce
   rules of step 12, and the exit-0-`moved`/exit-2/exit-3/non-zero result branching of
-  step 13) is stateful logic that drifts if copied — the "prose skill logic drifts"
-  memory. So adopt's steps **reference** `kickoff/SKILL.md` step 12/13 for that shared
+  step 14) is stateful logic that drifts if copied — the "prose skill logic drifts"
+  memory. So adopt's steps **reference** `kickoff/SKILL.md` step 12/13/14 for that shared
   logic and inline only the adopt-specific deltas, rather than a full paraphrase that
   would silently diverge under later edits.
 - **Adopt-specific deltas that must stay inline.** (1) The `LABEL` derives from the

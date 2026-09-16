@@ -202,7 +202,8 @@ Default arc = git/PR **milestones**: `commits → push → PR open → review pa
 ready-to-close`. claude self-drives via work-system/pr-flow/swarm; codex/grok drive
 to *PR open* with `gh`, and the **Manager fills the review gap** (`/swarm:review --pr
 N` — any agent's PR is a valid target). Kickoff **pre-authorizes** commit/push/PR/
-review/own-branch-rebase/agreed-fixes. **Stop-early gates** (→ `blocked`/escalate):
+review/own-branch-rebase/agreed-fixes — recorded in `MANDATE.md`, see
+[worker-autonomy-mandate](../features/worker-autonomy-mandate.md). **Stop-early gates** (→ `blocked`/escalate):
 failing CI, scope drift, any destructive/irreversible step, **merge to main** (never
 without explicit delegation), force-push beyond own-branch lease, any human decision.
 

@@ -9,3 +9,6 @@ tasks/archive/
 # Python bytecode cache — generated when a plugin script runs; never commit it
 __pycache__/
 *.pyc
+
+# Ephemeral work-system autonomy mandate written into a worktree by /kickoff — never commit it
+/MANDATE.md

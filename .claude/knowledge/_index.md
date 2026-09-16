@@ -19,6 +19,7 @@
 - `features/kickoff-agent-selection.md` — `/kickoff` worker choice: single committed per-repo default (no global/fallback/ranking) else picker; `agent-registry.sh` as SoT; optional PATH-detected `cc-harness:<id>` class (pure consumer of `list`/`exec`, no gateway hardcoding); bounded model-aware grok/kimi probes (inconclusive→trust-auth); kimi's two-phase seed+continue argv + `argv_shell=`; non-claude "document, don't fake" degradation; announce-not-prompt for external defaults
 - `features/task-archiving-on-close.md` — `/close` archives (not deletes) the task file; adaptive commit + ff-push to main; per-repo `.claude/work-system-close-autocommit` opt-in skips the ask
 - `features/swarm-backend-adapter.md` — External adapter contract: jailed read+web, egress guard, out-of-band transport, schema normalization, readiness, telemetry, adapter-owned config; Kimi uses ACP with denied permissions + local fail-closed validation
+- `features/worker-autonomy-mandate.md` — `MANDATE.md` as the lane's authorization record: frontmatter-only consent (task prose never grants), the 0/1/3 `allows` contract (denied vs. never-asked), a review budget counted in-file so it survives a resume, pr-flow's soft-coupled shim answering "unknown" not "no", plus bot-detection before recommending a review
 - `features/swarm-review-pipeline.md` — `/swarm:review`: 11 lenses/5 clusters across Claude + codex/grok/kimi; four-family consensus; verify, `--fix`/`--loop`, and deterministic `--pr` publishing
 
 ## Deployment
