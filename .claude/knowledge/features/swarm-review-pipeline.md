@@ -213,6 +213,23 @@ from 5/7 to 7/7 mutants caught. A green test nobody has seen fail proves nothing
 The markers couple the test to the source layout — an accepted stopgap, with the
 real extraction tracked in `tasks/extract-swarm-review-logic.md`.
 
+**A guard that cannot be false is not a guard (0.11.1, found by swarm review).**
+The first cut of this fix shipped `NO_RESULT = '… blocked by permission
+classifier, cancelled, or schema-invalid'` and told the presenter to name the
+classifier cause *only when an error string says so*. That condition was always
+true, because the only string it could read was the one that always said it — so
+every timeout became a published permission denial, and the new test pinned the
+substring, cementing it. Three families agreed on it in review. Two rules came
+out of it: **state only what the evidence supports** (a resolve-to-nothing
+carries no diagnostic at all — say that, do not upgrade it into a named cause),
+and **classification belongs where a test can reach it**, not in presenter prose.
+The "ran with X of Y voices" sentence is therefore a `coverageNote` computed in
+the workflow from the actual error strings, not a template in `SKILL.md` — the
+same section already forbade re-deriving coverage there, and the prose had
+quietly broken that rule. A corollary for shipped surfaces: **no internal task
+slug in user-facing text** — `tasks/` is untracked, so an installed user cannot
+resolve it.
+
 **Do not "fix" this by weakening the jail or the classifier.** This entry is only
 about not lying when a voice is lost. The prompt-free transport (a main-session
 Bash entry point plus a narrow allow rule) is `fix-swarm-review-runtime-handoff`;

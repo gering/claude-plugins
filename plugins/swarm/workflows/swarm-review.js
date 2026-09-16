@@ -707,7 +707,22 @@ const unitBrief = (u, { inline }) =>
 // coverage at all. Do not delete or rename them: the test fails loudly when a
 // region is missing rather than quietly checking nothing — the same failure mode
 // the accounting itself exists to prevent.
-const NO_RESULT = 'agent returned no result (blocked by permission classifier, cancelled, or schema-invalid)'
+// NAME ONLY WHAT WE KNOW. This string used to read "blocked by permission
+// classifier, cancelled, or schema-invalid", and the presenter was told to
+// diagnose a classifier denial whenever an error string said so — which this
+// string always did. Every timeout, cancellation and budget kill was therefore
+// published as a permission denial, and the first version of the test pinned the
+// substring for the null case, locking the tautology in. A resolve-to-nothing
+// carries NO diagnostic by construction: the agent never spoke. So say that, and
+// let the callers that DO have evidence (an adapter exit, a timeout message)
+// speak for themselves.
+const NO_RESULT = 'agent returned no result — no diagnostic reached us (cancelled, denied, or dropped before it answered)'
+// A plan/result skew is its OWN failure, not a missing result: reusing NO_RESULT
+// here published the *mismatched* voice's error text under the *planned* voice's
+// name — the precise misattribution the identity check exists to prevent — or
+// called a skew "schema-invalid" and sent the operator hunting a parser bug.
+const identityMismatchReason = (p, r) =>
+  `plan/result identity mismatch: expected ${p.backend}:${p.unit}, got ${r && r.backend ? `${r.backend}:${r.unit}` : 'an unidentifiable result'} — this voice's result was not accepted`
 const noResultReason = (r) =>
   (r && r.error) ? String(r.error).slice(0, 180)
   : (r && typeof r === 'object' && Object.keys(r).length) ? 'agent returned a result with no valid findings array (schema-invalid)'
@@ -922,8 +937,11 @@ const voices = plannedVoices.map((p, i) => {
   // order change in `parallel` from attributing one backend's findings to
   // another: it degrades to "everything lost", which is loud, rather than to a
   // quietly wrong report — which is the entire bug class this fix closes.
-  if (r && typeof r.ok === 'boolean' && Array.isArray(r.findings) && r.backend === p.backend && r.unit === p.unit) return r
-  return { backend: p.backend, unit: p.unit, lenses: p.lenses, ok: false, error: noResultReason(r), findings: [] }
+  const shaped = r && typeof r.ok === 'boolean' && Array.isArray(r.findings)
+  if (shaped && r.backend === p.backend && r.unit === p.unit) return r
+  // A well-shaped result at the WRONG index is a skew, not a missing answer.
+  const why = shaped ? identityMismatchReason(p, r) : noResultReason(r)
+  return { backend: p.backend, unit: p.unit, lenses: p.lenses, ok: false, error: why, findings: [] }
 })
 
 // error != empty: separate genuinely-dropped backends from clean empty reviews.
@@ -1019,6 +1037,28 @@ if (familiesLost.length) {
       (familiesPresent.length >= 2 ? '' : '; consensus is UNREACHABLE this run, every finding falls back to solo + verifier'))
 }
 const coverageNotes = []
+// THE HEADLINE, emitted here rather than templated in the presenter. The skill
+// used to carry this as prose that computed the counts itself and diagnosed the
+// cause conditionally — inside the very section that forbids re-deriving
+// coverage in the presenter, guarded only by a sentence no test can check. It
+// also asserted a permission denial off a substring that was always present.
+// Classifying evidence is exactly the kind of rule that has to live where a test
+// can reach it, so it does. Pushed FIRST: "how many voices actually spoke" is
+// what reframes every number in the balance line above it.
+if (voicesReturned < voices.length) {
+  const lost = voices.length - voicesReturned
+  // Three evidence classes, and NO guessing beyond them. A timeout says so in
+  // its own message; a resolve-to-nothing carries no diagnostic at all and must
+  // not be upgraded into a named cause; anything else spoke for itself.
+  const timedOut = backendErrors.filter((e) => /timed out|timeout/i.test(e.error)).length
+  const silent = backendErrors.filter((e) => e.error === NO_RESULT).length
+  const other = Math.max(0, lost - timedOut - silent)
+  const parts = []
+  if (timedOut) parts.push(`${timedOut} per Timeout`)
+  if (silent) parts.push(`${silent} ohne jede Rückmeldung (abgebrochen, abgelehnt oder verworfen — kein Fehlertext erreichte uns)`)
+  if (other) parts.push(`${other} mit einer Fehlermeldung des Backends`)
+  coverageNotes.push(`Dieser Review lief mit ${voicesReturned} von ${voices.length} Stimmen — ${lost} Aufruf(e) lieferten kein Ergebnis${parts.length ? `: ${parts.join('; ')}` : ''}. Die Einzelgründe stehen unter den Backend-Fehlern.`)
+}
 // The HEADER is emitted here as well, not templated in the skill: gated there on
 // "coverageNotes is non-empty" it fired for a single-family run and announced
 // "reduziert: 1 von 1 Modellfamilien" — and for a cluster-only degradation

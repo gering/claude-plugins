@@ -632,18 +632,12 @@ Then, when present:
   unit names WHICH cluster lost its coverage — "codex errored" alone hides that);
   an errored voice is NOT "found nothing".
 
-  Then ONE plain-language line above that list, so the consequence is not left
-  for the reader to assemble out of error strings:
-
-  > ⚠️ Dieser Review lief mit **<balance.voicesReturned> von <balance.voices>
-  > Stimmen** — <N> Aufrufe haben kein Ergebnis geliefert. Wenn der Grund
-  > "blocked by permission classifier" lautet, hat der Auto-Modus den externen
-  > Aufruf als Daten-Exfiltration eingestuft und abgelehnt; der prompt-freie
-  > Umbau dafür ist `fix-swarm-review-runtime-handoff`.
-
-  Name the classifier cause ONLY when an error string actually says so — for a
-  timeout or a non-zero adapter exit it is wrong, and a wrong diagnosis sends the
-  user to the wrong task. Print the counts in every case.
+  The "this review ran with X of Y voices" line is **not templated here** — the
+  workflow emits it as a `coverageNotes` entry, printed verbatim with the others.
+  Do not compute the counts, restate them, or diagnose a cause: an earlier
+  version of this section did both, and it asserted a permission denial off a
+  substring that the generic no-result reason always contained — so every timeout
+  was published as a classifier denial. Only the workflow sees the evidence.
 - **Voice timing** — run this and print its stdout verbatim under the balance
   block (skip the section when it prints nothing):
 

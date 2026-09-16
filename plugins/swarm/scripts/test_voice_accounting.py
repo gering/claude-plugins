@@ -18,6 +18,7 @@ skips itself when node is missing would reproduce the very bug it guards. If
 node is absent this fails, and CI installs node for that reason.
 """
 
+import functools
 import json
 import re
 import shutil
@@ -37,9 +38,16 @@ def fail(case, msg):
 # --- extraction --------------------------------------------------------------
 
 
+@functools.lru_cache(maxsize=None)
+def _source():
+    """Read swarm-review.js once. Every case used to re-read ~1450 lines."""
+    return SOURCE.read_text(encoding="utf-8")
+
+
+@functools.lru_cache(maxsize=None)
 def region(name):
     """Lift one `// swarm-test-region: <name>` block out of the source."""
-    text = SOURCE.read_text(encoding="utf-8")
+    text = _source()
     start = f"// swarm-test-region: {name}\n"
     if start not in text:
         sys.exit(
@@ -56,9 +64,10 @@ def region(name):
     return body.split(end, 1)[0]
 
 
+@functools.lru_cache(maxsize=None)
 def family_map():
     """Reuse the real FAMILY map instead of copying it into the test."""
-    text = SOURCE.read_text(encoding="utf-8")
+    text = _source()
     m = re.search(r"^const FAMILY = \{.*?\}$", text, re.M)
     if not m:
         sys.exit(
@@ -187,8 +196,17 @@ def case_resultless_shapes():
                      live_externals=["grok"])["backendErrors"][0]["error"]
     if null_err == schema_err:
         fail("shape distinction", "a null result and a schema-invalid one report the same reason")
-    if "blocked by permission classifier" not in null_err:
-        fail("shape distinction", f"null result lost its diagnostic reason: {null_err!r}")
+    # A resolve-to-nothing carries NO diagnostic — the agent never spoke. The
+    # reason must say that and must NOT name a cause. The first version of this
+    # test asserted the opposite (it required the literal "blocked by permission
+    # classifier"), which locked in a string that made every timeout read as a
+    # permission denial. Assert the absence now, so the tautology cannot return.
+    if "no diagnostic" not in null_err:
+        fail("shape distinction", f"null result lost its no-evidence wording: {null_err!r}")
+    for claimed in ("blocked by permission classifier", "timed out", "schema-invalid"):
+        if claimed in null_err:
+            fail("shape distinction",
+                 f"null result asserts a cause it cannot know ({claimed!r}): {null_err!r}")
 
 
 def case_total_family_loss():
@@ -236,6 +254,32 @@ def case_partial_family_loss():
         fail("partial loss", f"{len(out['backendErrors'])} backendErrors, expected 3")
 
 
+def case_voice_count_note():
+    """The "ran with X of Y voices" line belongs to the workflow, and must not
+    invent a cause. It was presenter prose that diagnosed a permission denial
+    from a substring the generic reason always carried."""
+    planned = [voice("claude", c) for c in CLUSTERS] + [voice("grok", c) for c in CLUSTERS]
+    # One grok call timed out (it says so), one vanished without a word.
+    settled = ([ok_result("claude", c, 1) for c in CLUSTERS]
+               + [ok_result("grok", CLUSTERS[0], 1),
+                  {"backend": "grok", "unit": CLUSTERS[1], "lenses": [CLUSTERS[1]],
+                   "ok": False, "error": "Exit code 1: grok timed out after 540s", "findings": []},
+                  None,
+                  ok_result("grok", CLUSTERS[3], 1)])
+    out = run(planned, settled, live_externals=["grok"])
+
+    notes = " ".join(out["coverageNotes"])
+    if "6 von 8 Stimmen" not in notes:
+        fail("voice count", f"the note does not state 6 of 8 voices: {notes!r}")
+    if "1 per Timeout" not in notes:
+        fail("voice count", f"the timed-out call was not classed as a timeout: {notes!r}")
+    if "1 ohne jede Rückmeldung" not in notes:
+        fail("voice count", f"the silent call was not classed as unexplained: {notes!r}")
+    # The counts must lead — they reframe every number in the balance line.
+    if "Stimmen" not in out["coverageNotes"][0]:
+        fail("voice count", f"the voice-count note is not first: {out['coverageNotes']!r}")
+
+
 def case_healthy_run_is_quiet():
     """The counter-test: a run that lost nothing must produce NO coverage note."""
     planned = [voice("claude", c) for c in CLUSTERS] + [voice("grok", c) for c in CLUSTERS]
@@ -252,6 +296,8 @@ def case_healthy_run_is_quiet():
         fail("healthy", f"voicesReturned = {out['voicesReturned']}, expected {len(planned)}")
     if out["familiesPartial"]:
         fail("healthy", f"familiesPartial non-empty on a clean run: {out['familiesPartial']!r}")
+    if any("Stimmen" in n for n in out["coverageNotes"]):
+        fail("healthy", "a clean run announced a voice count it did not lose")
 
 
 def case_claude_only_is_quiet():
@@ -283,6 +329,24 @@ def case_identity_mismatch_fails_closed():
         fail("identity", "an unplanned backend leaked into the voice list")
     if any(v["findings"] == 5 for v in out["voices"]):
         fail("identity", "findings were attributed to a voice that did not produce them")
+    # And it must be REPORTED as a skew. Delegating to noResultReason published a
+    # mismatch as "schema-invalid" — or, when the stray result carried an error,
+    # printed one backend's failure text under another backend's name.
+    err = [e for e in out["backendErrors"] if e["backend"] == "grok"][0]["error"]
+    if "identity mismatch" not in err:
+        fail("identity", f"a skew was not reported as a skew: {err!r}")
+    if "schema-invalid" in err:
+        fail("identity", f"a skew was reported as a schema error: {err!r}")
+    # A mismatched result that carries its OWN error text must not be republished
+    # under the planned voice's name.
+    out2 = run([voice("claude", "correctness"), voice("grok", "threat")],
+               [ok_result("claude", "correctness", 1),
+                {"backend": "codex", "unit": "threat", "lenses": ["threat"],
+                 "ok": False, "error": "exit 7 quota exceeded", "findings": []}],
+               live_externals=["grok"])
+    err2 = [e for e in out2["backendErrors"] if e["backend"] == "grok"][0]["error"]
+    if "quota exceeded" in err2:
+        fail("identity", f"codex's error text was published under grok's name: {err2!r}")
 
 
 def case_mapping_fails_closed():
@@ -344,6 +408,7 @@ def main():
         case_resultless_shapes,
         case_total_family_loss,
         case_partial_family_loss,
+        case_voice_count_note,
         case_healthy_run_is_quiet,
         case_claude_only_is_quiet,
         case_identity_mismatch_fails_closed,

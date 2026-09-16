@@ -221,7 +221,13 @@ keeps `backend_rc` null instead of claiming a model response.
 
 Unavailable backends drop from the ensemble — `claude` alone still works.
 `/swarm:review` reports a backend that *errored* mid-run distinctly from one
-that cleanly found nothing (error ≠ empty).
+that cleanly found nothing (error ≠ empty) — and, since 0.11.1, a voice that
+**resolved without reviewing anything** counts as an error too, not as a clean
+empty review. A voice can come back as nothing at all (denied, cancelled, or
+dropped before it answered); three releases reported exactly that as full
+coverage. Results are paired to the planned voice list by index, so a missing
+one is named rather than dropped, and the report says how many of the planned
+voices actually spoke plus what share of each model family was lost.
 
 ### Shared findings schema (`scripts/schema/finding.schema.json`)
 
