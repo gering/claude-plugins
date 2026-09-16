@@ -699,11 +699,34 @@ const unitBrief = (u, { inline }) =>
 // Exfiltration" (private diff -> external endpoint) and the agent comes back as
 // null/undefined. That is an ERROR, not a clean empty review, and every message
 // below says which of the three shapes we saw.
+// swarm-test-region: voice-mapping
+// The two regions marked this way are lifted VERBATIM by
+// scripts/test_voice_accounting.py and executed against synthetic voices. This
+// file is the repo's only JavaScript and the Python test suite cannot otherwise
+// reach it, so these markers are the seam that gives the accounting below any
+// coverage at all. Do not delete or rename them: the test fails loudly when a
+// region is missing rather than quietly checking nothing — the same failure mode
+// the accounting itself exists to prevent.
 const NO_RESULT = 'agent returned no result (blocked by permission classifier, cancelled, or schema-invalid)'
 const noResultReason = (r) =>
   (r && r.error) ? String(r.error).slice(0, 180)
   : (r && typeof r === 'object' && Object.keys(r).length) ? 'agent returned a result with no valid findings array (schema-invalid)'
   : NO_RESULT
+
+// The two result shapers. Named functions rather than inline `.then()` bodies
+// so the extractor can reach them: as inline arrows they were untestable, and a
+// mutation test confirmed that reintroducing either fail-open variant went
+// unnoticed. Both decide the SAME question — did this voice actually review
+// anything — so they answer it the same way: an explicit `ok` on every path.
+const shapeClaudeResult = (r, u) => Array.isArray(r?.findings)
+  ? { backend: 'claude', unit: u.name, lenses: u.lenses, ok: true, error: '', findings: r.findings }
+  : { backend: 'claude', unit: u.name, lenses: u.lenses, ok: false, error: noResultReason(r), findings: [] }
+// `ok === true` is the whole point: `r?.ok !== false` read a missing result as
+// success, which is how a denied spawn became "a healthy voice with 0 findings".
+const shapeExternalResult = (r, v) => (r?.ok === true && Array.isArray(r.findings))
+  ? { backend: v.backend, unit: v.unit, lenses: v.lenses, ok: true, error: '', findings: r.findings }
+  : { backend: v.backend, unit: v.unit, lenses: v.lenses, ok: false, error: noResultReason(r), findings: [] }
+// swarm-test-region-end
 
 // The PLAN for the Claude side, in the SAME order as claudeThunks (both map over
 // finderUnits, so the indexes cannot drift). The join below pairs results to this
@@ -720,9 +743,7 @@ const claudeThunks = finderUnits.map((u) => () =>
   // one that never came back; `r?.findings || []` used to launder the latter into
   // a clean empty review, and only the .catch (which a resolved-but-empty agent
   // never triggers) ever set ok=false.
-  ).then((r) => (Array.isArray(r?.findings)
-    ? { backend: 'claude', unit: u.name, lenses: u.lenses, ok: true, error: '', findings: r.findings }
-    : { backend: 'claude', unit: u.name, lenses: u.lenses, ok: false, error: noResultReason(r), findings: [] }))
+  ).then((r) => shapeClaudeResult(r, u))
    .catch((e) => ({ backend: 'claude', unit: u.name, lenses: u.lenses, ok: false, error: `claude:${u.name} — ${String(e).slice(0, 120)}`, findings: [] }))
 )
 
@@ -881,9 +902,7 @@ const externalThunks = externalVoiceSpecs.map((v) => () =>
   // FAIL CLOSED: `ok: r?.ok !== false` read undefined as success, so a denied or
   // cancelled spawn was reported as a healthy voice with 0 findings. Only an
   // explicit ok=true carrying a real findings array counts as a review.
-  ).then((r) => ((r?.ok === true && Array.isArray(r.findings))
-    ? { backend: v.backend, unit: v.unit, lenses: v.lenses, ok: true, error: '', findings: r.findings }
-    : { backend: v.backend, unit: v.unit, lenses: v.lenses, ok: false, error: noResultReason(r), findings: [] }))
+  ).then((r) => shapeExternalResult(r, v))
    .catch((e) => ({ backend: v.backend, unit: v.unit, lenses: v.lenses, ok: false, error: `${v.label} — ${String(e).slice(0, 180)}`, findings: [] }))
 )
 
@@ -895,6 +914,7 @@ const externalThunks = externalVoiceSpecs.map((v) => () =>
 // index i now names exactly which backend+unit was lost.
 const plannedVoices = [...claudeVoiceSpecs, ...externalVoiceSpecs]
 const settled = await parallel([...claudeThunks, ...externalThunks])
+// swarm-test-region: voice-accounting
 const voices = plannedVoices.map((p, i) => {
   const r = settled[i]
   // Accept a result only if it DECIDED (boolean ok), carries a findings array,
@@ -1040,6 +1060,7 @@ if (familiesPartial.length) {
 if (consensusReachable && unitsDegraded.length) {
   log(`Cluster coverage: ${unitsDegraded.join(', ')} had fewer than 2 families return — findings there cannot reach consensus and fall back to solo + verifier`)
 }
+// swarm-test-region-end
 
 const pool = []
 for (const v of voices) {
