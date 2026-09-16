@@ -1,0 +1,102 @@
+{
+  "schema": "insights.report/v1",
+  "report_id": "ins-20260901T120000Z-5a0c0ffee001",
+  "recorded_at": "2026-09-01T12:00:00Z",
+  "report_trigger": "manual",
+  "task_status": "in_progress",
+  "project": {
+    "name": "claude-plugins",
+    "ref": "git:/home/dev/src/claude-plugins",
+    "ref_source": "git-main-worktree",
+    "key": "4dc7e8ed4488d34d",
+    "remote": "git@github.com:gering/claude-plugins.git"
+  },
+  "work": {
+    "summary": "HISTORICAL FIXTURE (not a statement about current swarm behavior). Three-family /swarm:review --fix on a swarm 0.7.1 branch: 6 of 8 external wrapper agents were blocked, 2 returned findings, yet the workflow reported no backend errors and all families present.",
+    "task_id": {"value": null, "reason": "work-system tasks carry no task ID; the task name is the identity"},
+    "run_id": {"value": "wf_15df299a-ce1", "source": "workflow run journal"},
+    "task_name": {"value": "fix-swarm-grok-probe-and-workflow-path", "source": "branch name"},
+    "task_path": {"value": null, "reason": "worktree task copy not recorded at report time"},
+    "branch": {"value": "task/fix-swarm-grok-probe-and-workflow-path", "source": "git"},
+    "pr": {"value": null, "reason": "no PR opened at the time of the review"},
+    "instruction_ids": [],
+    "related_reports": []
+  },
+  "reporter": {
+    "role": "worker",
+    "role_source": "task lane session",
+    "model": {"value": null, "reason": "historical reconstruction; authoring model not preserved"},
+    "runtime": {"value": "claude-code", "source": "workflow journal"},
+    "harness": {"value": null, "reason": "not recorded"},
+    "reasoning_effort": {"value": null, "reason": "not recorded"},
+    "session_id": {"value": null, "reason": "not recorded"}
+  },
+  "participants": [
+    {"role": "unknown", "label": "codex voices", "model": {"value": null, "reason": "adapter model not in journal"}, "runtime": {"value": "codex CLI", "source": "swarm adapter"}, "harness": {"value": "Workflow general-purpose wrapper agent", "source": "workflow journal"}, "reasoning_effort": {"value": null, "reason": "not recorded"}, "scope": "external review clusters", "basis": "run_evidence"},
+    {"role": "unknown", "label": "grok voices", "model": {"value": null, "reason": "adapter model not in journal"}, "runtime": {"value": "grok CLI", "source": "swarm adapter"}, "harness": {"value": "Workflow general-purpose wrapper agent", "source": "workflow journal"}, "reasoning_effort": {"value": null, "reason": "not recorded"}, "scope": "external review clusters", "basis": "run_evidence"}
+  ],
+  "usage": {
+    "completeness": "partial",
+    "completeness_reason": "only the review run is described; earlier skill use in the lane is unknown",
+    "skills": [
+      {"skill": "swarm:review", "plugin": "swarm", "plugin_version": {"value": "0.7.1", "source": "branch under review (the executing install version was not recorded)"}, "model": {"value": null, "reason": "not recorded"}, "note": "--fix"}
+    ]
+  },
+  "user_feedback": [],
+  "retrospective": {
+    "outcome": {"intended": "Cross-family review of the branch with verified findings applied by --fix.", "achieved": "Review completed with 2 of 8 external voices; presented as a healthy multi-family result."},
+    "difficulty": {
+      "domain": {"level": "low", "reason": "ordinary review of a small branch"},
+      "tooling": {"level": "high", "reason": "a partial transport block was indistinguishable from an empty review without reading the journal"}
+    },
+    "worked_well": [
+      {"observation": "The 2 external voices that got through returned real findings.", "basis": "run_evidence", "evidence": ["wf_15df299a-ce1"]}
+    ],
+    "friction": [
+      {
+        "plugin": "swarm", "skill": "swarm:review",
+        "expected": "Blocked voices appear as backend errors and reduce family coverage.",
+        "observed": "backendErrors was empty and every family counted as present although 6 of 8 external voices produced no result.",
+        "impact": "Cross-family consensus was computed over three quarters missing coverage; a --pr run would have posted it as complete.",
+        "resolution": {"status": "unresolved", "detail": "found by reading the journal; tracked as a separate fix task"},
+        "suspected_cause": {"text": "Resultless resolves are mapped fail-open (ok: r?.ok !== false).", "confidence": "high"},
+        "basis": "run_evidence",
+        "evidence": ["wf_15df299a-ce1/journal.jsonl"],
+        "related_reports": []
+      }
+    ],
+    "interventions": [
+      {"kind": "manual_intervention", "description": "Read the workflow journal to discover the failed agents.", "reason": "the report itself showed no failure", "basis": "run_evidence"}
+    ],
+    "suggestions": {
+      "status": "provided",
+      "author": "reporting_model",
+      "items": [
+        {"change": "Pair planned voices with results by index and fail closed on a missing result.", "observation": "6 failed agents left no result record and no rejection.", "expected_benefit": "Partial loss becomes visible in-band, including in --pr output.", "uncertainty": {"level": "low", "note": null}}
+      ]
+    }
+  },
+  "plugin_details": {
+    "swarm": {
+      "runs": [
+        {
+          "profile": {"value": null, "reason": "profiles did not exist yet"},
+          "voices": {"planned": 12, "started": 6, "accepted": 6, "missing_results": 6, "empty_results": null},
+          "failures": [
+            {"voice": "codex:breakage", "reason": "wrapper agent blocked by classifier"},
+            {"voice": "codex:consistency", "reason": "wrapper agent blocked by classifier"},
+            {"voice": "codex:design", "reason": "wrapper agent blocked by classifier"},
+            {"voice": "grok:breakage", "reason": "wrapper agent blocked by classifier"},
+            {"voice": "grok:threat", "reason": "wrapper agent blocked by classifier"},
+            {"voice": "grok:design", "reason": "wrapper agent blocked by classifier"}
+          ],
+          "restarts": 0,
+          "findings": {"useful": null, "rejected": null, "rejection_reasons": []},
+          "handoff": {"fix": "--fix ran on the reduced finding set", "pr": null},
+          "benefit_vs_effort": "Unclear: the result looked complete, so its benefit was overstated.",
+          "basis": "run_evidence"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "insights",
+  "description": "Private, local task and plugin insight reports for Claude Code. /insights:report records observations mid-task or at any point: project, models, evidenced plugin versions, friction and improvement suggestions, with honest unknowns.",
+  "version": "0.1.0",
+  "author": {
+    "name": "gering"
+  },
+  "repository": "https://github.com/gering/claude-plugins",
+  "license": "MIT",
+  "keywords": ["insights", "retrospective", "feedback", "reports", "plugins"]
+}
