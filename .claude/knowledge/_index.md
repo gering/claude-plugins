@@ -20,7 +20,7 @@
 - `features/task-archiving-on-close.md` — `/close` archives (not deletes) the task file; adaptive commit + ff-push to main; per-repo `.claude/work-system-close-autocommit` opt-in skips the ask
 - `features/swarm-backend-adapter.md` — External adapter contract: jailed read+web, egress guard, out-of-band transport, schema normalization, readiness, telemetry, adapter-owned config; Kimi uses ACP with denied permissions + local fail-closed validation
 - `features/worker-autonomy-mandate.md` — `MANDATE.md` as the lane's authorization record: frontmatter-only consent (task prose never grants), the 0/1/3 `allows` contract (denied vs. never-asked), a review budget counted in-file so it survives a resume, pr-flow's soft-coupled shim answering "unknown" not "no", plus bot-detection before recommending a review
-- `features/swarm-review-pipeline.md` — `/swarm:review`: 11 lenses/5 clusters across Claude + codex/grok/kimi; four-family consensus; verify, `--fix`/`--loop`, and deterministic `--pr` publishing
+- `features/swarm-review-pipeline.md` — `/swarm:review`: 11 lenses/5 clusters across Claude + codex/grok/kimi; four-family consensus; verify, `--fix`/`--loop`, deterministic `--pr` publishing; fail-closed voice accounting (resolved != reviewed) + the marker/mutation test seam
 
 ## Deployment
 - `deployment/ci-structure-checks.md` — `check-structure.py` as the single automated guard for a build-less repo

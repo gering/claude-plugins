@@ -1,9 +1,9 @@
 ---
 title: "Swarm Review Pipeline (/swarm:review)"
 createdAt: 2026-07-08
-updatedAt: 2026-09-10
+updatedAt: 2026-09-16
 createdFrom: "PR #24"
-updatedFrom: "add-kimi-swarm-voice"
+updatedFrom: "fix-swarm-silent-voice-loss"
 pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
@@ -162,6 +162,61 @@ truth** — every voice's fan-out units come from it, Claude and externals alike
   well as by the workflow. The external CLIs get the fenced prompt via `agents.sh run … --prompt-file`.
 - The skill invoking `Workflow` is the explicit **opt-in** the Workflow tool
   requires; a plugin skill may not otherwise trigger it.
+
+## Voice accounting: "error != empty" also means "resolved != reviewed" (0.11.1)
+
+The `backendError`-instead-of-silence rule above was real but **incomplete**, and
+the gap cost three reviews. It only covered a voice that *errored*. A voice can
+also **resolve without having reviewed anything**: Claude Code's auto-mode
+permission classifier hard-denies the Workflow's transport-wrapper spawn as
+"Data Exfiltration" (a private repo diff heading for an external endpoint), and
+the agent then comes back as `null`/`undefined`. Three runs (2026-08-31 15/15
+denied, 2026-09-01 6/8, 2026-09-10 6/26 and 8/28 on PR #27) printed
+`gpt×N 0 · grok×N 0`, `ok: true`, `backendErrors: []` and full family coverage.
+Two Claude-only rounds were presented as a swarm review, and PR #27 got no
+cross-family consensus with nobody noticing in-band — the only trace was the
+Workflow notification's `<failures>` block.
+
+Three separate fail-open sites had to line up for that, which is why it survived
+so long:
+- `(await parallel([...])).filter(Boolean)` — a denied spawn was dropped *before*
+  any accounting saw it. **Rule: pair results to the planned voice list by INDEX,
+  never by truthiness.** Planned voices are known before fan-out
+  (`claudeVoiceSpecs` + `externalVoiceSpecs`), so a hole at index *i* names
+  exactly which backend+unit was lost. The join also checks identity
+  (`r.backend === p.backend && r.unit === p.unit`) so an order change degrades to
+  "everything lost" — loud — rather than mis-attributing findings.
+- `ok: r?.ok !== false` — `undefined !== false` is true, so *no result* read as
+  *successful voice, 0 findings*. Requires an explicit `ok === true` **plus**
+  `Array.isArray(findings)` now. A non-array `findings` is an error, not an empty
+  review.
+- The Claude finder's `.then()` set no `ok` at all; only its `.catch()` did, and a
+  resolved-but-empty agent never triggers a catch. Both paths set `ok` explicitly.
+
+**Coverage reporting, not just error listing.** `backendErrors` says which calls
+died; it never said what share of a family that was. Planned-vs-returned is
+tallied per family, so notes name the scale (`grok (5/5 Aufrufe ohne Ergebnis)`),
+and a family that returned from *some* clusters — invisible before, since it
+never reaches `familiesLost` — gets its own partial-loss note. `balance.voices`
+is now the planned topology with `balance.voicesReturned` beside it; collapsing
+both into one number is the same overstatement in miniature.
+
+**Testing the untestable file.** `swarm-review.js` is the repo's only JavaScript
+(the Workflow runtime accepts nothing else) and its largest logic file, so the
+Python suite could not reach it — the bug lived precisely where no test looked.
+`test_voice_accounting.py` lifts two `// swarm-test-region:` blocks verbatim and
+runs them under node. **The lesson is the mutation check, not the test:** it
+passed on the first run and was still worthless — reintroducing two of the three
+fail-open variants went unnoticed, because the result shapers were inline
+`.then()` bodies outside the markers. Extracting them to named functions took it
+from 5/7 to 7/7 mutants caught. A green test nobody has seen fail proves nothing.
+The markers couple the test to the source layout — an accepted stopgap, with the
+real extraction tracked in `tasks/extract-swarm-review-logic.md`.
+
+**Do not "fix" this by weakening the jail or the classifier.** This entry is only
+about not lying when a voice is lost. The prompt-free transport (a main-session
+Bash entry point plus a narrow allow rule) is `fix-swarm-review-runtime-handoff`;
+the >600 s runtime ceiling is `async-poll-external-voices`.
 
 ## Design decisions
 
