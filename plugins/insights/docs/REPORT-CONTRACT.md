@@ -15,15 +15,25 @@ the validation or storage logic.
 
 ```sh
 H="${CLAUDE_PLUGIN_ROOT}/scripts/insights.py"
-python3 "$H" context                 # observable facts for the draft (JSON)
-python3 "$H" write - <<'INSIGHTS_REPORT_EOF'
-{ ...draft... }
-INSIGHTS_REPORT_EOF
+python3 "$H" skeleton [--trigger handoff]   # complete draft, observed values prefilled
+python3 "$H" context                        # the raw observable facts (JSON), if needed
+python3 "$H" write <draft.json>             # or `write -` with JSON on stdin
 ```
 
+The skeleton contains every required field. Values the helper can observe carry
+their source. Everything the producer must decide is empty — `""`, or an unknown
+with an empty `reason` — and **fails validation by name**, so an untouched skeleton
+can never be stored as a report.
+
+Pass the finished draft as a file written by the host's file tool, or on stdin
+from a program. **Never embed report text in a shell heredoc or command line:**
+it contains user input, and a line equal to the heredoc terminator would end
+the document and run the rest as shell commands.
+
 `write` (and the dry-run twin `validate`) fills three fields when absent:
-`report_id` (fresh), `recorded_at` (now, UTC) and `project` (derived from the
-cwd, or `--project-dir DIR`). Everything else is the producer's draft.
+`report_id` (fresh), `recorded_at` (now, UTC, whole seconds) and `project`
+(derived from the cwd, or `--project-dir DIR`). It then sanitizes reference URLs,
+redacts credentials, and validates. Everything else is the producer's draft.
 
 | Exit | Meaning | Producer must |
 |------|---------|---------------|
@@ -34,7 +44,7 @@ cwd, or `--project-dir DIR`). Everything else is the producer's draft.
 | 4 | storage failure — **nothing saved** | report the failure; never claim a saved report |
 
 Output on success is `key=value` lines (`status`, `report_id`, `path`,
-`store_source`, `gaps`, then one `gap=<field>: <reason>` per unknown value), or
+`store_source`, `redactions`, `gaps`, then one `gap=<field>: <reason>` per unknown value), or
 one JSON object with `--json`.
 
 **Retry / idempotency.** A report's identity is its `report_id`. Rewriting the
@@ -62,9 +72,10 @@ shape; the producer owns the honesty.
 
 1. **Fact fields** (identity metadata) are either
    `{"value": X, "source": "<where it was observed>"}` or
-   `{"value": null, "reason": "<why it is unknown>"}`. A known value without a
-   source, or an unknown one without a reason, is rejected. Every such field must
-   exist, whether known or not.
+   `{"value": null, "reason": "<why it is unknown>"}`, never a mix of the two. A
+   known value without a source, an unknown one without a reason, or either
+   carrying the other variant's key is rejected. Every such field must exist,
+   whether known or not.
 2. **Models:** record a model only from direct evidence: the system prompt's
    model ID for the reporting model, a `/model` output, an adapter's own report.
    **Never** infer it from a tab name, an agent alias (`opus`, `codex`), a commit
@@ -91,7 +102,8 @@ shape; the producer owns the honesty.
 8. **Suggestions** are the reporting model's own assessment
    (`author: "reporting_model"`). `status: "none"` with an empty list is a valid,
    honest answer. Don't fabricate suggestions, and don't include reasoning traces.
-9. **User feedback** is stored verbatim with its attribution. Augmenting context
+9. **User feedback** is stored verbatim with its attribution. The only change is
+   the helper's own credential redaction (see Privacy guards). Augmenting context
    goes in other fields, never into the quoted text.
 
 ## Schema
@@ -104,7 +116,7 @@ by bumping the version, not by adding ad-hoc keys.
 {
   "schema": "insights.report/v1",
   "report_id": "ins-20260916T153000Z-3f9a1c2b7d4e",   // filled by write
-  "recorded_at": "2026-09-16T15:30:00Z",             // filled by write, UTC
+  "recorded_at": "2026-09-16T15:30:00Z",             // filled by write, UTC, whole seconds
   "report_trigger": "manual | handoff | close",      // why the report was written
   "task_status": "in_progress | blocked | completed | aborted | unknown", // independent of trigger
 
@@ -214,11 +226,15 @@ Cross-field rules the validator also checks:
 Limits: narrative text ≤2000 chars, identifiers/evidence ≤300, user feedback ≤8000,
 lists ≤50 items, whole report ≤64 KiB.
 
-**Privacy guards (rejected at write):** control characters, and high-confidence
-credential shapes (private-key headers, GitHub/Slack/AWS/`sk-` tokens, and
-`scheme://user:pass@` URLs). URL-shaped `work.pr`, `project.remote`, and
-`evidence` entries are **sanitized** before storing: userinfo, query strings, and
-fragments are removed. Don't put raw transcripts, diffs, prompts, credentials, or
+**Privacy guards.** `write` **redacts** high-confidence credential shapes in
+*every* string, user feedback included, replacing each with `[REDACTED]` and
+reporting the count as `redactions=N`. Covered shapes: private-key blocks,
+GitHub/Slack/AWS/`sk-` tokens, `scheme://user:pass@` credentials, and token-like
+query parameters such as `access_token=`, `key=`, `sig=`, `code=`, and
+`password=`. It **rejects** control characters, bidi overrides/isolates, and
+Unicode line separators. Reference fields that look like URLs (`work.pr`,
+`project.remote`, `evidence` entries) are also **sanitized**: userinfo, query
+strings, and fragments are removed. Don't put raw transcripts, diffs, prompts, credentials, or
 reasoning traces into any field. Evidence is a compact reference (a PR number, a
 run ID, a file path), not an excerpt.
 
@@ -233,7 +249,11 @@ ${XDG_DATA_HOME:-$HOME/.local/share}/gering-plugins/insights/v1/reports/<report_
   `$HOME/.local/share` (`store_source` says which applied).
 - Override the directory with `--store /abs/dir` or `INSIGHTS_STORE_DIR=/abs/dir`
   (tests, experiments). Relative overrides are refused.
-- `…/insights/` and everything below it is `0700`; each report is `0600`.
+- `…/insights/` and everything below it is created `0700`; each report is `0600`.
+  Existing directories are never chmod'ed. A store directory that is a symlink,
+  is owned by another user, or is accessible to group/others is refused (exit 4),
+  so an override can't silently change permissions on a directory used for
+  something else.
 - Publication is atomic and never replaces a file: write a private temp file in
   the same directory, `fsync` it, hard-link it to `<report_id>.json` (the link
   fails if the name exists), then remove the temp file. Concurrent writers can't
@@ -249,8 +269,9 @@ python3 "$H" list [--here | --project <ref|key|name>] [--task <name|id>] \
 python3 "$H" read <report_id>
 ```
 
-- Both re-validate on read. `read` exits 1 with the problems listed for a
-  malformed report, and 5 when it is missing. `list` shows every malformed file as
+- Both re-validate on read, and neither loads a file above 256 KiB. `read` exits
+  1 with the problems listed for a malformed report, and 5 when it is missing.
+  `--limit` takes a positive integer. `list` shows every malformed file as
   `MALFORMED <path>: <reason>` and ends with `reports=N malformed=M`. Malformed
   data is never silently skipped.
 - `--project <name>` matches every project with that name. Use `--here`, a `ref`,

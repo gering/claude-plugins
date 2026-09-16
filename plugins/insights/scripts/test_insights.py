@@ -116,7 +116,7 @@ def draft(summary="Implemented the store; tests pending.", **overrides) -> dict:
 
 
 def prepared(**overrides) -> dict:
-    return insights.prepare(draft(**overrides), str(SANDBOX))
+    return insights.prepare(draft(**overrides), str(SANDBOX))[0]
 
 
 def errors_for(doc) -> list:
@@ -193,6 +193,18 @@ def test_schema_rejects_structural_errors():
     bad_ts["recorded_at"] = "yesterday"
     assert_error(bad_ts, "recorded_at: must be a UTC timestamp")
 
+    newline_id = copy.deepcopy(good)
+    newline_id["report_id"] = insights.new_report_id() + "\n"
+    assert_error(newline_id, "report_id: must match")
+
+    fractional = copy.deepcopy(good)
+    fractional["recorded_at"] = "2026-09-16T10:00:00.9Z"  # would mis-sort as a string
+    assert_error(fractional, "recorded_at: must be a UTC timestamp")
+
+    related = copy.deepcopy(good)
+    related["work"]["related_reports"] = [insights.new_report_id() + "\n"]
+    assert_error(related, "work.related_reports[0]: must be a report ID")
+
     wrong_schema = copy.deepcopy(good)
     wrong_schema["schema"] = "insights.report/v2"
     assert_error(wrong_schema, "schema: must be")
@@ -224,6 +236,14 @@ def test_unknown_values_need_reasons_and_known_values_need_sources():
     role_without_source = copy.deepcopy(good)
     role_without_source["reporter"]["role_source"] = None
     assert_error(role_without_source, "reporter.role_source")
+
+    mixed_unknown = copy.deepcopy(good)
+    mixed_unknown["work"]["run_id"] = {"value": None, "reason": "not observable", "source": "system prompt"}
+    assert_error(mixed_unknown, "work.run_id.source: must be absent")
+
+    mixed_known = copy.deepcopy(good)
+    mixed_known["reporter"]["model"] = {"value": "claude-opus-5", "source": "system prompt", "reason": None}
+    assert_error(mixed_known, "reporter.model.reason: must be absent")
 
     unknown_role = copy.deepcopy(good)
     unknown_role["reporter"]["role"] = "unknown"
@@ -324,13 +344,23 @@ def test_retrospective_contracts():
 def test_privacy_guards():
     good = prepared()
 
-    secret = copy.deepcopy(good)
-    secret["work"]["summary"] = "used token ghp_" + "a" * 36 + " to push"
-    assert_error(secret, "looks like it contains a credential")
-
     escape = copy.deepcopy(good)
     escape["work"]["summary"] = "colored \x1b[31mtext"
-    assert_error(escape, "contains control characters")
+    assert_error(escape, "contains control or bidi characters")
+    bidi = copy.deepcopy(good)
+    bidi["work"]["summary"] = "looks fine \u202etxt.exe"
+    assert_error(bidi, "contains control or bidi characters")
+    separator = copy.deepcopy(good)
+    separator["work"]["summary"] = "line\u2028break"
+    assert_error(separator, "contains control or bidi characters")
+    emoji = copy.deepcopy(good)
+    emoji["work"]["summary"] = "family \U0001F468\u200d\U0001F469 ok"  # ZWJ stays legal
+    assert errors_for(emoji) == []
+
+    # A stored file that bypassed the helper's redaction is malformed on read.
+    leaked = copy.deepcopy(good)
+    leaked["work"]["summary"] = "used token ghp_" + "a" * 36
+    assert_error(leaked, "contains an unredacted credential")
 
     doc = draft()
     doc["work"]["pr"] = {"value": "https://user:tok@github.com/o/r/pull/7?token=abc#frag", "source": "gh"}
@@ -338,11 +368,86 @@ def test_privacy_guards():
                                             "evidence": ["https://ci.example.com/run/1?sig=secret"]}]
     doc["project"] = insights.project_identity(str(SANDBOX))
     doc["project"]["remote"] = "https://me:pw@github.com/o/r.git"
-    out = insights.prepare(doc)
+    out, _ = insights.prepare(doc)
     assert out["work"]["pr"]["value"] == "https://github.com/o/r/pull/7"
     assert out["retrospective"]["worked_well"][0]["evidence"] == ["https://ci.example.com/run/1"]
     assert out["project"]["remote"] == "https://github.com/o/r.git"
     assert insights.sanitize_url("git@github.com:o/r.git") == "git@github.com:o/r.git"
+    # Malformed ports and IPv6 literals must neither crash nor corrupt the host.
+    assert insights.sanitize_url("http://localhost:99999/api?x=1") == "http://localhost:99999/api"
+    assert insights.sanitize_url("https://example.test:not-a-port/repo") == "https://example.test:not-a-port/repo"
+    assert insights.sanitize_url("https://[::1]:8443/run/1?token=x") == "https://[::1]:8443/run/1"
+
+
+def test_credentials_are_redacted_not_rejected():
+    store = fresh_store("redaction")
+    token = "ghp_" + "b" * 36
+    feedback = f"The {token} token leaked into the README — see https://example.com/cb?access_token=SECRET123&page=2"
+    doc = draft(summary="Callback https://svc.example/cb?code=abc123 and key sk-ant-" + "c" * 24)
+    doc["user_feedback"] = [{"text": feedback, "attribution": "user", "captured_via": "/insights:report argument"}]
+    doc["work"]["pr"] = {"value": "http://[::1]:99999/pull/1", "source": "gh"}  # malformed port: no crash
+
+    res = cli("write", "-", "--store", str(store), stdin=json.dumps(doc, ensure_ascii=False))
+    assert res.returncode == 0, res.stderr
+    out = kv(res.stdout)
+    assert out["status"] == "stored" and out["redactions"] == "4", res.stdout
+    saved = json.loads(cli("read", out["report_id"], "--store", str(store)).stdout)
+    text = saved["user_feedback"][0]["text"]
+    assert token not in text and "SECRET123" not in text
+    assert text == ("The [REDACTED] token leaked into the README — see "
+                    "https://example.com/cb?access_token=[REDACTED]&page=2")
+    assert saved["work"]["summary"] == "Callback https://svc.example/cb?code=[REDACTED] and key [REDACTED]"
+
+    # Redaction is idempotent: re-sending the stored report is an unchanged retry.
+    again = cli("write", "-", "--store", str(store), stdin=json.dumps(saved, ensure_ascii=False))
+    assert again.returncode == 0 and kv(again.stdout)["status"] == "unchanged", again.stderr
+    assert kv(again.stdout)["redactions"] == "0"
+
+
+def test_skeleton_is_complete_but_never_storable_untouched():
+    root = SANDBOX / "skeleton-repo"
+    shutil.rmtree(root, ignore_errors=True)
+    repo = git_repo(root / "svc")
+    (repo / "MANDATE.md").write_text("---\ntask: add-thing\n---\n")
+    res = cli("skeleton", cwd=repo)
+    assert res.returncode == 0, res.stderr
+    skel = json.loads(res.stdout)
+    assert skel["work"]["task_name"] == {"value": "add-thing", "source": "MANDATE.md task"}
+    assert skel["work"]["branch"]["value"] == "main"
+
+    store = fresh_store("skeleton")
+    untouched = cli("write", "-", "--store", str(store), cwd=repo, stdin=res.stdout)
+    assert untouched.returncode == insights.EXIT_INVALID, untouched.stdout
+    for field in ("work.summary", "reporter.role", "reporter.model.reason", "usage.completeness"):
+        assert field in untouched.stderr, field
+    assert not store.exists() or not list(store.glob("*.json"))
+
+    filled = copy.deepcopy(skel)
+    filled.update(task_status="in_progress")
+    filled["work"]["summary"] = "Adding the thing."
+    for fact in filled["work"].values():
+        if isinstance(fact, dict) and fact.get("value") is None:
+            fact["reason"] = "not available"
+    filled["reporter"].update(role="worker", role_source="lane session",
+                              model={"value": "claude-opus-5", "source": "system prompt"})
+    for k in ("runtime", "harness", "reasoning_effort", "session_id"):
+        if filled["reporter"][k]["value"] is None:
+            filled["reporter"][k]["reason"] = "not observed"
+    filled["usage"].update(completeness="partial", completeness_reason="session only")
+    retro = filled["retrospective"]
+    retro["outcome"] = {"intended": "Add it.", "achieved": "Half done."}
+    retro["difficulty"] = {"domain": {"level": "low", "reason": "small"},
+                           "tooling": {"level": "low", "reason": "smooth"}}
+    retro["suggestions"]["status"] = "none"
+    ok = cli("write", "-", "--store", str(store), cwd=repo, stdin=json.dumps(filled))
+    assert ok.returncode == 0, ok.stderr
+
+
+def test_list_rejects_non_positive_limit():
+    store = fresh_store("limit")
+    for bad in ("-2", "0", "x"):
+        res = cli("list", "--store", str(store), "--limit", bad)
+        assert res.returncode == insights.EXIT_USAGE, (bad, res.returncode)
 
 
 def test_worktrees_group_and_same_named_repos_stay_distinct():
@@ -429,6 +534,24 @@ def test_default_store_is_private():
     assert stat.S_IMODE(os.stat(stored).st_mode) == 0o600
     assert not list(reports.glob(".*.tmp")), "temp file left behind"
     assert str(reports).startswith(str(SANDBOX)), "test escaped the sandbox"
+
+    # An existing override directory is never chmod'ed: open or symlinked ones are refused.
+    shared = SANDBOX / "shared-dir"
+    shared.mkdir(exist_ok=True)
+    os.chmod(shared, 0o755)
+    res = cli("write", "-", "--store", str(shared), stdin=json.dumps(draft()))
+    assert res.returncode == insights.EXIT_STORAGE and "group/others" in res.stderr, res.stderr
+    assert stat.S_IMODE(os.stat(shared).st_mode) == 0o755, "override dir was chmod'ed"
+    assert not list(shared.glob("*.json"))
+
+    private = SANDBOX / "private-target"
+    private.mkdir(mode=0o700, exist_ok=True)
+    link = SANDBOX / "store-link"
+    if not link.exists():
+        link.symlink_to(private)
+    res = cli("write", "-", "--store", str(link), stdin=json.dumps(draft()))
+    assert res.returncode == insights.EXIT_STORAGE and "symlink" in res.stderr, res.stderr
+    assert not list(private.glob("*.json"))
 
 
 def test_retry_is_idempotent_and_collisions_fail():
@@ -519,7 +642,7 @@ def test_failed_write_never_claims_success():
     # Unwritable store directory.
     if os.geteuid() != 0:  # root ignores directory permissions
         store.mkdir(parents=True, exist_ok=True)
-        os.chmod(store, 0o500)
+        os.chmod(store, 0o500)  # private but unwritable
         try:
             res = cli("write", "-", "--store", str(store), stdin=json.dumps(draft()))
             assert res.returncode == insights.EXIT_STORAGE, (res.returncode, res.stderr)
@@ -537,7 +660,7 @@ def test_failed_write_never_claims_success():
 
     # link() failing mid-publish surfaces as a storage error, not success.
     store = fresh_store("link-fails")
-    store.mkdir(parents=True)
+    store.mkdir(parents=True, mode=0o700)
     original_link = os.link
 
     def broken_link(*_a, **_k):
@@ -571,15 +694,20 @@ def test_corrupt_store_is_reported_honestly():
     renamed_id = insights.new_report_id()
     (store / f"{renamed_id}.json").write_text((store / f"{good_id}.json").read_text())
     (store / ".tmp-in-flight.tmp").write_text("{")  # temp files are not reports
+    huge_id = insights.new_report_id()
+    (store / f"{huge_id}.json").write_text(" " * (insights.MAX_STORED_FILE_BYTES + 1))
 
     res = cli("list", "--store", str(store))
     assert res.returncode == 0, res.stderr
-    assert "reports=1 malformed=3" in res.stdout, res.stdout
-    assert res.stdout.count("MALFORMED") == 3
+    assert "reports=1 malformed=4" in res.stdout, res.stdout
+    assert res.stdout.count("MALFORMED") == 4
 
     listed = json.loads(cli("list", "--store", str(store), "--json").stdout)
     assert [r["report_id"] for r in listed["reports"]] == [good_id]
-    assert len(listed["malformed"]) == 3
+    assert len(listed["malformed"]) == 4
+
+    res = cli("read", huge_id, "--store", str(store))
+    assert res.returncode == insights.EXIT_INVALID and "not loaded" in res.stderr, res.stderr
 
     res = cli("read", broken_id, "--store", str(store))
     assert res.returncode == insights.EXIT_INVALID and "malformed" in res.stderr and not res.stdout

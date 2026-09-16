@@ -9,9 +9,11 @@ no-overwrite store live in exactly one place. The contract is documented in
 Subcommands:
   context [--project-dir DIR]      Observable facts for a draft (project identity,
                                    git branch, task hints, runtime env, store path).
+  skeleton [--project-dir DIR] [--trigger T]  A complete draft: observed values
+                                   prefilled, everything else empty (fails validation until filled).
   new-id                           Print a fresh report ID (for retry-safe producers).
   write FILE|- [--project-dir DIR] Fill report_id/recorded_at/project if absent,
-        [--json]                   sanitize, validate, publish atomically.
+        [--json]                   sanitize URLs, redact credentials, validate, publish atomically.
   validate FILE|- [--project-dir DIR]  Same fill + validation, never writes.
   read REPORT_ID                   Print one stored report (validated on read).
   list [--here|--project P] [--task T] [--trigger X] [--status S] [--limit N] [--json]
@@ -36,6 +38,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import subprocess
 import sys
 import tempfile
@@ -56,21 +59,33 @@ MAX_FEEDBACK = 8000   # verbatim user feedback may be longer than agent prose
 MAX_SHORT = 300       # identifiers, labels, evidence references
 MAX_ITEMS = 50
 
-ID_RE = re.compile(r"^ins-\d{8}T\d{6}Z-[0-9a-f]{12}$")
-TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$")
-# Control characters other than \n and \t — rejected so stored text can never
-# carry terminal escape sequences into a later `read`/`list`.
-CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
-# High-confidence credential shapes. Not a DLP scanner — a guard against the
-# obvious paste of a token or key into a report that is meant to be shareable.
-SECRET_RES = [
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}"),
-    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{40,}"),
-    re.compile(r"\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"\bxox[abpr]-[A-Za-z0-9-]{10,}"),
-    re.compile(r"\b[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@"),  # credentials in a URL
+# Matched with fullmatch: `$` would also accept a trailing newline, which then
+# ends up inside a file name and splits the key=value output.
+ID_RE = re.compile(r"ins-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}")
+# Whole seconds only, so recorded_at sorts correctly as a string.
+TS_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+# Control characters other than \n and \t, plus bidi overrides/isolates and
+# Unicode line/paragraph separators — rejected so stored text can never carry
+# terminal escapes or visually reordered lines into a later `read`/`list`.
+# ZWJ/ZWNJ stay allowed (emoji sequences, some scripts).
+CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
+REDACTED = "[REDACTED]"  # no ":" or "=": a redacted value must not match a pattern again
+# High-confidence credential shapes, replaced by REDACTED before validation.
+# Redacting instead of rejecting keeps verbatim user feedback storable without
+# the producer editing it. Not a DLP scanner — a guard against the obvious paste
+# of a token or key into a report.
+SECRET_SUBS = [
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.S), REDACTED),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}"), REDACTED),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{40,}"), REDACTED),
+    (re.compile(r"\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}"), REDACTED),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), REDACTED),
+    (re.compile(r"\bxox[abpr]-[A-Za-z0-9-]{10,}"), REDACTED),
+    # credentials in a URL: scheme://user:pass@host
+    (re.compile(r"\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@"), r"\1" + REDACTED + "@"),
+    # token-like query parameters anywhere in text
+    (re.compile(r"([?&](?:access_token|refresh_token|id_token|token|api_key|apikey|key|sig|signature|"
+                r"secret|client_secret|password|passwd|auth|code)=)(?!\[REDACTED\])[^&#\s]+", re.I), r"\1" + REDACTED),
 ]
 
 TRIGGERS = ("manual", "handoff", "close")
@@ -126,9 +141,10 @@ def sanitize_url(value: str) -> str:
         return value
     if not parts.scheme or not parts.netloc:
         return value
-    host = parts.hostname or ""
-    if parts.port:
-        host = f"{host}:{parts.port}"
+    # Strip userinfo from the raw netloc instead of rebuilding it from
+    # hostname/port: `.port` raises on a malformed port, and `.hostname` loses
+    # the brackets of an IPv6 literal.
+    host = parts.netloc.rpartition("@")[2]
     return urlunsplit((parts.scheme, host, parts.path, "", ""))
 
 
@@ -230,7 +246,13 @@ def resolve_store(cli_store=None):
 
 
 def ensure_private_dir(path: Path, private_from: Path) -> None:
-    """Create the store directory; directories from `private_from` down are 0700."""
+    """Create the store directory; directories from `private_from` down must be private.
+
+    Missing directories are created 0700. Existing ones are never chmod'ed — an
+    override may point at a directory the user uses for something else — so a
+    symlink, a directory owned by someone else, or one that group/others can
+    access is refused instead of silently tightened.
+    """
     try:
         private_parts = path.relative_to(private_from).parts
     except ValueError:
@@ -245,15 +267,18 @@ def ensure_private_dir(path: Path, private_from: Path) -> None:
                 os.mkdir(cur, 0o700)
             except FileExistsError:
                 pass
-            st = os.stat(cur)
-            if not os.path.isdir(cur):
+            st = os.lstat(cur)
+            if stat.S_ISLNK(st.st_mode):
+                raise StorageError(f"store directory is a symlink (use the real path): {cur}")
+            if not stat.S_ISDIR(st.st_mode):
                 raise StorageError(f"store path component is not a directory: {cur}")
             if st.st_uid != os.getuid():
                 raise StorageError(f"store directory not owned by the current user: {cur}")
             if st.st_mode & 0o077:
-                os.chmod(cur, 0o700)
-    except StorageError:
-        raise
+                raise StorageError(
+                    f"store directory is accessible to group/others (mode "
+                    f"{stat.S_IMODE(st.st_mode):o}); reports must stay private — "
+                    f"`chmod 700` it or choose another directory: {cur}")
     except OSError as e:
         raise StorageError(f"cannot prepare store directory {path}: {e}")
 
@@ -289,8 +314,6 @@ def publish(reports: Path, report: dict) -> str:
         except OSError:
             pass  # directory fsync is best-effort (unsupported on some filesystems)
         return "stored"
-    except (StorageError, CollisionError):
-        raise
     except OSError as e:
         raise StorageError(f"cannot write report to {reports}: {e}")
     finally:
@@ -377,7 +400,7 @@ class Validator:
 
     def report_ids(self, path, val) -> None:
         def one(p, v):
-            if not isinstance(v, str) or not ID_RE.match(v):
+            if not isinstance(v, str) or not ID_RE.fullmatch(v):
                 self.err(p, "must be a report ID (ins-YYYYMMDDTHHMMSSZ-<12 hex>)")
         self.items(path, val, one)
 
@@ -385,14 +408,16 @@ class Validator:
         """{"value": X, "source": "..."} or {"value": null, "reason": "..."}."""
         if not self.obj(path, val, ("value",), ("source", "reason")):
             return
+        # The two variants are exclusive: an unknown value has no source, a
+        # known one needs no excuse. Mixing them makes provenance ambiguous.
         if val.get("value") is None:
             self.text(f"{path}.reason", val.get("reason"), MAX_SHORT)
-            if val.get("source") is not None:
-                self.text(f"{path}.source", val.get("source"), MAX_SHORT)
+            if "source" in val:
+                self.err(f"{path}.source", "must be absent when value is null (use reason)")
         else:
             self.text(f"{path}.source", val.get("source"), MAX_SHORT)
-            if "reason" in val and val["reason"] is not None:
-                self.text(f"{path}.reason", val["reason"], MAX_SHORT)
+            if "reason" in val:
+                self.err(f"{path}.reason", "must be absent when value is known (use source)")
             (value_fn or (lambda p, v: self.text(p, v, MAX_SHORT)))(f"{path}.value", val["value"])
 
     # -- sections
@@ -406,7 +431,7 @@ class Validator:
             return
         if r.get("schema") != SCHEMA_ID:
             self.err("schema", f"must be {SCHEMA_ID!r}")
-        if "report_id" in r and not (isinstance(r["report_id"], str) and ID_RE.match(r["report_id"])):
+        if "report_id" in r and not (isinstance(r["report_id"], str) and ID_RE.fullmatch(r["report_id"])):
             self.err("report_id", "must match ins-YYYYMMDDTHHMMSSZ-<12 hex> (use `insights.py new-id`)")
         if "recorded_at" in r:
             self.timestamp("recorded_at", r["recorded_at"])
@@ -434,7 +459,7 @@ class Validator:
             self.err("report", f"is {size} bytes (max {MAX_REPORT_BYTES})")
 
     def timestamp(self, path, val) -> None:
-        if not isinstance(val, str) or not TS_RE.match(val):
+        if not isinstance(val, str) or not TS_RE.fullmatch(val):
             self.err(path, "must be a UTC timestamp like 2026-09-16T15:30:00Z")
             return
         try:
@@ -731,11 +756,11 @@ class Validator:
                 self.walk_strings(f"{path}[{i}]", v)
         elif isinstance(val, str):
             if CTRL_RE.search(val):
-                self.err(path, "contains control characters")
-            for rx in SECRET_RES:
-                if rx.search(val):
-                    self.err(path, "looks like it contains a credential — remove it")
-                    break
+                self.err(path, "contains control or bidi characters")
+            # Writes redact before validating, so this only fires for a stored
+            # file that bypassed the helper.
+            if any(rx.search(val) for rx, _ in SECRET_SUBS):
+                self.err(path, "contains an unredacted credential")
 
 
 def validate_report(report) -> list:
@@ -770,8 +795,37 @@ def fact_gaps(report) -> list:
 # ----------------------------------------------------------------------- preparing
 
 
+def redact_secrets(report) -> int:
+    """Replace credential shapes in every string, in place; return the count."""
+    count = 0
+
+    def scrub(text):
+        nonlocal count
+        for rx, repl in SECRET_SUBS:
+            text, n = rx.subn(repl, text)
+            count += n
+        return text
+
+    def walk(val):
+        if isinstance(val, dict):
+            for k, v in val.items():
+                if isinstance(v, str):
+                    val[k] = scrub(v)
+                else:
+                    walk(v)
+        elif isinstance(val, list):
+            for i, v in enumerate(val):
+                if isinstance(v, str):
+                    val[i] = scrub(v)
+                else:
+                    walk(v)
+
+    walk(report)
+    return count
+
+
 def sanitize_report(report: dict) -> None:
-    """Strip credentials/query strings from the URL-bearing fields in place."""
+    """Strip userinfo/query/fragment from the URL-bearing reference fields in place."""
     proj = report.get("project")
     if isinstance(proj, dict) and isinstance(proj.get("remote"), str):
         proj["remote"] = sanitize_url(proj["remote"])
@@ -820,16 +874,18 @@ class InvalidReport(Exception):
         self.errors = errors
 
 
-def prepare(report: dict, project_dir=None) -> dict:
+def prepare(report: dict, project_dir=None):
+    """Fill defaults, sanitize, redact, validate. Returns (report, redactions)."""
     report.setdefault("report_id", new_report_id())
     report.setdefault("recorded_at", utc_now().strftime("%Y-%m-%dT%H:%M:%SZ"))
     if "project" not in report:
         report["project"] = project_identity(project_dir)
     sanitize_report(report)
+    redactions = redact_secrets(report)
     errors = validate_report(report)
     if errors:
         raise InvalidReport(errors)
-    return report
+    return report, redactions
 
 
 # ------------------------------------------------------------------------- context
@@ -935,6 +991,29 @@ def gather_context(project_dir=None, cli_store=None) -> dict:
 # ----------------------------------------------------------------------- read/list
 
 
+# Stored files are pretty-printed, so allow indentation overhead above the
+# canonical-size cap; anything bigger is refused before it is read into memory.
+MAX_STORED_FILE_BYTES = MAX_REPORT_BYTES * 4
+
+
+def load_stored(path: Path, expected_id: str):
+    """Load and re-validate one stored report. Returns (report|None, errors)."""
+    try:
+        size = os.stat(path).st_size
+    except OSError as e:
+        return None, [f"unreadable ({e})"]
+    if size > MAX_STORED_FILE_BYTES:
+        return None, [f"file is {size} bytes (max {MAX_STORED_FILE_BYTES}); not loaded"]
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        return None, [f"unreadable JSON ({e})"]
+    errors = validate_report(data)
+    if not errors and data.get("report_id") != expected_id:
+        errors = [f"report_id {data.get('report_id')!r} does not match file name {path.name}"]
+    return (None, errors) if errors else (data, [])
+
+
 def scan_store(reports: Path):
     """Yield (path, report|None, error|None) for every report file."""
     if not reports.is_dir():
@@ -942,14 +1021,7 @@ def scan_store(reports: Path):
     for path in sorted(reports.glob("*.json")):
         if path.name.startswith("."):
             continue
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, ValueError) as e:
-            yield path, None, f"unreadable JSON ({e})"
-            continue
-        errors = validate_report(data)
-        if not errors and data.get("report_id") + ".json" != path.name:
-            errors = [f"file name does not match report_id {data.get('report_id')!r}"]
+        data, errors = load_stored(path, path.name[: -len(".json")])
         if errors:
             more = f" (+{len(errors) - 1} more)" if len(errors) > 1 else ""
             yield path, None, errors[0] + more
@@ -1002,17 +1074,84 @@ def cmd_store(args) -> int:
     return EXIT_OK
 
 
+def unknown(reason=""):
+    return {"value": None, "reason": reason}
+
+
+def build_skeleton(ctx: dict, trigger: str) -> dict:
+    """A complete draft with every required field present.
+
+    Values the helper can observe are prefilled with their source. Everything
+    the producer must decide is an empty string (or an unknown with an empty
+    reason), which fails validation by name until it is filled in — so an
+    untouched skeleton can never be stored as if it were a report.
+    """
+    hints, runtime, git = ctx["task_hints"], ctx["runtime"], ctx["git"]
+
+    def observed(value, source):
+        return {"value": value, "source": source} if value else unknown()
+
+    claude = runtime.get("claude_code") or {}
+    work = {
+        "summary": "",
+        "task_id": unknown(),
+        "run_id": unknown(),
+        "task_name": observed(hints.get("mandate_task"), "MANDATE.md task"),
+        "task_path": observed(hints.get("main_task_file") or hints.get("task_md"), "insights.py context"),
+        "branch": observed(git.get("branch"), "git"),
+        "pr": unknown(),
+        "instruction_ids": [],
+        "related_reports": [],
+    }
+    reporter = {
+        "role": "",
+        "role_source": "",
+        "model": unknown(),
+        "runtime": observed(claude.get("version") and f"claude-code {claude['version']}",
+                            claude.get("version_source")),
+        "harness": observed("herdr" if "herdr" in runtime else None, "env:HERDR_ENV"),
+        "reasoning_effort": runtime.get("reasoning_effort") or unknown(),
+        "session_id": runtime.get("session_id") or unknown(),
+    }
+    level = {"level": "", "reason": ""}
+    return {
+        "schema": SCHEMA_ID,
+        "report_trigger": trigger,
+        "task_status": "",
+        "work": work,
+        "reporter": reporter,
+        "participants": [],
+        "usage": {"completeness": "", "completeness_reason": "", "skills": []},
+        "user_feedback": [],
+        "retrospective": {
+            "outcome": {"intended": "", "achieved": ""},
+            "difficulty": {"domain": dict(level), "tooling": dict(level)},
+            "worked_well": [],
+            "friction": [],
+            "interventions": [],
+            "suggestions": {"status": "", "author": "reporting_model", "items": []},
+        },
+    }
+
+
+def cmd_skeleton(args) -> int:
+    ctx = gather_context(args.project_dir, args.store)
+    print(json.dumps(build_skeleton(ctx, args.trigger), indent=2, ensure_ascii=False))
+    return EXIT_OK
+
+
 def cmd_validate(args) -> int:
-    report = prepare(load_input(args.input), args.project_dir)
+    report, redactions = prepare(load_input(args.input), args.project_dir)
     gaps = fact_gaps(report)
-    emit_kv([("status", "valid"), ("report_id", report["report_id"]), ("gaps", len(gaps))])
+    emit_kv([("status", "valid"), ("report_id", report["report_id"]),
+             ("redactions", redactions), ("gaps", len(gaps))])
     for g in gaps:
         print(f"gap={safe_line(g)}")
     return EXIT_OK
 
 
 def cmd_write(args) -> int:
-    report = prepare(load_input(args.input), args.project_dir)
+    report, redactions = prepare(load_input(args.input), args.project_dir)
     reports, source, private_from = resolve_store(args.store)
     ensure_private_dir(reports, private_from)
     status = publish(reports, report)
@@ -1020,31 +1159,25 @@ def cmd_write(args) -> int:
     gaps = fact_gaps(report)
     if args.json:
         print(json.dumps({"status": status, "report_id": report["report_id"], "path": str(path),
-                          "store_source": source, "gaps": gaps}, indent=2, ensure_ascii=False))
+                          "store_source": source, "redactions": redactions, "gaps": gaps},
+                         indent=2, ensure_ascii=False))
     else:
         emit_kv([("status", status), ("report_id", report["report_id"]), ("path", path),
-                 ("store_source", source), ("gaps", len(gaps))])
+                 ("store_source", source), ("redactions", redactions), ("gaps", len(gaps))])
         for g in gaps:
             print(f"gap={safe_line(g)}")
     return EXIT_OK
 
 
 def cmd_read(args) -> int:
-    if not ID_RE.match(args.report_id):
+    if not ID_RE.fullmatch(args.report_id):
         raise UsageError("report ID must match ins-YYYYMMDDTHHMMSSZ-<12 hex>")
     reports, _, _ = resolve_store(args.store)
     path = reports / f"{args.report_id}.json"
     if not path.is_file():
         print(f"error: no report {args.report_id} in {reports}", file=sys.stderr)
         return EXIT_NOT_FOUND
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError) as e:
-        print(f"error: {path} is malformed: unreadable JSON ({e})", file=sys.stderr)
-        return EXIT_INVALID
-    errors = validate_report(data)
-    if not errors and data.get("report_id") != args.report_id:
-        errors = [f"report_id {data.get('report_id')!r} does not match file name"]
+    data, errors = load_stored(path, args.report_id)
     if errors:
         print(f"error: {path} is malformed:", file=sys.stderr)
         for e in errors:
@@ -1064,7 +1197,7 @@ def cmd_list(args) -> int:
         elif matches(report, args, here_ref):
             rows.append(report)
     rows.sort(key=lambda r: (r["recorded_at"], r["report_id"]))
-    if args.limit:
+    if args.limit is not None:
         rows = rows[-args.limit:]
     if args.json:
         out = [{
@@ -1089,6 +1222,16 @@ def cmd_list(args) -> int:
     return EXIT_OK
 
 
+def positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {text!r}")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="insights.py", description="Insights report store.")
     sub = ap.add_subparsers(dest="cmd")
@@ -1100,6 +1243,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = with_store(sub.add_parser("context"))
     p.add_argument("--project-dir")
     p.set_defaults(fn=cmd_context)
+    p = with_store(sub.add_parser("skeleton"))
+    p.add_argument("--project-dir")
+    p.add_argument("--trigger", choices=TRIGGERS, default="manual")
+    p.set_defaults(fn=cmd_skeleton)
     sub.add_parser("new-id").set_defaults(fn=cmd_new_id)
     with_store(sub.add_parser("store")).set_defaults(fn=cmd_store)
     for name, fn in (("write", cmd_write), ("validate", cmd_validate)):
@@ -1119,7 +1266,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--task", help="task name or task ID")
     p.add_argument("--trigger", choices=TRIGGERS)
     p.add_argument("--status", choices=TASK_STATUSES)
-    p.add_argument("--limit", type=int, default=0, help="only the N most recent")
+    p.add_argument("--limit", type=positive_int, default=None, help="only the N most recent")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_list)
     return ap

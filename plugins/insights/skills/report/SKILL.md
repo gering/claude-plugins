@@ -33,50 +33,51 @@ verbatim; without text, the report is an agent-authored snapshot.
    without changing its meaning. Empty → **snapshot report**: write a concise
    agent-authored report of the work so far.
 
-2. **Collect observable facts** (project identity, branch, task hints, runtime
-   env, store):
+2. **Get a skeleton draft.** Every required field is present; values the helper
+   can observe (branch, task name, runtime, effort, session) are prefilled with
+   their source. The rest is empty and fails validation by name until you fill it:
    ```sh
-   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/insights.py" context
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/insights.py" skeleton
    ```
 
 3. **Read the contract** `${CLAUDE_PLUGIN_ROOT}/docs/REPORT-CONTRACT.md` for
-   the schema and provenance rules. Read the matching section of
+   field meanings and provenance rules. Read the matching section of
    `${CLAUDE_PLUGIN_ROOT}/docs/RETROSPECTIVE.md` only for plugins whose skills
    actually ran.
 
-4. **Draft the report JSON.** Write agent-authored text in English; keep user
-   feedback in its original language. Sources for the harder fields:
+4. **Fill the draft.** Write agent-authored text in English; keep user
+   feedback in its original language. Every unknown is `{"value": null,
+   "reason": "…"}` (no `source`); every known value is `{"value": …, "source":
+   "…"}` (no `reason`). Sources for the harder fields:
    - `reporter.model`: your exact model ID from your system prompt
-     (`source: "system prompt"`). `reporter.runtime`, `reasoning_effort`, and
-     `session_id`: from `context.runtime`, with the env variable as the source.
-     `reporter.role`: `worker` in a task worktree lane, `manager` at a repo root
-     coordinating lanes, `advisor` when advising without owning the work, `user`
-     when you only transcribe the user's own report, `unknown` otherwise.
+     (`source: "system prompt"`). `reporter.role`: `worker` in a task worktree
+     lane, `manager` at a repo root coordinating lanes, `advisor` when advising
+     without owning the work, `user` when you only transcribe the user's own
+     report, `unknown` otherwise.
    - `usage.skills`: every skill actually invoked in this conversation. Take its
      version from the `Base directory for this skill: …/<plugin>/<version>/…`
      line shown at invocation (`source: "skill base directory at invocation"`).
      Never use the currently installed or checked-out version as evidence.
      `completeness` is `partial` if the context was compacted or resumed, or if
      other sessions did part of the work.
-   - `work`: the task name from `context.task_hints` (`mandate_task`,
-     `task_title`) or the branch; a PR only if it is already known in context.
-     `summary` must stand alone once the worktree and task file are gone.
-   - `report_trigger`: `manual`. `task_status`: from what you observe
-     (`in_progress` mid-task, `blocked` when waiting on something outside the
-     lane, `unknown` with no task).
-   - Everything unavailable: `{"value": null, "reason": "…"}`.
+   - `work`: a PR only if it is already known in context. `summary` must stand
+     alone once the worktree and task file are gone.
+   - `task_status`: from what you observe (`in_progress` mid-task, `blocked` when
+     waiting on something outside the lane, `unknown` with no task).
 
-5. **Write it** through the helper (quoted heredoc: no shell expansion inside):
+5. **Write it.** Save the finished JSON with the **Write tool** as a new file in
+   your scratchpad directory (or `$TMPDIR`), e.g. `insights-draft-<random>.json`.
+   Never pass it through a shell heredoc or `echo`: report text contains user
+   input, and a shell would treat a stray terminator line as commands. Then:
    ```sh
-   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/insights.py" write - <<'INSIGHTS_REPORT_EOF'
-   { …report JSON… }
-   INSIGHTS_REPORT_EOF
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/insights.py" write '<draft file>'
    ```
    - Exit **1** (invalid, nothing saved): fix the fields stderr names and write
      again, at most twice.
    - Exit **3** or **4**, or a third validation failure: say the report was
      **not** saved, show the helper's error, and stop. Never describe an unsaved
      report as recorded.
+   - Remove the draft file afterwards (`rm '<draft file>'`), saved or not.
 
 6. **Confirm** in a few lines:
    ```
@@ -84,7 +85,9 @@ verbatim; without text, the report is an agent-authored snapshot.
    Path: <path>
    Unknown metadata (<n>): <field: reason; …>   (group repetitive gaps, e.g. "model of 3 participants")
    ```
-   For a feedback report, add one line on what context was attached to it.
+   If `redactions` is above 0, say that many credential-shaped strings were
+   replaced by `[REDACTED]`. For a feedback report, add one line on what context
+   was attached to it.
 
 ## Notes
 

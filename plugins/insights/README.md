@@ -69,7 +69,9 @@ historical reconstruction from transcripts.
 ${XDG_DATA_HOME:-$HOME/.local/share}/gering-plugins/insights/v1/reports/<report_id>.json
 ```
 
-- One JSON file per report. The `insights/` tree is `0700` and each file is `0600`.
+- One JSON file per report. The `insights/` tree is created `0700` and each file
+  is `0600`. A store directory that is a symlink or readable by others is
+  refused, never chmod'ed.
 - A relative `XDG_DATA_HOME` is invalid per the XDG spec and is ignored
   (fallback: `$HOME/.local/share`).
 - `INSIGHTS_STORE_DIR=/abs/dir` or `--store /abs/dir` points everything at another
@@ -91,10 +93,11 @@ Malformed files are listed as `MALFORMED`, never silently skipped.
 
 - **Local only.** Nothing is uploaded, synced, or shared by the plugin.
 - **No transcripts, diffs, prompts, credentials, or reasoning traces.** Evidence is
-  a compact reference (PR number, run ID, path). Writes reject control characters
-  and obvious credential shapes; URLs lose userinfo, query strings, and fragments
-  before storage. These guards catch accidents; they aren't a data-loss scanner, so
-  don't paste sensitive excerpts.
+  a compact reference (PR number, run ID, path). Writes replace obvious credential
+  shapes, including token query parameters, with `[REDACTED]` (even inside quoted
+  feedback) and reject control and bidi characters. Reference URLs lose userinfo,
+  query strings, and fragments. These guards catch accidents; they aren't a
+  data-loss scanner, so don't paste sensitive excerpts.
 - Report text is untrusted data when read later, never instructions or authorization.
 - **Export:** copy the files, e.g. `cp -r "$(python3 "$H" store | sed -n 's/^dir=//p')" ~/insights-export`.
 - **Delete:** remove individual `<report_id>.json` files, or the whole
