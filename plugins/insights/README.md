@@ -67,14 +67,14 @@ historical reconstruction from transcripts.
 ## Where reports live
 
 ```
-${XDG_DATA_HOME:-$HOME/.local/share}/gering-plugins/insights/v1/reports/<report_id>.json
+~/.gering-plugins/insights/reports/<report_id>.json
 ```
 
 - One JSON file per report. The `insights/` tree is created `0700` and each file
   is `0600`. An existing store directory must be a real directory you own with
   mode `0700` (no group/other bits). Otherwise it is refused, never chmod'ed.
-- A relative `XDG_DATA_HOME` is invalid per the XDG spec and is ignored
-  (fallback: `$HOME/.local/share`).
+- The location sits outside `~/.claude` on purpose: reports survive plugin
+  uninstalls, and non-Claude workers (codex, grok) can reach the same store later.
 - `INSIGHTS_STORE_DIR=/abs/dir` or `--store /abs/dir` points everything at another
   directory, which is useful for experiments and tests.
 - Writes are validated first, published atomically, and never overwrite an

@@ -46,9 +46,11 @@ from pathlib import Path
 
 SCHEMA_ID = "insights.report/v1"
 ENV_STORE = "INSIGHTS_STORE_DIR"
-# <data home>/gering-plugins/insights/v1/reports — everything below `gering-plugins`
-# is owned by this plugin and kept private (0700 dirs, 0600 files).
-STORE_SUBPATH = ("gering-plugins", "insights", "v1", "reports")
+# $HOME/.gering-plugins/insights/reports — `.gering-plugins` is shared by the
+# marketplace's plugins; everything from `insights` down is owned by this plugin
+# and kept private (0700 dirs, 0600 files). Deliberately outside ~/.claude so
+# reports survive plugin uninstalls and are reachable by non-Claude workers.
+STORE_SUBPATH = (".gering-plugins", "insights", "reports")
 
 EXIT_OK, EXIT_INVALID, EXIT_USAGE, EXIT_COLLISION, EXIT_STORAGE, EXIT_NOT_FOUND = 0, 1, 2, 3, 4, 5
 
@@ -219,8 +221,6 @@ def resolve_store(cli_store=None):
     """Return (reports_dir, source, private_from).
 
     `private_from` is the first directory this plugin owns and keeps at 0700.
-    XDG_DATA_HOME is honoured only when absolute (the XDG spec says relative
-    values are invalid and must be ignored); otherwise $HOME/.local/share.
     """
     override = cli_store or os.environ.get(ENV_STORE) or None
     if override:
@@ -230,19 +230,12 @@ def resolve_store(cli_store=None):
         reports = Path(override)
         return reports, label, reports
 
-    xdg = os.environ.get("XDG_DATA_HOME", "")
-    if xdg and os.path.isabs(xdg):
-        base, source = Path(xdg), "xdg:XDG_DATA_HOME"
-    else:
-        home = os.environ.get("HOME", "")
-        if not home or not os.path.isabs(home):
-            raise StorageError("cannot resolve a data directory: HOME is unset or not absolute")
-        base = Path(home) / ".local" / "share"
-        source = "default:$HOME/.local/share"
-        if xdg:
-            source += " (ignored non-absolute XDG_DATA_HOME)"
+    home = os.environ.get("HOME", "")
+    if not home or not os.path.isabs(home):
+        raise StorageError("cannot resolve the store directory: HOME is unset or not absolute")
+    base = Path(home)
     reports = base.joinpath(*STORE_SUBPATH)
-    return reports, source, base / STORE_SUBPATH[0] / STORE_SUBPATH[1]
+    return reports, "default:$HOME/.gering-plugins", base / STORE_SUBPATH[0] / STORE_SUBPATH[1]
 
 
 def ensure_private_dir(path: Path, private_from: Path) -> None:
@@ -1284,7 +1277,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="cmd")
 
     def with_store(p):
-        p.add_argument("--store", help="absolute store directory (overrides env/XDG)")
+        p.add_argument("--store", help="absolute store directory (overrides the default and INSIGHTS_STORE_DIR)")
         return p
 
     p = with_store(sub.add_parser("context"))

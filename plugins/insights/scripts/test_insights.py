@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Hermetic tests for insights.py. Run by scripts/check-structure.py in CI.
 
-HOME, XDG_DATA_HOME and INSIGHTS_STORE_DIR are pointed at a throwaway directory
+HOME is pointed at a throwaway directory and INSIGHTS_STORE_DIR is cleared
 before anything runs, so neither the in-process calls nor the CLI subprocesses
 can reach the real global store.
 """
@@ -22,7 +22,6 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SANDBOX = Path(tempfile.mkdtemp(prefix="insights-test-")).resolve()
 os.environ["HOME"] = str(SANDBOX / "home")
-os.environ["XDG_DATA_HOME"] = str(SANDBOX / "xdg")
 os.environ.pop("INSIGHTS_STORE_DIR", None)
 for var in [k for k in os.environ if k.startswith("GIT_")]:
     os.environ.pop(var)
@@ -570,18 +569,14 @@ def test_non_git_fallback_is_labelled():
 def test_store_location_resolution():
     env_store = os.environ.pop("INSIGHTS_STORE_DIR", None)
     try:
-        path, source, _ = insights.resolve_store()
-        assert path == SANDBOX / "xdg" / "gering-plugins" / "insights" / "v1" / "reports"
-        assert source == "xdg:XDG_DATA_HOME"
-
-        os.environ["XDG_DATA_HOME"] = "relative/data"
         path, source, private_from = insights.resolve_store()
-        assert path == SANDBOX / "home" / ".local" / "share" / "gering-plugins" / "insights" / "v1" / "reports"
-        assert "ignored non-absolute XDG_DATA_HOME" in source
-        assert private_from == SANDBOX / "home" / ".local" / "share" / "gering-plugins" / "insights"
+        assert path == SANDBOX / "home" / ".gering-plugins" / "insights" / "reports"
+        assert source == "default:$HOME/.gering-plugins"
+        assert private_from == SANDBOX / "home" / ".gering-plugins" / "insights"
 
-        os.environ["XDG_DATA_HOME"] = ""
-        assert insights.resolve_store()[1] == "default:$HOME/.local/share"
+        os.environ["INSIGHTS_STORE_DIR"] = str(SANDBOX / "elsewhere")
+        assert insights.resolve_store()[:2] == (SANDBOX / "elsewhere", "env:INSIGHTS_STORE_DIR")
+        assert insights.resolve_store("/abs/flag")[:2] == (Path("/abs/flag"), "--store")
 
         os.environ["INSIGHTS_STORE_DIR"] = "not/absolute"
         try:
@@ -589,8 +584,18 @@ def test_store_location_resolution():
             raise AssertionError("relative INSIGHTS_STORE_DIR accepted")
         except insights.UsageError:
             pass
+
+        os.environ.pop("INSIGHTS_STORE_DIR")
+        home = os.environ["HOME"]
+        os.environ["HOME"] = "relative-home"
+        try:
+            insights.resolve_store()
+            raise AssertionError("relative HOME accepted")
+        except insights.StorageError:
+            pass
+        finally:
+            os.environ["HOME"] = home
     finally:
-        os.environ["XDG_DATA_HOME"] = str(SANDBOX / "xdg")
         os.environ.pop("INSIGHTS_STORE_DIR", None)
         if env_store:
             os.environ["INSIGHTS_STORE_DIR"] = env_store
@@ -601,7 +606,7 @@ def test_default_store_is_private():
     reports, _, private_from = insights.resolve_store()
     insights.ensure_private_dir(reports, private_from)
     assert insights.publish(reports, report) == "stored"
-    for d in (private_from, private_from / "v1", reports):
+    for d in (private_from, reports):
         assert stat.S_IMODE(os.stat(d).st_mode) == 0o700, d
     stored = reports / f"{report['report_id']}.json"
     assert stat.S_IMODE(os.stat(stored).st_mode) == 0o600

@@ -244,12 +244,14 @@ run ID, a file path), not an excerpt.
 ## Store
 
 ```
-${XDG_DATA_HOME:-$HOME/.local/share}/gering-plugins/insights/v1/reports/<report_id>.json
+$HOME/.gering-plugins/insights/reports/<report_id>.json
 ```
 
-- `XDG_DATA_HOME` is used only when it is set and absolute. A relative value is
-  invalid per the XDG spec, so it is ignored and the fallback is
-  `$HOME/.local/share` (`store_source` says which applied).
+- `HOME` must be absolute. `~/.gering-plugins/` is shared by this marketplace's
+  plugins; everything from `insights/` down belongs to this plugin. The store is
+  outside `~/.claude`, so reports survive plugin uninstalls and stay reachable
+  for non-Claude producers. The schema version lives in each report
+  (`schema`), not in the path.
 - Override the directory with `--store /abs/dir` or `INSIGHTS_STORE_DIR=/abs/dir`
   (tests, experiments). Relative overrides are refused.
 - `…/insights/` and everything below it is created `0700`; each report is `0600`.
