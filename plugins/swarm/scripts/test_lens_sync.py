@@ -370,10 +370,19 @@ check(
 )
 # No internal task slug may reach a shipped, user-facing surface: `tasks/` is
 # untracked, so the reader cannot resolve it anywhere.
-check(
-    "skill: prints no internal task slug",
-    "fix-swarm-review-runtime-handoff" not in skill,
-)
+# EVERY user-facing surface, not just SKILL.md: the first version of this guard
+# covered the skill alone, and the CHANGELOG then shipped the same slug while
+# also describing presenter output the release had removed.
+for _name, _path in (
+    ("skill", HERE.parent / "skills" / "review" / "SKILL.md"),
+    ("plugin README", HERE.parent / "README.md"),
+    ("changelog", HERE.parent.parent.parent / "CHANGELOG.md"),
+    ("repo README", HERE.parent.parent.parent / "README.md"),
+):
+    check(
+        f"{_name}: prints no internal task slug",
+        not _path.exists() or "fix-swarm-review-runtime-handoff" not in _path.read_text(encoding="utf-8"),
+    )
 check(
     "workflow: consensusReachable is the GLOBAL question only",
     re.search(r"const consensusReachable = familiesPresent\.length >= 2\s*$", js, re.M),

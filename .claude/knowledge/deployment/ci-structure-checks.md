@@ -1,9 +1,9 @@
 ---
 title: "CI Structure Checks"
 createdAt: 2026-06-18
-updatedAt: 2026-07-12
+updatedAt: 2026-09-16
 createdFrom: "PR #6"
-updatedFrom: "session: 2026-07-12"
+updatedFrom: "fix-swarm-silent-voice-loss"
 pluginVersion: 1.8.2
 prime: false
 reindexedAt: 2026-07-12
@@ -15,6 +15,18 @@ This repo is declarative Markdown + JSON with **no build step**, so there is no
 compiler to catch structural regressions — they stay invisible until live use.
 `scripts/check-structure.py` is the **single automated guard**, run identically
 in CI (`.github/workflows/structure-checks.yml`) and locally before pushing.
+
+**Prerequisites: python3 AND `node` (since swarm 0.11.1).** The script discovers
+and runs the per-plugin `test_*.py` files, and one of them
+(`plugins/swarm/scripts/test_voice_accounting.py`) executes swarm's workflow
+JavaScript — the repo's only JS, and therefore the one file the Python suite
+cannot otherwise reach. It **fails hard rather than skipping** when node is
+absent, because a test guarding against silently lost review voices that silently
+skips itself reproduces the bug it guards. CI installs node via
+`actions/setup-node`; a contributor without it sees a FATAL, which is why the
+prerequisite is stated in README.md and the script's own docstring as well.
+A local-only contract ("python3 + bash") that CI quietly compensates for is how
+a green pipeline and a red working copy drift apart.
 
 ## What it verifies
 

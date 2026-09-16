@@ -68,7 +68,9 @@ def region(name):
 def family_map():
     """Reuse the real FAMILY map instead of copying it into the test."""
     text = _source()
-    m = re.search(r"^const FAMILY = \{.*?\}$", text, re.M)
+    # Line-break tolerant, like test_backend_sync.py's extractor: pinning the
+    # map to ONE line meant a cosmetic wrap would fail CI for no real reason.
+    m = re.search(r"const FAMILY = \{[^}]+\}", text)
     if not m:
         sys.exit(
             f"FATAL: could not find the one-line `const FAMILY = {{...}}` in "
@@ -148,6 +150,11 @@ def voice(backend, unit):
 def ok_result(backend, unit, n=0):
     return {"backend": backend, "unit": unit, "lenses": [unit],
             "ok": True, "error": "", "findings": [{"summary": f"[{unit}] x"}] * n}
+
+
+def failed_result(backend, unit, error, reason):
+    return {"backend": backend, "unit": unit, "lenses": [unit],
+            "ok": False, "reason": reason, "error": error, "findings": []}
 
 
 def errored(v):
@@ -262,8 +269,8 @@ def case_voice_count_note():
     # One grok call timed out (it says so), one vanished without a word.
     settled = ([ok_result("claude", c, 1) for c in CLUSTERS]
                + [ok_result("grok", CLUSTERS[0], 1),
-                  {"backend": "grok", "unit": CLUSTERS[1], "lenses": [CLUSTERS[1]],
-                   "ok": False, "error": "Exit code 1: grok timed out after 540s", "findings": []},
+                  failed_result("grok", CLUSTERS[1],
+                                "Exit code 1: grok timed out after 540s", "backend"),
                   None,
                   ok_result("grok", CLUSTERS[3], 1)])
     out = run(planned, settled, live_externals=["grok"])
@@ -271,13 +278,73 @@ def case_voice_count_note():
     notes = " ".join(out["coverageNotes"])
     if "6 von 8 Stimmen" not in notes:
         fail("voice count", f"the note does not state 6 of 8 voices: {notes!r}")
-    if "1 per Timeout" not in notes:
-        fail("voice count", f"the timed-out call was not classed as a timeout: {notes!r}")
+    # The backend SPOKE (its message names the timeout); the other voice did not.
+    # The note must not re-derive "timeout" by regexing that message — the detail
+    # stays verbatim in backendErrors, where it came from.
+    if "1 mit Fehlermeldung" not in notes:
+        fail("voice count", f"the backend-reported loss was not classed as such: {notes!r}")
     if "1 ohne jede Rückmeldung" not in notes:
         fail("voice count", f"the silent call was not classed as unexplained: {notes!r}")
+    if "ohne Einordnung" in notes:
+        fail("voice count", f"a loss escaped every bucket: {notes!r}")
     # The counts must lead — they reframe every number in the balance line.
     if "Stimmen" not in out["coverageNotes"][0]:
         fail("voice count", f"the voice-count note is not first: {out['coverageNotes']!r}")
+
+
+def case_every_loss_is_classified():
+    """A lost voice with no reason code would count in the total and appear in no
+    bucket — a sentence whose own numbers disagree."""
+    planned = [voice("claude", "correctness"), voice("grok", "threat")]
+    # A result that matches by identity but carries no code (a shaper that forgot).
+    stray = {"backend": "grok", "unit": "threat", "lenses": ["threat"],
+             "ok": False, "error": "something went wrong", "findings": []}
+    out = run(planned, [ok_result("claude", "correctness", 1), stray], live_externals=["grok"])
+    note = out["coverageNotes"][0]
+    if "1 von 2 Stimmen" not in note:
+        fail("classification", f"the loss was not counted: {note!r}")
+    if "ohne Einordnung" not in note:
+        fail("classification", f"an uncoded loss vanished from the breakdown: {note!r}")
+
+    # And an ok:false with an EMPTY error is a voice declaring failure, not a
+    # parser problem — it must not be published as schema-invalid.
+    got = run_mapping([{"kind": "external", "backend": "grok", "unit": "threat",
+                        "result": {"ok": False, "error": "", "findings": []}}])[0]
+    if got.get("reason") != "backend":
+        fail("classification", f"a terse backend failure was coded {got.get('reason')!r}")
+    if "schema-invalid" in got["error"]:
+        fail("classification", f"a terse backend failure was called a schema error: {got['error']!r}")
+
+
+def case_single_family_partial_loss():
+    """With one family configured there are no "other families" to fall back on —
+    the affected clusters were reviewed by nobody."""
+    planned = [voice("claude", c) for c in CLUSTERS]
+    settled = [ok_result("claude", CLUSTERS[0], 1), None,
+               ok_result("claude", CLUSTERS[2], 1), ok_result("claude", CLUSTERS[3], 1)]
+    out = run(planned, settled)
+    notes = " ".join(out["coverageNotes"])
+    if "übrigen Familien" in notes:
+        fail("single family", f"a zero-coverage cluster was reported as covered: {notes!r}")
+    if "NIEMANDEM" not in notes:
+        fail("single family", f"the uncovered cluster was not named as such: {notes!r}")
+
+
+def case_join_is_order_independent():
+    """Identity, not position, decides which result belongs to which voice."""
+    planned = [voice("claude", "correctness"), voice("grok", "threat"),
+               voice("codex", "design")]
+    good = [ok_result("claude", "correctness", 1), ok_result("grok", "threat", 2),
+            ok_result("codex", "design", 3)]
+    base = run(planned, good, live_externals=["grok", "codex"])
+    # The SAME results, delivered in a different order.
+    shuffled = run(planned, [good[2], good[0], good[1]], live_externals=["grok", "codex"])
+    if base["voices"] != shuffled["voices"]:
+        fail("order", "a reordered settled list changed the voice accounting")
+    if shuffled["backendErrors"]:
+        fail("order", f"reordering manufactured errors: {shuffled['backendErrors']!r}")
+    if shuffled["voicesReturned"] != 3:
+        fail("order", f"reordering lost voices: {shuffled['voicesReturned']}")
 
 
 def case_healthy_run_is_quiet():
@@ -409,6 +476,9 @@ def main():
         case_total_family_loss,
         case_partial_family_loss,
         case_voice_count_note,
+        case_every_loss_is_classified,
+        case_single_family_partial_loss,
+        case_join_is_order_independent,
         case_healthy_run_is_quiet,
         case_claude_only_is_quiet,
         case_identity_mismatch_fails_closed,
