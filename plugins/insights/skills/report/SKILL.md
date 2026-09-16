@@ -14,7 +14,8 @@ user_invocable: true
 
 ## Usage
 `/insights:report [free-text feedback]`. With text, the user's words are stored
-verbatim; without text, the report is an agent-authored snapshot.
+verbatim (apart from the helper's credential redaction); without text, the report
+is an agent-authored snapshot.
 
 ## Boundaries
 
@@ -28,7 +29,7 @@ verbatim; without text, the report is an agent-authored snapshot.
 ## Instructions
 
 1. **Mode.** `$ARGUMENTS` non-empty → **feedback report**: store the text
-   verbatim as `user_feedback[0]` (`attribution: "user"`,
+   verbatim (the helper redacts credentials itself) as `user_feedback[0]` (`attribution: "user"`,
    `captured_via: "/insights:report argument"`), then add context around it
    without changing its meaning. Empty → **snapshot report**: write a concise
    agent-authored report of the work so far.
@@ -60,7 +61,9 @@ verbatim; without text, the report is an agent-authored snapshot.
      Never use the currently installed or checked-out version as evidence.
      `completeness` is `partial` if the context was compacted or resumed, or if
      other sessions did part of the work.
-   - `work`: a PR only if it is already known in context. `summary` must stand
+   - `work`: if the skeleton left `task_name` unknown, a task name may still be
+     evident from `TASK.md` or the conversation (give that as its source). A PR
+     only if it is already known in context. `summary` must stand
      alone once the worktree and task file are gone.
    - `task_status`: from what you observe (`in_progress` mid-task, `blocked` when
      waiting on something outside the lane, `unknown` with no task).
@@ -72,12 +75,13 @@ verbatim; without text, the report is an agent-authored snapshot.
    ```sh
    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/insights.py" write '<draft file>'
    ```
-   - Exit **1** (invalid, nothing saved): fix the fields stderr names and write
-     again, at most twice.
+   - **Always** remove the draft file right after this call, saved or not
+     (`rm '<draft file>'`): it holds the unredacted text.
+   - Exit **1** (invalid, nothing saved): fix the fields stderr names, save the
+     draft again, and retry, at most twice (removing the draft each time).
    - Exit **3** or **4**, or a third validation failure: say the report was
      **not** saved, show the helper's error, and stop. Never describe an unsaved
      report as recorded.
-   - Remove the draft file afterwards (`rm '<draft file>'`), saved or not.
 
 6. **Confirm** in a few lines:
    ```

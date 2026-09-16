@@ -15,7 +15,8 @@ reuse the same script and contract instead of adding their own storage.
 Run it whenever something is worth keeping: midway through a task, when blocked,
 after finishing, or in a project with no task at all.
 
-- **With text**, your words are stored verbatim as user feedback. The agent adds
+- **With text**, your words are stored verbatim as user feedback, except that
+  credential-shaped strings are replaced by `[REDACTED]`. The agent adds
   context around them (project, task, models, skills used) without rewording them.
 - **Without text**, the agent writes a concise snapshot of the work so far.
 
@@ -70,8 +71,8 @@ ${XDG_DATA_HOME:-$HOME/.local/share}/gering-plugins/insights/v1/reports/<report_
 ```
 
 - One JSON file per report. The `insights/` tree is created `0700` and each file
-  is `0600`. A store directory that is a symlink or readable by others is
-  refused, never chmod'ed.
+  is `0600`. An existing store directory must be a real directory you own with
+  mode `0700` (no group/other bits). Otherwise it is refused, never chmod'ed.
 - A relative `XDG_DATA_HOME` is invalid per the XDG spec and is ignored
   (fallback: `$HOME/.local/share`).
 - `INSIGHTS_STORE_DIR=/abs/dir` or `--store /abs/dir` points everything at another

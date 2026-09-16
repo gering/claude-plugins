@@ -404,6 +404,68 @@ def test_credentials_are_redacted_not_rejected():
     assert kv(again.stdout)["redactions"] == "0"
 
 
+def test_redaction_edge_cases():
+    def scrub(text):
+        doc = {"work": {"summary": text}}
+        n = insights.redact_secrets(doc)
+        v = insights.Validator()
+        v.walk_strings("report", doc)
+        assert v.errors == [], (text, v.errors)  # never refused after redaction
+        return doc["work"]["summary"], n
+
+    # A substitution that removes a blocking "/" must not leave a new match behind.
+    assert scrub("https://api:8443?token=a/b&email=me@example.com") == \
+        ("https://api:8443?token=[REDACTED]&email=me@example.com", 1)
+    # Prose punctuation after a token value survives.
+    assert scrub("Use https://example.test/cb?token=abc), then retry.") == \
+        ("Use https://example.test/cb?token=[REDACTED]), then retry.", 1)
+    # A key header without its END marker costs only the header, not the rest of the text.
+    assert scrub("choked on -----BEGIN RSA PRIVATE KEY----- headers\nbecause of X") == \
+        ("choked on [REDACTED]\nbecause of X", 1)
+    block = "-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----"
+    assert scrub(f"pasted {block} by mistake") == ("pasted [REDACTED] by mistake", 1)
+
+    # Identity fields are helper-derived identifiers, not free text.
+    repo = SANDBOX / "code" / ("sk-learn-experiments-" + "x" * 20)
+    git_repo(repo)
+    doc = draft()
+    doc["work"]["branch"] = {"value": "sk-" + "b" * 24, "source": "git"}
+    out, n = insights.prepare(doc, str(repo))
+    assert n == 0 and out["project"]["name"] == repo.name
+    assert out["work"]["branch"]["value"] == "sk-" + "b" * 24
+    assert errors_for(out) == []
+
+    # A credential removed by URL sanitizing still counts as a redaction.
+    doc = draft()
+    doc["work"]["pr"] = {"value": "https://host.example/pull/1?access_token=secret", "source": "gh"}
+    out, n = insights.prepare(doc, str(SANDBOX))
+    assert out["work"]["pr"]["value"] == "https://host.example/pull/1" and n == 1
+
+
+def test_store_reader_is_bounded():
+    store = fresh_store("bounded")
+    good = cli("write", "-", "--store", str(store), stdin=json.dumps(draft()))
+    assert good.returncode == 0, good.stderr
+    fifo_id = insights.new_report_id()
+    os.mkfifo(store / f"{fifo_id}.json")
+    res = cli("list", "--store", str(store))  # must not block on the FIFO
+    assert res.returncode == 0 and "reports=1 malformed=1" in res.stdout, res.stdout
+    assert "not a regular file" in res.stdout
+
+    link_id = insights.new_report_id()
+    (store / f"{link_id}.json").symlink_to(store / f"{kv(good.stdout)['report_id']}.json")
+    res = cli("read", link_id, "--store", str(store))
+    assert res.returncode == insights.EXIT_INVALID, res.stdout
+
+    # An ID collision against an oversize file is refused without loading it.
+    huge_id = insights.new_report_id()
+    (store / f"{huge_id}.json").write_text(" " * (insights.MAX_STORED_FILE_BYTES + 1))
+    doc = draft()
+    doc.update(report_id=huge_id, recorded_at="2026-09-16T10:00:00Z")
+    res = cli("write", "-", "--store", str(store), stdin=json.dumps(doc))
+    assert res.returncode == insights.EXIT_COLLISION and "not loaded" in res.stderr, res.stderr
+
+
 def test_skeleton_is_complete_but_never_storable_untouched():
     root = SANDBOX / "skeleton-repo"
     shutil.rmtree(root, ignore_errors=True)
@@ -414,6 +476,15 @@ def test_skeleton_is_complete_but_never_storable_untouched():
     skel = json.loads(res.stdout)
     assert skel["work"]["task_name"] == {"value": "add-thing", "source": "MANDATE.md task"}
     assert skel["work"]["branch"]["value"] == "main"
+    assert skel["project"] == insights.project_identity(str(repo))
+
+    # Without MANDATE.md a work-system task branch still names the task.
+    (repo / "MANDATE.md").unlink()
+    subprocess.run(GIT + ["-C", str(repo), "checkout", "-q", "-b", "task/from-branch"], check=True)
+    alt = json.loads(cli("skeleton", cwd=repo).stdout)
+    assert alt["work"]["task_name"] == {"value": "from-branch", "source": "work-system task branch name"}
+    subprocess.run(GIT + ["-C", str(repo), "checkout", "-q", "main"], check=True)
+    (repo / "MANDATE.md").write_text("---\ntask: add-thing\n---\n")
 
     store = fresh_store("skeleton")
     untouched = cli("write", "-", "--store", str(store), cwd=repo, stdin=res.stdout)
@@ -439,8 +510,10 @@ def test_skeleton_is_complete_but_never_storable_untouched():
     retro["difficulty"] = {"domain": {"level": "low", "reason": "small"},
                            "tooling": {"level": "low", "reason": "smooth"}}
     retro["suggestions"]["status"] = "none"
-    ok = cli("write", "-", "--store", str(store), cwd=repo, stdin=json.dumps(filled))
+    ok = cli("write", "-", "--store", str(store), cwd=SANDBOX, stdin=json.dumps(filled))
     assert ok.returncode == 0, ok.stderr
+    saved = json.loads(cli("read", kv(ok.stdout)["report_id"], "--store", str(store)).stdout)
+    assert saved["project"]["ref"] == skel["project"]["ref"]  # not re-derived from the write cwd
 
 
 def test_list_rejects_non_positive_limit():

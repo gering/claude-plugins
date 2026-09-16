@@ -20,8 +20,9 @@ python3 "$H" context                        # the raw observable facts (JSON), i
 python3 "$H" write <draft.json>             # or `write -` with JSON on stdin
 ```
 
-The skeleton contains every required field. Values the helper can observe carry
-their source. Everything the producer must decide is empty — `""`, or an unknown
+The skeleton contains every required field, including the resolved `project`, so
+a later `write` from another directory keeps it. Values the helper can observe
+carry their source. Everything the producer must decide is empty — `""`, or an unknown
 with an empty `reason` — and **fails validation by name**, so an untouched skeleton
 can never be stored as a report.
 
@@ -227,7 +228,9 @@ Limits: narrative text ≤2000 chars, identifiers/evidence ≤300, user feedback
 lists ≤50 items, whole report ≤64 KiB.
 
 **Privacy guards.** `write` **redacts** high-confidence credential shapes in
-*every* string, user feedback included, replacing each with `[REDACTED]` and
+every free-text string, user feedback included (identifiers the helper derives
+or validates are exempt: `report_id`, `recorded_at`, `project.*`, `work.branch`,
+`work.task_name`), replacing each with `[REDACTED]` and
 reporting the count as `redactions=N`. Covered shapes: private-key blocks,
 GitHub/Slack/AWS/`sk-` tokens, `scheme://user:pass@` credentials, and token-like
 query parameters such as `access_token=`, `key=`, `sig=`, `code=`, and
@@ -269,7 +272,8 @@ python3 "$H" list [--here | --project <ref|key|name>] [--task <name|id>] \
 python3 "$H" read <report_id>
 ```
 
-- Both re-validate on read, and neither loads a file above 256 KiB. `read` exits
+- Both re-validate on read, and read only regular files (no symlinks, FIFOs, or
+  devices) of at most 256 KiB. `read` exits
   1 with the problems listed for a malformed report, and 5 when it is missing.
   `--limit` takes a positive integer. `list` shows every malformed file as
   `MALFORMED <path>: <reason>` and ends with `reports=N malformed=M`. Malformed

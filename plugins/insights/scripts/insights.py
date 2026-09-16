@@ -43,7 +43,6 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
 
 SCHEMA_ID = "insights.report/v1"
 ENV_STORE = "INSIGHTS_STORE_DIR"
@@ -75,17 +74,20 @@ REDACTED = "[REDACTED]"  # no ":" or "=": a redacted value must not match a patt
 # the producer editing it. Not a DLP scanner — a guard against the obvious paste
 # of a token or key into a report.
 SECRET_SUBS = [
-    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.S), REDACTED),
+    # a whole key block; a header without its END marker (prose mentioning the
+    # format, or a truncated paste) loses only the header line itself
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S), REDACTED),
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[^\n]*"), REDACTED),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}"), REDACTED),
     (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{40,}"), REDACTED),
     (re.compile(r"\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}"), REDACTED),
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), REDACTED),
     (re.compile(r"\bxox[abpr]-[A-Za-z0-9-]{10,}"), REDACTED),
     # credentials in a URL: scheme://user:pass@host
-    (re.compile(r"\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@"), r"\1" + REDACTED + "@"),
+    (re.compile(r"\b([a-z][a-z0-9+.-]*://)[^/\s:@?#]+:[^/\s@?#]+@"), r"\1" + REDACTED + "@"),
     # token-like query parameters anywhere in text
     (re.compile(r"([?&](?:access_token|refresh_token|id_token|token|api_key|apikey|key|sig|signature|"
-                r"secret|client_secret|password|passwd|auth|code)=)(?!\[REDACTED\])[^&#\s]+", re.I), r"\1" + REDACTED),
+                r"secret|client_secret|password|passwd|auth|code)=)(?!\[REDACTED\])[^&#\s]*[^&#\s),.;:'\"]", re.I), r"\1" + REDACTED),
 ]
 
 TRIGGERS = ("manual", "handoff", "close")
@@ -126,26 +128,24 @@ def canonical(obj) -> str:
     return json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
+URL_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)([^/?#\s]*)([^?#\s]*)(?:[?#]\S*)?")
+
+
 def sanitize_url(value: str) -> str:
-    """Drop userinfo, query and fragment from a URL-shaped string.
+    """Drop userinfo, query and fragment from a string that is exactly one URL.
 
     Credentials and tracking/session parameters live there; the host + path is
-    the part a later reader needs. Non-URL strings (e.g. `git@host:org/repo`)
-    are returned unchanged.
+    the part a later reader needs. Anything else (`git@host:org/repo`, prose) is
+    returned unchanged. Parsed with an anchored pattern rather than urlsplit:
+    `.port` raises on a malformed port, `.hostname` drops IPv6 brackets, and a
+    redacted `[REDACTED]@host` netloc makes urlsplit reject the URL outright.
     """
-    if not isinstance(value, str) or "://" not in value:
+    if not isinstance(value, str):
         return value
-    try:
-        parts = urlsplit(value)
-    except ValueError:
+    m = URL_RE.fullmatch(value)
+    if not m or not m.group(2):
         return value
-    if not parts.scheme or not parts.netloc:
-        return value
-    # Strip userinfo from the raw netloc instead of rebuilding it from
-    # hostname/port: `.port` raises on a malformed port, and `.hostname` loses
-    # the brackets of an IPv6 literal.
-    host = parts.netloc.rpartition("@")[2]
-    return urlunsplit((parts.scheme, host, parts.path, "", ""))
+    return m.group(1) + m.group(2).rpartition("@")[2] + m.group(3)
 
 
 def git_env() -> dict:
@@ -328,9 +328,38 @@ class CollisionError(Exception):
     pass
 
 
+def read_bounded(path: Path, limit: int) -> str:
+    """Read a regular file of at most `limit` bytes.
+
+    One descriptor for the type check, the size check and the read: no symlink
+    following, no blocking on a FIFO, no file that grows between stat and read.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(str(path), flags)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError("not a regular file")
+        if st.st_size > limit:
+            raise ValueError(f"file is {st.st_size} bytes (max {limit}); not loaded")
+        chunks, remaining = [], limit + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 65536))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > limit:
+            raise ValueError(f"file grew beyond {limit} bytes while reading; not loaded")
+        return data.decode("utf-8")
+    finally:
+        os.close(fd)
+
+
 def compare_existing(final: Path, report: dict) -> str:
     try:
-        existing = json.loads(final.read_text(encoding="utf-8"))
+        existing = json.loads(read_bounded(final, MAX_STORED_FILE_BYTES))
     except (OSError, ValueError) as e:
         raise CollisionError(f"{final.name} already exists and is unreadable ({e}); not replaced")
     if canonical(existing) == canonical(report):
@@ -759,7 +788,8 @@ class Validator:
                 self.err(path, "contains control or bidi characters")
             # Writes redact before validating, so this only fires for a stored
             # file that bypassed the helper.
-            if any(rx.search(val) for rx, _ in SECRET_SUBS):
+            segments = set(re.split(r"[.\[\]]", path))
+            if not REDACTION_EXEMPT & segments and any(rx.search(val) for rx, _ in SECRET_SUBS):
                 self.err(path, "contains an unredacted credential")
 
 
@@ -795,32 +825,45 @@ def fact_gaps(report) -> list:
 # ----------------------------------------------------------------------- preparing
 
 
+# Helper-derived identifiers are not free text: redacting a repo path such as
+# `/code/sk-learn-experiments` would break project.key and report grouping.
+REDACTION_EXEMPT = {"schema", "report_id", "recorded_at", "project", "branch", "task_name"}
+MAX_REDACTION_PASSES = 5
+
+
 def redact_secrets(report) -> int:
-    """Replace credential shapes in every string, in place; return the count."""
+    """Replace credential shapes in free-text strings, in place; return the count.
+
+    Repeats until nothing changes: one substitution can remove a character that
+    was blocking another pattern, and the validator re-checks with the same set.
+    """
     count = 0
 
     def scrub(text):
         nonlocal count
-        for rx, repl in SECRET_SUBS:
-            text, n = rx.subn(repl, text)
-            count += n
+        for _ in range(MAX_REDACTION_PASSES):
+            changed = 0
+            for rx, repl in SECRET_SUBS:
+                text, n = rx.subn(repl, text)
+                changed += n
+            count += changed
+            if not changed:
+                break
         return text
 
-    def walk(val):
+    def walk(val, key=None):
+        if key in REDACTION_EXEMPT:
+            return val
+        if isinstance(val, str):
+            return scrub(val)
         if isinstance(val, dict):
-            for k, v in val.items():
-                if isinstance(v, str):
-                    val[k] = scrub(v)
-                else:
-                    walk(v)
-        elif isinstance(val, list):
-            for i, v in enumerate(val):
-                if isinstance(v, str):
-                    val[i] = scrub(v)
-                else:
-                    walk(v)
+            return {k: walk(v, k) for k, v in val.items()}
+        if isinstance(val, list):
+            return [walk(v) for v in val]
+        return val
 
-    walk(report)
+    for key in list(report):
+        report[key] = walk(report[key], key)
     return count
 
 
@@ -880,8 +923,8 @@ def prepare(report: dict, project_dir=None):
     report.setdefault("recorded_at", utc_now().strftime("%Y-%m-%dT%H:%M:%SZ"))
     if "project" not in report:
         report["project"] = project_identity(project_dir)
+    redactions = redact_secrets(report)  # before URL sanitizing, so stripped credentials count
     sanitize_report(report)
-    redactions = redact_secrets(report)
     errors = validate_report(report)
     if errors:
         raise InvalidReport(errors)
@@ -999,15 +1042,11 @@ MAX_STORED_FILE_BYTES = MAX_REPORT_BYTES * 4
 def load_stored(path: Path, expected_id: str):
     """Load and re-validate one stored report. Returns (report|None, errors)."""
     try:
-        size = os.stat(path).st_size
+        data = json.loads(read_bounded(path, MAX_STORED_FILE_BYTES))
     except OSError as e:
         return None, [f"unreadable ({e})"]
-    if size > MAX_STORED_FILE_BYTES:
-        return None, [f"file is {size} bytes (max {MAX_STORED_FILE_BYTES}); not loaded"]
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError) as e:
-        return None, [f"unreadable JSON ({e})"]
+    except ValueError as e:  # includes UnicodeDecodeError and JSONDecodeError
+        return None, [f"unreadable ({e})"]
     errors = validate_report(data)
     if not errors and data.get("report_id") != expected_id:
         errors = [f"report_id {data.get('report_id')!r} does not match file name {path.name}"]
@@ -1092,11 +1131,18 @@ def build_skeleton(ctx: dict, trigger: str) -> dict:
         return {"value": value, "source": source} if value else unknown()
 
     claude = runtime.get("claude_code") or {}
+    branch = git.get("branch") or ""
+    if hints.get("mandate_task"):
+        task_name = observed(hints["mandate_task"], "MANDATE.md task")
+    elif branch.startswith("task/") and len(branch) > len("task/"):
+        task_name = observed(branch[len("task/"):], "work-system task branch name")
+    else:
+        task_name = unknown()
     work = {
         "summary": "",
         "task_id": unknown(),
         "run_id": unknown(),
-        "task_name": observed(hints.get("mandate_task"), "MANDATE.md task"),
+        "task_name": task_name,
         "task_path": observed(hints.get("main_task_file") or hints.get("task_md"), "insights.py context"),
         "branch": observed(git.get("branch"), "git"),
         "pr": unknown(),
@@ -1118,6 +1164,7 @@ def build_skeleton(ctx: dict, trigger: str) -> dict:
         "schema": SCHEMA_ID,
         "report_trigger": trigger,
         "task_status": "",
+        "project": ctx["project"],  # resolved now, so `write` can't re-derive it from another cwd
         "work": work,
         "reporter": reporter,
         "participants": [],
