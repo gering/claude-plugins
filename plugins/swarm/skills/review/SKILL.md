@@ -599,7 +599,7 @@ Then the balance block (ALWAYS, this shape), from `balance`:
 
 ```
 Bilanz:  <total> Findings (🔴<c> 🟡<w> ⚪<m> · <design> Design) · Konsens <consensus> · Solo <solo> · REFUTED <refuted> · Verdict ✅<a> 🟨<p> ❌<d>
-Agents:  <model> <findings> · …   (from balance.agents; EVERY backend is multi-voice — one call per gated cluster, per lens under --max. Render each backend's voice count so the topology is honest, e.g. `opus×5 7 · gpt×5 3 · grok×5 5 · kimi×5 4`; claude runs in-session, codex/grok/kimi through the adapter)
+Agents:  <model> <findings> · …   (from balance.agents; EVERY backend is multi-voice — one call per gated cluster, per lens under --max. Render each backend's voice count so the topology is honest, e.g. `opus×5 7 · gpt×5 3 · grok×5 5 · kimi×5 4`; claude runs in-session, codex/grok/kimi through the adapter. When `failedVoices > 0`, append `(<failedVoices> ohne Ergebnis)` to THAT backend — `grok×5 0` alone reads as "reviewed, found nothing", which is exactly the sentence three silent runs printed while most of their calls were being denied.)
 Lenses:  <gate.run joined>  —  gated-out: <gate.skip lenses>
 ```
 
@@ -631,6 +631,13 @@ Then, when present:
   `<backend> [<unit>: <lenses>]: <reason>` (every backend is multi-voice, so the
   unit names WHICH cluster lost its coverage — "codex errored" alone hides that);
   an errored voice is NOT "found nothing".
+
+  The "this review ran with X of Y voices" line is **not templated here** — the
+  workflow emits it as a `coverageNotes` entry, printed verbatim with the others.
+  Do not compute the counts, restate them, or diagnose a cause: an earlier
+  version of this section did both, and it asserted a permission denial off a
+  substring that the generic no-result reason always contained — so every timeout
+  was published as a classifier denial. Only the workflow sees the evidence.
 - **Voice timing** — run this and print its stdout verbatim under the balance
   block (skip the section when it prints nothing):
 

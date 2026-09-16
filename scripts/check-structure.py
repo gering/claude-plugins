@@ -11,7 +11,9 @@ Run locally before pushing:
     python3 scripts/check-structure.py
 
 Exit code 0 = no errors (warnings allowed), 1 = at least one error.
-Dependencies: python3 (3.7+) stdlib + bash only.
+Dependencies: python3 (3.7+) stdlib + bash, plus `node` — the discovered plugin
+tests include one that executes swarm's workflow JavaScript, and it fails hard
+rather than skipping when node is absent (CI installs it via actions/setup-node).
 """
 
 from __future__ import annotations

@@ -87,6 +87,12 @@ locally before pushing:
 python3 scripts/check-structure.py
 ```
 
+Requires **python3 and `node`**. Node is needed by one plugin test
+(`plugins/swarm/scripts/test_voice_accounting.py`) that executes the swarm
+review workflow — the repository's only JavaScript — against synthetic inputs.
+That test fails loudly rather than skipping when node is missing, because a test
+guarding against silently lost review voices must not silently skip itself.
+
 ## License
 
 MIT

@@ -15,5 +15,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # swarm-review.js is the repo's only JavaScript, and test_voice_accounting.py
+      # executes it under node. That test fails hard rather than skipping when node
+      # is missing (a test against silent loss must not vanish silently), so pin
+      # node here instead of relying on whatever the runner image happens to ship.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
       - name: Run structure checks
         run: python3 scripts/check-structure.py

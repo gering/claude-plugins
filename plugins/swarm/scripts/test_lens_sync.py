@@ -337,6 +337,52 @@ check(
     "workflow: emits the coverage sentences itself",
     "const coverageNotes = []" in js and "coverageNotes," in js,
 )
+# 0.11.1 added two more workflow-computes / skill-renders pairs, and they drift
+# exactly like the ones above. Pin both.
+# `voicesReturned` exists because `voices` became the PLANNED topology once a lost
+# voice stopped being filtered out — one number can no longer stand for both.
+check(
+    "workflow: exposes voicesReturned beside voices in balance",
+    "voicesReturned," in js and "voices: voices.length," in js,
+)
+# The "ran with X of Y voices" sentence must stay in the WORKFLOW. Templated in
+# the skill it computed its own counts and diagnosed a permission denial off a
+# substring the generic no-result reason always carried, so every timeout was
+# published as a classifier denial.
+check(
+    "workflow: owns the voices-returned sentence",
+    "von ${voices.length} Stimmen" in js,
+)
+check(
+    "skill: does not template the voices-returned sentence or diagnose a cause",
+    "voicesReturned> von" not in skill and "blocked by permission classifier" not in skill,
+)
+# The presenter DOES render failedVoices (a field the workflow computes) — that is
+# rendering, not re-deriving. Pin both halves so the field cannot be dropped on
+# either side and leave `grok×5 0` reading as "reviewed, found nothing".
+check(
+    "workflow: counts failedVoices per backend",
+    "failedVoices" in js,
+)
+check(
+    "skill: renders failedVoices on the Agents line",
+    "failedVoices" in skill,
+)
+# No internal task slug may reach a shipped, user-facing surface: `tasks/` is
+# untracked, so the reader cannot resolve it anywhere.
+# EVERY user-facing surface, not just SKILL.md: the first version of this guard
+# covered the skill alone, and the CHANGELOG then shipped the same slug while
+# also describing presenter output the release had removed.
+for _name, _path in (
+    ("skill", HERE.parent / "skills" / "review" / "SKILL.md"),
+    ("plugin README", HERE.parent / "README.md"),
+    ("changelog", HERE.parent.parent.parent / "CHANGELOG.md"),
+    ("repo README", HERE.parent.parent.parent / "README.md"),
+):
+    check(
+        f"{_name}: prints no internal task slug",
+        not _path.exists() or "fix-swarm-review-runtime-handoff" not in _path.read_text(encoding="utf-8"),
+    )
 check(
     "workflow: consensusReachable is the GLOBAL question only",
     re.search(r"const consensusReachable = familiesPresent\.length >= 2\s*$", js, re.M),
