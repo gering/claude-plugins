@@ -161,9 +161,9 @@ across permission requests/updates, plus completeness. `agents.sh` imports it
 before scratch cleanup into `tool_calls` / `tool_calls_complete`. Unknown is
 not zero and an interrupted stream may only have a partial count. Prompt bytes
 and observed calls do not measure billing or prove a provider retransmission
-multiplier. The live comparison was blocked before execution; see
-`plugins/swarm/docs/profile-measurements.md` for measured contract bytes and
-pending validation, rather than claiming token savings.
+multiplier. See `plugins/swarm/docs/profile-measurements.md` for observed
+resource data and live-validation status. The smaller contract does not itself
+establish token savings.
 
 No server-side all-tools-off contract was established for the installed Kimi
 ACP implementation; its plan-mode label is not such a guarantee. The quick
@@ -515,7 +515,7 @@ backend rc null.
   remain not-ready; do not confuse this model-uncertainty fallback with the
   intentionally strict auth-probe behavior below. The CLI may refresh its own
   auth/cache even though the probe generates no review.
-  Evidence and pending live-validation status live in
+  Evidence and live-validation status live in
   `plugins/swarm/docs/profile-measurements.md`.
 - **Model-aware readiness beats an auth-only check** (swarm 0.4.3). grok drops
   and renames models between releases — 0.2.101 removed

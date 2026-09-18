@@ -809,9 +809,8 @@ const shapeExternalResult = (r, v) => (r?.ok === true && Array.isArray(r.finding
   : ((code) => ({ backend: v.backend, unit: v.unit, lenses: v.lenses, ok: false, reason: code, error: reasonText(code, r), findings: [] }))(r?.ok === false ? LOSS.BACKEND : lossOf(r))
 // swarm-test-region-end
 
-// The PLAN for the Claude side, in the SAME order as claudeThunks (both map over
-// finderUnits, so the indexes cannot drift). The join below pairs results to this
-// list positionally — that is what makes a lost voice nameable.
+// Claude's plan supplies stable backend/unit identities for accounting, even
+// when parallel compacts or reorders its results.
 const claudeVoiceSpecs = finderUnits.map((u) => ({ backend: 'claude', unit: u.name, lenses: u.lenses }))
 const claudeThunks = finderUnits.map((u) => () =>
   agent(
@@ -1047,12 +1046,6 @@ const externalThunks = externalVoiceSpecs.map((v) => () =>
    .catch((e) => ({ backend: v.backend, unit: v.unit, lenses: v.lenses, ok: false, reason: LOSS.BACKEND, error: `${v.label} — ${String(e).slice(0, 180)}`, findings: [] }))
 )
 
-// THE JOIN. Results are paired to the plan BY INDEX, never by truthiness: the
-// old `.filter(Boolean)` dropped a resolved-to-nothing voice before any
-// accounting saw it, so a run whose external spawns were all denied still
-// reported `gpt×N 0 · grok×N 0`, `backendErrors: []` and every family present
-// (three reproductions: 2026-08-31, 2026-09-01, 2026-09-10 / PR #27). A hole at
-// index i now names exactly which backend+unit was lost.
 const plannedVoices = [...claudeVoiceSpecs, ...externalVoiceSpecs]
 const settled = await parallel([...claudeThunks, ...externalThunks])
 // swarm-test-region: voice-accounting

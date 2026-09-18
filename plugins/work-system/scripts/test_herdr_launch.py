@@ -282,6 +282,32 @@ def wrapper_cases(**over):
     return cases
 
 
+# A registry failure is not an empty selection. Preserve its status/diagnosis,
+# and never launch even when it printed a usable-looking partial argv record.
+for registry_rc, partial in ((1, ""), (2, ""), (42, "argv=claude\nargv=--help\n")):
+    e = Env({}, log_argv=True, api="modern")
+    copied = Path(e.tmp.name) / "scripts"
+    copied.mkdir()
+    for filename in ("herdr-launch.sh", "lib-bounded.sh"):
+        (copied / filename).write_text((HERE / filename).read_text())
+    (copied / "agent-registry.sh").write_text(
+        "#!/bin/sh\n"
+        f"printf %s {shquote(partial)}\n"
+        "printf '%s\\n' 'registry fixture failure' >&2\n"
+        f"exit {registry_rc}\n"
+    )
+    r = subprocess.run(
+        ["bash", str(copied / "herdr-launch.sh"), "launch", "t", str(e.worktree), "w1", "--kimi"],
+        env=e.env, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30,
+    )
+    check(f"registry exit {registry_rc}: preserved", r.returncode == registry_rc)
+    check(f"registry exit {registry_rc}: diagnostic preserved",
+          f"registry exit {registry_rc}" in r.stderr and "registry fixture failure" in r.stderr)
+    check(f"registry exit {registry_rc}: no partial output or herdr calls",
+          r.stdout == "" and e.calls() == [])
+    e.close()
+
+
 # ========================================================================== #
 # error diagnostics (legacy path — unchanged behaviour)
 # ========================================================================== #

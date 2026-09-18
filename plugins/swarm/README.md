@@ -74,11 +74,12 @@ cleanup margin. Raising `SWARM_TIMEOUT` cannot cross that ceiling. Longer
 execution belongs to the async transport work, not a lower-effort workaround.
 
 **Validation status:** hermetic tests exercise the profiles and policies.
-Live Kimi comparison and current Sol/Astra execution validation remain release
-checks; the 2026-09-14 baseline attempt was blocked by Auto Mode before a
-backend review ran. No measured token/quota savings are claimed. See
-[measurement notes](docs/profile-measurements.md) for reproducible inputs and
-what the telemetry does—and does not—measure.
+Sol/low, Sol/medium and Astra/medium passed live adapter smoke checks. All six
+Kimi comparison calls passed; both diff-only reviews reported zero observed
+tools. Prompts were smaller, but diff-only was slower in this sample and the
+compact tools-enabled contract elicited more tools than baseline. No token/quota
+savings are claimed. See [measurement notes](docs/profile-measurements.md) for
+observations, reproducible inputs and measurement limits.
 
 ## The pipeline (`/swarm:review`)
 

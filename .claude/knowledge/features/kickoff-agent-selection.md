@@ -1,9 +1,9 @@
 ---
 title: "Kickoff Agent Selection: registry, per-repo default, honest degradation"
 createdAt: 2026-07-17
-updatedAt: 2026-09-21
+updatedAt: 2026-09-22
 createdFrom: "session: 2026-07-17 (task/kickoff-agent-selection)"
-updatedFrom: "session: 2026-09-21 (task/auto-select-latest-grok)"
+updatedFrom: "auto-select-latest-grok + add-swarm-review-profiles"
 pluginVersion: 1.9.0
 prime: false
 ---
@@ -34,6 +34,35 @@ launch). Skills never hardcode the CLI list. `default get` **validates** its
 committed value against the registry — a stale/removed/attacker-supplied name
 (including a `cc-harness:…` default when the helper is off PATH) reads as "no
 default" (→ picker), never routes or bricks kickoff.
+
+## Producer completion is part of the registry protocol
+
+A line read from `< <(producer)` is not proof that the producer has exited.
+The registry used this shape for availability/status and row lookup, then
+immediately printed its machine-readable result. On macOS Bash 3.2, a late
+producer `SIGCHLD` interrupted `printf` with `Interrupted system call`, leaving
+a partial record. The launcher hid the unexpected registry error as "resolved
+no argv", so full-suite failures looked like unrelated pane/job-control bugs.
+A controlled backpressured-pipe reproduction isolated the failure; this was not
+an assumption based only on the OS version.
+
+The registry now captures each bounded producer synchronously, checks its exit
+status, and only then consumes/emits the record. That also rejects a producer
+which prints a valid-looking row and subsequently fails. Do not retry a whole
+write: some bytes may already have escaped, so retrying can duplicate protocol
+data. No signal suppression, deadline increase or mandatory newer Bash was
+needed. This is a completion requirement for this protocol, not a blanket ban
+on streaming process substitution elsewhere.
+
+`herdr-launch.sh` accepts records only for the registry's expected success or
+unavailable statuses; every other error is preserved and stops before argv is
+used. `scripts/test_registry_completion.py` covers completion, failure after a
+partial row, the blocked writer and preserved success/unavailable contracts;
+`test_herdr_launch.py` pins the no-partial-launch and diagnostic behavior.
+Related background: [Bash process-substitution interruption discussion](https://lists.gnu.org/archive/html/bug-bash/2008-10/msg00091.html)
+and [Bash interrupted-write discussion](https://lists.nongnu.org/archive/html/bug-bash/2018-01/msg00031.html).
+The local test establishes this specific failure rather than borrowing a signal
+attribution from those discussions.
 
 ## Optional `cc-harness` class: PATH helper, pure consumer
 A `cc-harness:grok` worker is a *full* CC session (skills, lenses, `/continue`,

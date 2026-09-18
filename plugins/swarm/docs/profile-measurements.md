@@ -1,18 +1,28 @@
 # Profile measurement notes
 
-## Status — 2026-09-14
+## Status — 2026-09-17
 
-**Live comparison is blocked, not completed.** Auto Mode refused the first
-repository-diff baseline command before Kimi executed it. Readiness had returned
-`ready`; no review telemetry, findings, quota measurement or model-token count
-was produced by that attempt. Do not retry through a different session or
-transport to bypass that decision. The operator must explicitly authorize the
-external review through the normal permission path before it can run.
+**The planned live checks are complete:** all three Codex model/effort smoke
+calls and all six Kimi comparison calls returned valid JSON with backend and
+adapter exit codes 0. Both diff-only calls reported zero observed tool calls.
+No token/quota savings or latency improvement are established by this sample.
 
-Current Sol/Astra model-execution validation is also outstanding. Unit tests
-verify configuration and command generation, not provider access. The requested
-Codex profiles are `gpt-5.6-sol`/low, `gpt-5.6-sol`/medium and
-`gpt-6-astra`/medium; no model fallback is permitted to disguise an unsupported ID.
+Auto Mode twice refused a call before provider execution. Work resumed only
+after the operator explicitly restored manual permissions; successful calls
+were not repeated. No alternate session or transport bypassed either refusal.
+
+**Codex actual-load checks passed on 2026-09-14.** Each requested model/effort configuration
+returned exactly `{"findings":[]}` through the current jailed adapter, with
+backend and adapter exit codes 0. The assembled smoke prompt was 472 bytes and
+requested no tools or repository exploration; each call had a 120-second cap.
+This verifies invocation/schema compatibility, not review quality or hidden
+provider routing. No fallback model was selected.
+
+| Profile | Requested model | Effort | Seconds | Result |
+|---|---|---|---:|---|
+| quick | gpt-5.6-sol | low | 5 | valid JSON, rc 0 |
+| default | gpt-5.6-sol | medium | 5 | valid JSON, rc 0 |
+| max | gpt-6-astra | medium | 6 | valid JSON, rc 0 |
 
 ## Measured locally: contract bytes
 
@@ -33,7 +43,41 @@ validation constraints, property names and literal instance values (`const`,
 the contract: a large diff still dominates the input. No per-cluster diff slice,
 extra fence or coverage truncation was introduced.
 
-## Reproducible pending live comparison
+## Live Kimi comparison
+
+All completed calls used `kimi-code/k3-256k`, low effort, a 540-second adapter
+cap and the identical saved prompt for each unit. Every completed call returned
+schema-valid findings with backend/adapter rc 0 and complete tool-call
+observations. Durations are the adapter's measured backend interval, excluding
+readiness probes. Each cell is a **single run**, not a repeated benchmark.
+
+| Contract / unit | Completed UTC | Prompt bytes | Observed tool calls | Seconds |
+|---|---|---:|---:|---:|
+| Baseline / breakage | 2026-09-14 15:05 | 58455 | 1 | 124 |
+| Baseline / threat | 2026-09-16 10:04 | 58459 | 0 | 280 |
+| Compact, tools / breakage | 2026-09-16 10:50 | 56014 | 2 | 163 |
+| Compact, tools / threat | 2026-09-16 15:20 | 56018 | 3 | 229 |
+| Compact, diff-only / breakage | 2026-09-16 19:33 | 55783 | 0 | 197 |
+| Compact, diff-only / threat | 2026-09-17 10:29 | 55787 | 0 | 356 |
+
+Every comparison pair saves exactly **2441 prompt bytes** with tools enabled
+or **2672 bytes** in diff-only mode. Diff-only produced accepted reviews with
+zero observed tools, but was slower than baseline on both units in this sample.
+The compact tools-enabled contract elicited more tool calls than baseline;
+latency increased for Breakage and decreased for Threat.
+
+Baseline tool use was already sparse. These observations do **not** demonstrate
+a reduced billing multiplier, overall latency or quota consumption. Runs
+spanned multiple days; model sampling, load and caching were not controlled.
+Findings were collected only for this resource measurement, not adversarially
+verified or treated as a review-quality benchmark. Kimi stays opt-in, and this
+small sample does not justify changing the default profile's tool policy.
+
+## Reproducing the comparison
+
+The two saved per-unit prompts were verified to contain the exact diff below,
+and the baseline contract was compared byte-for-byte with the original before
+execution. Completed calls were not repeated automatically.
 
 - Source: `git diff 163908b^ 163908b -- plugins/swarm/scripts/kimi-acp.py`.
 - Raw diff bytes: **54,069**.

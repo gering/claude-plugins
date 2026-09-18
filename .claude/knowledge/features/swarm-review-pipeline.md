@@ -1,7 +1,7 @@
 ---
 title: "Swarm Review Pipeline (/swarm:review)"
 createdAt: 2026-07-08
-updatedAt: 2026-09-14
+updatedAt: 2026-09-20
 createdFrom: "PR #24"
 updatedFrom: "branch: task/add-swarm-review-profiles"
 pluginVersion: 1.9.0
@@ -181,12 +181,13 @@ Workflow notification's `<failures>` block.
 Three separate fail-open sites had to line up for that, which is why it survived
 so long:
 - `(await parallel([...])).filter(Boolean)` — a denied spawn was dropped *before*
-  any accounting saw it. **Rule: pair results to the planned voice list by INDEX,
-  never by truthiness.** Planned voices are known before fan-out
-  (`claudeVoiceSpecs` + `externalVoiceSpecs`), so a hole at index *i* names
-  exactly which backend+unit was lost. The join also checks identity
-  (`r.backend === p.backend && r.unit === p.unit`) so an order change degrades to
-  "everything lost" — loud — rather than mis-attributing findings.
+  any accounting saw it. **Rule: join results to planned backend/unit identity,
+  never by truthiness or assumed array ordering.** Planned voices are known
+  before fan-out (`claudeVoiceSpecs` + `externalVoiceSpecs`); a missing identity
+  names the lost voice. An earlier index-only join could falsely lose healthy
+  voices when results shifted. The current identity map tolerates reordering
+  and compaction; positions only help describe a missing result, never accept
+  or attribute findings.
 - `ok: r?.ok !== false` — `undefined !== false` is true, so *no result* read as
   *successful voice, 0 findings*. Requires an explicit `ok === true` **plus**
   `Array.isArray(findings)` now. A non-array `findings` is an error, not an empty
@@ -339,10 +340,10 @@ the diff out of the script, above). Claude applies edits between rounds.
   opt-in even under max. Positive tool budgets are advisory, not truncating
   turn limits. Neither profiles nor a higher `SWARM_TIMEOUT` crosses the
   synchronous Bash ceiling; `async-poll-external-voices` must coordinate with
-  runtime-handoff on the one runner. Live Kimi comparison and current Codex
-  model-load checks are still pending; the attempted baseline was blocked
-  before execution. Details and measured contract bytes live in
-  `plugins/swarm/docs/profile-measurements.md`, not invented quota savings.
+  runtime-handoff on the one runner. Live validation, permission blocks and
+  measured prompt/tool observations are recorded in
+  `plugins/swarm/docs/profile-measurements.md`. Keep mutable run status there;
+  smaller contracts alone do not establish token/quota savings.
 
 - **Per-backend cluster allowlist** (`EXTERNAL_BACKENDS[].clusters`, 0.11.0): Kimi
   reviews only `breakage` + `threat` on both profiles. Moonshot meters a 5-hour
