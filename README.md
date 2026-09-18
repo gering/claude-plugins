@@ -44,6 +44,14 @@ Plugin settings system: per-plugin TOML config resolved over schema defaults. Ea
 
 [Documentation →](plugins/settings/)
 
+### Insights
+
+Private, local reports on how work went, for process and plugin learning (not worker ranking). `/insights:report [free text]` records one mid-task, when blocked, after finishing, or with no task at all: the project (grouped by main checkout across worktrees), the models and evidenced plugin versions that actually ran, a standalone work summary, friction, what worked, and the reporting model's improvement suggestions. Unknown metadata stays explicitly unknown with a reason. Reports are validated JSON files under `~/.gering-plugins/insights/`, published atomically and never overwritten. Nothing is uploaded. *(0.1.0: manual reports only; worker/Manager handoff producers follow separately.)*
+
+**Commands:** `/insights:report [free text]`
+
+[Documentation →](plugins/insights/)
+
 ## Installation
 
 ### 1. Add the marketplace
@@ -60,6 +68,7 @@ Plugin settings system: per-plugin TOML config resolved over schema defaults. Ea
 /plugin install pr-flow
 /plugin install swarm
 /plugin install settings
+/plugin install insights
 ```
 
 ### 3. Reload plugins

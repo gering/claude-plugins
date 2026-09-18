@@ -1,0 +1,156 @@
+{
+  "schema": "insights.report/v1",
+  "report_id": "ins-20260905T180000Z-0000beef0003",
+  "recorded_at": "2026-09-05T18:00:00Z",
+  "report_trigger": "manual",
+  "task_status": "completed",
+  "project": {
+    "name": "claude-plugins",
+    "ref": "git:/home/dev/src/claude-plugins",
+    "ref_source": "git-main-worktree",
+    "key": "4dc7e8ed4488d34d",
+    "remote": "git@github.com:gering/claude-plugins.git"
+  },
+  "work": {
+    "summary": "HISTORICAL FIXTURE (not a statement about current herdr behavior). Delivery pilot: a prompt sent to a busy worker with a short --wait timed out, yet the worker kept running, finished its current turn and answered the queued prompt without retry. No work-system task; project-level report.",
+    "task_id": {
+      "value": null,
+      "reason": "no work-system task: coordination pilot"
+    },
+    "run_id": {
+      "value": null,
+      "reason": "no run registry existed"
+    },
+    "task_name": {
+      "value": null,
+      "reason": "no work-system task"
+    },
+    "task_path": {
+      "value": null,
+      "reason": "no work-system task"
+    },
+    "branch": {
+      "value": null,
+      "reason": "pilot ran in scratch directories outside the repository"
+    },
+    "pr": {
+      "value": null,
+      "reason": "no PR"
+    },
+    "instruction_ids": [
+      "CC-BUSY-B"
+    ],
+    "related_reports": []
+  },
+  "reporter": {
+    "role": "advisor",
+    "role_source": "pilot coordinator session",
+    "model": {
+      "value": null,
+      "reason": "historical reconstruction; authoring model not preserved"
+    },
+    "runtime": {
+      "value": "claude-code",
+      "source": "session"
+    },
+    "harness": {
+      "value": "herdr 0.8.0",
+      "source": "herdr version output"
+    },
+    "reasoning_effort": {
+      "value": null,
+      "reason": "not recorded"
+    },
+    "session_id": {
+      "value": null,
+      "reason": "not recorded"
+    }
+  },
+  "participants": [
+    {
+      "role": "worker",
+      "label": "pilot pane p1",
+      "model": {
+        "value": "Fable 5.1",
+        "source": "pilot environment record"
+      },
+      "runtime": {
+        "value": "Claude Code 2.1.260",
+        "source": "pilot environment record"
+      },
+      "harness": {
+        "value": "herdr 0.8.0",
+        "source": "pilot environment record"
+      },
+      "reasoning_effort": {
+        "value": "low",
+        "source": "pilot environment record"
+      },
+      "scope": "delivery probe recipient",
+      "basis": "run_evidence"
+    }
+  ],
+  "usage": {
+    "completeness": "complete",
+    "completeness_reason": "the pilot used no plugin skills; only raw herdr CLI calls",
+    "skills": []
+  },
+  "user_feedback": [],
+  "retrospective": {
+    "outcome": {
+      "intended": "Learn whether a timed-out send means the prompt was lost.",
+      "achieved": "Showed a timeout is delivery-unverified: the prompt was processed later."
+    },
+    "difficulty": {
+      "domain": {
+        "level": "medium",
+        "reason": "asynchronous delivery semantics"
+      },
+      "tooling": {
+        "level": "low",
+        "reason": "herdr exposed state; only the timeout was ambiguous"
+      }
+    },
+    "worked_well": [
+      {
+        "observation": "Attributed result markers made the late delivery provable without a retry.",
+        "basis": "run_evidence",
+        "evidence": [
+          "RESULT CC-BUSY-B 73"
+        ]
+      }
+    ],
+    "friction": [],
+    "interventions": [],
+    "suggestions": {
+      "status": "provided",
+      "author": "reporting_model",
+      "items": [
+        {
+          "change": "Model delivery-unverified as its own run state and never auto-resend on timeout.",
+          "observation": "The timed-out prompt was answered later without any retry.",
+          "expected_benefit": "Avoids duplicate dispatch to a worker that is still running.",
+          "uncertainty": {
+            "level": "medium",
+            "note": "one case per harness, no load or restart test"
+          }
+        }
+      ]
+    }
+  },
+  "plugin_details": {
+    "work-system": {
+      "questions": [],
+      "handoff_gaps": [],
+      "ambiguous_states": [
+        {
+          "kind": "delivery",
+          "observed": "--wait --timeout 25000 timed out after 25 s while the recipient was busy.",
+          "resolution": "Recipient finished the running turn and answered the queued prompt with the expected marker; no retry was sent.",
+          "status": "resolved",
+          "basis": "run_evidence"
+        }
+      ]
+    }
+  }
+}

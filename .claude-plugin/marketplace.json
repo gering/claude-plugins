@@ -37,6 +37,12 @@
       "source": "./plugins/settings",
       "description": "Plugin settings system for Claude Code marketplaces. Per-plugin TOML config resolved over schema defaults: list, show, get, set, validate. Each plugin owns its config file, defaults, and validation schema.",
       "version": "0.1.0"
+    },
+    {
+      "name": "insights",
+      "source": "./plugins/insights",
+      "description": "Private, local task and plugin insight reports for Claude Code. /insights:report records observations mid-task or at any point: project, models, evidenced plugin versions, friction and improvement suggestions, with honest unknowns.",
+      "version": "0.1.0"
     }
   ]
 }

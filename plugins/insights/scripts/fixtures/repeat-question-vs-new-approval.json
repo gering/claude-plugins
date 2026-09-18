@@ -1,0 +1,197 @@
+{
+  "schema": "insights.report/v1",
+  "report_id": "ins-20260906T090000Z-0000a11ce002",
+  "recorded_at": "2026-09-06T09:00:00Z",
+  "report_trigger": "manual",
+  "task_status": "blocked",
+  "project": {
+    "name": "hkcm",
+    "ref": "git:/home/dev/src/hkcm",
+    "ref_source": "git-main-worktree",
+    "key": "a9d06b1664bf6983",
+    "remote": null
+  },
+  "work": {
+    "summary": "HISTORICAL FIXTURE (not a statement about current work-system behavior). A worker kicked off with a direct user mandate stopped at /continue asking what to work on (avoidable), and later correctly stopped to ask for merge approval, which the mandate did not grant (necessary).",
+    "task_id": {
+      "value": null,
+      "reason": "work-system tasks carry no task ID"
+    },
+    "run_id": {
+      "value": null,
+      "reason": "no run registry existed"
+    },
+    "task_name": {
+      "value": null,
+      "reason": "task name not preserved in the source note"
+    },
+    "task_path": {
+      "value": null,
+      "reason": "worktree removed; path not preserved"
+    },
+    "branch": {
+      "value": null,
+      "reason": "not preserved"
+    },
+    "pr": {
+      "value": null,
+      "reason": "not preserved"
+    },
+    "instruction_ids": [],
+    "related_reports": []
+  },
+  "reporter": {
+    "role": "manager",
+    "role_source": "repo-root coordination session",
+    "model": {
+      "value": null,
+      "reason": "historical reconstruction; authoring model not preserved"
+    },
+    "runtime": {
+      "value": "claude-code",
+      "source": "session"
+    },
+    "harness": {
+      "value": "herdr",
+      "source": "tab-based lane"
+    },
+    "reasoning_effort": {
+      "value": null,
+      "reason": "not recorded"
+    },
+    "session_id": {
+      "value": null,
+      "reason": "not recorded"
+    }
+  },
+  "participants": [
+    {
+      "role": "worker",
+      "label": "task lane",
+      "model": {
+        "value": null,
+        "reason": "worker model not preserved"
+      },
+      "runtime": {
+        "value": "claude-code",
+        "source": "herdr tab"
+      },
+      "harness": {
+        "value": "herdr",
+        "source": "herdr tab"
+      },
+      "reasoning_effort": {
+        "value": null,
+        "reason": "not recorded"
+      },
+      "scope": "implementation",
+      "basis": "second_hand"
+    }
+  ],
+  "usage": {
+    "completeness": "partial",
+    "completeness_reason": "only the two question events are described",
+    "skills": [
+      {
+        "skill": "work-system:continue",
+        "plugin": "work-system",
+        "plugin_version": {
+          "value": "1.12.1",
+          "source": "installed skill text quoted in the follow-up task"
+        },
+        "model": {
+          "value": null,
+          "reason": "not recorded"
+        },
+        "note": "step 7 ended with an unconditional question"
+      }
+    ]
+  },
+  "user_feedback": [],
+  "retrospective": {
+    "outcome": {
+      "intended": "Worker starts implementation right after kickoff and stops only at the merge decision.",
+      "achieved": "Worker idled on a generic question until the user answered; the merge stop was correct."
+    },
+    "difficulty": {
+      "domain": {
+        "level": "medium",
+        "reason": "ordinary feature work"
+      },
+      "tooling": {
+        "level": "medium",
+        "reason": "the skill instruction forced a stop the mandate had already covered"
+      }
+    },
+    "worked_well": [
+      {
+        "observation": "The merge approval stop respected an authorization the user had not given.",
+        "basis": "model_assessment",
+        "evidence": []
+      }
+    ],
+    "friction": [
+      {
+        "plugin": "work-system",
+        "skill": "work-system:continue",
+        "expected": "Resume starts on the next unmet requirement when a kickoff mandate exists.",
+        "observed": "Resume ended with 'What would you like to work on?'.",
+        "impact": "One avoidable user round-trip per resume; lane idle until answered.",
+        "resolution": {
+          "status": "resolved",
+          "detail": "addressed later by recording MANDATE.md at kickoff"
+        },
+        "suspected_cause": {
+          "text": "Unconditional question at the end of the continue instructions.",
+          "confidence": "high"
+        },
+        "basis": "run_evidence",
+        "evidence": [
+          "tasks/extend-worker-autonomy.md"
+        ],
+        "related_reports": []
+      }
+    ],
+    "interventions": [
+      {
+        "kind": "user_question",
+        "description": "User had to restate which requirement to start.",
+        "reason": "generic resume question",
+        "basis": "second_hand"
+      }
+    ],
+    "suggestions": {
+      "status": "none",
+      "author": "reporting_model",
+      "items": []
+    }
+  },
+  "plugin_details": {
+    "work-system": {
+      "questions": [
+        {
+          "question": "What would you like to work on?",
+          "reason": "skill step ended unconditionally",
+          "classification": "avoidable_repeat",
+          "mandate_source": "direct user authorization in the Manager session",
+          "mandate_scope": "implement the task through a reviewed PR",
+          "answer_already_available": "yes",
+          "basis": "second_hand"
+        },
+        {
+          "question": "May I merge the PR?",
+          "reason": "merge was not part of the mandate",
+          "classification": "new_approval",
+          "mandate_source": "direct user authorization in the Manager session",
+          "mandate_scope": "implement the task through a reviewed PR",
+          "answer_already_available": "no",
+          "basis": "second_hand"
+        }
+      ],
+      "handoff_gaps": [
+        "The mandate lived only in the Manager conversation, not in the lane."
+      ],
+      "ambiguous_states": []
+    }
+  }
+}
