@@ -359,9 +359,12 @@ manual report instead of restating it, so one incident is never later counted as
 independent observations. A close that finds a `close` report already stored writes
 nothing new, which makes a retried teardown idempotent without any extra bookkeeping.
 
-`work-system` never writes a report file and never validates one — everything goes
-through `scripts/insights-handoff.sh`, its single bridge to the plugin
-(`probe` · `reported` · `skeleton` · `write`).
+`work-system` never writes a report file, never validates one, and never redacts one
+itself — everything goes through `scripts/insights-handoff.sh`, its single bridge to the
+plugin (`probe` · `prepare` · `reported` · `write` · `redact`). `prepare` answers
+skip / absent / unusable / draft in one call, and it takes the lane **directory** rather
+than a task name: a git refname may legally contain `$(…)`, and a name pasted into a
+command line is executed before any script sees it.
 
 **What this does not guarantee.** Be precise about the gaps rather than trusting the
 feature further than it goes:
@@ -370,10 +373,14 @@ feature further than it goes:
   behaves exactly as before, without a word about it.
 - **Installed but broken is not the same as absent.** A helper that cannot run is
   surfaced as one line in the close summary; it never blocks cleanup.
-- **A crashed or killed worker reports nothing.** Both producers need a session that
-  reaches a handoff. `/close` is the backstop — but a Manager-run close can only report
-  the *Manager's* view, and the worker's model, skills and friction stay unknown unless
-  that worker left its own handoff report first.
+- **Nothing here is a guarantee of capture.** Both producers need a session that
+  actually reaches that point: a crashed or killed worker, or a task closed by hand,
+  produces no report at all. `/close` is the next opportunity, not a backstop that always
+  fires — and a Manager-run close can only report the *Manager's* view, with the worker's
+  model, skills and friction unknown unless that worker left its own handoff report.
+  The close-retry skip is check-then-write and matches by task **name**, so a reused name
+  can look already-reported (its timestamp is what tells them apart) and two concurrent
+  closes could both write — a harmless extra record, not worth a lock.
 - **Metadata is only as good as the evidence.** A model is recorded from the reporting
   session's own system prompt and a plugin version from the `Base directory for this
   skill:` line at invocation — never from a tab name, an agent alias, the worker class
@@ -382,8 +389,12 @@ feature further than it goes:
   with a reason; they are not filled in by inference.
 - **A failed write is never a saved report.** The compact summary is preserved in the
   archived task file (`archive-task.sh --note-file`) — the one durable place left after
-  teardown. There is no second fallback store, and if even that is unavailable the loss
-  is reported rather than papered over.
+  teardown. It goes through insights' own credential redaction first, because that
+  archive can be committed and pushed and an instruction not to paste a secret is not a
+  boundary; the file must be named `note-*` and sit in the caller's temp dir or the
+  repo's `tasks/`, so an existing file can never be pointed at instead. There is no
+  second fallback store, and if even that is unavailable the loss is reported rather
+  than papered over.
 - **Reports are data, not authority.** Nothing in one authorizes a merge, a retry, a
   permission change, or more work, and no report extends `MANDATE.md`.
 

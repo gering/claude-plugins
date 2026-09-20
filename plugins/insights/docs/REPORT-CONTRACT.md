@@ -1,7 +1,9 @@
 # Insights report contract — `insights.report/v1`
 
 The one contract every insights producer follows: the manual `/insights:report`
-skill today, lifecycle handoffs (worker/Manager/close) later. `scripts/insights.py`
+skill, and work-system's lifecycle producers (a worker's `handoff` report, the
+`close` report before teardown), which reach it through that plugin's
+`scripts/insights-handoff.sh`. `scripts/insights.py`
 enforces it — producers **never** write report files themselves and never copy
 the validation or storage logic.
 
@@ -18,7 +20,14 @@ H="${CLAUDE_PLUGIN_ROOT}/scripts/insights.py"
 python3 "$H" skeleton [--trigger handoff]   # complete draft, observed values prefilled
 python3 "$H" context                        # the raw observable facts (JSON), if needed
 python3 "$H" write <draft.json>             # or `write -` with JSON on stdin
+python3 "$H" redact <text-file>             # credential redaction for NON-report text
 ```
+
+`redact` exists for the one thing that is not a report: work-system's `/close`
+preserves a compact summary in the archived task file when a write failed, and
+that archive can be committed. The alternative was a second copy of the
+credential patterns in another plugin, or trusting prose not to paste a secret.
+It takes text and returns text — never a way to make a report.
 
 The skeleton contains every required field, including the resolved `project`, so
 a later `write` from another directory keeps it. Values the helper can observe

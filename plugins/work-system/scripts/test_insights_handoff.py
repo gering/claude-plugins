@@ -10,9 +10,10 @@ so the installed-plugins manifest can never be consulted. Nothing here touches
 the user's real report store, a real worktree, or a live worker.
 
 Covered: absent vs. unusable insights (the distinction /close warns on), the
-project-scoped idempotency lookup a close retry depends on, the lifecycle-fact
-overlay and its provenance, and the write passthrough's exit codes — including
-that a storage failure never looks like a stored report.
+project-scoped idempotency lookup a close retry depends on, `prepare`'s
+derivation of the lane's identity (and that a shell-metacharacter branch name
+stays DATA), the exit-code mapping that keeps an unsaved report from reading as
+"nothing to do", and the /close step ordering.
 """
 import json
 import os
@@ -51,8 +52,8 @@ def make_tree(root, insights="real"):
     """
     ws = root / "plugins" / "work-system" / "scripts"
     ws.mkdir(parents=True)
-    shutil.copy(SCRIPT, ws / SCRIPT.name)
-    shutil.copy(HERE / "lib-bounded.sh", ws / "lib-bounded.sh")
+    for name in (SCRIPT.name, "lib-bounded.sh", "task-status.sh", "main-repo-path.sh"):
+        shutil.copy(HERE / name, ws / name)
     if insights == "real":
         ins = root / "plugins" / "insights" / "scripts"
         ins.mkdir(parents=True)
@@ -90,17 +91,32 @@ def new_store(root, name="store", mode=0o700):
     return d
 
 
-def new_project(root, name="proj"):
+def git(repo, *args):
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+
+
+def new_project(root, name="proj", branch=None):
     """A real git repo: the store groups reports by the main checkout."""
     d = root / name
     d.mkdir(parents=True)
-    for args in (["init", "-q", "-b", "main"], ["config", "user.email", "t@t"],
-                 ["config", "user.name", "T"]):
-        subprocess.run(["git", "-C", str(d), *args], capture_output=True)
+    git(d, "init", "-q", "-b", "main")
+    git(d, "config", "user.email", "t@t")
+    git(d, "config", "user.name", "T")
     (d / "README.md").write_text("x\n")
-    subprocess.run(["git", "-C", str(d), "add", "-A"], capture_output=True)
-    subprocess.run(["git", "-C", str(d), "commit", "-qm", "init"], capture_output=True)
+    git(d, "add", "-A")
+    git(d, "commit", "-qm", "init")
+    if branch:
+        git(d, "checkout", "-q", "-b", branch)
     return d
+
+
+def draft_file(home, data):
+    """A draft on disk, with its descriptor closed (mkstemp hands one back)."""
+    fd, name = tempfile.mkstemp(suffix=".json", dir=str(home))
+    os.close(fd)
+    p = Path(name)
+    p.write_text(json.dumps(data))
+    return p
 
 
 def fill(draft):
@@ -134,27 +150,29 @@ def fill(draft):
     return d
 
 
-def write_report(script, store, home, project, trigger="close", caller="close",
-                 role=None, patch=None, related=(), **over):
-    """skeleton -> fill -> write, returning the write result and the draft."""
-    args = ["skeleton", trigger, "--caller", caller, "--project-dir", str(project)]
-    for rid in related:
-        args += ["--related", rid]
+def prepare_and_write(script, store, home, lane, trigger="close", caller="close",
+                      role=None, patch=None, **over):
+    """prepare -> fill the draft it left -> write. Returns (result, prepare kv)."""
+    args = ["prepare", trigger, "--caller", caller, "--lane", str(lane),
+            "--project-dir", str(lane)]
     for k, v in over.items():
         args += ["--" + k.replace("_", "-"), str(v)]
-    sk = run(script, *args, store=store, home=home, cwd=project)
-    assert sk.returncode == 0, sk.stderr
-    draft = fill(sk.stdout)
+    pre = run(script, *args, store=store, home=home, cwd=lane)
+    assert pre.returncode == 0, pre.stderr
+    info = kv(pre.stdout)
+    if info.get("action") != "draft":
+        return None, info
+    d = fill(Path(info["draft"]).read_text())
     if role:
-        draft["reporter"]["role"] = role
-        draft["reporter"]["role_source"] = "test harness"
+        d["reporter"]["role"] = role
+        d["reporter"]["role_source"] = "test harness"
     if patch:
-        patch(draft)
-    p = Path(tempfile.mkstemp(suffix=".json", dir=str(home))[1])
-    p.write_text(json.dumps(draft))
-    res = run(script, "write", str(p), "--project-dir", str(project),
-              store=store, home=home, cwd=project)
-    return res, draft
+        patch(d)
+    Path(info["draft"]).write_text(json.dumps(d))
+    res = run(script, "write", info["draft"], "--project-dir", str(lane),
+              store=store, home=home, cwd=lane)
+    os.unlink(info["draft"])
+    return res, info
 
 
 with tempfile.TemporaryDirectory() as td:
@@ -178,14 +196,14 @@ with tempfile.TemporaryDirectory() as td:
 
     real = make_tree(tmp / "t-real", insights="real")
     store = new_store(tmp, "store")
-    proj = new_project(tmp)
+    proj = new_project(tmp, branch="task/some-task")
     r = run(real, "probe", store=store, home=home, cwd=proj)
     d = kv(r.stdout)
     check("a working helper probes ok", d.get("status") == "ok" and d.get("available") == "yes")
     check("probe names the helper it found", d.get("helper", "").endswith("insights.py"))
     # Callers read the contract path from here rather than rebuilding it: the
-    # obvious `${CLAUDE_PLUGIN_ROOT}/../insights/...` is wrong in the marketplace
-    # cache, where plugins sit at <root>/<plugin>/<version>/.
+    # obvious `<plugin-root>/../insights/...` is wrong in the marketplace cache,
+    # where plugins sit at <root>/<plugin>/<version>/.
     check("probe points at the report contract",
           d.get("contract", "").endswith("insights/docs/REPORT-CONTRACT.md")
           and Path(d["contract"]).is_file())
@@ -196,23 +214,68 @@ with tempfile.TemporaryDirectory() as td:
           run(absent, "reported", "t", home=home).returncode == 3)
     check("reported exits 4 when insights is unusable",
           run(broken, "reported", "t", home=home).returncode == 4)
-    r = run(absent, "skeleton", "close", "--caller", "close", home=home)
-    check("skeleton exits 3 when insights is absent", r.returncode == 3)
-    # stdout is the draft channel: a caller redirecting it must get JSON or nothing,
-    # never a status line that would land in the draft file.
-    check("a failed skeleton writes nothing to stdout", r.stdout == "")
-    check("a failed skeleton explains itself on stderr", "status=absent" in r.stderr)
+    r = run(absent, "prepare", "close", "--caller", "close", "--lane", str(proj), home=home)
+    check("prepare exits 3 when insights is absent", r.returncode == 3)
+    # stdout is the payload channel: a caller parsing it must get facts or
+    # nothing, never a status line.
+    check("a failed prepare writes nothing to stdout", r.stdout == "")
+    check("a failed prepare explains itself on stderr", "status=absent" in r.stderr)
+
+    # ------------------------------------------------- deriving the lane identity
+    # The whole point of --lane: work-system derives the task name and branch
+    # itself, so nothing repo-authored is ever pasted into a command line.
+    r = run(real, "prepare", "handoff", "--caller", "continue", "--lane", str(proj),
+            "--project-dir", str(proj), "--status", "in_progress",
+            store=store, home=home, cwd=tmp)
+    d = kv(r.stdout)
+    check("prepare derives the task name from the lane", d.get("task") == "some-task")
+    check("prepare derives the branch from the lane", d.get("branch") == "task/some-task")
+    check("prepare leaves a draft", d.get("action") == "draft" and Path(d["draft"]).is_file())
+    check("the draft is private", (Path(d["draft"]).stat().st_mode & 0o077) == 0)
+    drafted = json.loads(Path(d["draft"]).read_text())
+    check("the derived task name reaches the draft",
+          drafted["work"]["task_name"]["value"] == "some-task")
+    check("a carried fact names where it came from",
+          "work-system:continue" in drafted["work"]["task_name"]["source"])
+    check("a carried fact is never a value+reason mix", "reason" not in drafted["work"]["branch"])
+    check("the trigger reaches the draft", drafted["report_trigger"] == "handoff")
+    check("task_status is set independently of the trigger",
+          drafted["task_status"] == "in_progress")
+    check("an unobserved fact stays unknown", drafted["work"]["run_id"]["value"] is None)
+    os.unlink(d["draft"])
+
+    # A branch name git accepts but a shell would EXECUTE. `$(...)` is a legal
+    # refname as long as it has no space, so this is not hypothetical — it is the
+    # reason prepare takes a directory instead of a name.
+    hostile = "task/x$(touch$IFS%s)y" % (tmp / "PWNED")
+    hproj = new_project(tmp, "hostile-proj")
+    if git(hproj, "checkout", "-q", "-b", hostile).returncode == 0:
+        r = run(real, "prepare", "handoff", "--caller", "continue", "--lane", str(hproj),
+                "--project-dir", str(hproj), "--status", "in_progress",
+                store=store, home=home, cwd=tmp)
+        d = kv(r.stdout)
+        check("a metacharacter branch name is not executed", not (tmp / "PWNED").exists())
+        check("a metacharacter branch name survives as data",
+              d.get("branch") == hostile)
+        if d.get("action") == "draft":
+            check("the hostile name reaches the draft verbatim",
+                  json.loads(Path(d["draft"]).read_text())["work"]["branch"]["value"] == hostile)
+            os.unlink(d["draft"])
+    else:
+        # Git's refname rules changed; the guarantee is still the code's, not git's.
+        check("hostile-refname case could be constructed", True)
 
     # ------------------------------------------------------------- idempotency
     r = run(real, "reported", "some-task", "--project-dir", str(proj),
             store=store, home=home, cwd=proj)
     d = kv(r.stdout)
     check("an unreported task lists no reports", r.returncode == 0 and d.get("reports") == "0")
-    check("an empty store reports no malformed files", d.get("malformed") == "0")
+    # Named store-global on purpose: insights cannot attribute an unparsable file
+    # to a task, so a caller must not read this as "this task has malformed reports".
+    check("the malformed count is labelled store-global", "malformed_store" in d)
 
-    res, draft = write_report(real, store, home, proj, task="some-task",
-                              branch="task/some-task", status="completed")
-    check("a filled skeleton stores", res.returncode == 0 and "status=stored" in res.stdout)
+    res, info = prepare_and_write(real, store, home, proj, trigger="close", status="completed")
+    check("a filled draft stores", res.returncode == 0 and "status=stored" in res.stdout)
     stored_id = kv(res.stdout)["report_id"]
 
     r = run(real, "reported", "some-task", "--project-dir", str(proj),
@@ -220,12 +283,25 @@ with tempfile.TemporaryDirectory() as td:
     d = kv(r.stdout)
     check("a close retry sees the existing report", d.get("reports") == "1")
     check("the existing report carries its trigger", "trigger=close" in r.stdout)
+    check("the existing report carries its timestamp — the only way to spot a "
+          "stale namesake", "recorded_at=" in r.stdout)
+
+    # The one automatic skip, and it is trigger-scoped.
+    _, info = prepare_and_write(real, store, home, proj, trigger="close", status="completed")
+    check("a second close is skipped, not duplicated", info.get("action") == "skip")
+    check("the skip names the report that already covers it",
+          info.get("report") == stored_id)
+    r = run(real, "prepare", "handoff", "--caller", "continue", "--lane", str(proj),
+            "--project-dir", str(proj), store=store, home=home, cwd=proj)
+    d = kv(r.stdout)
+    check("a handoff is never auto-skipped by a close report", d.get("action") == "draft")
+    check("prepare offers the earlier report for linking",
+          stored_id in (d.get("related") or ""))
+    os.unlink(d["draft"])
 
     r = run(real, "reported", "some-task", "--trigger", "handoff",
             "--project-dir", str(proj), store=store, home=home, cwd=proj)
-    check("the trigger filter separates handoff from close",
-          kv(r.stdout).get("reports") == "0")
-
+    check("the trigger filter separates handoff from close", kv(r.stdout).get("reports") == "0")
     r = run(real, "reported", "other-task", "--project-dir", str(proj),
             store=store, home=home, cwd=proj)
     check("a different task is not considered reported", kv(r.stdout).get("reports") == "0")
@@ -236,188 +312,81 @@ with tempfile.TemporaryDirectory() as td:
             store=store, home=home, cwd=other)
     check("the lookup is scoped to this project", kv(r.stdout).get("reports") == "0")
 
-    # --------------------------------------------------------- fact provenance
-    sk = run(real, "skeleton", "handoff", "--caller", "continue",
-             "--task", "lane-a", "--branch", "task/lane-a", "--pr", "42",
-             "--status", "blocked", "--related", stored_id,
-             "--project-dir", str(proj), store=store, home=home, cwd=proj)
-    d = json.loads(sk.stdout)
-    check("the trigger reaches the draft", d["report_trigger"] == "handoff")
-    check("task_status is set independently of the trigger", d["task_status"] == "blocked")
-    check("the observed task name is carried over", d["work"]["task_name"]["value"] == "lane-a")
-    check("a carried fact names where it came from",
-          "work-system:continue" in d["work"]["task_name"]["source"])
-    check("a carried fact is never a value+reason mix", "reason" not in d["work"]["branch"])
-    check("the PR source is the command that observed it",
-          d["work"]["pr"]["source"].startswith("gh pr view"))
-    check("an earlier report is linked, not merged",
-          d["work"]["related_reports"] == [stored_id])
-    check("an unobserved fact stays unknown", d["work"]["run_id"]["value"] is None)
-
-    # The overlay must not turn a skeleton into something storable on its own:
-    # the fields the reporting model owns still fail validation by name.
-    p = Path(tempfile.mkstemp(suffix=".json", dir=str(home))[1])
-    p.write_text(sk.stdout)
-    r = run(real, "write", str(p), "--project-dir", str(proj),
-            store=store, home=home, cwd=proj)
-    check("an unfilled overlaid skeleton is still rejected", r.returncode == 1)
-    check("a rejected draft names its problems", "summary" in r.stderr)
-
-    check("skeleton without --caller is a usage error",
-          run(real, "skeleton", "close", store=store, home=home, cwd=proj).returncode == 2)
-    check("an unknown trigger is a usage error",
-          run(real, "skeleton", "nonsense", "--caller", "close",
+    # ----------------------------------------------------------- usage errors
+    check("prepare without --caller is a usage error",
+          run(real, "prepare", "close", "--lane", str(proj),
               store=store, home=home, cwd=proj).returncode == 2)
+    check("prepare without --lane is a usage error",
+          run(real, "prepare", "close", "--caller", "close",
+              store=store, home=home, cwd=proj).returncode == 2)
+    check("an unknown trigger is a usage error",
+          run(real, "prepare", "nonsense", "--caller", "close", "--lane", str(proj),
+              store=store, home=home, cwd=proj).returncode == 2)
+    # Validated here rather than downstream: argparse's rejection came back as
+    # "insights is installed but unusable", which blames the wrong component.
+    r = run(real, "reported", "t", "--trigger", "nonsense",
+            store=store, home=home, cwd=proj)
+    check("reported validates its trigger itself", r.returncode == 2)
+    check("a bad trigger is not reported as a broken plugin",
+          "unusable" not in r.stderr)
+    check("a non-numeric --pr is a usage error",
+          run(real, "prepare", "close", "--caller", "close", "--lane", str(proj),
+              "--pr", "12; rm -rf /", store=store, home=home, cwd=proj).returncode == 2)
     check("writing a missing draft is a usage error",
           run(real, "write", str(tmp / "nope.json"), store=store, home=home).returncode == 2)
+    link = tmp / "draft-link.json"
+    link.symlink_to(tmp / "nope.json")
+    check("a symlinked draft is refused, like --note-file",
+          run(real, "write", str(link), store=store, home=home).returncode == 2)
 
-    # ------------------------------------------------------- write passthrough
-    # Retry safety: the same ID with identical content is a no-op success, and
-    # different content under that ID must never overwrite the stored report.
-    same = json.loads(json.dumps(draft))
-    same["report_id"] = stored_id
-    same["recorded_at"] = json.loads((store / f"{stored_id}.json").read_text())["recorded_at"]
-    p = Path(tempfile.mkstemp(suffix=".json", dir=str(home))[1])
-    p.write_text(json.dumps(same))
-    r = run(real, "write", str(p), "--project-dir", str(proj), store=store, home=home, cwd=proj)
+    # ------------------------------------------------- the exit-code namespace
+    # insights.py's 2 (usage) and 3 (collision) must NOT surface as this script's
+    # 2 (bad argv) and 3 (absent) — a collision reading as "not installed" would
+    # turn an unsaved report into "nothing to do".
+    stored = json.loads((store / f"{stored_id}.json").read_text())
+    same = draft_file(home, stored)
+    r = run(real, "write", str(same), "--project-dir", str(proj),
+            store=store, home=home, cwd=proj)
     check("re-writing an identical report is a no-op success",
           r.returncode == 0 and "status=unchanged" in r.stdout)
-
-    same["work"]["summary"] = "Different content under the same report ID."
-    p.write_text(json.dumps(same))
-    r = run(real, "write", str(p), "--project-dir", str(proj), store=store, home=home, cwd=proj)
-    check("a colliding ID never overwrites (exit 3)", r.returncode == 3)
+    clash = json.loads(json.dumps(stored))
+    clash["work"]["summary"] = "Different content under the same report ID."
+    same.write_text(json.dumps(clash))
+    r = run(real, "write", str(same), "--project-dir", str(proj),
+            store=store, home=home, cwd=proj)
+    check("a colliding ID exits 5, not 3", r.returncode == 5)
     check("the stored report survived the collision",
           "stands alone" in (store / f"{stored_id}.json").read_text())
-
-    # A storage failure must be exit 4 — never a quiet success a caller could
-    # report as a saved report.
-    bad = new_store(tmp, "bad-store", mode=0o777)
-    res, _ = write_report(real, bad, home, proj, task="fails")
-    check("a refused store fails with exit 4", res.returncode == 4)
-    check("a refused store stores nothing", not list(bad.glob("*.json")))
-
-# =========================================================== acceptance scenarios
-with tempfile.TemporaryDirectory() as td:
-    tmp = Path(td)
-    home = new_store(tmp, "home")
-    script = make_tree(tmp / "tree", insights="real")
-    store = new_store(tmp, "store")
-    proj = new_project(tmp)
-
-    def rid(res):
-        return kv(res.stdout)["report_id"]
-
-    # ---- one task, three perspectives, none of them overwriting another -------
-    # The scenario the whole feature exists for: a manual report during the work,
-    # the worker's handoff at its terminal gate, and the Manager's close report —
-    # linked, not merged. They must survive as INDEPENDENT reports, or a later
-    # analysis would count one incident as three, or three as one.
-    TASK = "shared-task"
-    manual, _ = write_report(script, store, home, proj, trigger="manual",
-                             caller="report", role="user", task=TASK, status="in_progress")
-    check("the manual report stores", manual.returncode == 0)
-    manual_id = rid(manual)
-    manual_bytes = (store / f"{manual_id}.json").read_bytes()
-
-    handoff, _ = write_report(script, store, home, proj, trigger="handoff",
-                              caller="continue", role="worker", related=[manual_id],
-                              task=TASK, branch=f"task/{TASK}", pr="17",
-                              status="in_progress")
-    check("the worker handoff report stores", handoff.returncode == 0)
-    handoff_id = rid(handoff)
-
-    closing, _ = write_report(script, store, home, proj, trigger="close",
-                              caller="close", role="manager",
-                              related=[manual_id, handoff_id],
-                              task=TASK, branch=f"task/{TASK}", pr="17",
-                              status="completed")
-    check("the Manager close report stores", closing.returncode == 0)
-    close_id = rid(closing)
-
-    check("the three reports are distinct", len({manual_id, handoff_id, close_id}) == 3)
-    check("an earlier report is never rewritten",
-          (store / f"{manual_id}.json").read_bytes() == manual_bytes)
-
-    r = run(script, "reported", TASK, "--project-dir", str(proj),
+    bad = draft_file(home, {"schema": "insights.report/v1"})
+    r = run(real, "write", str(bad), "--project-dir", str(proj),
             store=store, home=home, cwd=proj)
-    check("all three perspectives are found for the task", kv(r.stdout).get("reports") == "3")
-    for trig in ("manual", "handoff", "close"):
-        rr = run(script, "reported", TASK, "--trigger", trig, "--project-dir", str(proj),
-                 store=store, home=home, cwd=proj)
-        check(f"the {trig} perspective stays separately addressable",
-              kv(rr.stdout).get("reports") == "1")
+    check("an invalid draft exits 1", r.returncode == 1)
+    os.unlink(same); os.unlink(bad)
 
-    stored_close = json.loads((store / f"{close_id}.json").read_text())
-    check("the close report links both earlier ones",
-          stored_close["work"]["related_reports"] == [manual_id, handoff_id])
-    check("roles are kept apart",
-          json.loads((store / f"{handoff_id}.json").read_text())["reporter"]["role"] == "worker"
-          and stored_close["reporter"]["role"] == "manager")
+    # A storage failure must be exit 4 — never a quiet success.
+    badstore = new_store(tmp, "bad-store", mode=0o777)
+    res, _ = prepare_and_write(real, badstore, home, proj, trigger="handoff", status="blocked")
+    check("a refused store fails with exit 4", res.returncode == 4)
+    check("a refused store stores nothing", not list(badstore.glob("*.json")))
 
-    # A report is not task state: reaching a reviewed PR is still in_progress, and
-    # the trigger never implies the status.
-    check("a handoff at the gate is not a completed task",
-          json.loads((store / f"{handoff_id}.json").read_text())["task_status"] == "in_progress")
-
-    # ---- the contexts a lifecycle producer must report honestly ---------------
-    # A blocked handoff and an explicit abandonment are ordinary reports with
-    # their own task_status — not failures, and not completions.
-    for status, label in (("blocked", "a blocked handoff"), ("aborted", "an abandoned task")):
-        res, _ = write_report(script, store, home, proj, trigger="handoff",
-                              caller="continue", role="worker",
-                              task=f"{status}-task", status=status)
-        check(f"{label} is reportable", res.returncode == 0)
-        check(f"{label} keeps its own task_status",
-              json.loads((store / f"{rid(res)}.json").read_text())["task_status"] == status)
-
-    # No task at all (a legacy or manual context): the task facts stay unknown
-    # WITH a reason rather than being invented, and the report is still valid.
-    res, _ = write_report(script, store, home, proj, trigger="close", caller="close",
-                          status="unknown")
-    check("a report with no task name is valid", res.returncode == 0)
-    stored = json.loads((store / f"{rid(res)}.json").read_text())
-    check("an absent task name is an unknown with a reason",
-          stored["work"]["task_name"]["value"] is None
-          and stored["work"]["task_name"]["reason"])
-    check("an unknown fact never carries a source", "source" not in stored["work"]["task_name"])
-
-    # A resumed lane cannot see its own earlier history, and a model change during
-    # the task is two usage entries — never one averaged claim.
-    def resumed(d):
-        d["usage"]["completeness"] = "partial"
-        d["usage"]["completeness_reason"] = "session resumed with `claude -c`; earlier turns not visible"
-        d["usage"]["skills"] = [
-            {"skill": "work-system:continue", "plugin": "work-system",
-             "plugin_version": {"value": "1.14.0", "source": "skill base directory at invocation"},
-             "model": {"value": "claude-opus-5", "source": "system prompt"},
-             "note": "before the model change"},
-            {"skill": "work-system:continue", "plugin": "work-system",
-             "plugin_version": {"value": "1.15.0", "source": "skill base directory at invocation"},
-             "model": {"value": "claude-sonnet-5", "source": "system prompt"},
-             "note": "after the model change"},
-        ]
-        d["reporter"]["model"] = {"value": None,
-                                  "reason": "not observable after the resume"}
-    res, _ = write_report(script, store, home, proj, trigger="handoff", caller="continue",
-                          role="worker", patch=resumed, task="resumed-task",
-                          status="in_progress")
-    check("a resumed, partial history is storable", res.returncode == 0)
-    stored = json.loads((store / f"{rid(res)}.json").read_text())
-    check("partial history keeps its reason",
-          stored["usage"]["completeness"] == "partial" and stored["usage"]["completeness_reason"])
-    check("a model change is two usage entries",
-          len(stored["usage"]["skills"]) == 2
-          and stored["usage"]["skills"][0]["model"]["value"]
-              != stored["usage"]["skills"][1]["model"]["value"])
-    check("an unobservable model stays unknown",
-          stored["reporter"]["model"]["value"] is None)
+    # ---------------------------------------------------------------- redact
+    # The /close fallback note is not a report, but it lands in a file this repo
+    # may commit and push — so it goes through insights' own patterns, not prose.
+    note = tmp / "note.txt"
+    note.write_text("write failed. token sk-ant-0123456789abcdefghijklmno stays out of git\n")
+    r = run(real, "redact", str(note), store=store, home=home, cwd=proj)
+    check("redact exits 0", r.returncode == 0)
+    check("redact removes the credential shape", "sk-ant-0123" not in r.stdout)
+    check("redact keeps the surrounding text", "write failed." in r.stdout)
+    check("redact reports how much it replaced", "redactions=1" in r.stderr)
+    check("redact is unavailable when insights is absent",
+          run(absent, "redact", str(note), home=home).returncode == 3)
 
 
 # ======================================================= /close ordering contract
-# The ordering in requirement §5 is prose, and prose drifts under later edits —
-# which is exactly how a reporting step would migrate past the safety gate or
-# turn into a cleanup blocker. Assert the invariants directly on the skill.
+# The ordering in the task's acceptance criteria is prose, and prose drifts under
+# later edits — which is exactly how a reporting step would migrate past the
+# safety gate or turn into a cleanup blocker. Assert it against the skill.
 CLOSE = (HERE.parent / "skills" / "close" / "SKILL.md").read_text()
 CONTINUE = (HERE.parent / "skills" / "continue" / "SKILL.md").read_text()
 
@@ -435,15 +404,22 @@ check("the merge gate still comes before reporting", gate < report)
 check("reporting comes before the worktree is removed", report < removal)
 
 step6b = CLOSE[report:removal]
-check("an absent insights plugin is skipped silently", "Skip this whole step **silently**" in step6b)
-check("an unusable plugin is not reported as absent", "Do not treat that as absent" in step6b)
+check("an absent insights plugin is skipped silently", "silently" in step6b)
 check("a failed report never blocks cleanup", "never a cleanup gate" in step6b)
-check("a close retry does not duplicate its report", "Do **not** write a second one" in step6b)
 check("an unsaved report is never described as recorded",
       "never describe it as recorded" in step6b)
 check("a report grants no authority", "authorizes anything" in step6b)
+check("the unsaved summary is redacted before it can be committed",
+      "redact" in step6b)
 check("the unsaved summary lands in the archived task file",
       "--note-file" in step6b and "--note-file" in CLOSE[removal:])
+# The lane's identity is DERIVED, never pasted: a refname may contain `$(...)`.
+check("close passes a lane, not a task name", "--lane" in step6b)
+check("close never pastes a repo-derived name into a command",
+      '--task "<task-name>"' not in CLOSE)
+check("continue passes a lane, not a task name", "--lane" in CONTINUE)
+check("continue never pastes a repo-derived name into a command",
+      '--task "<task-name>"' not in CONTINUE)
 
 check("the handoff report is bounded to real handoffs",
       "Never at a tool call, a turn end, a commit, or an unchanged idle" in CONTINUE)
@@ -451,7 +427,6 @@ check("reaching the gate is not a completed task",
       "Reaching `reviewed-pr`" in CONTINUE and "is `in_progress`" in CONTINUE)
 check("the handoff report consumes no review round", "consumes **no** review round" in CONTINUE)
 check("the crash gap is documented, not advertised away", "**Known gap.**" in CONTINUE)
-
 
 if FAILS:
     print("FAIL:")

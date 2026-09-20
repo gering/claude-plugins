@@ -13,6 +13,8 @@ The tests run against REAL git repos (not bare temp dirs) because the flag is
 only honored when git-tracked and unmodified: presence alone must never
 authorize skipping /close's push-approval gate.
 """
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -30,9 +32,19 @@ def check(name, cond):
         FAILS.append(name)
 
 
-def run(*args):
+def run(*args, tmpdir=None):
+    """Invoke archive-task.sh. `tmpdir` overrides $TMPDIR for the child.
+
+    The note-file location rule allows $TMPDIR, /tmp and the repo's tasks/. A
+    test tree built with tempfile lives under $TMPDIR, which would make that rule
+    vacuous — so the escape cases point $TMPDIR somewhere that does not exist and
+    assert the refusal that a real checkout (outside /tmp) would get.
+    """
+    env = dict(os.environ)
+    if tmpdir is not None:
+        env["TMPDIR"] = tmpdir
     return subprocess.run(
-        ["bash", str(SCRIPT), *args], capture_output=True, text=True
+        ["bash", str(SCRIPT), *args], capture_output=True, text=True, env=env
     )
 
 
@@ -520,7 +532,7 @@ with tempfile.TemporaryDirectory() as td:
     root = Path(td)
     repo = new_repo(root, "noterepo")
     (repo / "tasks").mkdir(exist_ok=True)
-    note = root / "note.txt"
+    note = root / "note-insights.txt"
     note.write_text("insights report NOT saved (exit 4).\nSummary: did the thing.\n")
 
     (repo / "tasks" / "n1.md").write_text("# Note task\n\nbody\n")
@@ -541,22 +553,69 @@ with tempfile.TemporaryDirectory() as td:
     # A bad --note-file is a usage error, and the task must still be there: a
     # half-archived task is worse than a lost note.
     (repo / "tasks" / "n3.md").write_text("# Guarded\n")
-    r = run("archive", str(repo), "n3", "task/n3", "--note-file", str(root / "missing"))
+    r = run("archive", str(repo), "n3", "task/n3", "--note-file", str(root / "note-missing"))
     check("a missing note file is a usage error", r.returncode == 2)
     check("a failed note leaves the task in place", (repo / "tasks" / "n3.md").exists())
 
-    link = root / "link.txt"
-    link.symlink_to(note)
-    r = run("archive", str(repo), "n3", "task/n3", "--note-file", str(link))
-    check("a symlinked note file is refused", r.returncode == 2)
-    check("a refused symlink leaves the task in place", (repo / "tasks" / "n3.md").exists())
+    # The real guarantee is not "no symlinks" but "cannot escape": the path is
+    # resolved (parents included) and must land inside the caller's temp dir or
+    # the repo's tasks/. A symlinked PARENT was how the earlier last-component
+    # check was bypassed, so that is the case worth pinning.
+    outside = Path(tempfile.mkdtemp(dir=str(repo)))  # inside the repo: a real, non-allowed location
+    try:
+        (outside / "secret").write_text("PRIVATE KEY MATERIAL\n")
+        (outside / "note-secret").write_text("PRIVATE KEY MATERIAL\n")
+        escape = root / "escape"
+        escape.symlink_to(outside)          # a symlinked PARENT, not the final name
+        # Correctly named but pointing outside every allowed root, THROUGH a
+        # symlinked parent — the exact bypass a last-component `[ -L ]` missed.
+        nowhere = str(root / "no-such-tmpdir")
+        r = run("archive", str(repo), "n3", "task/n3",
+                "--note-file", str(escape / "note-secret"), tmpdir=nowhere)
+        check("a note escaping the allowed roots is refused", r.returncode == 2)
+        check("the refusal names the RESOLVED path, not the symlink",
+              str(outside) in r.stderr)
+        check("a refused escape leaves the task in place", (repo / "tasks" / "n3.md").exists())
+        check("nothing of the secret reached an archive",
+              not any("PRIVATE KEY" in f.read_text()
+                      for f in (repo / "tasks" / "archive").glob("*.md")))
+    finally:
+        shutil.rmtree(outside, ignore_errors=True)
 
-    # Bounded: a runaway note must not bloat a committable archive.
-    big = root / "big.txt"
-    big.write_text("x" * 20000)
+    # An existing file the caller merely points at is refused by the NAME rule,
+    # which is what keeps the (broad) location rule meaningful.
+    r = run("archive", str(repo), "n3", "task/n3", "--note-file", str(repo / "README.md"))
+    check("an existing file that is not a purpose-made note is refused", r.returncode == 2)
+    check("the refusal explains the naming rule", "note-" in r.stderr)
+
+    # Bounded AFTER quoting, and only whole quoted lines: `> ` adds two bytes per
+    # line, so bounding the raw input let a ~3x larger block into the archive.
+    big = root / "note-big.txt"
+    big.write_text(("y" * 80 + "\n") * 200)
     run("archive", str(repo), "n3", "task/n3", "--note-file", str(big))
-    big_text = (repo / "tasks" / "archive" / "n3.md").read_text()
-    check("an oversized note is truncated", big_text.count("x") <= 4096)
+    quoted = [l for l in (repo / "tasks" / "archive" / "n3.md").read_text().splitlines()
+              if l.startswith("> y")]
+    check("the quoted block stays within the bound",
+          sum(len(l) + 1 for l in quoted) <= 4096)
+    check("the quoted block never ends mid-line", all(len(l) == 82 for l in quoted))
+
+    # CR, DEL and C1 were left in by the earlier strip set, contradicting the doc.
+    ctl = root / "note-ctl.txt"
+    ctl.write_bytes(b"line one\r\nline\x7ftwo\n")
+    (repo / "tasks" / "n4.md").write_text("# Ctl\n")
+    run("archive", str(repo), "n4", "task/n4", "--note-file", str(ctl))
+    ctl_text = (repo / "tasks" / "archive" / "n4.md").read_text()
+    check("control characters are stripped, CR and DEL included",
+          "\r" not in ctl_text and "\x7f" not in ctl_text and "> linetwo" in ctl_text)
+
+    # A note that cannot be preserved must fail loudly: it is the last place the
+    # observation exists, so a silent empty note is worse than an error.
+    empty = root / "note-empty.txt"
+    empty.write_text("")
+    (repo / "tasks" / "n5.md").write_text("# Empty\n")
+    r = run("archive", str(repo), "n5", "task/n5", "--note-file", str(empty))
+    check("an empty note is an error, not a silent success", r.returncode == 2)
+    check("a failed note leaves the task in place (empty)", (repo / "tasks" / "n5.md").exists())
 
 
 if FAILS:

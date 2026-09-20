@@ -113,6 +113,10 @@ at any moment. Lifecycle reporting lives in the plugins that own the lifecycle:
 this contract. See its README (*Insight reports at handoff and close*) for the
 triggers and, more importantly, for what they do **not** guarantee.
 
+`insights.py redact <file>` exposes the same credential redaction `write` applies, for
+the one thing that is not a report: the compact summary `/close` preserves in the
+archived task file when a report could not be stored.
+
 This plugin adds no hooks, always-loaded rules, ratings, dashboards, or analysis
 skills. After a few dozen genuine reports, inspect them by hand before building
 analytics.

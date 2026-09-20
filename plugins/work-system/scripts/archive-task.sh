@@ -40,10 +40,22 @@
 #       place left after teardown — in practice: an insights report that could
 #       NOT be stored (see the insights plugin's report contract), so the
 #       observation is not lost with the worktree. The note travels as a FILE, never
-#       an argument or a heredoc, because it can carry free text. It is bounded to
-#       4 KiB and stripped of control characters: this archive may be committed,
-#       so it takes a compact agent-authored summary, never a full report draft,
-#       verbatim user feedback, or credentials.
+#       an argument or a heredoc, because it can carry free text.
+#       The note ends up in a file this repo may COMMIT AND PUSH (see the
+#       autocommit opt-in below), so the path is constrained twice over. It must
+#       (a) resolve — parents included — inside the caller's temp dir ($TMPDIR),
+#       /tmp, or the repo's tasks/, and (b) be NAMED `note-*`. The name rule is
+#       what makes the location rule bite: a temp dir is broad, and on a checkout
+#       that itself lives under /tmp it would allow nearly everything. Together
+#       they mean the note must be a file the caller created for this purpose,
+#       never an existing one it merely points at (`~/.ssh/id_rsa`, `/repo/.env`).
+#       The content is then read through an ALREADY-OPEN descriptor, so a swap
+#       between check and read is impossible. Testing `[ -L ]` on the last
+#       component was not enough — it says nothing about a symlinked PARENT or a
+#       hardlink.
+#       Content is bounded to 4 KiB AFTER quoting and stripped of every C0/C1
+#       control character and DEL. Redaction is the CALLER's job (the insights
+#       bridge exposes it): this script cannot tell a summary from a secret.
 #   commit-push <main-repo-path> <task-name> <archived-rel-path> <main-branch>
 #       After /close's user approval: stage exactly the archive change (the new
 #       file when not gitignored, _index.md, and the original's removal when
@@ -180,19 +192,62 @@ archive() {
   local stamp="> Archived $date · $mid · $branch"
 
   # The note is rendered here so a bad --note-file fails BEFORE the source file is
-  # touched: a usage error must never leave a half-archived task. Symlinks are
-  # refused for the same reason the autocommit flag refuses them — the path is
-  # supplied by a caller, and following it could read an arbitrary file into a
-  # committable archive.
+  # touched: a usage error must never leave a half-archived task.
+  #
+  # The path is CONSTRAINED, not pattern-matched. What lands here can be
+  # committed and pushed, and `[ -L ]` on the final component proves nothing: a
+  # symlinked parent (`ln -s ~/.ssh /tmp/n` → `--note-file /tmp/n/id_rsa`), a
+  # hardlink, or simply `--note-file /repo/.env` all pass it. So: require a
+  # purpose-made NAME, require the fully resolved path to sit in a directory the
+  # caller legitimately owns for this, then open ONCE and read the descriptor we
+  # already validated (no check/read window to swap).
   local note_block=""
   if [ -n "$note_file" ]; then
-    if [ ! -f "$note_file" ] || [ -L "$note_file" ]; then
-      echo "--note-file must be an existing regular file: $note_file" >&2
+    local note_real note_root note_base ok=no
+    # The name rule carries most of the weight: $TMPDIR is broad, and a checkout
+    # under /tmp would otherwise make the location rule vacuous.
+    note_base="$(basename -- "$note_file")"
+    case "$note_base" in
+      note-*) ;;
+      *) echo "--note-file must be named note-* (a file written for this purpose): $note_base" >&2
+         exit 2 ;;
+    esac
+    # -P resolves every symlink in the path, parents included. A path that does
+    # not resolve at all is refused rather than retried unresolved.
+    note_real="$(cd "$(dirname "$note_file")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$note_file")")" \
+      || { echo "--note-file path does not resolve: $note_file" >&2; exit 2; }
+    for note_root in "${TMPDIR:-/tmp}" /tmp "$tasks_dir"; do
+      [ -n "$note_root" ] || continue
+      note_root="$(cd "$note_root" 2>/dev/null && pwd -P)" || continue
+      case "$note_real" in "$note_root"/*) ok=yes; break ;; esac
+    done
+    if [ "$ok" != yes ]; then
+      echo "--note-file must resolve inside \$TMPDIR, /tmp or $tasks_dir (got: $note_real)" >&2
       exit 2
     fi
-    note_block="$(head -c 4096 "$note_file" 2>/dev/null \
-      | tr -d '\000-\010\013\014\016-\037' \
-      | sed 's/^/> /')" || note_block=""
+    # One open, then validate THAT descriptor: a regular file, not a symlink
+    # target swapped in after the path check, not a FIFO that would block us.
+    exec 9<"$note_real" || { echo "--note-file could not be opened: $note_real" >&2; exit 2; }
+    if [ ! -f /dev/fd/9 ]; then
+      exec 9<&-
+      echo "--note-file must be a regular file: $note_real" >&2
+      exit 2
+    fi
+    # Bound AFTER quoting, not before: `> ` adds two bytes per line, so a 4 KiB
+    # raw cap let a ~3× larger block into the archive. Strip every C0 control
+    # character (CR included — the old set skipped it), DEL and C1. The awk
+    # bound emits WHOLE quoted lines only, so the block can never end in a
+    # half-quoted fragment the way a plain `head -c` would leave it.
+    # A read failure must NOT degrade to a silent empty note: this note is the
+    # last place the observation exists, so losing it is a hard error.
+    note_block="$(tr -d '\000-\010\013-\037\177' <&9 | sed 's/^/> /' \
+      | awk '{ n += length($0) + 1; if (n > 4096) exit; print }')" \
+      || { exec 9<&-; echo "--note-file could not be read: $note_real" >&2; exit 2; }
+    exec 9<&-
+    if [ -z "$note_block" ]; then
+      echo "--note-file is empty after sanitizing: $note_real" >&2
+      exit 2
+    fi
   fi
 
   # Title for the index line: the document title is the FIRST non-blank line when it

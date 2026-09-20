@@ -1,9 +1,9 @@
 ---
 title: "Insights Report Store (insights.report/v1)"
 createdAt: 2026-09-16
-updatedAt: 2026-09-16
+updatedAt: 2026-09-20
 createdFrom: "branch: task/add-plugin-insights-report"
-updatedFrom: "branch: task/add-plugin-insights-report"
+updatedFrom: "branch: task/integrate-insights-handoffs"
 pluginVersion: 1.9.0
 prime: false
 ---
@@ -61,6 +61,10 @@ entry records the *why* behind decisions a later producer could easily undo.
 
 ## Scope boundary
 
-The 0.1.0 release is manual only. Automatic handoff producers are
-`tasks/integrate-insights-handoffs.md`; they must reuse this helper. Fixtures in
-`scripts/fixtures/` are historical examples, not current bug status.
+This entry covers the store and contract only. The lifecycle producers that use
+them — work-system's `handoff` and `close` reports — are
+[insights-lifecycle-producers](insights-lifecycle-producers.md); they reuse this
+helper and never write a report file themselves. `redact` (0.1.1) is the one
+piece of this helper used on text that is *not* a report, for the `/close`
+fallback note. Fixtures in `scripts/fixtures/` are historical examples, not
+current bug status.

@@ -7,11 +7,5 @@
   },
   "repository": "https://github.com/gering/claude-plugins",
   "license": "MIT",
-  "keywords": [
-    "tasks",
-    "worktree",
-    "workflow",
-    "git",
-    "parallel-development"
-  ]
+  "keywords": ["tasks", "worktree", "workflow", "git", "parallel-development"]
 }

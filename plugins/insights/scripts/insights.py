@@ -1209,6 +1209,53 @@ def cmd_write(args) -> int:
     return EXIT_OK
 
 
+def cmd_redact(args) -> int:
+    """Redact credential shapes in a plain text file.
+
+    A report is redacted by `write`. This exposes the SAME substitutions for the
+    one case that has no report to write: work-system's `/close` preserves a
+    compact summary in the archived task file when a report could not be stored,
+    and that archive may be committed and pushed. Without this, the only options
+    were copying SECRET_SUBS into another plugin (a second set to drift) or
+    trusting prose not to paste a secret. Text-only — no schema, no storage — so
+    it never becomes a second way to make a report.
+    """
+    try:
+        if args.input == "-":
+            raw = sys.stdin.buffer.read(MAX_REPORT_BYTES + 1)
+        else:
+            with open(args.input, "rb") as fh:
+                raw = fh.read(MAX_REPORT_BYTES + 1)
+    except OSError as e:
+        raise UsageError(f"cannot read {args.input}: {e}")
+    if len(raw) > MAX_REPORT_BYTES:
+        raise UsageError(f"input exceeds {MAX_REPORT_BYTES} bytes")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        print(f"{args.input}: not valid UTF-8 ({e})", file=sys.stderr)
+        return EXIT_INVALID
+    # Same refusal as a report's: control characters and bidi overrides can make
+    # the rendered text differ from what is stored. CTRL_RE covers both.
+    if CTRL_RE.search(text):
+        print(f"{args.input}: contains control characters or bidi overrides", file=sys.stderr)
+        return EXIT_INVALID
+    count = 0
+    for _ in range(MAX_REDACTION_PASSES):
+        changed = 0
+        for rx, repl in SECRET_SUBS:
+            text, n = rx.subn(repl, text)
+            changed += n
+        count += changed
+        if not changed:
+            break
+    sys.stdout.write(text)
+    if not text.endswith("\n"):
+        sys.stdout.write("\n")
+    print(f"redactions={count}", file=sys.stderr)
+    return EXIT_OK
+
+
 def cmd_read(args) -> int:
     if not ID_RE.fullmatch(args.report_id):
         raise UsageError("report ID must match ins-YYYYMMDDTHHMMSSZ-<12 hex>")
@@ -1296,6 +1343,10 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "write":
             p.add_argument("--json", action="store_true")
         p.set_defaults(fn=fn)
+    p = sub.add_parser("redact")
+    p.add_argument("input", help="text file, or - for stdin")
+    p.set_defaults(fn=cmd_redact)
+
     p = with_store(sub.add_parser("read"))
     p.add_argument("report_id")
     p.set_defaults(fn=cmd_read)
