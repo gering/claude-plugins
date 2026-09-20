@@ -196,8 +196,12 @@ with tempfile.TemporaryDirectory() as td:
           run(absent, "reported", "t", home=home).returncode == 3)
     check("reported exits 4 when insights is unusable",
           run(broken, "reported", "t", home=home).returncode == 4)
-    check("skeleton exits 3 when insights is absent",
-          run(absent, "skeleton", "close", "--caller", "close", home=home).returncode == 3)
+    r = run(absent, "skeleton", "close", "--caller", "close", home=home)
+    check("skeleton exits 3 when insights is absent", r.returncode == 3)
+    # stdout is the draft channel: a caller redirecting it must get JSON or nothing,
+    # never a status line that would land in the draft file.
+    check("a failed skeleton writes nothing to stdout", r.stdout == "")
+    check("a failed skeleton explains itself on stderr", "status=absent" in r.stderr)
 
     # ------------------------------------------------------------- idempotency
     r = run(real, "reported", "some-task", "--project-dir", str(proj),

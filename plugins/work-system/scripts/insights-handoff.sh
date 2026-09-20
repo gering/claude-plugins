@@ -174,14 +174,30 @@ resolve_helper() {
   HELPER_REASON=""
 }
 
-# Exit early for the two non-ok states, with the code that tells them apart.
+# Exit early for the two non-ok states, with the code that tells them apart. Both go to
+# STDERR: stdout belongs to the subcommand's payload (`skeleton` writes JSON there), and
+# a caller redirecting it to a draft file must never capture a status line instead. The
+# exit code is what callers branch on.
 require_helper() {
   resolve_helper
   case "$HELPER_STATUS" in
     ok) return 0 ;;
-    absent)   printf 'status=absent\nreason=%s\n' "$HELPER_REASON"; exit "$EXIT_ABSENT" ;;
-    *)        printf 'status=unusable\nreason=%s\n' "$HELPER_REASON" >&2; exit "$EXIT_UNUSABLE" ;;
+    absent) printf 'status=absent\nreason=%s\n'   "$HELPER_REASON" >&2; exit "$EXIT_ABSENT" ;;
+    *)      printf 'status=unusable\nreason=%s\n' "$HELPER_REASON" >&2; exit "$EXIT_UNUSABLE" ;;
   esac
+}
+
+# Run the insights helper, keeping its stdout PURE: stderr goes to a temp file rather
+# than being folded into the captured output, so a python warning can never end up
+# inside the JSON a caller parses. Sets HELPER_OUT and HELPER_ERR; returns the exit code.
+HELPER_OUT=""; HELPER_ERR=""
+call_helper() {
+  local errf rc=0
+  errf="$(mktemp)" || { HELPER_ERR="could not create a temp file"; return 1; }
+  HELPER_OUT="$(bounded python3 "$HELPER" "$@" 2>"$errf")" || rc=$?
+  HELPER_ERR="$(tr '\n' ' ' < "$errf")"
+  rm -f "$errf"
+  return "$rc"
 }
 
 # ------------------------------------------------------------------------- probe
@@ -222,15 +238,15 @@ cmd_reported() {
   [ -n "$project_dir" ] && args+=(--project-dir "$project_dir")
   [ -n "$trigger" ] && args+=(--trigger "$trigger")
 
-  local out rc=0
-  out="$(bounded python3 "$HELPER" "${args[@]}" 2>&1)" || rc=$?
+  local rc=0
+  call_helper "${args[@]}" || rc=$?
   if [ "$rc" -ne 0 ]; then
-    printf 'status=unusable\nreason=%s\n' "$(printf '%s' "$out" | tr '\n' ' ')" >&2
+    printf 'status=unusable\nreason=%s\n' "${HELPER_ERR:-insights.py list failed with exit $rc}" >&2
     exit "$EXIT_UNUSABLE"
   fi
   # Malformed files are reported, never silently skipped: "0 reports" because the
   # only existing one is unreadable is a different fact from "never reported".
-  printf '%s' "$out" | python3 -c '
+  printf '%s' "$HELPER_OUT" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 print("status=ok")
@@ -278,14 +294,14 @@ cmd_skeleton() {
   local args=(skeleton --trigger "$trigger")
   [ -n "$project_dir" ] && args+=(--project-dir "$project_dir")
 
-  local skel rc=0
-  skel="$(bounded python3 "$HELPER" "${args[@]}" 2>&1)" || rc=$?
+  local rc=0
+  call_helper "${args[@]}" || rc=$?
   if [ "$rc" -ne 0 ]; then
-    printf 'status=unusable\nreason=%s\n' "$(printf '%s' "$skel" | tr '\n' ' ')" >&2
+    printf 'status=unusable\nreason=%s\n' "${HELPER_ERR:-insights.py skeleton failed with exit $rc}" >&2
     exit "$EXIT_UNUSABLE"
   fi
 
-  printf '%s' "$skel" | INS_CALLER="$caller" INS_TASK="$task" INS_BRANCH="$branch" \
+  printf '%s' "$HELPER_OUT" | INS_CALLER="$caller" INS_TASK="$task" INS_BRANCH="$branch" \
     INS_PR="$pr" INS_TASK_PATH="$task_path" INS_STATUS="$status" \
     INS_RELATED="$(printf '%s\n' "${related[@]+"${related[@]}"}")" python3 -c '
 import json, os, sys

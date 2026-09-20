@@ -246,6 +246,16 @@ Rules:
    - `usage.completeness`: `complete` only if the whole reported period is visible here.
      A Manager closing a worker's lane did not see that worker's session — that is
      `partial`/`unknown` with the reason, not a gap to paper over.
+   - `work.run_id` / `work.task_id`: work-system has no run registry, so these stay
+     unknown with that as the reason. Do **not** mint an identifier here — a report ID is
+     not a task identity, and a competing run identity would be worse than none.
+   - `plugin_details.work-system`: this is the perspective only the closer has — questions
+     that had to be asked (an `avoidable_repeat` only when the answer really was already
+     available, naming where), `handoff_gaps`, and `ambiguous_states` at start or delivery
+     with how they resolved. Do not wait for the worker to report coordination friction;
+     it cannot see it.
+   - `plugin_details.pr-flow` / `swarm`: from evidence already in hand (review rounds, a
+     swarm summary, the PR). Never re-run a review or a build to fill a field.
 
    **d) Write it.** Save the finished JSON with the **Write tool** into your scratchpad
    (e.g. `insights-close-<random>.json`) — never a heredoc or `echo`: report text can
