@@ -34,17 +34,33 @@ then looks exactly like a plugin the user never installed, so reports the user
 expects are dropped in silence. Absent is skipped without a word; unusable costs
 one line in the close summary.
 
-Two details that look incidental:
+Three details that look incidental:
 
-- **The bridge's stdout is the draft channel.** `skeleton` writes JSON there, so
-  status lines go to stderr and the helper's own stderr is captured separately —
-  folded into the captured stdout, a stray python warning would break the JSON a
-  caller parses.
+- **The bridge's stdout is the payload channel.** `prepare` writes facts there and
+  the draft to a file, so status lines go to stderr and the helper's own stderr is
+  captured separately — folded into the captured stdout, a stray python warning
+  would break the JSON a caller parses.
 - **The contract path comes from `probe`'s `contract=` output**, never from
   `$CLAUDE_PLUGIN_ROOT` plus `../insights/…`. That shape resolves only in a dev
   checkout; in the marketplace cache plugins sit at `<root>/<plugin>/<version>/`
   and it silently points at nothing. `check-structure.py` catches the literal
   form, which is how this was found.
+- **insights.py's exit codes are mapped, never relayed.** Its 2 (usage) and 3 (ID
+  collision) would otherwise land on the bridge's 2 (bad argv) and 3 (absent) — so
+  an unsaved report read as "insights is not installed, skip silently". The bridge
+  owns 0/1/2/3/4/5 and translates.
+
+## `prepare` takes a directory, not a name
+
+The producers originally ran probe → reported → skeleton themselves and passed
+`--task "<task-name>"`. Two problems with one fix. A git refname may legally
+contain `$(…)` (git only forbids a space there), and double quotes do **not**
+suppress command substitution — so a crafted branch name executed during a
+routine `/close`, before any script could validate it. The only real defense is
+to never let the model paste a repo-derived string into a command: `prepare`
+takes the lane **directory** and runs `task-status.sh` itself. Collapsing the
+three calls into one was the second half of the same fix, and it removed the
+protocol's duplicate telling in two SKILLs.
 
 ## Ordering and non-authority in `/close`
 
@@ -65,14 +81,23 @@ edit quietly moves it.
   close` scoped to this project answers "was this close already reported" — no
   new marker file, nothing to keep in sync with a teardown that may be
   interrupted. The lookup is project-scoped on purpose: task names collide
-  across repos.
+  across repos. Two limits it does not close, both accepted rather than
+  engineered away: it is check-then-write, not atomic, and it matches by task
+  **name**, which gets reused over time — so the caller is given `recorded_at`
+  and told to judge. A duplicate report is a harmless extra record; a lock or a
+  competing run identity would cost more than it saves.
 - **The failed-write fallback is the archived task file**, via
   `archive-task.sh --note-file` (see
   [task-archiving-on-close](task-archiving-on-close.md)). There is deliberately
   **no** second store: a fallback store would be a second thing to find, trust
-  and redact. The note is bounded and quoted because that archive may be
-  committed, so it takes a compact agent-authored summary — never the draft,
-  which is unredacted until `insights.py write` touches it.
+  and redact. That archive can be committed and pushed, which drove two
+  decisions the first cut got wrong. The note is **redacted mechanically**
+  (`insights.py redact`, added in 0.1.1 so the patterns are not copied into a
+  second plugin) rather than by telling the model not to paste a secret — an
+  instruction is not a boundary. And the path is constrained by a purpose-made
+  `note-*` **name** as well as a resolved location: the location rule alone is
+  near-vacuous on a checkout that lives under `/tmp`, and testing `[ -L ]` on the
+  last component says nothing about a symlinked parent.
 - **work-system mints no run identity.** It has no run registry, so `run_id`
   stays unknown with that reason. A competing identifier would be worse than
   none, and a report ID is not a task identity.
