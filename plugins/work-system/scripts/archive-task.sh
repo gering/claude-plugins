@@ -135,6 +135,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-stat.sh
 [ -f "$SCRIPT_DIR/lib-stat.sh" ] && . "$SCRIPT_DIR/lib-stat.sh"
 
+# If the lib is absent (an incomplete install), define the same contract as a
+# stub rather than leaving the callers to hit "command not found". Every caller
+# reads the VALUE and refuses on empty, so this degrades CLOSED — a note whose
+# identity cannot be verified is rejected, never accepted unchecked. Making it
+# explicit keeps that a decision instead of an accident.
+declare -f stat_field >/dev/null 2>&1 || stat_field() { return 0; }
+
 # `:(literal)` pathspec prefix. Task names flow in from task files and reach git
 # as PATHSPECS, where `*`/`?`/`[` are globs: a task named `x*` yields
 # `tasks/archive/x*.md`, matching every archived file with that prefix. The rule

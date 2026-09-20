@@ -108,6 +108,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || SC
 # shellcheck source=lib-stat.sh
 [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/lib-stat.sh" ] && . "$SCRIPT_DIR/lib-stat.sh"
 
+# If the lib is absent (an incomplete install), define the same contract as a
+# stub rather than leaving the callers to hit "command not found". Every caller
+# reads the VALUE and refuses on empty, so this degrades CLOSED — a note whose
+# identity cannot be verified is rejected, never accepted unchecked. Making it
+# explicit keeps that a decision instead of an accident.
+declare -f stat_field >/dev/null 2>&1 || stat_field() { return 0; }
+
 # Temp files hold helper stderr and skeleton drafts. Clean them on ANY exit,
 # including a signal: a draft is unredacted until insights.py touches it, and a
 # /close that is interrupted must not leave one behind.

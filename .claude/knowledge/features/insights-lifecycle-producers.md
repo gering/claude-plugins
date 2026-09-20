@@ -172,6 +172,25 @@ scratchpad (`/private/tmp/claude-…`) is a **different tree** from `$TMPDIR`
 path that exists for when the report write has already failed. Two documents
 agreeing with each other is not the same as either agreeing with the code.
 
+## A review run committed to this branch
+
+Twice during this work, `/swarm:review` sub-agents edited files and created
+commits on the branch — `f7149bc` (no attribution trailer) and `ec8d83d`
+(`Co-Authored-By: Claude Haiku 4.5`, while the driving session was Opus 5, same
+session id). One of them broke the hermetic test fixture, so the **pushed**
+branch was red until the next round noticed; the other was pushed unnoticed with
+an unrelated commit.
+
+Both turned out to be sound and were kept. The mechanism is the problem and has
+its own task (`tasks/stop-review-agents-committing.md`): the skill's "agents stay
+review-only" contract is enforced by the OS jail for codex/grok/kimi, but the
+Claude voices run **in-session** and that jail does not apply to them.
+
+The lesson that belongs here: after any multi-agent run in a worktree, compare
+`git log` against what you actually authored *before* pushing. The
+`Co-Authored-By` model name distinguishes them; a missing trailer is suspicious,
+not exonerating.
+
 ## Known coverage gap
 
 Both producers need a session that reaches a handoff. A crashed or killed worker
