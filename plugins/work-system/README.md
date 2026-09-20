@@ -378,9 +378,10 @@ feature further than it goes:
   produces no report at all. `/close` is the next opportunity, not a backstop that always
   fires — and a Manager-run close can only report the *Manager's* view, with the worker's
   model, skills and friction unknown unless that worker left its own handoff report.
-  The close-retry skip is check-then-write and matches by task **name**, so a reused name
-  can look already-reported (its timestamp is what tells them apart) and two concurrent
-  closes could both write — a harmless extra record, not worth a lock.
+  The close-retry skip is check-then-write, so two concurrent closes could both write —
+  a harmless extra record, not worth a lock. A report from an earlier task that merely
+  reused the name is excluded by comparing it against the lane's first commit, and a
+  close that cannot name its task at all is refused rather than filed unattributably.
 - **Metadata is only as good as the evidence.** A model is recorded from the reporting
   session's own system prompt and a plugin version from the `Base directory for this
   skill:` line at invocation — never from a tab name, an agent alias, the worker class

@@ -40,7 +40,16 @@
 #       only correct in the dev layout, and in the marketplace cache
 #       (…/<plugin>/<version>/) it silently points at nothing.
 #   prepare <handoff|close|manual> --caller <skill> --lane <dir> [--project-dir DIR]
-#           [--pr <n>] [--status <task-status>]
+#           [--pr <n>] [--status <task-status>] [--resolve-from <file>]
+#       --resolve-from names a file holding `task-status.sh` output; the bridge
+#       reads `task_name=`/`task_branch=` from it instead of resolving the lane
+#       itself. /close needs this: when the worktree is already gone (a retried
+#       teardown) the lane is the MAIN checkout sitting on `main`, where
+#       task-status.sh resolves an EMPTY task name — the idempotency lookup was
+#       then skipped, every retry drafted another report, and each one was stored
+#       without a task_name so no later lookup could ever find it. Passing the
+#       name as a FILE keeps it out of any command line: a refname may legally
+#       contain `$(…)`, which a shell expands before this script sees an argument.
 #       Everything a producer needs, in one call: resolve insights, derive the
 #       lane's task name and branch via task-status.sh, look up what this project
 #       already has for that task, and — unless there is nothing to do — leave a
@@ -51,6 +60,14 @@
 #       only want to know what exists.
 #   write <draft-file> [--project-dir DIR]
 #       Store a finished draft.
+#   note-file
+#       Create an empty, private note file and print its path. The /close
+#       fallback note must land somewhere `archive-task.sh --note-file` accepts,
+#       and that is NOT "your scratchpad": on macOS the session scratchpad
+#       (/private/tmp/claude-…) is a different tree from $TMPDIR (/var/folders/…),
+#       so a note written where the skill said was refused by the script — in the
+#       one path that exists for when everything else already failed. Creating it
+#       here means the two cannot disagree: both sides use ${TMPDIR:-/tmp}.
 #   redact <file> [--in-place]
 #       Run insights' own credential redaction over a plain text file, printing
 #       the redacted text, or rewriting the file when --in-place is given.
@@ -129,6 +146,40 @@ bounded() {
 }
 
 die_usage() { echo "$*" >&2; exit "$EXIT_USAGE"; }
+
+# Portable inode / link-count lookups. `stat` is not POSIX and the two common
+# implementations disagree on `-f`: BSD reads it as the format string, GNU as
+# --file-system. So `stat -f '%i' X || stat -c '%i' X` does NOT degrade cleanly —
+# on GNU the first call prints filesystem info for X (exit non-zero because the
+# format operand is not a path), and the fallback's real answer is appended to
+# that inside the same `$( )`. The caller then compares two multi-line strings
+# and refuses every note. Probe ONCE and pick the dialect instead.
+STAT_STYLE=""
+stat_style() {
+  [ -n "$STAT_STYLE" ] && { printf '%s' "$STAT_STYLE"; return 0; }
+  if stat --version >/dev/null 2>&1; then STAT_STYLE=gnu; else
+    if stat -f '%i' . >/dev/null 2>&1; then STAT_STYLE=bsd; else STAT_STYLE=none; fi
+  fi
+  printf '%s' "$STAT_STYLE"
+}
+
+# stat_field <inode|links> <path> [--deref] — prints the number, or nothing.
+stat_field() {
+  local what="$1" path="$2" deref="${3:-}" style
+  style="$(stat_style)"
+  case "$style:$what" in
+    gnu:inode) stat ${deref:+-L} -c '%i' -- "$path" 2>/dev/null ;;
+    gnu:links) stat ${deref:+-L} -c '%h' -- "$path" 2>/dev/null ;;
+    bsd:inode) stat ${deref:+-L} -f '%i' -- "$path" 2>/dev/null ;;
+    bsd:links) stat ${deref:+-L} -f '%l' -- "$path" 2>/dev/null ;;
+    *) return 0 ;;
+  esac
+  # Always succeed: the caller reads the VALUE (empty means unknown) and decides.
+  # Under `set -e` a failing substitution aborts the assignment itself, which
+  # turned a missing file into exit 1 instead of the caller's deliberate exit 2.
+  return 0
+}
+
 
 # --------------------------------------------------------------- locating insights
 #
@@ -357,7 +408,7 @@ for r in d["reports"]:
 
 # ----------------------------------------------------------------------- prepare
 cmd_prepare() {
-  local trigger="" caller="" lane="" project_dir="" pr="" status=""
+  local trigger="" caller="" lane="" project_dir="" pr="" status="" resolve_from=""
   [ $# -ge 1 ] && { trigger="$1"; shift; }
   valid_trigger "$trigger" \
     || die_usage "usage: ${0##*/} prepare <$(echo $TRIGGERS | tr ' ' '|')> --caller <skill> --lane <dir> [...]"
@@ -368,6 +419,7 @@ cmd_prepare() {
       --project-dir) [ $# -ge 2 ] || die_usage "--project-dir needs a value"; project_dir="$2"; shift 2 ;;
       --pr)          [ $# -ge 2 ] || die_usage "--pr needs a value";          pr="$2";          shift 2 ;;
       --status)      [ $# -ge 2 ] || die_usage "--status needs a value";      status="$2";      shift 2 ;;
+      --resolve-from) [ $# -ge 2 ] || die_usage "--resolve-from needs a value"; resolve_from="$2"; shift 2 ;;
       *) die_usage "unknown option: $1" ;;
     esac
   done
@@ -380,6 +432,10 @@ cmd_prepare() {
   case "$pr" in ''|*[!0-9]*) [ -z "$pr" ] || die_usage "--pr expects a bare number, got: $pr" ;; esac
 
   require_helper
+  # `status=ok` means the helper is usable, and it is printed HERE — after
+  # require_helper, before any payload. It used to lead the output, which read as
+  # "everything below succeeded" while the lane resolution and the store lookup
+  # could still fail underneath it.
   printf 'status=ok\n'
   # The SKILLs read field semantics from the report contract and must not derive
   # that path from work-system's own root (correct only in a dev checkout).
@@ -391,7 +447,14 @@ cmd_prepare() {
   # into a command line is executed before this script ever sees it. The subshell
   # `cd` is scoped (cwd-safety rule) and task-status.sh reads the current branch.
   local task="" branch="" main_branch="" resolved resolve_rc=0
-  resolved="$( ( cd "$lane" 2>/dev/null && bash "$SCRIPT_DIR/task-status.sh" resolve ) 2>/dev/null )" || resolve_rc=$?
+  if [ -n "$resolve_from" ]; then
+    [ -f "$resolve_from" ] || die_usage "--resolve-from is not a file: $resolve_from"
+    [ -L "$resolve_from" ] && die_usage "--resolve-from must not be a symlink: $resolve_from"
+    # Bounded read: this is a key=value dump, not a document.
+    resolved="$(head -c 65536 "$resolve_from")" || resolve_rc=$?
+  else
+    resolved="$( ( cd "$lane" 2>/dev/null && bash "$SCRIPT_DIR/task-status.sh" resolve ) 2>/dev/null )" || resolve_rc=$?
+  fi
   task="$(printf '%s\n' "$resolved" | sed -n 's/^task_name=//p' | head -1)"
   branch="$(printf '%s\n' "$resolved" | sed -n 's/^task_branch=//p' | head -1)"
   # task-status.sh already resolved the repo's default branch. Re-deriving it
@@ -406,6 +469,14 @@ cmd_prepare() {
   if [ "$resolve_rc" -ne 0 ] || [ -z "$task" ]; then
     printf 'task_resolution=%s\n' \
       "$([ "$resolve_rc" -ne 0 ] && echo failed || echo none)"
+    # Without a name there is no idempotency key AND no way to find the stored
+    # report later, so a `close` here would duplicate on every retry and file
+    # each copy anonymously. Refuse rather than produce that quietly; the caller
+    # can supply the name it already has via --resolve-from.
+    if [ "$trigger" = close ]; then
+      printf 'action=blocked\nreason=no task name for this lane, so a close report could neither be deduplicated nor found again — pass --resolve-from with task-status.sh output\n'
+      return "$EXIT_OK"
+    fi
   fi
 
   # The lane's first commit off the default branch: a stored close report OLDER
@@ -444,6 +515,10 @@ import json, os, sys
 
 # Schema cap on work.related_reports; linking more makes the draft invalid, and
 # a report rejected for an over-long link list is a lost retrospective.
+# Mirrors the list cap in insights.py. Duplicated as a literal on purpose: the
+# bridge must not import the helper, and exceeding the cap makes the draft
+# invalid — a report lost to an over-long link list is worse than a link dropped
+# here. (No apostrophes: this python is inside a single-quoted shell string.)
 MAX_RELATED = 50
 since = os.environ.get("LANE_SINCE") or ""
 d = json.load(sys.stdin)
@@ -516,9 +591,6 @@ if best:
   local draft
   mktemp_tracked || { echo "could not create a draft file" >&2; exit "$EXIT_UNUSABLE"; }
   draft="$MKTEMP_OUT"
-  # The caller writes the finished draft and removes it; do not delete it from
-  # under them on exit.
-  untrack "$draft"
 
   # Overlay the lifecycle facts work-system genuinely observed, each with the
   # source it came from. insights.py's own skeleton derives task hints from the
@@ -565,6 +637,10 @@ json.dump(d, sys.stdout, indent=2, ensure_ascii=False)
 sys.stdout.write("\n")
 ' > "$draft" || { echo "could not overlay lifecycle facts onto the insights skeleton" >&2; exit "$EXIT_UNUSABLE"; }
   chmod 600 "$draft" 2>/dev/null || true
+  # Hand ownership over only now that the draft is actually built. Untracking it
+  # up front meant a failed overlay left an unredacted file behind, because the
+  # cleanup trap had already been told to ignore it.
+  untrack "$draft"
 
   printf 'action=draft\ndraft=%s\n' "$draft"
   [ -n "$related" ] && printf 'related=%s\n' "$related"
@@ -613,6 +689,22 @@ cmd_write() {
   esac
 }
 
+# --------------------------------------------------------------------- note-file
+cmd_note_file() {
+  [ $# -eq 0 ] || die_usage "usage: ${0##*/} note-file"
+  # `note-` prefix and ${TMPDIR:-/tmp} location are exactly what archive-task.sh
+  # enforces. Untracked on purpose: the caller writes into it and hands it to the
+  # archive step, so it must outlive this process.
+  local f
+  f="$(mktemp "${TMPDIR:-/tmp}/note-insights.XXXXXX")" || {
+    echo "could not create a note file under ${TMPDIR:-/tmp}" >&2
+    return "$EXIT_UNUSABLE"
+  }
+  chmod 600 "$f" 2>/dev/null || true
+  printf 'note=%s\n' "$f"
+  return "$EXIT_OK"
+}
+
 # ------------------------------------------------------------------------ redact
 cmd_redact() {
   local file="" in_place=no
@@ -639,7 +731,7 @@ cmd_redact() {
     # read the status of the `if` statement itself — always 0 — so the
     # invalid-vs-unusable mapping below was dead code and every failure came back
     # as "insights installed but unusable".
-    pre="$(stat -f '%i' "$file" 2>/dev/null || stat -c '%i' "$file" 2>/dev/null || echo "")"
+    pre="$(stat_field inode "$file")"
     rc=0
     bounded python3 "$HELPER" redact "$file" > "$out" || rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -648,13 +740,17 @@ cmd_redact() {
     fi
     # The rename targets a path, and the note we just read may no longer be the
     # file sitting there. Same check-to-use gap as archive-task.sh's note open.
-    post="$(stat -f '%i' "$file" 2>/dev/null || stat -c '%i' "$file" 2>/dev/null || echo "")"
+    post="$(stat_field inode "$file")"
     if [ -z "$pre" ] || [ "$pre" != "$post" ]; then
       echo "$file changed while it was being redacted — refusing to overwrite it" >&2
       return "$EXIT_UNUSABLE"
     fi
-    if mv "$out" "$file"; then
-      untrack "$out"
+    # `cat >` rather than `mv`: the temp file lives in ${TMPDIR:-/tmp} and the note
+    # may not, and a cross-filesystem `mv` is a copy+unlink that replaces the
+    # inode — defeating the identity check above and changing the file's owner and
+    # mode. Writing through the existing file keeps both.
+    if cat "$out" > "$file"; then
+      rm -f "$out"; untrack "$out"
       return "$EXIT_OK"
     fi
     echo "redacted copy could not replace $file — the note is unchanged" >&2
@@ -672,7 +768,8 @@ cmd_redact() {
 }
 
 case "${1:-}" in
-  probe)    shift; cmd_probe "$@" ;;
+  probe)     shift; cmd_probe "$@" ;;
+  note-file) shift; cmd_note_file "$@" ;;
   prepare)  shift; cmd_prepare "$@" ;;
   reported) shift; cmd_reported "$@" ;;
   write)    shift; cmd_write "$@" ;;

@@ -655,6 +655,32 @@ with tempfile.TemporaryDirectory() as td:
     check("a FIFO note is refused rather than hanging", r.returncode == 2)
     check("the FIFO refusal leaves the task in place", (repo / "tasks" / "b3.md").exists())
 
+    # Bidi overrides reorder what a reader sees in a terminal and a diff viewer.
+    # insights rejects a report containing them; this archive is committed, so it
+    # must not carry them either.
+    bidi = scratch / "note-bidi.txt"
+    bidi.write_bytes("before \u202b override after\n".encode())
+    (repo / "tasks" / "b4.md").write_text("# B4\n")
+    run("archive", str(repo), "b4", "task/b4", "--note-file", str(bidi), tmpdir=str(scratch))
+    b4 = (repo / "tasks" / "archive" / "b4.md").read_bytes()
+    check("bidi overrides are stripped from the archive", "\u202b".encode() not in b4)
+    check("the text around a bidi override survives", b"override after" in b4)
+
+    # `stat -f … || stat -c …` is wrong on GNU coreutils, where -f means
+    # --file-system: the first call prints filesystem info AND fails, so the
+    # fallback's answer was appended to that garbage. Every --note-file call then
+    # refused on Linux. The probe-once helper must return a bare number, and a
+    # missing file must still reach the caller's deliberate exit 2 (not exit 1
+    # from `set -e` aborting the assignment).
+    # Its own task file: `archive` consumes the source, and a reused name would
+    # exit 3 ("no task file") before the note check is ever reached.
+    (repo / "tasks" / "b5.md").write_text("# B5\n")
+    r = run("archive", str(repo), "b5", "task/b5",
+            "--note-file", str(scratch / "note-absent"), tmpdir=str(scratch))
+    check("a missing note is the caller's usage error, not a set -e abort",
+          r.returncode == 2)
+    check("the refused note leaves the task file in place", (repo / "tasks" / "b5.md").exists())
+
     # An existing file the caller merely points at is refused by the NAME rule,
     # which is what keeps the (broad) location rule meaningful.
     r = run("archive", str(repo), "n3", "task/n3", "--note-file", str(repo / "README.md"))

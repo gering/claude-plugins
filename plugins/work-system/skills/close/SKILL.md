@@ -192,19 +192,23 @@ Rules:
    command: a refname may legally contain `$(…)`, and double quotes do not suppress
    command substitution. Pass a **directory** and let the helper derive the identity.
 
-   Assign the paths to shell variables in the same call rather than pasting them inline —
-   a worktree path is repo-derived too, and `"<worktree-path>"` in a command is the same
-   substitution hazard as the task name:
+   Save step 1's helper output to a file first and let the bridge read the identity from
+   it. Nothing repo-derived may be typed into a command: a refname or a path may legally
+   contain `$(…)`, and the shell expands that before any script sees an argument.
    ```sh
-   WT='<worktree-path>'; MAIN='<main-repo-path>'     # single quotes: no expansion
+   TS="$(mktemp "${TMPDIR:-/tmp}/ws-resolve.XXXXXX")"
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/task-status.sh" resolve > "$TS"   # from the lane, or
+   #   ( cd <main-repo> && … resolve "<task>" ) > "$TS"   when closing by name from main
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" prepare close --caller close \
-        --lane "${WT:-$MAIN}" --project-dir "$MAIN" \
+        --lane "<lane dir>" --project-dir "<main-repo-path>" --resolve-from "$TS" \
         --status <completed|aborted|unknown> [--pr <pr_number>]
    ```
-   `--lane` needs an existing directory. A task with **no worktree** (step 4 found none,
-   or it was already removed) has none, so pass the main repo instead — that is what
-   `${WT:-$MAIN}` above does. A non-existent `--lane` is a usage error (**exit 2**): treat
-   it like exit 4 — one line in the summary, no report, cleanup continues.
+   `--lane` needs an existing directory. A task whose **worktree is already gone** (a
+   retried teardown) has none — pass the main repo, and `--resolve-from` is then what
+   keeps the report attributable: on `main` the helper resolves an empty task name, and a
+   close report without one can neither be deduplicated nor found again. A non-existent
+   `--lane` is a usage error (**exit 2**): treat it like exit 4 — one line in the summary,
+   no report, cleanup continues.
    `--status` is the *task's* state, independent of the trigger: `completed` only when
    step 2 confirmed a merged PR, `aborted` when the user is closing unmerged/abandoned
    work, `unknown` otherwise. A report never makes a task look merged.
@@ -224,6 +228,10 @@ Rules:
      report that really does cover this task — there is nothing for you to second-guess.
      One caveat it reports rather than resolves: `malformed_store=` above 0 counts
      unreadable files across the whole store, not this task's.
+   - **exit 0, `action=blocked`** → the bridge could not name this task, so a close report
+     would duplicate on every retry and be unfindable afterwards. Pass `--resolve-from`
+     (above) and try once; if it still blocks, note "insights: no report (task not
+     identifiable)" in the summary and continue the close.
    - **exit 0, `action=draft`** → `draft=` is a private file holding a contract-complete
      skeleton with the observed facts already filled in. Any `related=` IDs are earlier
      manual/handoff reports, already linked in the draft — *linked*, never merged: a
@@ -269,10 +277,16 @@ Rules:
    you were told to fix.
 
    **d) When nothing was saved** — the observation must not vanish with the worktree:
-   1. Write a **compact** note (Write tool) into your scratchpad, named `note-<something>`
-      — the archive helper only accepts a file written for this purpose, so an existing
-      file can never be pointed at by mistake. One or two lines of agent-authored summary
-      plus the helper's error. Not the draft, not verbatim user feedback.
+   1. Ask for a note file and write into **that** path (Write tool) — do not choose one
+      yourself:
+      ```sh
+      bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" note-file    # prints note=<path>
+      ```
+      Your scratchpad is **not** an acceptable location: on macOS it is a different tree
+      from `$TMPDIR`, and the archive helper refuses it — in the one path that exists for
+      when everything else already failed. The helper creates the file where both sides
+      agree. Write one or two lines of agent-authored summary plus the helper's error into
+      it. Not the draft, not verbatim user feedback.
    2. Redact it mechanically — the archive it lands in may be committed and pushed, and
       "I was careful" is not a boundary:
       ```sh
@@ -281,10 +295,9 @@ Rules:
       On a non-zero exit the note is left **unchanged** and you must **not** archive it:
       drop the `--note-file` flag and report the summary as lost. Never archive text that
       failed redaction — that is the one path where a secret would reach a commit.
-   3. Pass it to step 10's archive call as `--note-file`. It must be named `note-*` and
-      resolve inside your scratchpad (`$TMPDIR`, which may default to `/tmp`) or the repo's
-      `tasks/`; any other location, a symlink escaping those, or an empty note is refused
-      (exit 2) and leaves the task file untouched.
+   3. Pass it to step 10's archive call as `--note-file`. Because `note-file` created it,
+      it already satisfies the helper's name and location rules; a symlink, a FIFO, a
+      hardlink or an empty note is refused (exit 2) and leaves the task file untouched.
    4. Report it: "insights: report NOT saved (<reason>) — summary kept in `<archived_path>`".
    5. **Continue the close.** A failed report is never a cleanup gate and never becomes a
       new approval question. If step 10 cannot archive either (no task file), say plainly

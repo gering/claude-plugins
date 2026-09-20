@@ -143,6 +143,40 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # `check-ignore` breaks gitignore detection entirely.
 lit() { printf ':(literal)%s' "$1"; }
 
+# Portable inode / link-count lookups. `stat` is not POSIX and the two common
+# implementations disagree on `-f`: BSD reads it as the format string, GNU as
+# --file-system. So `stat -f '%i' X || stat -c '%i' X` does NOT degrade cleanly —
+# on GNU the first call prints filesystem info for X (exit non-zero because the
+# format operand is not a path), and the fallback's real answer is appended to
+# that inside the same `$( )`. The caller then compares two multi-line strings
+# and refuses every note. Probe ONCE and pick the dialect instead.
+STAT_STYLE=""
+stat_style() {
+  [ -n "$STAT_STYLE" ] && { printf '%s' "$STAT_STYLE"; return 0; }
+  if stat --version >/dev/null 2>&1; then STAT_STYLE=gnu; else
+    if stat -f '%i' . >/dev/null 2>&1; then STAT_STYLE=bsd; else STAT_STYLE=none; fi
+  fi
+  printf '%s' "$STAT_STYLE"
+}
+
+# stat_field <inode|links> <path> [--deref] — prints the number, or nothing.
+stat_field() {
+  local what="$1" path="$2" deref="${3:-}" style
+  style="$(stat_style)"
+  case "$style:$what" in
+    gnu:inode) stat ${deref:+-L} -c '%i' -- "$path" 2>/dev/null ;;
+    gnu:links) stat ${deref:+-L} -c '%h' -- "$path" 2>/dev/null ;;
+    bsd:inode) stat ${deref:+-L} -f '%i' -- "$path" 2>/dev/null ;;
+    bsd:links) stat ${deref:+-L} -f '%l' -- "$path" 2>/dev/null ;;
+    *) return 0 ;;
+  esac
+  # Always succeed: the caller reads the VALUE (empty means unknown) and decides.
+  # Under `set -e` a failing substitution aborts the assignment itself, which
+  # turned a missing file into exit 1 instead of the caller's deliberate exit 2.
+  return 0
+}
+
+
 archive() {
   local repo="${1:-}" name="${2:-}" branch="${3:-}"
   if [ -z "$repo" ] || [ -z "$name" ] || [ -z "$branch" ]; then
@@ -235,7 +269,7 @@ archive() {
     # FAIL CLOSED when neither works: this is a security check on an optional
     # feature, and "assume 1" silently turns it off exactly where it matters.
     local note_links
-    note_links="$(stat -f %l "$note_file" 2>/dev/null || stat -c %h "$note_file" 2>/dev/null || echo "")"
+    note_links="$(stat_field links "$note_file")"
     case "$note_links" in
       1) ;;
       ''|*[!0-9]*)
@@ -255,7 +289,7 @@ archive() {
     # and the path is already pinned to an allowed root, so the inode is the
     # identity that matters here.
     local note_ident
-    note_ident="$(stat -f '%i' "$note_file" 2>/dev/null || stat -c '%i' "$note_file" 2>/dev/null || echo "")"
+    note_ident="$(stat_field inode "$note_file")"
     # -P resolves every symlink in the parent path. A path that does not resolve
     # at all is refused rather than retried unresolved.
     note_real="$(cd "$(dirname "$note_file")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$note_file")")" \
@@ -284,11 +318,11 @@ archive() {
       exit 2
     fi
     local fd_ident post_ident
-    fd_ident="$(stat -L -f '%i' /dev/fd/9 2>/dev/null || stat -L -c '%i' /dev/fd/9 2>/dev/null || echo "")"
+    fd_ident="$(stat_field inode /dev/fd/9 --deref)"
     # And the path must STILL name that same file: the fd check alone would pass
     # if the swap happened before the open, since the descriptor then honestly
     # describes the attacker's file.
-    post_ident="$(stat -f '%i' "$note_file" 2>/dev/null || stat -c '%i' "$note_file" 2>/dev/null || echo "")"
+    post_ident="$(stat_field inode "$note_file")"
     if [ -z "$note_ident" ] || [ -z "$fd_ident" ] \
        || [ "$note_ident" != "$fd_ident" ] || [ "$note_ident" != "$post_ident" ]; then
       exec 9<&-
@@ -326,6 +360,7 @@ archive() {
     note_block="$( set -o pipefail
       LC_ALL=C tr -d '\000-\010\013-\037\177' <&9 \
       | LC_ALL=C sed $'s/\xc2[\x80-\x9f]//g' \
+      | LC_ALL=C sed $'s/\xe2\x80[\xaa-\xae]//g; s/\xe2\x81[\xa6-\xa9]//g' \
       | LC_ALL=C sed 's/^/> /' \
       | LC_ALL=C awk -v lim=4096 '
           done { next }

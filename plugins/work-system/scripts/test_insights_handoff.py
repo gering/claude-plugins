@@ -416,6 +416,51 @@ with tempfile.TemporaryDirectory() as td:
               stale["report_id"] not in drafted["work"]["related_reports"])
         os.unlink(d["draft"])
 
+    # ------------------------------------------- identity when the worktree is gone
+    # A retried close runs in the MAIN checkout on `main`, where task-status.sh
+    # resolves an EMPTY task name. That silently skipped the idempotency lookup
+    # and stored an unattributable report, so every retry duplicated and none
+    # could ever be found again. It must refuse instead.
+    bare = new_project(tmp, "bare-proj")          # on `main`, no task branch
+    r = run(real, "prepare", "close", "--caller", "close", "--lane", str(bare),
+            "--project-dir", str(bare), "--status", "completed",
+            store=store, home=home, cwd=bare)
+    d = kv(r.stdout)
+    check("a close with no derivable task name is blocked", d.get("action") == "blocked")
+    check("the block says why", "deduplicated" in (d.get("reason") or ""))
+    check("no draft is produced for an unattributable close", "draft" not in d)
+
+    # …and the caller can supply the name it already has, as a FILE — never as a
+    # command-line value, because a refname may legally contain `$(…)`.
+    resolved = tmp / "resolve.txt"
+    resolved.write_text("task_name=recovered-task\ntask_branch=task/recovered-task\nmain_branch=main\n")
+    r = run(real, "prepare", "close", "--caller", "close", "--lane", str(bare),
+            "--project-dir", str(bare), "--status", "completed",
+            "--resolve-from", str(resolved), store=store, home=home, cwd=bare)
+    d = kv(r.stdout)
+    check("--resolve-from restores the identity", d.get("task") == "recovered-task")
+    check("and the close can then be drafted", d.get("action") == "draft")
+    if d.get("action") == "draft":
+        drafted = json.loads(Path(d["draft"]).read_text())
+        check("the recovered name reaches the report",
+              drafted["work"]["task_name"]["value"] == "recovered-task")
+        os.unlink(d["draft"])
+
+    # note-file: the bridge picks the location, because the session scratchpad is
+    # NOT $TMPDIR on macOS and archive-task.sh refuses it — in the one path that
+    # exists for when everything else already failed.
+    r = run(real, "note-file", store=store, home=home, cwd=proj)
+    d = kv(r.stdout)
+    note_path = Path(d.get("note", ""))
+    check("note-file prints a path", r.returncode == 0 and d.get("note"))
+    check("the note file exists and is private",
+          note_path.is_file() and (note_path.stat().st_mode & 0o077) == 0)
+    check("the note is named the way archive-task.sh requires",
+          note_path.name.startswith("note-"))
+    check("the note sits under the temp root archive-task.sh accepts",
+          str(note_path).startswith(str(Path(os.environ.get("TMPDIR", "/tmp")))))
+    note_path.unlink(missing_ok=True)
+
     # ---------------------------------------------------------------- redact
     # The /close fallback note is not a report, but it lands in a file this repo
     # may commit and push — so it goes through insights' own patterns, not prose.

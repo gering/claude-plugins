@@ -43,8 +43,10 @@ Three details that look incidental:
 - **The contract path comes from `probe`'s `contract=` output**, never from
   `$CLAUDE_PLUGIN_ROOT` plus `../insights/…`. That shape resolves only in a dev
   checkout; in the marketplace cache plugins sit at `<root>/<plugin>/<version>/`
-  and it silently points at nothing. `check-structure.py` catches the literal
-  form, which is how this was found.
+  and it silently points at nothing. The repo's `${CLAUDE_PLUGIN_ROOT}` reference
+  check is what surfaced the literal form during this work — it validates that a
+  referenced path exists, so it caught the dev-layout spelling; it does not
+  enforce the rule in general.
 - **insights.py's exit codes are mapped, never relayed.** Its 2 (usage) and 3 (ID
   collision) would otherwise land on the bridge's 2 (bad argv) and 3 (absent) — so
   an unsaved report read as "insights is not installed, skip silently". The bridge
@@ -155,6 +157,20 @@ guard silently do nothing:
   a string comparison against a report's real-UTC `recorded_at`. `format-local:`
   with `TZ=UTC` is what converts. (`%cI` has the same problem with its offset,
   and `--max-count` applies before `--reverse`, so the oldest commit is `tail -1`.)
+
+## The note path belongs to the script, not the caller
+
+The `/close` fallback note produced a critical finding in three consecutive
+review rounds, each time in a different guard, until the shape changed: the
+caller no longer chooses the path at all. `insights-handoff.sh note-file`
+creates it, and `archive-task.sh --note-file` accepts only what that produces.
+
+The failure that forced it is worth remembering, because the prose looked
+right: the skill said "write it into your scratchpad", and on macOS the session
+scratchpad (`/private/tmp/claude-…`) is a **different tree** from `$TMPDIR`
+(`/var/folders/…`). So the note landed somewhere the script refused — in the one
+path that exists for when the report write has already failed. Two documents
+agreeing with each other is not the same as either agreeing with the code.
 
 ## Known coverage gap
 
