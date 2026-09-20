@@ -53,7 +53,8 @@ def make_tree(root, insights="real"):
     """
     ws = root / "plugins" / "work-system" / "scripts"
     ws.mkdir(parents=True)
-    for name in (SCRIPT.name, "lib-bounded.sh", "task-status.sh", "main-repo-path.sh"):
+    for name in (SCRIPT.name, "lib-bounded.sh", "lib-stat.sh",
+                 "task-status.sh", "main-repo-path.sh"):
         shutil.copy(HERE / name, ws / name)
     if insights == "real":
         ins = root / "plugins" / "insights" / "scripts"

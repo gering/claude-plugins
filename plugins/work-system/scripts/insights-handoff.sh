@@ -471,6 +471,16 @@ cmd_prepare() {
   # No resolvable lane start means we cannot rule out that an older report
   # belongs to a namesake — so DON'T filter. Idempotency is the safer default: a
   # missed duplicate is a stray record, a missed skip re-reports every retry.
+  #
+  # But SAY SO. This is not a rare corner: on the documented retry path the
+  # worktree is already gone, the lane IS the main checkout sitting on the
+  # default branch, and `main..HEAD` is empty — so the filter is unavailable
+  # precisely where a reused task name would be mistaken for this one. The caller
+  # must fall back to judging `report_recorded_at`, which it can only do if it
+  # knows the mechanism did not.
+  if [ "$trigger" = close ]; then
+    printf 'namesake_filter=%s\n' "$([ -n "$lane_since" ] && echo applied || echo unavailable)"
+  fi
 
   local related="" existing_close="" existing_close_at=""
   if [ -n "$task" ]; then
@@ -714,14 +724,32 @@ cmd_redact() {
       echo "$file changed while it was being redacted — refusing to overwrite it" >&2
       return "$EXIT_UNUSABLE"
     fi
-    # `cat >` rather than `mv`: the temp file lives in ${TMPDIR:-/tmp} and the note
-    # may not, and a cross-filesystem `mv` is a copy+unlink that replaces the
-    # inode — defeating the identity check above and changing the file's owner and
-    # mode. Writing through the existing file keeps both.
-    if cat "$out" > "$file"; then
+    # Replace by ATOMIC RENAME from the note's OWN directory. The two obvious
+    # alternatives are both wrong here:
+    #   * `cat "$out" > "$file"` truncates the target before writing, so a write
+    #     that fails part-way (full disk, quota) destroys the note while the error
+    #     below still claims it is unchanged — and `>` re-resolves the path, which
+    #     reopens the check-to-use gap the inode comparison just closed and would
+    #     follow a symlink planted in that window.
+    #   * `mv` from ${TMPDIR:-/tmp} can cross a filesystem boundary, which turns
+    #     into copy+unlink: a new inode, and the target's owner/mode replaced.
+    # A sibling temp file plus `mv` is same-filesystem (so a real rename),
+    # atomic (no truncated intermediate state), and rename does NOT follow a
+    # symlink at the destination — it replaces the name itself.
+    local dest_dir sib
+    dest_dir="$(dirname "$file")"
+    sib="$(mktemp "$dest_dir/.note-redacted.XXXXXX")" || {
+      echo "could not stage the redacted note next to $file — it is unchanged" >&2
+      return "$EXIT_UNUSABLE"
+    }
+    TMPFILES+=("$sib")
+    chmod 600 "$sib" 2>/dev/null || true
+    if cat "$out" > "$sib" && mv "$sib" "$file"; then
+      untrack "$sib"
       rm -f "$out"; untrack "$out"
       return "$EXIT_OK"
     fi
+    rm -f "$sib"; untrack "$sib"
     echo "redacted copy could not replace $file — the note is unchanged" >&2
     return "$EXIT_UNUSABLE"
   fi

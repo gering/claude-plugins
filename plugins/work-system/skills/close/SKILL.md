@@ -192,17 +192,21 @@ Rules:
    command: a refname may legally contain `$(…)`, and double quotes do not suppress
    command substitution. Pass a **directory** and let the helper derive the identity.
 
-   Save step 1's helper output to a file first and let the bridge read the identity from
-   it. Nothing repo-derived may be typed into a command: a refname or a path may legally
-   contain `$(…)`, and the shell expands that before any script sees an argument.
+   Save step 1's helper output to a file and let the bridge read the identity from it.
+   **Type no repo-derived value into this command** — not the task name, not the branch,
+   not a path: a refname or a worktree directory may legally contain `$(…)`, and the
+   shell expands that before any script sees an argument. Every value below comes from a
+   script's stdout or from `$PWD`, so no literal is left to expand:
    ```sh
+   MAIN="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path)"
+   LANE="$PWD"; [ -e "$LANE/.git" ] || LANE="$MAIN"
+   #   run from the main repo, or the worktree is already gone → the lane is $MAIN
    TS="$(mktemp "${TMPDIR:-/tmp}/ws-resolve.XXXXXX")"
-   bash "${CLAUDE_PLUGIN_ROOT}/scripts/task-status.sh" resolve > "$TS"   # from the lane, or
-   #   ( cd <main-repo> && … resolve "<task>" ) > "$TS"   when closing by name from main
+   ( cd "$LANE" && bash "${CLAUDE_PLUGIN_ROOT}/scripts/task-status.sh" resolve ) > "$TS"
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" prepare close --caller close \
-        --lane "<lane dir>" --project-dir "<main-repo-path>" --resolve-from "$TS" \
+        --lane "$LANE" --project-dir "$MAIN" --resolve-from "$TS" \
         --status <completed|aborted|unknown> [--pr <pr_number>]
-   rm -f "$TS"   # Clean up the temporary identity file after the bridge has read it
+   rm -f "$TS"   # the identity file has been read; it is not needed past this point
    ```
    `--lane` needs an existing directory. A task whose **worktree is already gone** (a
    retried teardown) has none — pass the main repo, and `--resolve-from` is then what
@@ -223,10 +227,15 @@ Rules:
      gates cleanup.
    - **exit 0, `action=skip`** → a close report for this task is already stored (`report=`
      and `report_recorded_at=` name it): a retry after a failed teardown. Note
-     "insights: already reported (`<id>`)" and go to step 7. The helper has already
-     excluded reports older than this lane's first commit (they belong to an earlier task
-     that reused the name, and it marks those `namesake=yes`), so a skip here means a
-     report that really does cover this task — there is nothing for you to second-guess.
+     "insights: already reported (`<id>`)" and go to step 7 — **but read
+     `namesake_filter=` first**:
+     - `applied` → reports older than this lane's first commit were excluded (marked
+       `namesake=yes`), so the skip really does cover this task. Nothing to second-guess.
+     - `unavailable` → the lane has no commit range to compare against, which is the
+       normal case on this very retry path: the worktree is gone, so the lane is the main
+       checkout and `main..HEAD` is empty. The filter did **not** run. Judge
+       `report_recorded_at=` yourself — if it predates this task, an older task reused the
+       name, so treat it as unreported and continue below instead of skipping.
      One caveat it reports rather than resolves: `malformed_store=` above 0 counts
      unreadable files across the whole store, not this task's.
    - **exit 0, `action=blocked`** → the bridge could not name this task, so a close report
