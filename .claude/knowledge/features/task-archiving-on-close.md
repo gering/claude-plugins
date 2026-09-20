@@ -4,7 +4,7 @@ createdAt: 2026-06-29
 updatedAt: 2026-09-20
 createdFrom: "PR #19"
 updatedFrom: "branch: task/integrate-insights-handoffs"
-pluginVersion: 1.9.0
+pluginVersion: 1.15.0
 prime: false
 reindexedAt: 2026-07-12
 ---

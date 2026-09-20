@@ -35,10 +35,12 @@ def check(name, cond):
 def run(*args, tmpdir=None):
     """Invoke archive-task.sh. `tmpdir` overrides $TMPDIR for the child.
 
-    The note-file location rule allows $TMPDIR, /tmp and the repo's tasks/. A
-    test tree built with tempfile lives under $TMPDIR, which would make that rule
-    vacuous — so the escape cases point $TMPDIR somewhere that does not exist and
-    assert the refusal that a real checkout (outside /tmp) would get.
+    The note-file location rule allows `${TMPDIR:-/tmp}` and the repo's tasks/.
+    A test tree built with tempfile lives under $TMPDIR (and on Linux CI that is
+    literally /tmp), so every escape case must point $TMPDIR at a directory
+    INSIDE the fixture and put the escape file outside it. Letting the child
+    inherit the real $TMPDIR made the whole fixture an allowed root, and the
+    refusal cases passed on macOS while failing on CI.
     """
     env = dict(os.environ)
     if tmpdir is not None:
@@ -532,11 +534,13 @@ with tempfile.TemporaryDirectory() as td:
     root = Path(td)
     repo = new_repo(root, "noterepo")
     (repo / "tasks").mkdir(exist_ok=True)
-    note = root / "note-insights.txt"
+    scratch = root / "scratch"
+    scratch.mkdir(exist_ok=True)
+    note = scratch / "note-insights.txt"
     note.write_text("insights report NOT saved (exit 4).\nSummary: did the thing.\n")
 
     (repo / "tasks" / "n1.md").write_text("# Note task\n\nbody\n")
-    r = run("archive", str(repo), "n1", "task/n1", "--pr", "7", "--note-file", str(note))
+    r = run("archive", str(repo), "n1", "task/n1", "--pr", "7", "--note-file", str(note), tmpdir=str(scratch))
     archived = repo / "tasks" / "archive" / "n1.md"
     text = archived.read_text() if archived.exists() else ""
     check("--note-file archives successfully", r.returncode == 0)
@@ -553,7 +557,7 @@ with tempfile.TemporaryDirectory() as td:
     # A bad --note-file is a usage error, and the task must still be there: a
     # half-archived task is worse than a lost note.
     (repo / "tasks" / "n3.md").write_text("# Guarded\n")
-    r = run("archive", str(repo), "n3", "task/n3", "--note-file", str(root / "note-missing"))
+    r = run("archive", str(repo), "n3", "task/n3", "--note-file", str(scratch / "note-missing"))
     check("a missing note file is a usage error", r.returncode == 2)
     check("a failed note leaves the task in place", (repo / "tasks" / "n3.md").exists())
 
@@ -569,9 +573,10 @@ with tempfile.TemporaryDirectory() as td:
         escape.symlink_to(outside)          # a symlinked PARENT, not the final name
         # Correctly named but pointing outside every allowed root, THROUGH a
         # symlinked parent — the exact bypass a last-component `[ -L ]` missed.
-        nowhere = str(root / "no-such-tmpdir")
+        scratch = root / "scratch"
+        scratch.mkdir(exist_ok=True)
         r = run("archive", str(repo), "n3", "task/n3",
-                "--note-file", str(escape / "note-secret"), tmpdir=nowhere)
+                "--note-file", str(escape / "note-secret"), tmpdir=str(scratch))
         check("a note escaping the allowed roots is refused", r.returncode == 2)
         check("the refusal names the RESOLVED path, not the symlink",
               str(outside) in r.stderr)
@@ -585,19 +590,19 @@ with tempfile.TemporaryDirectory() as td:
     # The final component gets its own check. Resolving only the PARENT left the
     # whole guard bypassable by a correctly-named symlink in an allowed root —
     # reproduced before the fix: the target's contents landed in the archive.
-    secret = root / "real-secret"
+    secret = scratch / "real-secret"
     secret.write_text("SUPER SECRET KEY MATERIAL\n")
-    sym = root / "note-symlinked"
+    sym = scratch / "note-symlinked"
     sym.symlink_to(secret)
     (repo / "tasks" / "s1.md").write_text("# S1\n")
-    r = run("archive", str(repo), "s1", "task/s1", "--note-file", str(sym))
+    r = run("archive", str(repo), "s1", "task/s1", "--note-file", str(sym), tmpdir=str(scratch))
     check("a symlink as the FINAL component is refused", r.returncode == 2)
     check("a refused symlink leaves the task in place", (repo / "tasks" / "s1.md").exists())
 
     # A hardlink has no symlink to detect, so the link count is what catches it.
-    hard = root / "note-hardlinked"
+    hard = scratch / "note-hardlinked"
     os.link(secret, hard)
-    r = run("archive", str(repo), "s1", "task/s1", "--note-file", str(hard))
+    r = run("archive", str(repo), "s1", "task/s1", "--note-file", str(hard), tmpdir=str(scratch))
     check("a hardlinked note is refused", r.returncode == 2)
     check("no archive anywhere contains the secret",
           not any("SUPER SECRET" in f.read_text()
@@ -606,13 +611,49 @@ with tempfile.TemporaryDirectory() as td:
     # `tr` is byte-oriented, so it clears C0 and DEL but a C1 control arrives
     # UTF-8-encoded (0xC2 0x80-0x9F) and survived it. 0x9B is an 8-bit CSI: a
     # `cat` of the committed archive would run it as a control sequence.
-    c1 = root / "note-c1.txt"
+    c1 = scratch / "note-c1.txt"
     c1.write_bytes(b"before \xc2\x9b after\n")
     (repo / "tasks" / "s2.md").write_text("# S2\n")
-    run("archive", str(repo), "s2", "task/s2", "--note-file", str(c1))
+    run("archive", str(repo), "s2", "task/s2", "--note-file", str(c1), tmpdir=str(scratch))
     archived_c1 = (repo / "tasks" / "archive" / "s2.md").read_bytes()
     check("C1 controls are stripped, not just C0 and DEL", b"\xc2\x9b" not in archived_c1)
     check("the surrounding text survives the C1 strip", b"before  after" in archived_c1)
+
+    # The 4 KiB bound must TRUNCATE, never abort. awk used to `exit` at the
+    # bound, which killed the upstream tr/sed with SIGPIPE; under pipefail that
+    # surfaced as "could not be read" and the archive was never written — so
+    # /close reported the note as lost. Only notes ABOVE the ~64 KiB pipe buffer
+    # show it, which is why the earlier 16 KiB fixture passed.
+    huge = scratch / "note-huge.txt"
+    huge.write_text(("z" * 90 + "\n") * 900)          # ~80 KiB, well past the buffer
+    (repo / "tasks" / "b1.md").write_text("# B1\n")
+    r = run("archive", str(repo), "b1", "task/b1", "--note-file", str(huge), tmpdir=str(scratch))
+    check("a note larger than the pipe buffer is truncated, not fatal", r.returncode == 0)
+    b1 = repo / "tasks" / "archive" / "b1.md"
+    check("the archive exists despite the oversized note", b1.is_file())
+    if b1.is_file():
+        quoted = [l for l in b1.read_text().splitlines() if l.startswith("> z")]
+        check("the huge note is bounded", sum(len(l) + 1 for l in quoted) <= 4096)
+        check("the huge note is not empty", quoted)
+
+    # A single line longer than the whole bound used to produce an empty block,
+    # and an empty block is refused — so a valid note was rejected outright.
+    longline = scratch / "note-longline.txt"
+    longline.write_text("y" * 9000 + "\n")
+    (repo / "tasks" / "b2.md").write_text("# B2\n")
+    r = run("archive", str(repo), "b2", "task/b2", "--note-file", str(longline), tmpdir=str(scratch))
+    check("a first line past the bound is truncated, not dropped", r.returncode == 0)
+    b2 = repo / "tasks" / "archive" / "b2.md"
+    check("the over-long line survives as a bounded line",
+          b2.is_file() and any(l.startswith("> y") for l in b2.read_text().splitlines()))
+
+    # A FIFO would block `exec 9<` forever, before the descriptor check could run.
+    fifo = scratch / "note-fifo"
+    os.mkfifo(fifo)
+    (repo / "tasks" / "b3.md").write_text("# B3\n")
+    r = run("archive", str(repo), "b3", "task/b3", "--note-file", str(fifo), tmpdir=str(scratch))
+    check("a FIFO note is refused rather than hanging", r.returncode == 2)
+    check("the FIFO refusal leaves the task in place", (repo / "tasks" / "b3.md").exists())
 
     # An existing file the caller merely points at is refused by the NAME rule,
     # which is what keeps the (broad) location rule meaningful.
@@ -622,9 +663,9 @@ with tempfile.TemporaryDirectory() as td:
 
     # Bounded AFTER quoting, and only whole quoted lines: `> ` adds two bytes per
     # line, so bounding the raw input let a ~3x larger block into the archive.
-    big = root / "note-big.txt"
+    big = scratch / "note-big.txt"
     big.write_text(("y" * 80 + "\n") * 200)
-    run("archive", str(repo), "n3", "task/n3", "--note-file", str(big))
+    run("archive", str(repo), "n3", "task/n3", "--note-file", str(big), tmpdir=str(scratch))
     quoted = [l for l in (repo / "tasks" / "archive" / "n3.md").read_text().splitlines()
               if l.startswith("> y")]
     check("the quoted block stays within the bound",
@@ -632,20 +673,20 @@ with tempfile.TemporaryDirectory() as td:
     check("the quoted block never ends mid-line", all(len(l) == 82 for l in quoted))
 
     # CR, DEL and C1 were left in by the earlier strip set, contradicting the doc.
-    ctl = root / "note-ctl.txt"
+    ctl = scratch / "note-ctl.txt"
     ctl.write_bytes(b"line one\r\nline\x7ftwo\n")
     (repo / "tasks" / "n4.md").write_text("# Ctl\n")
-    run("archive", str(repo), "n4", "task/n4", "--note-file", str(ctl))
+    run("archive", str(repo), "n4", "task/n4", "--note-file", str(ctl), tmpdir=str(scratch))
     ctl_text = (repo / "tasks" / "archive" / "n4.md").read_text()
     check("control characters are stripped, CR and DEL included",
           "\r" not in ctl_text and "\x7f" not in ctl_text and "> linetwo" in ctl_text)
 
     # A note that cannot be preserved must fail loudly: it is the last place the
     # observation exists, so a silent empty note is worse than an error.
-    empty = root / "note-empty.txt"
+    empty = scratch / "note-empty.txt"
     empty.write_text("")
     (repo / "tasks" / "n5.md").write_text("# Empty\n")
-    r = run("archive", str(repo), "n5", "task/n5", "--note-file", str(empty))
+    r = run("archive", str(repo), "n5", "task/n5", "--note-file", str(empty), tmpdir=str(scratch))
     check("an empty note is an error, not a silent success", r.returncode == 2)
     check("a failed note leaves the task in place (empty)", (repo / "tasks" / "n5.md").exists())
 

@@ -15,6 +15,11 @@ Subcommands:
   write FILE|- [--project-dir DIR] Fill report_id/recorded_at/project if absent,
         [--json]                   sanitize URLs, redact credentials, validate, publish atomically.
   validate FILE|- [--project-dir DIR]  Same fill + validation, never writes.
+  redact FILE|-                    Redact credentials in PLAIN TEXT (not a report):
+                                   strips control/bidi characters, applies the same
+                                   substitutions `write` does, prints the result.
+                                   For a producer that must keep text outside a report
+                                   (work-system's /close fallback note).
   read REPORT_ID                   Print one stored report (validated on read).
   list [--here|--project P] [--task T] [--trigger X] [--status S] [--limit N] [--json]
   store                            Print the resolved store directory and its source.

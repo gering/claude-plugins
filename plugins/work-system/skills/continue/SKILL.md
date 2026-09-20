@@ -377,6 +377,7 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
     ```sh
     bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" prepare handoff \
          --caller continue --lane "$PWD" --status <in_progress|blocked|aborted> [--pr <n>]
+    # "$PWD", not a pasted path: the worktree path is repo-derived like any other name.
     ```
     Pass the **lane directory**, never the task name or branch: a refname may legally
     contain `$(…)`, and double quotes do not suppress command substitution — the helper
@@ -401,7 +402,7 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
     the error. There is no fallback store here; `/close` attempts its own report later.
 
     **Fields this skill is the only one that can fill honestly** (field meanings: the
-    report contract at the `contract=` path `probe` prints):
+    report contract at the `contract=` path `prepare` printed above):
     - `task_status` is the *task's* state, not the trigger's. Reaching `reviewed-pr`
       is `in_progress`: the PR is open and reviewed, and the merge is still the human's
       decision. Only an actually finished task is `completed`.

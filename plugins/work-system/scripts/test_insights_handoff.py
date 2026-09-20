@@ -17,6 +17,7 @@ stays DATA), the exit-code mapping that keeps an unsaved report from reading as
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -402,9 +403,17 @@ with tempfile.TemporaryDirectory() as td:
     d = kv(r.stdout)
     check("a report predating the lane does not block a new close report",
           d.get("action") == "draft")
-    check("the stale namesake is still offered for linking",
-          stale["report_id"] in (d.get("related") or ""))
+    # It is reported — so a human can see it — but NOT linked: related_reports is
+    # a claim of relation, and a different task that merely reused the name is
+    # not this task's history.
+    check("the namesake is surfaced", stale["report_id"] in r.stdout)
+    check("the namesake is flagged as such", "namesake=yes" in r.stdout)
+    check("the namesake is not linked into the new report",
+          stale["report_id"] not in (d.get("related") or ""))
     if d.get("action") == "draft":
+        drafted = json.loads(Path(d["draft"]).read_text())
+        check("no namesake reaches related_reports in the draft",
+              stale["report_id"] not in drafted["work"]["related_reports"])
         os.unlink(d["draft"])
 
     # ---------------------------------------------------------------- redact
@@ -444,6 +453,16 @@ with tempfile.TemporaryDirectory() as td:
     check("a failed --in-place leaves the note unchanged",
           untouched.read_text() == "original content\n")
     check("a failed --in-place is not reported as success", r.returncode != 0)
+
+    # `rc=$?` taken after a closed `if` always read 0, so the invalid-vs-unusable
+    # mapping was dead and every failure came back as 4 ("installed but
+    # unusable") — blaming the plugin for a bad input.
+    badinput = tmp / "note-badutf8.txt"
+    badinput.write_bytes(b"\xff\xfe not utf-8\n")
+    r = run(real, "redact", str(badinput), "--in-place", store=store, home=home, cwd=proj)
+    check("a rejected input maps to exit 1, not 'plugin unusable'", r.returncode == 1)
+    check("a rejected --in-place leaves the file byte-identical",
+          badinput.read_bytes() == b"\xff\xfe not utf-8\n")
 
     # The cleanup trap was dead code: `f="$(mktemp_tracked)"` appended inside a
     # subshell, so the parent's array was always empty. Assert no stray temp
@@ -496,13 +515,22 @@ for label, text in (("close", step6b), ("continue", CONTINUE)):
           '--task "<task-name>"' not in text and "--task '<task-name>'" not in text)
 # Every flag the SKILLs prescribe must actually exist, or the model hits
 # `unknown option` (exit 2) on a path neither skill documents a branch for.
+# (This used to be a loop whose only statement was `continue` — zero assertions.)
 SCRIPT_TEXT = SCRIPT.read_text()
-for text in (CLOSE, CONTINUE):
-    for line in text.splitlines():
-        if "insights-handoff.sh" not in line and "--" not in line:
+FLAG_RE = re.compile(r"--[a-z][a-z-]+")
+KNOWN_NON_BRIDGE = {"--pr", "--json", "--jq", "--ff-only", "--quiet", "--short",
+                    "--sha", "--note-file", "--date", "--format", "--admin"}
+for label, text in (("close", CLOSE), ("continue", CONTINUE)):
+    # Join backslash-continued lines first: the SKILLs wrap their commands, and
+    # scanning raw lines saw only each command's first fragment.
+    for line in re.sub(r"\\\n\s*", " ", text).splitlines():
+        if "insights-handoff.sh" not in line:
             continue
-    # prepare is the only prescribed entry point; --related was documented once
-    # and never existed.
+        for flag in FLAG_RE.findall(line):
+            if flag in KNOWN_NON_BRIDGE:
+                continue
+            check(f"{label} prescribes {flag}, which the bridge accepts",
+                  f"{flag})" in SCRIPT_TEXT)
 check("no SKILL prescribes a --related flag",
       "--related" not in CLOSE and "--related" not in CONTINUE)
 check("--related is not a bridge flag either", "--related)" not in SCRIPT_TEXT)

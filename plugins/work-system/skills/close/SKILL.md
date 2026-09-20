@@ -190,13 +190,21 @@ Rules:
 
    **a) One call decides everything.** Do not paste the task name or branch into this
    command: a refname may legally contain `$(…)`, and double quotes do not suppress
-   command substitution. Pass the **worktree directory**; the helper derives the identity
-   itself.
+   command substitution. Pass a **directory** and let the helper derive the identity.
+
+   Assign the paths to shell variables in the same call rather than pasting them inline —
+   a worktree path is repo-derived too, and `"<worktree-path>"` in a command is the same
+   substitution hazard as the task name:
    ```sh
+   WT='<worktree-path>'; MAIN='<main-repo-path>'     # single quotes: no expansion
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" prepare close --caller close \
-        --lane "<worktree-path>" --project-dir "<main-repo-path>" \
+        --lane "${WT:-$MAIN}" --project-dir "$MAIN" \
         --status <completed|aborted|unknown> [--pr <pr_number>]
    ```
+   `--lane` needs an existing directory. A task with **no worktree** (step 4 found none,
+   or it was already removed) has none, so pass the main repo instead — that is what
+   `${WT:-$MAIN}` above does. A non-existent `--lane` is a usage error (**exit 2**): treat
+   it like exit 4 — one line in the summary, no report, cleanup continues.
    `--status` is the *task's* state, independent of the trigger: `completed` only when
    step 2 confirmed a merged PR, `aborted` when the user is closing unmerged/abandoned
    work, `unknown` otherwise. A report never makes a task look merged.
@@ -209,12 +217,13 @@ Rules:
      (<reason>) — no report written" — and continue. An unusable optional plugin never
      gates cleanup.
    - **exit 0, `action=skip`** → a close report for this task is already stored (`report=`
-     names it): a retry after a failed teardown. Note "insights: already reported (`<id>`)"
-     and go to step 7. Two caveats the helper prints rather than resolves: reports are
-     matched by task **name**, so an old report from a *reused* name can look like this
-     task's — check `recorded_at=`; and a `malformed_store=` above 0 counts unreadable
-     files across the whole store, not this task's. If the match is implausibly old, treat
-     it as unreported and continue below.
+     and `report_recorded_at=` name it): a retry after a failed teardown. Note
+     "insights: already reported (`<id>`)" and go to step 7. The helper has already
+     excluded reports older than this lane's first commit (they belong to an earlier task
+     that reused the name, and it marks those `namesake=yes`), so a skip here means a
+     report that really does cover this task — there is nothing for you to second-guess.
+     One caveat it reports rather than resolves: `malformed_store=` above 0 counts
+     unreadable files across the whole store, not this task's.
    - **exit 0, `action=draft`** → `draft=` is a private file holding a contract-complete
      skeleton with the observed facts already filled in. Any `related=` IDs are earlier
      manual/handoff reports, already linked in the draft — *linked*, never merged: a
@@ -623,8 +632,8 @@ no proof of origin, and a close is destructive (worktree removed, branch deleted
    that lane's session, so `reporter.role` is `manager`, `usage.completeness` is
    `partial`/`unknown` with that as the reason, and the worker's model, skills and
    friction stay unknown unless the worker left its own `handoff` report — link that one
-   — `prepare` finds and links it automatically (the `related=` line lists what it
-   linked); there is no flag for it. Never restate its content as your own observation. A repeat
+   `prepare` finds and links it automatically; the `related=` line lists what it linked,
+   and there is no flag for it. Never restate its content as your own observation. A repeat
    close-request for a task already reported writes nothing new.
 4. **The worker tab is a *different* tab**, so step 12 takes **Scenario A** (`close-tab` —
    closed once and verified) and the fragile self-close path is never used. That is the

@@ -43,8 +43,8 @@
 #       an argument or a heredoc, because it can carry free text.
 #       The note ends up in a file this repo may COMMIT AND PUSH (see the
 #       autocommit opt-in below), so the path is constrained twice over. It must
-#       (a) resolve — parents included — inside the caller's temp dir ($TMPDIR),
-#       /tmp, or the repo's tasks/, and (b) be NAMED `note-*`. The name rule is
+#       (a) resolve — parents included — inside the caller's temp dir
+#       (`${TMPDIR:-/tmp}`) or the repo's tasks/, and (b) be NAMED `note-*`. The name rule is
 #       what makes the location rule bite: a temp dir is broad, and on a checkout
 #       that itself lives under /tmp it would allow nearly everything. Together
 #       they mean the note must be a file the caller created for this purpose,
@@ -223,38 +223,81 @@ archive() {
       echo "--note-file must not be a symlink: $note_file" >&2
       exit 2
     fi
-    # A hardlink has no link to detect, so check the link count instead. BSD and
-    # GNU stat disagree on the flag; if neither works, the name and location rules
-    # still stand — degrade, don't block.
+    # A FIFO would block `exec 9<` forever, before any check on the descriptor
+    # could run. Refuse it by path first; a swap to a FIFO inside the window
+    # below is a hang, not a disclosure (see the residual note there).
+    if [ -p "$note_file" ]; then
+      echo "--note-file must not be a FIFO: $note_file" >&2
+      exit 2
+    fi
+    # A hardlink has no link to detect, so check the link count. BSD and GNU stat
+    # disagree on the flag; both default to lstat, which is what we want.
+    # FAIL CLOSED when neither works: this is a security check on an optional
+    # feature, and "assume 1" silently turns it off exactly where it matters.
     local note_links
-    note_links="$(stat -f %l "$note_file" 2>/dev/null || stat -c %h "$note_file" 2>/dev/null || echo 1)"
+    note_links="$(stat -f %l "$note_file" 2>/dev/null || stat -c %h "$note_file" 2>/dev/null || echo "")"
     case "$note_links" in
-      ''|*[!0-9]*) ;;
       1) ;;
+      ''|*[!0-9]*)
+         echo "--note-file: cannot determine the link count (no usable stat) — refusing rather than assuming it is not a hardlink" >&2
+         exit 2 ;;
       *) echo "--note-file must not be a hardlink (link count $note_links): $note_file" >&2
          exit 2 ;;
     esac
+    # Identity of the file we just vetted, by lstat (both stat variants default
+    # to it). Compared against the OPEN descriptor below, this is what makes the
+    # path checks stick: on their own they describe the path at check time, and
+    # nothing stopped a swap before the open. `/tmp` is an allowed root and is
+    # world-writable, so that window is reachable, not theoretical.
+    # INODE only, deliberately: `/dev/fd/N` reports the devfs node's device on
+    # macOS, not the underlying file's, so `%d` is not comparable across the two
+    # stat calls. Within one directory two distinct files cannot share an inode,
+    # and the path is already pinned to an allowed root, so the inode is the
+    # identity that matters here.
+    local note_ident
+    note_ident="$(stat -f '%i' "$note_file" 2>/dev/null || stat -c '%i' "$note_file" 2>/dev/null || echo "")"
     # -P resolves every symlink in the parent path. A path that does not resolve
     # at all is refused rather than retried unresolved.
     note_real="$(cd "$(dirname "$note_file")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$note_file")")" \
       || { echo "--note-file path does not resolve: $note_file" >&2; exit 2; }
-    for note_root in "${TMPDIR:-/tmp}" /tmp "$tasks_dir"; do
+    # `${TMPDIR:-/tmp}` already covers a host with no TMPDIR, so a SEPARATE literal
+    # `/tmp` root only widened the rule to a world-writable directory the caller
+    # never asked for — and made the refusal untestable wherever the test tree
+    # itself lives under /tmp (Linux CI), where it silently allowed everything.
+    for note_root in "${TMPDIR:-/tmp}" "$tasks_dir"; do
       [ -n "$note_root" ] || continue
       note_root="$(cd "$note_root" 2>/dev/null && pwd -P)" || continue
       case "$note_real" in "$note_root"/*) ok=yes; break ;; esac
     done
     if [ "$ok" != yes ]; then
-      echo "--note-file must resolve inside \$TMPDIR, /tmp or $tasks_dir (got: $note_real)" >&2
+      echo "--note-file must resolve inside \$TMPDIR (${TMPDIR:-/tmp}) or $tasks_dir (got: $note_real)" >&2
       exit 2
     fi
-    # One open, then validate THAT descriptor: a regular file, not a symlink
-    # target swapped in after the path check, not a FIFO that would block us.
+    # One open, then validate THAT descriptor — a regular file, and the SAME file
+    # the checks above vetted. `[ -f /dev/fd/9 ]` alone is not enough: it follows
+    # to whatever the descriptor points at, so a symlink swapped in after the
+    # `[ -L ]` test still passes it. Comparing device+inode is what closes that.
     exec 9<"$note_real" || { echo "--note-file could not be opened: $note_real" >&2; exit 2; }
     if [ ! -f /dev/fd/9 ]; then
       exec 9<&-
       echo "--note-file must be a regular file: $note_real" >&2
       exit 2
     fi
+    local fd_ident post_ident
+    fd_ident="$(stat -L -f '%i' /dev/fd/9 2>/dev/null || stat -L -c '%i' /dev/fd/9 2>/dev/null || echo "")"
+    # And the path must STILL name that same file: the fd check alone would pass
+    # if the swap happened before the open, since the descriptor then honestly
+    # describes the attacker's file.
+    post_ident="$(stat -f '%i' "$note_file" 2>/dev/null || stat -c '%i' "$note_file" 2>/dev/null || echo "")"
+    if [ -z "$note_ident" ] || [ -z "$fd_ident" ] \
+       || [ "$note_ident" != "$fd_ident" ] || [ "$note_ident" != "$post_ident" ]; then
+      exec 9<&-
+      echo "--note-file changed between the check and the open (vetted inode $note_ident, opened $fd_ident, path now $post_ident) — refusing" >&2
+      exit 2
+    fi
+    # RESIDUAL: a swap to a FIFO inside that same window makes the open above
+    # block. That is a hang of this one archive call, not a disclosure, and
+    # closing it needs O_NONBLOCK, which the shell cannot express.
     # Bound AFTER quoting, not before: `> ` adds two bytes per line, so a 4 KiB
     # raw cap let a ~3× larger block into the archive. The awk bound emits WHOLE
     # quoted lines only, so the block never ends in a half-quoted fragment the
@@ -268,11 +311,29 @@ archive() {
     # `pipefail` in a subshell (not the whole function): a failure in any stage
     # must be a hard error, because this note is the last place the observation
     # exists — a silently truncated or empty note is worse than a refusal.
+    #
+    # The awk stage must NEVER `exit` early. It did, and on any note larger than
+    # the pipe buffer (~64 KiB) the upstream `tr`/`sed` then died of SIGPIPE,
+    # which `pipefail` turned into "could not be read" — so the bound ABORTED the
+    # whole archive instead of truncating it, and /close went on to report the
+    # note as lost. Reproduced with an 80 KiB note; the old 16 KiB fixture fit the
+    # buffer and never showed it. So: stop printing, keep consuming.
+    #
+    # `LC_ALL=C` on awk too, so `length()` counts BYTES like every other stage —
+    # a character-counting awk made a multibyte note several times the intended
+    # size. A first line longer than the whole bound is truncated rather than
+    # dropped, which used to yield an empty block and a refused note.
     note_block="$( set -o pipefail
       LC_ALL=C tr -d '\000-\010\013-\037\177' <&9 \
       | LC_ALL=C sed $'s/\xc2[\x80-\x9f]//g' \
-      | sed 's/^/> /' \
-      | awk '{ n += length($0) + 1; if (n > 4096) exit; print }' )" \
+      | LC_ALL=C sed 's/^/> /' \
+      | LC_ALL=C awk -v lim=4096 '
+          done { next }
+          { if (n + length($0) + 1 > lim) {
+              if (n == 0) print substr($0, 1, lim - 1)
+              done = 1; next
+            }
+            n += length($0) + 1; print }' )" \
       || { exec 9<&-; echo "--note-file could not be read: $note_real" >&2; exit 2; }
     exec 9<&-
     if [ -z "$note_block" ]; then

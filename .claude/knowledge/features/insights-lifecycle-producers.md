@@ -4,7 +4,7 @@ createdAt: 2026-09-20
 updatedAt: 2026-09-20
 createdFrom: "branch: task/integrate-insights-handoffs"
 updatedFrom: "branch: task/integrate-insights-handoffs"
-pluginVersion: 1.9.0
+pluginVersion: 1.15.0
 prime: false
 ---
 
@@ -116,6 +116,28 @@ the merge is still the human's decision. Only an actually finished task is
 `aborted`. Nothing in a report marks a task merged, extends `MANDATE.md` (see
 [worker-autonomy-mandate](worker-autonomy-mandate.md)), or consumes a review
 round.
+
+## Guards that were bypassable, and how
+
+Each of these passed review once and was defeated in the next round:
+
+- **Resolving the parent is not resolving the path.** A `note-*` symlink sitting
+  in an allowed directory still had its target opened — correct name, correct
+  location, wrong file. And once the final component is checked, the check is
+  still path-based: the open must be verified against the *descriptor* (inode of
+  the fd vs. the inode lstat'ed before the open, plus the path still naming it).
+  `%d` is useless for that comparison on macOS, where `/dev/fd/N` reports the
+  devfs node's device rather than the file's.
+- **A redundant allowed root made the rule untestable.** `/tmp` was listed
+  alongside `${TMPDIR:-/tmp}`, which already covers it. On Linux the whole test
+  fixture lives under `/tmp`, so every "this must be refused" case silently
+  passed as allowed — the tests were green on macOS and would have been red in
+  CI. Removing the redundant root fixed the rule and the tests at once.
+- **A bound that aborts is not a bound.** The note's 4 KiB limit was an awk
+  `exit`, which SIGPIPE'd the upstream `tr`/`sed`; under `pipefail` that became
+  "could not be read" and killed the archive — so an oversized note destroyed the
+  very thing the note exists to preserve. Only notes past the ~64 KiB pipe buffer
+  show it. Stop printing, keep consuming.
 
 ## Three shell traps this code hit, each of which looked correct
 

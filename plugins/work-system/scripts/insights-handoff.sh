@@ -206,6 +206,17 @@ PY
 
 HELPER=""; HELPER_STATUS=""; HELPER_REASON=""
 
+# The contract ships beside the helper in every layout, so derive it from the
+# resolved path rather than rebuilding the plugin root a second way. One place:
+# both `probe` and `prepare` emit it, and two copies of a path expression is how
+# they end up disagreeing.
+emit_contract() {
+  [ -n "$HELPER" ] || return 0
+  local contract="${HELPER%/scripts/insights.py}/docs/REPORT-CONTRACT.md"
+  [ -f "$contract" ] && printf 'contract=%s\n' "$contract"
+  return 0
+}
+
 # Locate insights. This does NOT run it: `probe` adds a liveness call, but every
 # other subcommand makes a real helper call within milliseconds anyway and maps a
 # non-zero exit to `unusable` itself — a second python3 spawn per subcommand only
@@ -258,11 +269,16 @@ unusable() {
 }
 
 TRIGGERS="handoff close manual"
-valid_trigger() {
-  local t
-  for t in $TRIGGERS; do [ "$1" = "$t" ] && return 0; done
+# The report schema's task_status enum. `--pr` and `--trigger` are guarded and
+# this reaches the same report, so leaving it unchecked only moved the rejection
+# to `write`, where it reads as a bad draft rather than a bad call.
+STATUSES="in_progress blocked completed aborted unknown"
+in_set() {
+  local needle="$1" t; shift
+  for t in $@; do [ "$needle" = "$t" ] && return 0; done
   return 1
 }
+valid_trigger() { in_set "$1" $TRIGGERS; }
 
 # ------------------------------------------------------------------------- probe
 cmd_probe() {
@@ -282,12 +298,7 @@ cmd_probe() {
   printf 'status=%s\n' "$HELPER_STATUS"
   printf 'available=%s\n' "$([ "$HELPER_STATUS" = ok ] && echo yes || echo no)"
   printf 'helper=%s\n' "$HELPER"
-  # The contract sits next to the helper in every layout, so derive it from the
-  # resolved path rather than rebuilding the plugin root a second way.
-  if [ -n "$HELPER" ]; then
-    local contract="${HELPER%/scripts/insights.py}/docs/REPORT-CONTRACT.md"
-    [ -f "$contract" ] && printf 'contract=%s\n' "$contract"
-  fi
+  emit_contract
   [ -n "$HELPER_REASON" ] && printf 'reason=%s\n' "$HELPER_REASON"
   return "$EXIT_OK"
 }
@@ -362,6 +373,7 @@ cmd_prepare() {
   done
   [ -n "$caller" ] || die_usage "--caller is required (the skill producing this report)"
   [ -n "$lane" ] || die_usage "--lane is required (the worktree or repo the task lives in)"
+  [ -z "$status" ] || in_set "$status" $STATUSES || die_usage "--status must be one of: $STATUSES"
   [ -d "$lane" ] || die_usage "--lane is not a directory: $lane"
   # A bare number only. The value reaches a JSON field and a report; anything
   # else is a caller bug, and accepting it would put unvalidated text in a fact.
@@ -369,21 +381,23 @@ cmd_prepare() {
 
   require_helper
   printf 'status=ok\n'
-  # The SKILLs tell the model to read field semantics from the report contract
-  # and forbid deriving that path from work-system's own root (correct only in a
-  # dev checkout). `prepare` is the only command they run, so it must carry the
-  # path — otherwise the instruction names an output nothing produces.
-  local contract="${HELPER%/scripts/insights.py}/docs/REPORT-CONTRACT.md"
-  [ -f "$contract" ] && printf 'contract=%s\n' "$contract"
+  # The SKILLs read field semantics from the report contract and must not derive
+  # that path from work-system's own root (correct only in a dev checkout).
+  # `prepare` is the only command they run, so it carries the path.
+  emit_contract
 
   # Derive the lane's identity HERE rather than taking it as an argument: a task
   # name or refname may contain shell metacharacters, and a value the model pastes
   # into a command line is executed before this script ever sees it. The subshell
   # `cd` is scoped (cwd-safety rule) and task-status.sh reads the current branch.
-  local task="" branch="" resolved resolve_rc=0
+  local task="" branch="" main_branch="" resolved resolve_rc=0
   resolved="$( ( cd "$lane" 2>/dev/null && bash "$SCRIPT_DIR/task-status.sh" resolve ) 2>/dev/null )" || resolve_rc=$?
   task="$(printf '%s\n' "$resolved" | sed -n 's/^task_name=//p' | head -1)"
   branch="$(printf '%s\n' "$resolved" | sed -n 's/^task_branch=//p' | head -1)"
+  # task-status.sh already resolved the repo's default branch. Re-deriving it
+  # here (upstream → origin/HEAD → main → master) was a second, more fragile
+  # copy of a question this output had already answered.
+  main_branch="$(printf '%s\n' "$resolved" | sed -n 's/^main_branch=//p' | head -1)"
   printf 'task=%s\n' "$task"
   printf 'branch=%s\n' "$branch"
   # "The helper failed" and "this lane genuinely has no task" both produced an
@@ -394,69 +408,81 @@ cmd_prepare() {
       "$([ "$resolve_rc" -ne 0 ] && echo failed || echo none)"
   fi
 
-  # What this project already holds for the task. Without a name there is nothing
-  # to look up — that is a legitimate state (a lane with no task), not an error.
-  # A close report older than this lane's own first commit belongs to an earlier
-  # task that reused the name (the archive's -2/-3 suffixes exist because names
-  # DO get reused). Without this the skip was permanent: the new task's close
-  # report could never be written, and the comment claiming `recorded_at` told
-  # them apart was true of the output and false of the code.
+  # The lane's first commit off the default branch: a stored close report OLDER
+  # than that belongs to an earlier task that reused the name (the archive's
+  # -2/-3 suffixes exist because names DO get reused). Without it the skip was
+  # permanent and a new task could never get its own close report.
+  #
+  # Only `close` consumes this, and it costs a git log per call — so don't run it
+  # for a handoff or a manual report that will never look at the answer.
+  #
   # Formatted as real UTC `…Z`, matching a report's `recorded_at` EXACTLY.
-  # Three ways to get this wrong, all of which look right:
-  #   * `%cI` emits a local offset (`+02:00`); comparing that to a `Z` timestamp
-  #     as strings is not a chronological comparison at all.
-  #   * `--date=format:` renders in the COMMIT's own timezone, so appending a
-  #     literal `Z` produced a stamp that looked UTC and was two hours off.
-  #     `format-local:` with TZ=UTC is what actually converts.
-  #   * `--max-count` is applied BEFORE `--reverse`, so the oldest commit comes
-  #     from `tail -1`, never from `--reverse --max-count=1`.
-  # Try the upstream, then origin/HEAD, then the local default branch. The last
-  # fallback is not decoration: a purely local repo has neither of the first two,
-  # and without it the namesake check silently did nothing there — the failure
-  # mode it exists to fix, just quieter.
-  local lane_since="" lane_base="" cand
-  for cand in "$( ( cd "$lane" 2>/dev/null && git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null ) )" \
-              "$( ( cd "$lane" 2>/dev/null && git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null ) )" \
-              main master; do
-    [ -n "$cand" ] || continue
-    ( cd "$lane" 2>/dev/null && git rev-parse --verify --quiet "$cand" >/dev/null ) || continue
-    lane_base="$cand"; break
-  done
-  if [ -n "$lane_base" ]; then
-    lane_since="$( ( cd "$lane" 2>/dev/null \
-      && TZ=UTC git log --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ "$lane_base..HEAD" 2>/dev/null | tail -1 ) )" || lane_since=""
+  # `--date=format:` renders in the COMMIT's timezone, so appending a literal `Z`
+  # produced a stamp that looked UTC and was hours off; `format-local:` with
+  # TZ=UTC is what converts. (`%cI` has the same problem with its offset.)
+  # `--max-count` applies BEFORE `--reverse`, so the oldest commit is `tail -1`.
+  local lane_since=""
+  if [ "$trigger" = close ] && [ -n "$main_branch" ]; then
+    if ( cd "$lane" 2>/dev/null && git rev-parse --verify --quiet "$main_branch" >/dev/null ); then
+      lane_since="$( ( cd "$lane" 2>/dev/null \
+        && TZ=UTC git log --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ "$main_branch..HEAD" 2>/dev/null | tail -1 ) )" || lane_since=""
+    fi
   fi
-  # No resolvable lane start means we cannot rule out that an older report belongs
-  # to a namesake — so DON'T filter. Idempotency is the safer default: a missed
-  # duplicate is a stray record, a missed skip re-reports every retry.
+  # No resolvable lane start means we cannot rule out that an older report
+  # belongs to a namesake — so DON'T filter. Idempotency is the safer default: a
+  # missed duplicate is a stray record, a missed skip re-reports every retry.
 
   local related="" existing_close="" existing_close_at=""
   if [ -n "$task" ]; then
     list_reports "$task" "" "$project_dir" || unusable "insights.py list failed"
-    local parsed; parsed="$(emit_reports)" || exit "$EXIT_UNUSABLE"
-    printf '%s\n' "$parsed" | grep -v '^status=' || true
-    related="$(printf '%s\n' "$parsed" | sed -n 's/^report=\([^ ]*\) .*/\1/p' | tr '\n' ' ')"
-    # Read the decision out of the helper's JSON, not out of the line we just
-    # printed for a human: re-parsing our own display text couples the decision
-    # to its formatting.
-    local close_row
-    close_row="$(printf '%s' "$HELPER_OUT" | LANE_SINCE="$lane_since" python3 -c '
+    # ONE parse of the list JSON, emitting the display lines AND the decision.
+    # Two separate python passes over the same rows read them with different key
+    # assumptions and could disagree about what "the close report" was.
+    local parsed
+    parsed="$(printf '%s' "$HELPER_OUT" | LANE_SINCE="$lane_since" python3 -c '
 import json, os, sys
+
+# Schema cap on work.related_reports; linking more makes the draft invalid, and
+# a report rejected for an over-long link list is a lost retrospective.
+MAX_RELATED = 50
 since = os.environ.get("LANE_SINCE") or ""
+d = json.load(sys.stdin)
+rows = d["reports"]
+print("reports=%d" % len(rows))
+# STORE-GLOBAL: insights counts unreadable files before any project/task filter
+# can apply to them, because a file that will not parse has no task to filter on.
+print("malformed_store=%d" % len(d["malformed"]))
+
+def belongs(r):
+    # Same lexicographic-is-chronological compare as above, valid only because
+    # both sides are UTC "...Z" strings of the same shape.
+    return not (since and r["recorded_at"] < since)
+
 best = None
-for r in json.load(sys.stdin)["reports"]:
-    if r["report_trigger"] != "close":
-        continue
-    # Both sides are UTC `…Z` strings of the same shape, so a lexicographic
-    # compare IS a chronological one — which is only true because the caller
-    # formats git output as UTC rather than passing %cI through.
-    if since and r["recorded_at"] < since:
-        continue
-    if best is None or r["recorded_at"] > best["recorded_at"]:
-        best = r
+related = []
+for r in rows:
+    print("report=%s trigger=%s task_status=%s recorded_at=%s%s"
+          % (r["report_id"], r["report_trigger"], r["task_status"], r["recorded_at"],
+             "" if belongs(r) else " namesake=yes"))
+    # A report from an older task that merely reused the name is NOT this task
+    # history, so it is reported but not linked: related_reports is a claim of
+    # relation, and linking a stranger makes the claim false.
+    if belongs(r):
+        related.append(r["report_id"])
+    if r["report_trigger"] == "close" and belongs(r):
+        if best is None or r["recorded_at"] > best["recorded_at"]:
+            best = r
+if len(related) > MAX_RELATED:
+    print("related_dropped=%d" % (len(related) - MAX_RELATED))
+    related = related[-MAX_RELATED:]
+print("related=%s" % " ".join(related))
 if best:
-    print("%s %s" % (best["report_id"], best["recorded_at"]))
-' 2>/dev/null)" || close_row=""
+    print("close=%s %s" % (best["report_id"], best["recorded_at"]))
+' 2>/dev/null)" || unusable "could not parse insights list output"
+    printf '%s\n' "$parsed" | grep -v '^related=\|^close=' || true
+    related="$(printf '%s\n' "$parsed" | sed -n 's/^related=//p' | head -1)"
+    local close_row
+    close_row="$(printf '%s\n' "$parsed" | sed -n 's/^close=//p' | head -1)"
     existing_close="${close_row%% *}"
     existing_close_at="${close_row#* }"
   else
@@ -512,8 +538,7 @@ caller = os.environ["INS_CALLER"]
 # the dishonesty this report format exists to prevent.
 via = "task-status.sh resolve via work-system:%s" % caller
 # prepare runs `task-status.sh resolve`, which does NOT look up a PR: the number
-# arrives as the caller --pr argument. Naming a command this script never runs is
-# exactly the provenance dishonesty this report format exists to prevent.
+# arrives as the caller --pr argument.
 # (No apostrophes here — this python is embedded in a single-quoted shell string.)
 pr_via = "--pr argument supplied by work-system:%s" % caller
 
@@ -607,20 +632,33 @@ cmd_redact() {
   if [ "$in_place" = yes ]; then
     # Redact into a temp file and rename over the original only on success: a
     # failed pass must leave the ORIGINAL note intact, never a truncated one.
-    local out
+    local out pre post
     mktemp_tracked || { echo "could not create a temp file" >&2; return "$EXIT_UNUSABLE"; }
     out="$MKTEMP_OUT"
-    if bounded python3 "$HELPER" redact "$file" > "$out"; then
-      if mv "$out" "$file"; then
-        untrack "$out"
-        return "$EXIT_OK"
-      fi
-      echo "redacted copy could not replace $file — the note is unchanged" >&2
+    # Capture the helper's status DIRECTLY. Taking `rc=$?` after a closed `if`
+    # read the status of the `if` statement itself — always 0 — so the
+    # invalid-vs-unusable mapping below was dead code and every failure came back
+    # as "insights installed but unusable".
+    pre="$(stat -f '%i' "$file" 2>/dev/null || stat -c '%i' "$file" 2>/dev/null || echo "")"
+    rc=0
+    bounded python3 "$HELPER" redact "$file" > "$out" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo "redaction failed — $file is unchanged" >&2
+      case "$rc" in 1|2) return "$EXIT_INVALID" ;; *) return "$EXIT_UNUSABLE" ;; esac
+    fi
+    # The rename targets a path, and the note we just read may no longer be the
+    # file sitting there. Same check-to-use gap as archive-task.sh's note open.
+    post="$(stat -f '%i' "$file" 2>/dev/null || stat -c '%i' "$file" 2>/dev/null || echo "")"
+    if [ -z "$pre" ] || [ "$pre" != "$post" ]; then
+      echo "$file changed while it was being redacted — refusing to overwrite it" >&2
       return "$EXIT_UNUSABLE"
     fi
-    rc=$?
-    echo "redaction failed — $file is unchanged" >&2
-    case "$rc" in 1|2) return "$EXIT_INVALID" ;; *) return "$EXIT_UNUSABLE" ;; esac
+    if mv "$out" "$file"; then
+      untrack "$out"
+      return "$EXIT_OK"
+    fi
+    echo "redacted copy could not replace $file — the note is unchanged" >&2
+    return "$EXIT_UNUSABLE"
   fi
   bounded python3 "$HELPER" redact "$file" || rc=$?
   case "$rc" in
