@@ -105,6 +105,8 @@ EXIT_OK=0; EXIT_INVALID=1; EXIT_USAGE=2; EXIT_ABSENT=3; EXIT_UNUSABLE=4; EXIT_CO
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
 # shellcheck source=lib-bounded.sh
 [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/lib-bounded.sh" ] && . "$SCRIPT_DIR/lib-bounded.sh"
+# shellcheck source=lib-stat.sh
+[ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/lib-stat.sh" ] && . "$SCRIPT_DIR/lib-stat.sh"
 
 # Temp files hold helper stderr and skeleton drafts. Clean them on ANY exit,
 # including a signal: a draft is unredacted until insights.py touches it, and a
@@ -146,39 +148,6 @@ bounded() {
 }
 
 die_usage() { echo "$*" >&2; exit "$EXIT_USAGE"; }
-
-# Portable inode / link-count lookups. `stat` is not POSIX and the two common
-# implementations disagree on `-f`: BSD reads it as the format string, GNU as
-# --file-system. So `stat -f '%i' X || stat -c '%i' X` does NOT degrade cleanly —
-# on GNU the first call prints filesystem info for X (exit non-zero because the
-# format operand is not a path), and the fallback's real answer is appended to
-# that inside the same `$( )`. The caller then compares two multi-line strings
-# and refuses every note. Probe ONCE and pick the dialect instead.
-STAT_STYLE=""
-stat_style() {
-  [ -n "$STAT_STYLE" ] && { printf '%s' "$STAT_STYLE"; return 0; }
-  if stat --version >/dev/null 2>&1; then STAT_STYLE=gnu; else
-    if stat -f '%i' . >/dev/null 2>&1; then STAT_STYLE=bsd; else STAT_STYLE=none; fi
-  fi
-  printf '%s' "$STAT_STYLE"
-}
-
-# stat_field <inode|links> <path> [--deref] — prints the number, or nothing.
-stat_field() {
-  local what="$1" path="$2" deref="${3:-}" style
-  style="$(stat_style)"
-  case "$style:$what" in
-    gnu:inode) stat ${deref:+-L} -c '%i' -- "$path" 2>/dev/null ;;
-    gnu:links) stat ${deref:+-L} -c '%h' -- "$path" 2>/dev/null ;;
-    bsd:inode) stat ${deref:+-L} -f '%i' -- "$path" 2>/dev/null ;;
-    bsd:links) stat ${deref:+-L} -f '%l' -- "$path" 2>/dev/null ;;
-    *) return 0 ;;
-  esac
-  # Always succeed: the caller reads the VALUE (empty means unknown) and decides.
-  # Under `set -e` a failing substitution aborts the assignment itself, which
-  # turned a missing file into exit 1 instead of the caller's deliberate exit 2.
-  return 0
-}
 
 
 # --------------------------------------------------------------- locating insights

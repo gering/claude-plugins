@@ -202,6 +202,7 @@ Rules:
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" prepare close --caller close \
         --lane "<lane dir>" --project-dir "<main-repo-path>" --resolve-from "$TS" \
         --status <completed|aborted|unknown> [--pr <pr_number>]
+   rm -f "$TS"   # Clean up the temporary identity file after the bridge has read it
    ```
    `--lane` needs an existing directory. A task whose **worktree is already gone** (a
    retried teardown) has none — pass the main repo, and `--resolve-from` is then what
