@@ -1,10 +1,10 @@
 ---
 title: "Task Archiving on /close"
 createdAt: 2026-06-29
-updatedAt: 2026-07-24
+updatedAt: 2026-09-20
 createdFrom: "PR #19"
-updatedFrom: "session: 2026-07-24"
-pluginVersion: 1.10.0
+updatedFrom: "branch: task/integrate-insights-handoffs"
+pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -17,6 +17,14 @@ appends a one-line entry to an append-only `tasks/archive/_index.md` log. Ration
 `tasks/` is untracked by design (no git history to fall back on), so the old `rm`
 left a closed task gone for good. Archiving keeps finished-task context (goal,
 acceptance criteria, shipping PR) and turns the closed set into a queryable record.
+`--note-file` appends a short quoted block under that stamp, so the archived file
+doubles as the one durable handoff left after teardown — in practice an insights
+report that could not be stored (see
+[insights-lifecycle-producers](insights-lifecycle-producers.md)). It is bounded,
+control-character-stripped, and refused on a symlink or missing path *before* the
+task file is moved, because this archive may be committed and a half-archived task
+is worse than a lost note.
+
 Companion to [herdr-close-automation](herdr-close-automation.md) (the other half of `/close` cleanup);
 the worktree's `TASK.md` copy is deliberately *not* archived — see
 [worktree-task-file-copy](../architecture/worktree-task-file-copy.md).
