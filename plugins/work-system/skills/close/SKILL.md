@@ -230,9 +230,9 @@ Rules:
    work, `unknown` otherwise. A report never makes a task look merged.
 
    Fill the remaining fields from what is already in this session. Field meanings are in
-   the report contract at the `contract=` path `probe` printed — read it from there, never
-   from a guessed `${CLAUDE_PLUGIN_ROOT}/../insights/…`, which only resolves in a dev
-   checkout. **No questionnaire, no extra cost:** do not ask the user anything, and do not start a review, build, or
+   the report contract at the `contract=` path `probe` printed — read it from there. Never
+   build that path from this plugin's own root: it resolves only in a dev checkout, and in
+   the installed cache it points at nothing. **No questionnaire, no extra cost:** do not ask the user anything, and do not start a review, build, or
    extra model call to fill a field. Anything you did not observe stays
    `{"value": null, "reason": "…"}`.
    - `work.summary` must stand alone once the worktree and task file are gone.
@@ -609,6 +609,12 @@ no proof of origin, and a close is destructive (worktree removed, branch deleted
    verdict, same evidence, same questions. Nothing in the message substitutes for the
    merge gate: `pr=`/`branch=` are deliberately not part of the payload precisely so
    there is nothing to be tempted to trust.
+3b. **Step 6b reports the *Manager's* perspective, not the worker's.** You did not see
+   that lane's session, so `reporter.role` is `manager`, `usage.completeness` is
+   `partial`/`unknown` with that as the reason, and the worker's model, skills and
+   friction stay unknown unless the worker left its own `handoff` report — link that one
+   via `--related`, never restate its content as your own observation. A repeat
+   close-request for a task already reported writes nothing new.
 4. **The worker tab is a *different* tab**, so step 12 takes **Scenario A** (`close-tab` —
    closed once and verified) and the fragile self-close path is never used. That is the
    whole point of the delegation.

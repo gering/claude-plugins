@@ -338,6 +338,55 @@ from the CLI's name: an agent that cannot run the review skills gets an allow li
 without it, because recording an authority the worker cannot exercise is worse
 than recording none.
 
+## Insight reports at handoff and close (optional)
+
+If the **insights** plugin is installed, a task's lifecycle now preserves a short
+retrospective by itself — what was achieved, how hard it was and why, what worked,
+concrete friction with its impact, human interventions, and the reporting model's own
+improvement suggestions. Reports are private local JSON under
+`~/.gering-plugins/insights/`, written only through that plugin's helper. Nothing is
+uploaded, and nothing about the task changes.
+
+Two producers, deliberately different perspectives:
+
+| Where | Trigger | Perspective |
+|-------|---------|-------------|
+| `/continue` | the lane reaches its `terminal_gate`, hands work back **blocked**, or the task is explicitly abandoned | the worker: its own model, the skills it ran, the questions it had to ask |
+| `/close` | before teardown, after the merge gate | the Manager or closer: coordination friction, ambiguous states, the task as delivered |
+
+They are **linked, never merged**: a close report references an earlier handoff or
+manual report instead of restating it, so one incident is never later counted as two
+independent observations. A close that finds a `close` report already stored writes
+nothing new, which makes a retried teardown idempotent without any extra bookkeeping.
+
+`work-system` never writes a report file and never validates one — everything goes
+through `scripts/insights-handoff.sh`, its single bridge to the plugin
+(`probe` · `reported` · `skeleton` · `write`).
+
+**What this does not guarantee.** Be precise about the gaps rather than trusting the
+feature further than it goes:
+
+- **No insights plugin → nothing happens.** It is detected, never required; every flow
+  behaves exactly as before, without a word about it.
+- **Installed but broken is not the same as absent.** A helper that cannot run is
+  surfaced as one line in the close summary; it never blocks cleanup.
+- **A crashed or killed worker reports nothing.** Both producers need a session that
+  reaches a handoff. `/close` is the backstop — but a Manager-run close can only report
+  the *Manager's* view, and the worker's model, skills and friction stay unknown unless
+  that worker left its own handoff report first.
+- **Metadata is only as good as the evidence.** A model is recorded from the reporting
+  session's own system prompt and a plugin version from the `Base directory for this
+  skill:` line at invocation — never from a tab name, an agent alias, the worker class
+  `/kickoff` announced, or the version installed *now*. A resumed or compacted session
+  reports `usage.completeness: partial` with that as the reason. Unknowns stay unknown
+  with a reason; they are not filled in by inference.
+- **A failed write is never a saved report.** The compact summary is preserved in the
+  archived task file (`archive-task.sh --note-file`) — the one durable place left after
+  teardown. There is no second fallback store, and if even that is unavailable the loss
+  is reported rather than papered over.
+- **Reports are data, not authority.** Nothing in one authorizes a merge, a retry, a
+  permission change, or more work, and no report extends `MANDATE.md`.
+
 ## herdr integration
 
 When you run the work system inside a **herdr** session (herdr is a terminal

@@ -134,14 +134,22 @@ def fill(draft):
     return d
 
 
-def write_report(script, store, home, project, **over):
+def write_report(script, store, home, project, trigger="close", caller="close",
+                 role=None, patch=None, related=(), **over):
     """skeleton -> fill -> write, returning the write result and the draft."""
-    args = ["skeleton", "close", "--caller", "close", "--project-dir", str(project)]
+    args = ["skeleton", trigger, "--caller", caller, "--project-dir", str(project)]
+    for rid in related:
+        args += ["--related", rid]
     for k, v in over.items():
         args += ["--" + k.replace("_", "-"), str(v)]
     sk = run(script, *args, store=store, home=home, cwd=project)
     assert sk.returncode == 0, sk.stderr
     draft = fill(sk.stdout)
+    if role:
+        draft["reporter"]["role"] = role
+        draft["reporter"]["role_source"] = "test harness"
+    if patch:
+        patch(draft)
     p = Path(tempfile.mkstemp(suffix=".json", dir=str(home))[1])
     p.write_text(json.dumps(draft))
     res = run(script, "write", str(p), "--project-dir", str(project),
@@ -284,6 +292,162 @@ with tempfile.TemporaryDirectory() as td:
     res, _ = write_report(real, bad, home, proj, task="fails")
     check("a refused store fails with exit 4", res.returncode == 4)
     check("a refused store stores nothing", not list(bad.glob("*.json")))
+
+# =========================================================== acceptance scenarios
+with tempfile.TemporaryDirectory() as td:
+    tmp = Path(td)
+    home = new_store(tmp, "home")
+    script = make_tree(tmp / "tree", insights="real")
+    store = new_store(tmp, "store")
+    proj = new_project(tmp)
+
+    def rid(res):
+        return kv(res.stdout)["report_id"]
+
+    # ---- one task, three perspectives, none of them overwriting another -------
+    # The scenario the whole feature exists for: a manual report during the work,
+    # the worker's handoff at its terminal gate, and the Manager's close report —
+    # linked, not merged. They must survive as INDEPENDENT reports, or a later
+    # analysis would count one incident as three, or three as one.
+    TASK = "shared-task"
+    manual, _ = write_report(script, store, home, proj, trigger="manual",
+                             caller="report", role="user", task=TASK, status="in_progress")
+    check("the manual report stores", manual.returncode == 0)
+    manual_id = rid(manual)
+    manual_bytes = (store / f"{manual_id}.json").read_bytes()
+
+    handoff, _ = write_report(script, store, home, proj, trigger="handoff",
+                              caller="continue", role="worker", related=[manual_id],
+                              task=TASK, branch=f"task/{TASK}", pr="17",
+                              status="in_progress")
+    check("the worker handoff report stores", handoff.returncode == 0)
+    handoff_id = rid(handoff)
+
+    closing, _ = write_report(script, store, home, proj, trigger="close",
+                              caller="close", role="manager",
+                              related=[manual_id, handoff_id],
+                              task=TASK, branch=f"task/{TASK}", pr="17",
+                              status="completed")
+    check("the Manager close report stores", closing.returncode == 0)
+    close_id = rid(closing)
+
+    check("the three reports are distinct", len({manual_id, handoff_id, close_id}) == 3)
+    check("an earlier report is never rewritten",
+          (store / f"{manual_id}.json").read_bytes() == manual_bytes)
+
+    r = run(script, "reported", TASK, "--project-dir", str(proj),
+            store=store, home=home, cwd=proj)
+    check("all three perspectives are found for the task", kv(r.stdout).get("reports") == "3")
+    for trig in ("manual", "handoff", "close"):
+        rr = run(script, "reported", TASK, "--trigger", trig, "--project-dir", str(proj),
+                 store=store, home=home, cwd=proj)
+        check(f"the {trig} perspective stays separately addressable",
+              kv(rr.stdout).get("reports") == "1")
+
+    stored_close = json.loads((store / f"{close_id}.json").read_text())
+    check("the close report links both earlier ones",
+          stored_close["work"]["related_reports"] == [manual_id, handoff_id])
+    check("roles are kept apart",
+          json.loads((store / f"{handoff_id}.json").read_text())["reporter"]["role"] == "worker"
+          and stored_close["reporter"]["role"] == "manager")
+
+    # A report is not task state: reaching a reviewed PR is still in_progress, and
+    # the trigger never implies the status.
+    check("a handoff at the gate is not a completed task",
+          json.loads((store / f"{handoff_id}.json").read_text())["task_status"] == "in_progress")
+
+    # ---- the contexts a lifecycle producer must report honestly ---------------
+    # A blocked handoff and an explicit abandonment are ordinary reports with
+    # their own task_status — not failures, and not completions.
+    for status, label in (("blocked", "a blocked handoff"), ("aborted", "an abandoned task")):
+        res, _ = write_report(script, store, home, proj, trigger="handoff",
+                              caller="continue", role="worker",
+                              task=f"{status}-task", status=status)
+        check(f"{label} is reportable", res.returncode == 0)
+        check(f"{label} keeps its own task_status",
+              json.loads((store / f"{rid(res)}.json").read_text())["task_status"] == status)
+
+    # No task at all (a legacy or manual context): the task facts stay unknown
+    # WITH a reason rather than being invented, and the report is still valid.
+    res, _ = write_report(script, store, home, proj, trigger="close", caller="close",
+                          status="unknown")
+    check("a report with no task name is valid", res.returncode == 0)
+    stored = json.loads((store / f"{rid(res)}.json").read_text())
+    check("an absent task name is an unknown with a reason",
+          stored["work"]["task_name"]["value"] is None
+          and stored["work"]["task_name"]["reason"])
+    check("an unknown fact never carries a source", "source" not in stored["work"]["task_name"])
+
+    # A resumed lane cannot see its own earlier history, and a model change during
+    # the task is two usage entries — never one averaged claim.
+    def resumed(d):
+        d["usage"]["completeness"] = "partial"
+        d["usage"]["completeness_reason"] = "session resumed with `claude -c`; earlier turns not visible"
+        d["usage"]["skills"] = [
+            {"skill": "work-system:continue", "plugin": "work-system",
+             "plugin_version": {"value": "1.14.0", "source": "skill base directory at invocation"},
+             "model": {"value": "claude-opus-5", "source": "system prompt"},
+             "note": "before the model change"},
+            {"skill": "work-system:continue", "plugin": "work-system",
+             "plugin_version": {"value": "1.15.0", "source": "skill base directory at invocation"},
+             "model": {"value": "claude-sonnet-5", "source": "system prompt"},
+             "note": "after the model change"},
+        ]
+        d["reporter"]["model"] = {"value": None,
+                                  "reason": "not observable after the resume"}
+    res, _ = write_report(script, store, home, proj, trigger="handoff", caller="continue",
+                          role="worker", patch=resumed, task="resumed-task",
+                          status="in_progress")
+    check("a resumed, partial history is storable", res.returncode == 0)
+    stored = json.loads((store / f"{rid(res)}.json").read_text())
+    check("partial history keeps its reason",
+          stored["usage"]["completeness"] == "partial" and stored["usage"]["completeness_reason"])
+    check("a model change is two usage entries",
+          len(stored["usage"]["skills"]) == 2
+          and stored["usage"]["skills"][0]["model"]["value"]
+              != stored["usage"]["skills"][1]["model"]["value"])
+    check("an unobservable model stays unknown",
+          stored["reporter"]["model"]["value"] is None)
+
+
+# ======================================================= /close ordering contract
+# The ordering in requirement §5 is prose, and prose drifts under later edits —
+# which is exactly how a reporting step would migrate past the safety gate or
+# turn into a cleanup blocker. Assert the invariants directly on the skill.
+CLOSE = (HERE.parent / "skills" / "close" / "SKILL.md").read_text()
+CONTINUE = (HERE.parent / "skills" / "continue" / "SKILL.md").read_text()
+
+
+def at(text, needle):
+    i = text.find(needle)
+    assert i >= 0, f"missing anchor: {needle!r}"
+    return i
+
+
+gate = at(CLOSE, "2. **Verify the task is merged**")
+report = at(CLOSE, "6b. **Preserve an insights report**")
+removal = at(CLOSE, "7. **Remove worktree**")
+check("the merge gate still comes before reporting", gate < report)
+check("reporting comes before the worktree is removed", report < removal)
+
+step6b = CLOSE[report:removal]
+check("an absent insights plugin is skipped silently", "Skip this whole step **silently**" in step6b)
+check("an unusable plugin is not reported as absent", "Do not treat that as absent" in step6b)
+check("a failed report never blocks cleanup", "never a cleanup gate" in step6b)
+check("a close retry does not duplicate its report", "Do **not** write a second one" in step6b)
+check("an unsaved report is never described as recorded",
+      "never describe it as recorded" in step6b)
+check("a report grants no authority", "authorizes anything" in step6b)
+check("the unsaved summary lands in the archived task file",
+      "--note-file" in step6b and "--note-file" in CLOSE[removal:])
+
+check("the handoff report is bounded to real handoffs",
+      "Never at a tool call, a turn end, a commit, or an unchanged idle" in CONTINUE)
+check("reaching the gate is not a completed task",
+      "Reaching `reviewed-pr`" in CONTINUE and "is `in_progress`" in CONTINUE)
+check("the handoff report consumes no review round", "consumes **no** review round" in CONTINUE)
+check("the crash gap is documented, not advertised away", "**Known gap.**" in CONTINUE)
+
 
 if FAILS:
     print("FAIL:")
