@@ -361,6 +361,65 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
      not changed since the last pass is never worth a round; a new concern about
      unchanged code is, and should say so.
 
+10. **Record a handoff report when you hand the work back** — optional plugin, no
+    approval, no cost beyond what you already know.
+
+    **When.** Exactly at a *meaningful handoff*, while the friction, the review
+    rounds and the questions are still in context:
+    - you reached the recorded `terminal_gate` (step 8) and the decision is now the
+      human's;
+    - you are handing the work back **blocked** — say what is unresolved;
+    - the task is **explicitly abandoned**.
+
+    **When not.** Never at a tool call, a turn end, a commit, or an unchanged idle
+    state. One report per arrival at a handoff — if a `handoff` report already exists
+    and nothing has happened since (no new commits, no new review round), do not
+    write a duplicate. A *later* arrival after real further work is a genuine new
+    observation: write a new report and link the earlier one.
+
+    ```sh
+    bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" probe
+    bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" reported "<task-name>"
+    bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" skeleton handoff --caller continue \
+         --task "<task-name>" --branch "<task-branch>" --status <in_progress|blocked|aborted> \
+         [--pr <n>] [--related <id>]...
+    ```
+    `status=absent` → skip silently; `status=unusable` → one line saying so, then
+    continue. Both leave the lane exactly as it is today. Fill the draft, save it with
+    the **Write tool** into your scratchpad (never a heredoc — report text can contain
+    user input), then `insights-handoff.sh write '<draft file>'` and `rm` the draft
+    immediately, saved or not. Exit 0 → name the `report_id`. Exit 1 → fix the fields
+    stderr names and retry at most twice. Exit 3/4 or a third failure → say plainly
+    that **nothing was saved** and show the error. There is no fallback store here;
+    `/close` will attempt its own report later, which is the actual backstop.
+
+    **Fields this skill is the only one that can fill honestly** (field meanings: the
+    report contract at the `contract=` path `probe` printed):
+    - `task_status` is the *task's* state, not the trigger's. Reaching `reviewed-pr`
+      is `in_progress`: the PR is open and reviewed, and the merge is still the
+      human's decision. Only an actually finished task is `completed`.
+    - `reporter.role: worker`; `reporter.model` = your own model ID from your system
+      prompt, never an alias, tab name, or the worker class `/kickoff` announced.
+    - `usage.skills` = the skills invoked **in this session**, each at the version in
+      its `Base directory for this skill:` line. After a `claude -c` resume or a
+      compaction, `usage.completeness` is `partial`/`unknown` with that as the reason —
+      a resumed lane genuinely cannot see its own earlier history.
+    - `plugin_details.work-system.questions`: questions you had to ask. Classify an
+      `avoidable_repeat` only when the answer really was already available (the
+      mandate, TASK.md, this conversation) — name which, in `mandate_source`.
+    - `plugin_details.pr-flow.review_rounds` / `plugin_details.swarm`: from evidence
+      already in hand. Never re-run a review to fill a field.
+
+    **What the report is not.** It records; it changes nothing. It does not complete
+    the task, does not extend or reinterpret `MANDATE.md`, does not authorize a merge
+    or another round, and it consumes **no** review round. Writing one is part of the
+    lane work the user already authorized, so it adds no question of its own.
+
+    **Known gap.** This step needs a session that reaches a handoff. A worker that
+    crashes, is killed, or exits without one writes nothing — `/close` step 6b is the
+    guaranteed report for the task, and a Manager-run close can only report the
+    Manager's own perspective.
+
 ## Remember
 
 - Check project CLAUDE.md and rules for project-specific checks and conventions

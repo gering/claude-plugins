@@ -29,11 +29,21 @@
 #
 # Subcommands:
 #   archive <main-repo-path> <task-name> <task-branch> [--pr <n>] [--sha <sha>]
+#           [--note-file <path>]
 #       Move <main-repo>/tasks/<name>.md → tasks/archive/<name>.md with a stamp,
 #       and append an _index.md line. With --pr the stamp records a merged PR (and
 #       --sha its merge commit, shortened — an empty or literal "null" sha = no
 #       sha); without --pr it records a manual close. On a name collision the file
 #       is suffixed -2, -3, … (never clobbered).
+#       --note-file appends the file's text as a blockquote under the stamp. It
+#       exists so /close can preserve a short handoff note in the one durable
+#       place left after teardown — in practice: an insights report that could
+#       NOT be stored (see the insights plugin's report contract), so the
+#       observation is not lost with the worktree. The note travels as a FILE, never
+#       an argument or a heredoc, because it can carry free text. It is bounded to
+#       4 KiB and stripped of control characters: this archive may be committed,
+#       so it takes a compact agent-authored summary, never a full report draft,
+#       verbatim user feedback, or credentials.
 #   commit-push <main-repo-path> <task-name> <archived-rel-path> <main-branch>
 #       After /close's user approval: stage exactly the archive change (the new
 #       file when not gitignored, _index.md, and the original's removal when
@@ -121,18 +131,19 @@ lit() { printf ':(literal)%s' "$1"; }
 archive() {
   local repo="${1:-}" name="${2:-}" branch="${3:-}"
   if [ -z "$repo" ] || [ -z "$name" ] || [ -z "$branch" ]; then
-    echo "usage: ${0##*/} archive <main-repo-path> <task-name> <task-branch> [--pr <n>] [--sha <sha>]" >&2
+    echo "usage: ${0##*/} archive <main-repo-path> <task-name> <task-branch> [--pr <n>] [--sha <sha>] [--note-file <path>]" >&2
     exit 2
   fi
   shift 3 || true
 
-  local pr="" sha=""
+  local pr="" sha="" note_file=""
   while [ $# -gt 0 ]; do
     case "$1" in
       # Require a value: a bare trailing `--pr` must error, not silently fall
       # through to a "closed manually" stamp on a genuinely merged task.
       --pr)  [ $# -ge 2 ] || { echo "--pr needs a value" >&2; exit 2; }; pr="$2";  shift 2 ;;
       --sha) [ $# -ge 2 ] || { echo "--sha needs a value" >&2; exit 2; }; sha="$2"; shift 2 ;;
+      --note-file) [ $# -ge 2 ] || { echo "--note-file needs a value" >&2; exit 2; }; note_file="$2"; shift 2 ;;
       *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
   done
@@ -168,6 +179,22 @@ archive() {
   local date; date="$(date +%F 2>/dev/null || echo unknown)"
   local stamp="> Archived $date · $mid · $branch"
 
+  # The note is rendered here so a bad --note-file fails BEFORE the source file is
+  # touched: a usage error must never leave a half-archived task. Symlinks are
+  # refused for the same reason the autocommit flag refuses them — the path is
+  # supplied by a caller, and following it could read an arbitrary file into a
+  # committable archive.
+  local note_block=""
+  if [ -n "$note_file" ]; then
+    if [ ! -f "$note_file" ] || [ -L "$note_file" ]; then
+      echo "--note-file must be an existing regular file: $note_file" >&2
+      exit 2
+    fi
+    note_block="$(head -c 4096 "$note_file" 2>/dev/null \
+      | tr -d '\000-\010\013\014\016-\037' \
+      | sed 's/^/> /')" || note_block=""
+  fi
+
   # Title for the index line: the document title is the FIRST non-blank line when it
   # is an ATX heading ('#'-run THEN a space). Looking only at the first non-blank
   # line (not any '#' line anywhere, which grep would catch inside a leading code
@@ -191,7 +218,15 @@ archive() {
     echo "failed to create a temp file in $tasks_dir/archive" >&2
     exit 1
   fi
-  if ! { printf '%s\n\n' "$stamp"; cat "$src"; } > "$tmp"; then
+  # An `if` (not `stamp && note`): under `set -e` a false test in an AND-list
+  # inside this group would abort the whole write.
+  emit_stamped() {
+    printf '%s\n' "$stamp"
+    if [ -n "$note_block" ]; then printf '>\n%s\n' "$note_block"; fi
+    printf '\n'
+    cat "$src"
+  }
+  if ! emit_stamped > "$tmp"; then
     rm -f "$tmp" 2>/dev/null || true
     echo "failed to write archive $dest" >&2
     exit 1

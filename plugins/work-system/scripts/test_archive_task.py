@@ -510,6 +510,55 @@ with tempfile.TemporaryDirectory() as tmp:
           "x-decoy-1.md" in git(grepo, "status", "--porcelain").stdout)
 
 
+# ---------------------------------------------------------------- --note-file
+# /close preserves a short handoff note (in practice: an insights report that
+# could not be stored) in the archived task file — the one durable place left
+# once the worktree is gone. The guards matter because this archive may be
+# committed: a caller-supplied path must not be followed through a symlink, and
+# a bad path must fail BEFORE the task file is moved.
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    repo = new_repo(root, "noterepo")
+    (repo / "tasks").mkdir(exist_ok=True)
+    note = root / "note.txt"
+    note.write_text("insights report NOT saved (exit 4).\nSummary: did the thing.\n")
+
+    (repo / "tasks" / "n1.md").write_text("# Note task\n\nbody\n")
+    r = run("archive", str(repo), "n1", "task/n1", "--pr", "7", "--note-file", str(note))
+    archived = repo / "tasks" / "archive" / "n1.md"
+    text = archived.read_text() if archived.exists() else ""
+    check("--note-file archives successfully", r.returncode == 0)
+    check("the note is quoted under the stamp", "> insights report NOT saved (exit 4)." in text)
+    check("the stamp still leads the file", text.startswith("> Archived "))
+    check("the task body survives the note", text.rstrip().endswith("body"))
+
+    (repo / "tasks" / "n2.md").write_text("# Plain\n\nbody\n")
+    run("archive", str(repo), "n2", "task/n2")
+    check("without a note the stamp is unchanged",
+          (repo / "tasks" / "archive" / "n2.md").read_text().startswith("> Archived ")
+          and ">\n>" not in (repo / "tasks" / "archive" / "n2.md").read_text())
+
+    # A bad --note-file is a usage error, and the task must still be there: a
+    # half-archived task is worse than a lost note.
+    (repo / "tasks" / "n3.md").write_text("# Guarded\n")
+    r = run("archive", str(repo), "n3", "task/n3", "--note-file", str(root / "missing"))
+    check("a missing note file is a usage error", r.returncode == 2)
+    check("a failed note leaves the task in place", (repo / "tasks" / "n3.md").exists())
+
+    link = root / "link.txt"
+    link.symlink_to(note)
+    r = run("archive", str(repo), "n3", "task/n3", "--note-file", str(link))
+    check("a symlinked note file is refused", r.returncode == 2)
+    check("a refused symlink leaves the task in place", (repo / "tasks" / "n3.md").exists())
+
+    # Bounded: a runaway note must not bloat a committable archive.
+    big = root / "big.txt"
+    big.write_text("x" * 20000)
+    run("archive", str(repo), "n3", "task/n3", "--note-file", str(big))
+    big_text = (repo / "tasks" / "archive" / "n3.md").read_text()
+    check("an oversized note is truncated", big_text.count("x") <= 4096)
+
+
 if FAILS:
     print("FAIL:")
     for f in FAILS:
