@@ -382,8 +382,10 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
     contain `$(…)`, and double quotes do not suppress command substitution — the helper
     derives the identity itself. Exit **3** → insights is not installed, skip silently.
     Exit **4** → installed but unusable, say so in one line and continue. Exit **0** →
-    `draft=` holds a contract-complete skeleton, and `related=` lists earlier reports for
-    this task (already linked in the draft).
+    `draft=` holds a contract-complete skeleton, `contract=` is where the field meanings
+    live (read it from there, never from a path built out of this plugin's root), and
+    `related=` lists earlier reports for this task, which `prepare` has already linked in
+    the draft — there is no flag to link them by hand.
 
     **Duplicate handoffs are yours to judge** — `prepare` auto-skips only a repeated
     *close*. If `related=` already names a `handoff` report and nothing has happened since

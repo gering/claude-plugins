@@ -582,6 +582,38 @@ with tempfile.TemporaryDirectory() as td:
     finally:
         shutil.rmtree(outside, ignore_errors=True)
 
+    # The final component gets its own check. Resolving only the PARENT left the
+    # whole guard bypassable by a correctly-named symlink in an allowed root —
+    # reproduced before the fix: the target's contents landed in the archive.
+    secret = root / "real-secret"
+    secret.write_text("SUPER SECRET KEY MATERIAL\n")
+    sym = root / "note-symlinked"
+    sym.symlink_to(secret)
+    (repo / "tasks" / "s1.md").write_text("# S1\n")
+    r = run("archive", str(repo), "s1", "task/s1", "--note-file", str(sym))
+    check("a symlink as the FINAL component is refused", r.returncode == 2)
+    check("a refused symlink leaves the task in place", (repo / "tasks" / "s1.md").exists())
+
+    # A hardlink has no symlink to detect, so the link count is what catches it.
+    hard = root / "note-hardlinked"
+    os.link(secret, hard)
+    r = run("archive", str(repo), "s1", "task/s1", "--note-file", str(hard))
+    check("a hardlinked note is refused", r.returncode == 2)
+    check("no archive anywhere contains the secret",
+          not any("SUPER SECRET" in f.read_text()
+                  for f in (repo / "tasks" / "archive").glob("*.md")))
+
+    # `tr` is byte-oriented, so it clears C0 and DEL but a C1 control arrives
+    # UTF-8-encoded (0xC2 0x80-0x9F) and survived it. 0x9B is an 8-bit CSI: a
+    # `cat` of the committed archive would run it as a control sequence.
+    c1 = root / "note-c1.txt"
+    c1.write_bytes(b"before \xc2\x9b after\n")
+    (repo / "tasks" / "s2.md").write_text("# S2\n")
+    run("archive", str(repo), "s2", "task/s2", "--note-file", str(c1))
+    archived_c1 = (repo / "tasks" / "archive" / "s2.md").read_bytes()
+    check("C1 controls are stripped, not just C0 and DEL", b"\xc2\x9b" not in archived_c1)
+    check("the surrounding text survives the C1 strip", b"before  after" in archived_c1)
+
     # An existing file the caller merely points at is refused by the NAME rule,
     # which is what keeps the (broad) location rule meaningful.
     r = run("archive", str(repo), "n3", "task/n3", "--note-file", str(repo / "README.md"))

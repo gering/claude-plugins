@@ -107,6 +107,13 @@ def new_project(root, name="proj", branch=None):
     git(d, "commit", "-qm", "init")
     if branch:
         git(d, "checkout", "-q", "-b", branch)
+        # A real lane has commits on its branch, and the namesake check needs
+        # them: the lane's start is its first commit off the default branch. A
+        # branch with nothing on it has no resolvable start, which correctly
+        # falls back to "cannot rule out a namesake, so still skip".
+        (d / "work.txt").write_text("lane work\n")
+        git(d, "add", "-A")
+        git(d, "commit", "-qm", "lane work")
     return d
 
 
@@ -369,6 +376,37 @@ with tempfile.TemporaryDirectory() as td:
     check("a refused store fails with exit 4", res.returncode == 4)
     check("a refused store stores nothing", not list(badstore.glob("*.json")))
 
+    # ------------------------------------------------- a reused task name
+    # The skip used to be permanent: any stored close report for the NAME won,
+    # so a new task reusing an archived name could never get its own report.
+    # A report older than this lane's first commit belongs to the namesake.
+    reused = new_project(tmp, "reused-proj", branch="task/reissue")
+    res, _ = prepare_and_write(real, store, home, reused, trigger="close", status="completed")
+    check("the first close of a name stores", res.returncode == 0)
+    old_id = kv(res.stdout)["report_id"]
+
+    _, info = prepare_and_write(real, store, home, reused, trigger="close", status="completed")
+    check("an immediate retry still skips", info.get("action") == "skip")
+    check("the skip shows the timestamp it judged by", "report_recorded_at" in info)
+
+    # Rewrite the stored report as if it came from an earlier task of the same
+    # name, then re-run: the lane's commits are newer, so it must NOT skip.
+    stale = json.loads((store / f"{old_id}.json").read_text())
+    (store / f"{old_id}.json").unlink()
+    stale["report_id"] = stale["report_id"].replace("ins-2026", "ins-2020")
+    stale["recorded_at"] = "2020-01-01T00:00:00Z"
+    (store / f"{stale['report_id']}.json").write_text(json.dumps(stale, indent=2))
+    r = run(real, "prepare", "close", "--caller", "close", "--lane", str(reused),
+            "--project-dir", str(reused), "--status", "completed",
+            store=store, home=home, cwd=reused)
+    d = kv(r.stdout)
+    check("a report predating the lane does not block a new close report",
+          d.get("action") == "draft")
+    check("the stale namesake is still offered for linking",
+          stale["report_id"] in (d.get("related") or ""))
+    if d.get("action") == "draft":
+        os.unlink(d["draft"])
+
     # ---------------------------------------------------------------- redact
     # The /close fallback note is not a report, but it lands in a file this repo
     # may commit and push — so it goes through insights' own patterns, not prose.
@@ -381,6 +419,40 @@ with tempfile.TemporaryDirectory() as td:
     check("redact reports how much it replaced", "redactions=1" in r.stderr)
     check("redact is unavailable when insights is absent",
           run(absent, "redact", str(note), home=home).returncode == 3)
+
+    # Refusing on a control character left the caller with UNREDACTED text — the
+    # one input where redaction matters most. It strips instead.
+    ctl = tmp / "note-ctl.txt"
+    ctl.write_text("tok sk-ant-0123456789abcdefghijklmno\x01end\n")
+    r = run(real, "redact", str(ctl), store=store, home=home, cwd=proj)
+    check("a control character no longer disables redaction", r.returncode == 0)
+    check("the credential is still removed", "sk-ant-0123" not in r.stdout)
+    check("the control character is stripped", "\x01" not in r.stdout)
+
+    # --in-place exists so the SKILL does not spell out a redirect-then-rename at
+    # the one moment the note is the last copy of the observation.
+    inplace = tmp / "note-inplace.txt"
+    inplace.write_text("keep this. sk-ant-0123456789abcdefghijklmno\n")
+    r = run(real, "redact", str(inplace), "--in-place", store=store, home=home, cwd=proj)
+    check("--in-place exits 0", r.returncode == 0)
+    check("--in-place rewrites the file", "sk-ant-0123" not in inplace.read_text())
+    check("--in-place keeps the rest of the note", "keep this." in inplace.read_text())
+    # A failed pass must leave the ORIGINAL intact, never a truncated one.
+    untouched = tmp / "note-untouched.txt"
+    untouched.write_text("original content\n")
+    r = run(broken, "redact", str(untouched), "--in-place", home=home)
+    check("a failed --in-place leaves the note unchanged",
+          untouched.read_text() == "original content\n")
+    check("a failed --in-place is not reported as success", r.returncode != 0)
+
+    # The cleanup trap was dead code: `f="$(mktemp_tracked)"` appended inside a
+    # subshell, so the parent's array was always empty. Assert no stray temp
+    # files survive a run that creates several.
+    before = set(Path(os.environ.get("TMPDIR", "/tmp")).glob("insights-handoff.*"))
+    run(real, "reported", "some-task", "--project-dir", str(proj),
+        store=store, home=home, cwd=proj)
+    after = set(Path(os.environ.get("TMPDIR", "/tmp")).glob("insights-handoff.*"))
+    check("the bridge leaves no temp files behind", after <= before)
 
 
 # ======================================================= /close ordering contract
@@ -413,13 +485,31 @@ check("the unsaved summary is redacted before it can be committed",
       "redact" in step6b)
 check("the unsaved summary lands in the archived task file",
       "--note-file" in step6b and "--note-file" in CLOSE[removal:])
-# The lane's identity is DERIVED, never pasted: a refname may contain `$(...)`.
-check("close passes a lane, not a task name", "--lane" in step6b)
-check("close never pastes a repo-derived name into a command",
-      '--task "<task-name>"' not in CLOSE)
-check("continue passes a lane, not a task name", "--lane" in CONTINUE)
-check("continue never pastes a repo-derived name into a command",
-      '--task "<task-name>"' not in CONTINUE)
+# The lane's identity is DERIVED, never pasted: a refname may legally contain
+# `$(...)`. Scoped to the INSIGHTS calls, which is all this change controls — the
+# pre-existing archive-task.sh invocation in step 10 still interpolates
+# `<task-name>`/`<task-branch>` and predates this feature; claiming otherwise here
+# would assert a guarantee the repo does not have.
+for label, text in (("close", step6b), ("continue", CONTINUE)):
+    check(f"{label} passes a lane to the bridge, not a task name", "--lane" in text)
+    check(f"{label} never pastes a repo-derived name into a bridge call",
+          '--task "<task-name>"' not in text and "--task '<task-name>'" not in text)
+# Every flag the SKILLs prescribe must actually exist, or the model hits
+# `unknown option` (exit 2) on a path neither skill documents a branch for.
+SCRIPT_TEXT = SCRIPT.read_text()
+for text in (CLOSE, CONTINUE):
+    for line in text.splitlines():
+        if "insights-handoff.sh" not in line and "--" not in line:
+            continue
+    # prepare is the only prescribed entry point; --related was documented once
+    # and never existed.
+check("no SKILL prescribes a --related flag",
+      "--related" not in CLOSE and "--related" not in CONTINUE)
+check("--related is not a bridge flag either", "--related)" not in SCRIPT_TEXT)
+check("--in-place is what the SKILLs prescribe for redaction",
+      "--in-place" in CLOSE and "--in-place)" in SCRIPT_TEXT)
+check("a failed redaction never archives the note",
+      "must **not** archive it" in CLOSE)
 
 check("the handoff report is bounded to real handoffs",
       "Never at a tool call, a turn end, a commit, or an unchanged idle" in CONTINUE)

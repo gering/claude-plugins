@@ -824,24 +824,36 @@ REDACTION_EXEMPT = {"schema", "report_id", "recorded_at", "project", "branch", "
 MAX_REDACTION_PASSES = 5
 
 
-def redact_secrets(report) -> int:
-    """Replace credential shapes in free-text strings, in place; return the count.
+def scrub_text(text):
+    """Redact credential shapes in one string. Returns (text, replacements).
 
     Repeats until nothing changes: one substitution can remove a character that
     was blocking another pattern, and the validator re-checks with the same set.
+
+    The single implementation. `redact` used to carry its own copy of this loop,
+    which meant the two could drift in algorithm while both claimed to apply
+    "the same substitutions" — only the patterns were actually shared.
     """
+    count = 0
+    for _ in range(MAX_REDACTION_PASSES):
+        changed = 0
+        for rx, repl in SECRET_SUBS:
+            text, n = rx.subn(repl, text)
+            changed += n
+        count += changed
+        if not changed:
+            break
+    return text, count
+
+
+def redact_secrets(report) -> int:
+    """Replace credential shapes in free-text strings, in place; return the count."""
     count = 0
 
     def scrub(text):
         nonlocal count
-        for _ in range(MAX_REDACTION_PASSES):
-            changed = 0
-            for rx, repl in SECRET_SUBS:
-                text, n = rx.subn(repl, text)
-                changed += n
-            count += changed
-            if not changed:
-                break
+        text, n = scrub_text(text)
+        count += n
         return text
 
     def walk(val, key=None):
@@ -1235,24 +1247,17 @@ def cmd_redact(args) -> int:
     except UnicodeDecodeError as e:
         print(f"{args.input}: not valid UTF-8 ({e})", file=sys.stderr)
         return EXIT_INVALID
-    # Same refusal as a report's: control characters and bidi overrides can make
-    # the rendered text differ from what is stored. CTRL_RE covers both.
-    if CTRL_RE.search(text):
-        print(f"{args.input}: contains control characters or bidi overrides", file=sys.stderr)
-        return EXIT_INVALID
-    count = 0
-    for _ in range(MAX_REDACTION_PASSES):
-        changed = 0
-        for rx, repl in SECRET_SUBS:
-            text, n = rx.subn(repl, text)
-            changed += n
-        count += changed
-        if not changed:
-            break
+    # STRIP control characters and bidi overrides rather than refusing the file.
+    # A report is rejected because a bad report should not be stored; this text
+    # is a note whose only alternative is being used UNREDACTED, so a single CR
+    # or bidi override would have disabled redaction exactly when the input is
+    # least trustworthy. Stripping keeps the output usable and safe.
+    text, stripped = CTRL_RE.subn("", text)
+    text, count = scrub_text(text)
     sys.stdout.write(text)
     if not text.endswith("\n"):
         sys.stdout.write("\n")
-    print(f"redactions={count}", file=sys.stderr)
+    print(f"redactions={count} stripped={stripped}", file=sys.stderr)
     return EXIT_OK
 
 

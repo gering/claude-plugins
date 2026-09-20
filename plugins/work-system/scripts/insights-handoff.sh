@@ -40,7 +40,7 @@
 #       only correct in the dev layout, and in the marketplace cache
 #       (…/<plugin>/<version>/) it silently points at nothing.
 #   prepare <handoff|close|manual> --caller <skill> --lane <dir> [--project-dir DIR]
-#           [--pr <n>] [--status <task-status>] [--out <file>]
+#           [--pr <n>] [--status <task-status>]
 #       Everything a producer needs, in one call: resolve insights, derive the
 #       lane's task name and branch via task-status.sh, look up what this project
 #       already has for that task, and — unless there is nothing to do — leave a
@@ -51,9 +51,13 @@
 #       only want to know what exists.
 #   write <draft-file> [--project-dir DIR]
 #       Store a finished draft.
-#   redact <file>
+#   redact <file> [--in-place]
 #       Run insights' own credential redaction over a plain text file, printing
-#       the redacted text. For the one thing that is NOT a report: the compact
+#       the redacted text, or rewriting the file when --in-place is given.
+#       --in-place exists so the caller does not have to perform a
+#       redirect-then-rename ritual by hand at the one moment when that file is
+#       the last surviving copy of the observation: a `> file.tmp && mv` written
+#       out as prose loses the note whenever any step of it goes wrong. For the one thing that is NOT a report: the compact
 #       summary /close preserves in the archived task file when a write failed.
 #       That archive can be committed and pushed, and "the model was told not to
 #       paste a secret" is not a boundary. Redaction lives in insights (one set of
@@ -92,12 +96,29 @@ TMPFILES=()
 cleanup() { [ ${#TMPFILES[@]} -gt 0 ] && rm -f "${TMPFILES[@]}" 2>/dev/null; return 0; }
 trap cleanup EXIT INT TERM HUP
 
+# Returns the path in MKTEMP_OUT, NOT on stdout. Every caller used
+# `f="$(mktemp_tracked)"`, and a command substitution runs in a SUBSHELL — so the
+# `TMPFILES+=` landed in a child that exited immediately and the trap above was
+# cleaning an array that was always empty. Verified: the parent's array stayed at
+# length 0. A global out-parameter is ugly; a cleanup trap that silently does
+# nothing is worse.
+MKTEMP_OUT=""
 mktemp_tracked() {
-  local f
-  f="$(mktemp "${TMPDIR:-/tmp}/insights-handoff.XXXXXX")" || return 1
-  chmod 600 "$f" 2>/dev/null || true
-  TMPFILES+=("$f")
-  printf '%s\n' "$f"
+  MKTEMP_OUT="$(mktemp "${TMPDIR:-/tmp}/insights-handoff.XXXXXX")" || return 1
+  chmod 600 "$MKTEMP_OUT" 2>/dev/null || true
+  TMPFILES+=("$MKTEMP_OUT")
+}
+
+# Drop one path from the tracked set. `TMPFILES=("${TMPFILES[@]/$p}")` looks like
+# removal but is per-element SUBSTRING substitution: the entry becomes an empty
+# string that stays in the array, and any other path containing this one as a
+# substring is silently mangled into a different path the trap would then delete.
+untrack() {
+  local keep=() t
+  for t in ${TMPFILES[@]+"${TMPFILES[@]}"}; do
+    [ "$t" = "$1" ] || keep+=("$t")
+  done
+  TMPFILES=(${keep[@]+"${keep[@]}"})
 }
 
 # A local helper call that wedges must not hang a /close. Without lib-bounded.sh
@@ -223,10 +244,11 @@ require_helper() {
 HELPER_OUT=""; HELPER_ERR=""
 call_helper() {
   local errf rc=0
-  errf="$(mktemp_tracked)" || { HELPER_ERR="could not create a temp file"; return 1; }
+  mktemp_tracked || { HELPER_ERR="could not create a temp file"; return 1; }
+  errf="$MKTEMP_OUT"
   HELPER_OUT="$(bounded python3 "$HELPER" "$@" 2>"$errf")" || rc=$?
   HELPER_ERR="$(tr '\n' ' ' < "$errf")"
-  rm -f "$errf"
+  rm -f "$errf"; untrack "$errf"
   return "$rc"
 }
 
@@ -324,7 +346,7 @@ for r in d["reports"]:
 
 # ----------------------------------------------------------------------- prepare
 cmd_prepare() {
-  local trigger="" caller="" lane="" project_dir="" pr="" status="" out=""
+  local trigger="" caller="" lane="" project_dir="" pr="" status=""
   [ $# -ge 1 ] && { trigger="$1"; shift; }
   valid_trigger "$trigger" \
     || die_usage "usage: ${0##*/} prepare <$(echo $TRIGGERS | tr ' ' '|')> --caller <skill> --lane <dir> [...]"
@@ -335,7 +357,6 @@ cmd_prepare() {
       --project-dir) [ $# -ge 2 ] || die_usage "--project-dir needs a value"; project_dir="$2"; shift 2 ;;
       --pr)          [ $# -ge 2 ] || die_usage "--pr needs a value";          pr="$2";          shift 2 ;;
       --status)      [ $# -ge 2 ] || die_usage "--status needs a value";      status="$2";      shift 2 ;;
-      --out)         [ $# -ge 2 ] || die_usage "--out needs a value";         out="$2";         shift 2 ;;
       *) die_usage "unknown option: $1" ;;
     esac
   done
@@ -348,27 +369,96 @@ cmd_prepare() {
 
   require_helper
   printf 'status=ok\n'
+  # The SKILLs tell the model to read field semantics from the report contract
+  # and forbid deriving that path from work-system's own root (correct only in a
+  # dev checkout). `prepare` is the only command they run, so it must carry the
+  # path — otherwise the instruction names an output nothing produces.
+  local contract="${HELPER%/scripts/insights.py}/docs/REPORT-CONTRACT.md"
+  [ -f "$contract" ] && printf 'contract=%s\n' "$contract"
 
   # Derive the lane's identity HERE rather than taking it as an argument: a task
   # name or refname may contain shell metacharacters, and a value the model pastes
   # into a command line is executed before this script ever sees it. The subshell
   # `cd` is scoped (cwd-safety rule) and task-status.sh reads the current branch.
-  local task="" branch="" resolved
-  resolved="$( ( cd "$lane" 2>/dev/null && bash "$SCRIPT_DIR/task-status.sh" resolve ) 2>/dev/null )" || resolved=""
+  local task="" branch="" resolved resolve_rc=0
+  resolved="$( ( cd "$lane" 2>/dev/null && bash "$SCRIPT_DIR/task-status.sh" resolve ) 2>/dev/null )" || resolve_rc=$?
   task="$(printf '%s\n' "$resolved" | sed -n 's/^task_name=//p' | head -1)"
   branch="$(printf '%s\n' "$resolved" | sed -n 's/^task_branch=//p' | head -1)"
   printf 'task=%s\n' "$task"
   printf 'branch=%s\n' "$branch"
+  # "The helper failed" and "this lane genuinely has no task" both produced an
+  # empty name, and the idempotency lookup below silently skipped — so a
+  # transient git error looked like a task that had never been reported.
+  if [ "$resolve_rc" -ne 0 ] || [ -z "$task" ]; then
+    printf 'task_resolution=%s\n' \
+      "$([ "$resolve_rc" -ne 0 ] && echo failed || echo none)"
+  fi
 
   # What this project already holds for the task. Without a name there is nothing
   # to look up — that is a legitimate state (a lane with no task), not an error.
-  local related="" existing_close=""
+  # A close report older than this lane's own first commit belongs to an earlier
+  # task that reused the name (the archive's -2/-3 suffixes exist because names
+  # DO get reused). Without this the skip was permanent: the new task's close
+  # report could never be written, and the comment claiming `recorded_at` told
+  # them apart was true of the output and false of the code.
+  # Formatted as real UTC `…Z`, matching a report's `recorded_at` EXACTLY.
+  # Three ways to get this wrong, all of which look right:
+  #   * `%cI` emits a local offset (`+02:00`); comparing that to a `Z` timestamp
+  #     as strings is not a chronological comparison at all.
+  #   * `--date=format:` renders in the COMMIT's own timezone, so appending a
+  #     literal `Z` produced a stamp that looked UTC and was two hours off.
+  #     `format-local:` with TZ=UTC is what actually converts.
+  #   * `--max-count` is applied BEFORE `--reverse`, so the oldest commit comes
+  #     from `tail -1`, never from `--reverse --max-count=1`.
+  # Try the upstream, then origin/HEAD, then the local default branch. The last
+  # fallback is not decoration: a purely local repo has neither of the first two,
+  # and without it the namesake check silently did nothing there — the failure
+  # mode it exists to fix, just quieter.
+  local lane_since="" lane_base="" cand
+  for cand in "$( ( cd "$lane" 2>/dev/null && git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null ) )" \
+              "$( ( cd "$lane" 2>/dev/null && git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null ) )" \
+              main master; do
+    [ -n "$cand" ] || continue
+    ( cd "$lane" 2>/dev/null && git rev-parse --verify --quiet "$cand" >/dev/null ) || continue
+    lane_base="$cand"; break
+  done
+  if [ -n "$lane_base" ]; then
+    lane_since="$( ( cd "$lane" 2>/dev/null \
+      && TZ=UTC git log --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ "$lane_base..HEAD" 2>/dev/null | tail -1 ) )" || lane_since=""
+  fi
+  # No resolvable lane start means we cannot rule out that an older report belongs
+  # to a namesake — so DON'T filter. Idempotency is the safer default: a missed
+  # duplicate is a stray record, a missed skip re-reports every retry.
+
+  local related="" existing_close="" existing_close_at=""
   if [ -n "$task" ]; then
     list_reports "$task" "" "$project_dir" || unusable "insights.py list failed"
     local parsed; parsed="$(emit_reports)" || exit "$EXIT_UNUSABLE"
     printf '%s\n' "$parsed" | grep -v '^status=' || true
     related="$(printf '%s\n' "$parsed" | sed -n 's/^report=\([^ ]*\) .*/\1/p' | tr '\n' ' ')"
-    existing_close="$(printf '%s\n' "$parsed" | sed -n 's/^report=\([^ ]*\) trigger=close .*/\1/p' | head -1)"
+    # Read the decision out of the helper's JSON, not out of the line we just
+    # printed for a human: re-parsing our own display text couples the decision
+    # to its formatting.
+    local close_row
+    close_row="$(printf '%s' "$HELPER_OUT" | LANE_SINCE="$lane_since" python3 -c '
+import json, os, sys
+since = os.environ.get("LANE_SINCE") or ""
+best = None
+for r in json.load(sys.stdin)["reports"]:
+    if r["report_trigger"] != "close":
+        continue
+    # Both sides are UTC `…Z` strings of the same shape, so a lexicographic
+    # compare IS a chronological one — which is only true because the caller
+    # formats git output as UTC rather than passing %cI through.
+    if since and r["recorded_at"] < since:
+        continue
+    if best is None or r["recorded_at"] > best["recorded_at"]:
+        best = r
+if best:
+    print("%s %s" % (best["report_id"], best["recorded_at"]))
+' 2>/dev/null)" || close_row=""
+    existing_close="${close_row%% *}"
+    existing_close_at="${close_row#* }"
   else
     printf 'reports=0\nmalformed_store=unknown\n'
   fi
@@ -385,7 +475,8 @@ cmd_prepare() {
   # Neither is worth a lock or a second identity: a duplicate report is a
   # harmless extra record, and inventing a run id was ruled out by design.
   if [ "$trigger" = close ] && [ -n "$existing_close" ]; then
-    printf 'action=skip\nreason=a close report for this task is already stored\nreport=%s\n' "$existing_close"
+    printf 'action=skip\nreason=a close report for this task is already stored\nreport=%s\nreport_recorded_at=%s\n' \
+      "$existing_close" "$existing_close_at"
     return "$EXIT_OK"
   fi
 
@@ -393,13 +484,15 @@ cmd_prepare() {
   [ -n "$project_dir" ] && args+=(--project-dir "$project_dir")
   call_helper "${args[@]}" || unusable "insights.py skeleton failed"
 
-  local draft="$out"
-  if [ -z "$draft" ]; then
-    draft="$(mktemp_tracked)" || { echo "could not create a draft file" >&2; exit "$EXIT_UNUSABLE"; }
-    # The caller writes the finished draft and removes it; do not delete it from
-    # under them on exit.
-    TMPFILES=("${TMPFILES[@]/$draft}")
-  fi
+  # The draft path is always ours. An earlier `--out` let the caller name it,
+  # with none of the name/location/symlink guards this script applies elsewhere —
+  # a redirection that truncates whatever it is pointed at. Nothing needed it.
+  local draft
+  mktemp_tracked || { echo "could not create a draft file" >&2; exit "$EXIT_UNUSABLE"; }
+  draft="$MKTEMP_OUT"
+  # The caller writes the finished draft and removes it; do not delete it from
+  # under them on exit.
+  untrack "$draft"
 
   # Overlay the lifecycle facts work-system genuinely observed, each with the
   # source it came from. insights.py's own skeleton derives task hints from the
@@ -418,7 +511,11 @@ caller = os.environ["INS_CALLER"]
 # the PR number, because "the source names a command that never ran" is exactly
 # the dishonesty this report format exists to prevent.
 via = "task-status.sh resolve via work-system:%s" % caller
-pr_via = "task-status.sh assess (gh pr list --head) via work-system:%s" % caller
+# prepare runs `task-status.sh resolve`, which does NOT look up a PR: the number
+# arrives as the caller --pr argument. Naming a command this script never runs is
+# exactly the provenance dishonesty this report format exists to prevent.
+# (No apostrophes here — this python is embedded in a single-quoted shell string.)
+pr_via = "--pr argument supplied by work-system:%s" % caller
 
 def fact(field, value, source):
     if value:
@@ -493,19 +590,45 @@ cmd_write() {
 
 # ------------------------------------------------------------------------ redact
 cmd_redact() {
-  local file=""
+  local file="" in_place=no
   [ $# -ge 1 ] && { file="$1"; shift; }
-  [ $# -eq 0 ] || die_usage "usage: ${0##*/} redact <file>"
-  [ -n "$file" ] || die_usage "usage: ${0##*/} redact <file>"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --in-place) in_place=yes; shift ;;
+      *) die_usage "unknown option: $1" ;;
+    esac
+  done
+  [ -n "$file" ] || die_usage "usage: ${0##*/} redact <file> [--in-place]"
   [ -e "$file" ] || die_usage "no file at $file"
   [ -L "$file" ] && die_usage "file must not be a symlink: $file"
   [ -f "$file" ] || die_usage "file must be a regular file: $file"
   require_helper
   local rc=0
+  if [ "$in_place" = yes ]; then
+    # Redact into a temp file and rename over the original only on success: a
+    # failed pass must leave the ORIGINAL note intact, never a truncated one.
+    local out
+    mktemp_tracked || { echo "could not create a temp file" >&2; return "$EXIT_UNUSABLE"; }
+    out="$MKTEMP_OUT"
+    if bounded python3 "$HELPER" redact "$file" > "$out"; then
+      if mv "$out" "$file"; then
+        untrack "$out"
+        return "$EXIT_OK"
+      fi
+      echo "redacted copy could not replace $file — the note is unchanged" >&2
+      return "$EXIT_UNUSABLE"
+    fi
+    rc=$?
+    echo "redaction failed — $file is unchanged" >&2
+    case "$rc" in 1|2) return "$EXIT_INVALID" ;; *) return "$EXIT_UNUSABLE" ;; esac
+  fi
   bounded python3 "$HELPER" redact "$file" || rc=$?
   case "$rc" in
     0) return "$EXIT_OK" ;;
     1) return "$EXIT_INVALID" ;;
+    # Same mapping as cmd_write: the helper's usage exit (unreadable or oversize
+    # input) is a problem with what we handed it, not a broken plugin.
+    2) return "$EXIT_INVALID" ;;
     *) return "$EXIT_UNUSABLE" ;;
   esac
 }

@@ -221,8 +221,9 @@ Rules:
      worker's handoff report and this close report are two perspectives, not two copies.
 
    **b) Fill the draft** (edit the file at `draft=` with the Write tool). Field meanings
-   are in the report contract at the `contract=` path `probe` prints — read it from there.
-   Never build that path from this plugin's own root: it resolves only in a dev checkout.
+   are in the report contract at the `contract=` path the call above printed — read it
+   from there. Never build that path from this plugin's own root: it resolves only in a
+   dev checkout, and in an installed copy it points at nothing.
    **No questionnaire, no extra cost:** do not ask the user anything, and do not start a
    review, build, or extra model call to fill a field. Anything you did not observe stays
    `{"value": null, "reason": "…"}`.
@@ -246,13 +247,17 @@ Rules:
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" write '<draft file>' \
         --project-dir "<main-repo-path>"
    ```
-   **Always `rm` the draft right after this call, saved or not** — it is unredacted until
-   the helper touches it. Outcomes:
+   Outcomes:
    - **0** (`status=stored`/`unchanged`) → note `insights: report <id>` in the summary.
-   - **1** (rejected — nothing saved) → fix exactly the fields stderr names, rewrite the
-     draft, retry **at most twice**.
+   - **1** (rejected — nothing saved) → fix exactly the fields stderr names in the SAME
+     draft file and retry **at most twice**.
    - **4** (storage failure), **5** (a different report already holds this ID), or a third
      rejection → **not saved**. Do not retry further and never describe it as recorded.
+
+   **`rm` the draft once you are done with it** — after a success, or after the last
+   retry. It holds unredacted report text until the helper stores it, so it must not
+   outlive this step; deleting it *before* the retry above would throw away the very file
+   you were told to fix.
 
    **d) When nothing was saved** — the observation must not vanish with the worktree:
    1. Write a **compact** note (Write tool) into your scratchpad, named `note-<something>`
@@ -262,11 +267,11 @@ Rules:
    2. Redact it mechanically — the archive it lands in may be committed and pushed, and
       "I was careful" is not a boundary:
       ```sh
-      bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" redact '<note file>' \
-           > '<note file>.tmp' && mv '<note file>.tmp' '<note file>'
+      bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" redact '<note file>' --in-place
       ```
-      If that exits non-zero, shorten the note to a single sentence you wrote yourself and
-      use it unredacted — never fall back to pasting helper output.
+      On a non-zero exit the note is left **unchanged** and you must **not** archive it:
+      drop the `--note-file` flag and report the summary as lost. Never archive text that
+      failed redaction — that is the one path where a secret would reach a commit.
    3. Pass it to step 10's archive call as `--note-file`. It must be named `note-*` and
       resolve inside your scratchpad (`$TMPDIR`), `/tmp`, or the repo's `tasks/`; any
       other location, a symlink escaping those, or an empty note is refused (exit 2) and
@@ -618,7 +623,8 @@ no proof of origin, and a close is destructive (worktree removed, branch deleted
    that lane's session, so `reporter.role` is `manager`, `usage.completeness` is
    `partial`/`unknown` with that as the reason, and the worker's model, skills and
    friction stay unknown unless the worker left its own `handoff` report — link that one
-   via `--related`, never restate its content as your own observation. A repeat
+   — `prepare` finds and links it automatically (the `related=` line lists what it
+   linked); there is no flag for it. Never restate its content as your own observation. A repeat
    close-request for a task already reported writes nothing new.
 4. **The worker tab is a *different* tab**, so step 12 takes **Scenario A** (`close-tab` —
    closed once and verified) and the fragile self-close path is never used. That is the

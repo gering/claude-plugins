@@ -49,10 +49,13 @@
 #       that itself lives under /tmp it would allow nearly everything. Together
 #       they mean the note must be a file the caller created for this purpose,
 #       never an existing one it merely points at (`~/.ssh/id_rsa`, `/repo/.env`).
-#       The content is then read through an ALREADY-OPEN descriptor, so a swap
-#       between check and read is impossible. Testing `[ -L ]` on the last
-#       component was not enough — it says nothing about a symlinked PARENT or a
-#       hardlink.
+#       BOTH ends of the path are checked, because each alone was bypassable:
+#       resolving only the PARENT let `ln -s ~/.ssh/id_rsa /tmp/note-leak` through
+#       (correct name, allowed directory, symlinked final component), and testing
+#       only the final component said nothing about a symlinked parent. A hardlink
+#       is refused too (st_nlink > 1) — it has no symlink to detect. The content
+#       is then read through an ALREADY-OPEN descriptor, so a swap between check
+#       and read is impossible.
 #       Content is bounded to 4 KiB AFTER quoting and stripped of every C0/C1
 #       control character and DEL. Redaction is the CALLER's job (the insights
 #       bridge exposes it): this script cannot tell a summary from a secret.
@@ -212,8 +215,27 @@ archive() {
       *) echo "--note-file must be named note-* (a file written for this purpose): $note_base" >&2
          exit 2 ;;
     esac
-    # -P resolves every symlink in the path, parents included. A path that does
-    # not resolve at all is refused rather than retried unresolved.
+    # The FINAL component must not be a link of any kind. `pwd -P` below resolves
+    # the parents, but a symlink at the end would still be followed by the open,
+    # landing an arbitrary target's content in a committable archive — the exact
+    # bypass a parents-only resolve left open (`ln -s ~/.ssh/id_rsa /tmp/note-leak`).
+    if [ -L "$note_file" ]; then
+      echo "--note-file must not be a symlink: $note_file" >&2
+      exit 2
+    fi
+    # A hardlink has no link to detect, so check the link count instead. BSD and
+    # GNU stat disagree on the flag; if neither works, the name and location rules
+    # still stand — degrade, don't block.
+    local note_links
+    note_links="$(stat -f %l "$note_file" 2>/dev/null || stat -c %h "$note_file" 2>/dev/null || echo 1)"
+    case "$note_links" in
+      ''|*[!0-9]*) ;;
+      1) ;;
+      *) echo "--note-file must not be a hardlink (link count $note_links): $note_file" >&2
+         exit 2 ;;
+    esac
+    # -P resolves every symlink in the parent path. A path that does not resolve
+    # at all is refused rather than retried unresolved.
     note_real="$(cd "$(dirname "$note_file")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$note_file")")" \
       || { echo "--note-file path does not resolve: $note_file" >&2; exit 2; }
     for note_root in "${TMPDIR:-/tmp}" /tmp "$tasks_dir"; do
@@ -234,14 +256,23 @@ archive() {
       exit 2
     fi
     # Bound AFTER quoting, not before: `> ` adds two bytes per line, so a 4 KiB
-    # raw cap let a ~3× larger block into the archive. Strip every C0 control
-    # character (CR included — the old set skipped it), DEL and C1. The awk
-    # bound emits WHOLE quoted lines only, so the block can never end in a
-    # half-quoted fragment the way a plain `head -c` would leave it.
-    # A read failure must NOT degrade to a silent empty note: this note is the
-    # last place the observation exists, so losing it is a hard error.
-    note_block="$(tr -d '\000-\010\013-\037\177' <&9 | sed 's/^/> /' \
-      | awk '{ n += length($0) + 1; if (n > 4096) exit; print }')" \
+    # raw cap let a ~3× larger block into the archive. The awk bound emits WHOLE
+    # quoted lines only, so the block never ends in a half-quoted fragment the
+    # way a plain `head -c` would leave it.
+    #
+    # Two passes strip controls, because `tr` is BYTE-oriented: it clears C0
+    # (CR included — an earlier set skipped it) and DEL, but a C1 control arrives
+    # UTF-8-encoded as 0xC2 0x80–0x9F and survives it. 0x9B is an 8-bit CSI, so a
+    # `cat` of the committed archive would execute it as a control sequence.
+    #
+    # `pipefail` in a subshell (not the whole function): a failure in any stage
+    # must be a hard error, because this note is the last place the observation
+    # exists — a silently truncated or empty note is worse than a refusal.
+    note_block="$( set -o pipefail
+      LC_ALL=C tr -d '\000-\010\013-\037\177' <&9 \
+      | LC_ALL=C sed $'s/\xc2[\x80-\x9f]//g' \
+      | sed 's/^/> /' \
+      | awk '{ n += length($0) + 1; if (n > 4096) exit; print }' )" \
       || { exec 9<&-; echo "--note-file could not be read: $note_real" >&2; exit 2; }
     exec 9<&-
     if [ -z "$note_block" ]; then
