@@ -395,8 +395,8 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
     one is already in the draft. The helper cannot decide this for you: it knows a report's
     ID, trigger, status and time — not which commit or review round it covered.
 
-    Fill the draft, then `insights-handoff.sh write '<draft file>'` and `rm` it
-    immediately, saved or not (it is unredacted until the helper touches it). Exit 0 →
+    Fill the draft, then `bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" write '<draft file>'`
+    and `rm` it immediately, saved or not (it is unredacted until the helper touches it). Exit 0 →
     name the `report_id`. Exit 1 → fix the fields stderr names and retry at most twice.
     Exit 4 or 5, or a third rejection → say plainly that **nothing was saved** and show
     the error. There is no fallback store here; `/close` attempts its own report later.

@@ -11,10 +11,11 @@ prime: false
 # Insights Report Store (insights.report/v1)
 
 `plugins/insights/scripts/insights.py` is the **only** write/read path for
-insights reports: the manual `/insights:report` skill today, and worker/Manager/
-close handoff producers later. Producers never write report files or copy
-validation. The contract is in `plugins/insights/docs/REPORT-CONTRACT.md`. This
-entry records the *why* behind decisions a later producer could easily undo.
+insights reports: the manual `/insights:report` skill, plus worker/Manager/
+close handoff producers through the insights plugin. Producers never write report
+files or copy validation — all paths go through insights.py. The contract is in
+`plugins/insights/docs/REPORT-CONTRACT.md`. This entry records the *why* behind
+decisions a producer or future change could easily undo.
 
 ## Decisions and the failures they prevent
 

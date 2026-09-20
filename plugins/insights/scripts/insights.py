@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """insights.py — the one validation + persistence path for insights reports.
 
-Every producer (the manual `/insights:report` skill today, lifecycle handoffs
-later) goes through this script, so the schema, the privacy rules and the
-no-overwrite store live in exactly one place. The contract is documented in
-`docs/REPORT-CONTRACT.md`; this file is its enforcement.
+Every producer (the manual `/insights:report` skill, lifecycle handoffs through
+the insights plugin) goes through this script, so the schema, the privacy rules
+and the no-overwrite store live in exactly one place. The contract is documented
+in `docs/REPORT-CONTRACT.md`; this file is its enforcement.
 
 Subcommands:
   context [--project-dir DIR]      Observable facts for a draft (project identity,

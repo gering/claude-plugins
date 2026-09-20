@@ -282,9 +282,9 @@ Rules:
       drop the `--note-file` flag and report the summary as lost. Never archive text that
       failed redaction — that is the one path where a secret would reach a commit.
    3. Pass it to step 10's archive call as `--note-file`. It must be named `note-*` and
-      resolve inside your scratchpad (`$TMPDIR`), `/tmp`, or the repo's `tasks/`; any
-      other location, a symlink escaping those, or an empty note is refused (exit 2) and
-      leaves the task file untouched.
+      resolve inside your scratchpad (`$TMPDIR`, which may default to `/tmp`) or the repo's
+      `tasks/`; any other location, a symlink escaping those, or an empty note is refused
+      (exit 2) and leaves the task file untouched.
    4. Report it: "insights: report NOT saved (<reason>) — summary kept in `<archived_path>`".
    5. **Continue the close.** A failed report is never a cleanup gate and never becomes a
       new approval question. If step 10 cannot archive either (no task file), say plainly
