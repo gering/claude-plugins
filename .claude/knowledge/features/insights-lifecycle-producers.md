@@ -94,10 +94,14 @@ edit quietly moves it.
   decisions the first cut got wrong. The note is **redacted mechanically**
   (`insights.py redact`, added in 0.1.1 so the patterns are not copied into a
   second plugin) rather than by telling the model not to paste a secret — an
-  instruction is not a boundary. And the path is constrained by a purpose-made
-  `note-*` **name** as well as a resolved location: the location rule alone is
-  near-vacuous on a checkout that lives under `/tmp`, and testing `[ -L ]` on the
-  last component says nothing about a symlinked parent.
+  instruction is not a boundary — and a redaction that *fails* means the note is
+  not archived at all, never used unredacted. The path is constrained at three
+  points, because each one alone was bypassed in review: a purpose-made `note-*`
+  **name** (the location rule is near-vacuous on a checkout under `/tmp`), a
+  resolved **location** (parents included), and the **final component** itself.
+  Resolving only the parent still let `ln -s ~/.ssh/id_rsa /tmp/note-leak`
+  through — correct name, allowed directory, symlinked last component — and a
+  hardlink has no symlink to detect at all, so the link count is checked too.
 - **work-system mints no run identity.** It has no run registry, so `run_id`
   stays unknown with that reason. A competing identifier would be worse than
   none, and a report ID is not a task identity.
@@ -112,6 +116,23 @@ the merge is still the human's decision. Only an actually finished task is
 `aborted`. Nothing in a report marks a task merged, extends `MANDATE.md` (see
 [worker-autonomy-mandate](worker-autonomy-mandate.md)), or consumes a review
 round.
+
+## Three shell traps this code hit, each of which looked correct
+
+Worth recording because all three pass a casual reading and two of them make a
+guard silently do nothing:
+
+- **A command substitution is a subshell.** `f="$(mktemp_tracked)"` ran the
+  function's `TMPFILES+=(…)` in a child, so the parent's cleanup trap was always
+  iterating an empty array. The helper returns its path in a global instead.
+- **`${arr[@]/pat}` is substring substitution, not element removal.** Used to
+  "untrack" a path it leaves an empty entry in place and rewrites any other entry
+  containing that path as a substring — into a path the trap would then delete.
+- **`git log --date=format:` renders in the COMMIT's timezone.** Appending a
+  literal `Z` produced a stamp that looked UTC and was two hours off, which broke
+  a string comparison against a report's real-UTC `recorded_at`. `format-local:`
+  with `TZ=UTC` is what converts. (`%cI` has the same problem with its offset,
+  and `--max-count` applies before `--reverse`, so the oldest commit is `tail -1`.)
 
 ## Known coverage gap
 
