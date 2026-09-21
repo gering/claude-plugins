@@ -23,6 +23,10 @@
 #                                 --codex, --sol, --grok, --kimi), a
 #                                 canonical name (claude:opus), a bare CLI
 #                                 (codex -> that CLI's default model), cli:model
+#                                 (grok's model is DYNAMIC: --grok/grok/grok:latest
+#                                 resolve to the newest canonical grok-4.x/5.x on
+#                                 offer and print model_requested/model_source/
+#                                 model_latest/model_catalog; grok:<id> pins),
 #                                 (the --agent escape hatch), or cc-harness:<id>
 #                                 when the optional PATH helper lists it.
 #                                 Emits key=value lines incl. one `argv=` line
@@ -274,12 +278,22 @@ KIMI_LAUNCH_SCRIPT='if kimi -m "$1" -p "$2"; then exec kimi -c --auto; else rc=$
 # agent-start entries hand their argv TAIL to `--kind <herdr_kind>` (so argv[0]
 # MUST equal herdr_kind), pane-run entries are wrappers sent as one shell command
 # and then waited for until herdr detects herdr_kind in that pane.
+#
+# grok's model slot is the DYNAMIC token `latest`, not a version: `--grok`,
+# `grok` and `grok:latest` mean "the newest canonical grok-4.x/5.x this CLI
+# offers", resolved against `grok models` at resolve time (lib-grok-latest.sh —
+# shared byte-identical with the swarm plugin, so neither requires the other).
+# The NAME stays `grok:latest` (that is what a project default stores, so a
+# default keeps tracking new releases); `model=` is the concrete id, frozen into
+# the argv. A deliberate pin is `--agent grok:<id>` (e.g. grok:grok-4.6) and is
+# never reinterpreted as latest.
+GROK_DYNAMIC="latest"
 REGISTRY='--fable|claude|fable|continue,close-exit,statusline,commit,pr|agent-start|claude
 --opus|claude|opus|continue,close-exit,statusline,commit,pr|agent-start|claude
 -|claude|sonnet|continue,close-exit,statusline,commit,pr|agent-start|claude
 --codex|codex|gpt-5.6-terra|commit,pr|agent-start|codex
 --sol|codex|gpt-5.6-sol|commit,pr|agent-start|codex
---grok|grok|grok-4.5|commit,pr|agent-start|grok
+--grok|grok|latest|commit,pr|agent-start|grok
 --kimi|kimi|kimi-code/k3-256k|commit,pr|pane-run|kimi'
 
 usage() {
@@ -600,6 +614,19 @@ row_for_cli_default() { find_row cli  "$1"; }
 row_for_name() {
   find_row name "$1" && return 0
   case "$1" in
+    grok:grok-*)
+      # An explicit grok PIN: any id the CLI could take as `-m`, vetted for
+      # charset (it lands in an argv and a committed default) — existence is
+      # entry_status's question, exactly as for a registry row. The record is the
+      # grok row with the model slot replaced, so every other field stays single-
+      # sourced in REGISTRY.
+      local pin="${1#grok:}" rec
+      case "$pin" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+      [ "${#pin}" -le 64 ] || return 1
+      rec="$(find_row cli grok)" || return 1
+      printf '%s\n' "$rec" | awk -F'|' -v OFS='|' -v m="$pin" '{ $1 = "-"; $3 = m; print }'
+      return 0
+      ;;
     "$HARNESS_NS":*)
       # EXISTENCE CHECK ONLY, and deliberately output-free. Both callers
       # (validate_name, `default get`) branch on the exit code and discard stdout,
@@ -677,8 +704,60 @@ _LIB_BOUNDED="$SCRIPT_DIR/lib-bounded.sh"
 # token and a false "model not offered". Status travels via the exit code, NOT a
 # global: entry_status runs this in a command substitution (its own subshell), so
 # a global flag would never propagate back. Bounded via run_bounded (never hangs).
+#
+# The listing is loaded at most ONCE per process: `grok_models_load` (call it
+# directly, never in `$( )`) fills the globals, and a subshell inherits them —
+# so resolving `latest` and then checking availability costs one network call,
+# not two.
+_GROK_RAW_LOADED=""
+_GROK_RAW=""
+_GROK_RAW_RC=0
+grok_models_load() {
+  [ -n "$_GROK_RAW_LOADED" ] && return 0
+  _GROK_RAW_LOADED=1
+  _GROK_RAW="$(run_bounded 10 grok models 2>/dev/null)" || _GROK_RAW_RC=$?
+}
 grok_models_raw() {
-  run_bounded 10 grok models 2>/dev/null
+  grok_models_load
+  printf '%s' "$_GROK_RAW"
+  return "$_GROK_RAW_RC"
+}
+
+_LIB_GROK_LATEST="$SCRIPT_DIR/lib-grok-latest.sh"
+# shellcheck source=lib-grok-latest.sh
+. "$_LIB_GROK_LATEST" 2>/dev/null || {
+  echo "agent-registry.sh: cannot source $_LIB_GROK_LATEST (it ships alongside this script)" >&2
+  exit 1
+}
+
+# Resolve the dynamic `latest` token. Sets (main shell — call directly):
+#   GROK_CONCRETE  the newest canonical id on offer, or "" when none can be named
+#   GROK_CATALOG   ok | no-candidate | unparseable | unreachable | not-probed
+#   GROK_WHY       the reason GROK_CONCRETE is empty
+# `unreachable` (discovery failed — says nothing about models) and
+# `no-candidate` (a valid catalog without a canonical 4.x/5.x) are different
+# answers and stay different. There is NO fallback id: a baked-in version is a
+# guess that ages silently, and the honest alternative is one explicit pin away.
+GROK_CONCRETE=""
+GROK_CATALOG="not-probed"
+GROK_WHY=""
+grok_resolve_latest() {
+  GROK_CONCRETE=""; GROK_WHY=""
+  if ! command -v grok >/dev/null 2>&1 || [ ! -s "$GROK_AUTH_FILE" ]; then
+    GROK_CATALOG="not-probed"   # entry_status names the install/auth problem
+    return 0
+  fi
+  grok_models_load
+  local state
+  state="$(printf '%s\n' "$_GROK_RAW" | grok_latest_from_listing "$_GROK_RAW_RC")"
+  GROK_CATALOG="$(printf '%s\n' "$state" | sed -n 's/^catalog=//p')"
+  GROK_CONCRETE="$(printf '%s\n' "$state" | sed -n 's/^latest=//p')"
+  case "$GROK_CATALOG" in
+    ok) ;;
+    no-candidate) GROK_WHY="this grok CLI offers no canonical grok-4.x/5.x model (see: grok models) — pin one: --agent grok:<id>" ;;
+    unparseable)  GROK_WHY="\`grok models\` printed no readable model list, so the latest model cannot be named — pin one: --agent grok:<id>" ;;
+    *)            GROK_WHY="\`grok models\` is unreachable, so the latest model cannot be named — retry, or pin one: --agent grok:<id>" ;;
+  esac
 }
 
 # Same contract as grok_models_raw, for kimi: RAW `kimi provider list --json` on
@@ -725,7 +804,14 @@ entry_status() {
         elif [ -z "$_raw" ]; then
           # succeeded but produced nothing — inconclusive too, not "model gone".
           avail=yes; note="grok models empty — availability assumed"
-        elif grep -qF -- "$model" <<<"$_raw"; then avail=yes   # substring, drift-tolerant
+        elif grep -qF -- "$model" <<<"$_raw" \
+             && { [ -z "$(printf '%s\n' "$_raw" | grok_latest_parse)" ] \
+                  || printf '%s\n' "$_raw" | grok_latest_parse | grep -qxF -- "$model"; }; then
+          # Listed. The exact-id check only applies when the listing parses: a
+          # bare substring would call grok-4.7 "offered" when only
+          # grok-4.7-build-fast is, but a reformatted listing the parser cannot
+          # read keeps the old drift-tolerant substring answer.
+          avail=yes
         else note="model not offered by this grok CLI (see: grok models)"; fi
       fi
       ;;
@@ -793,7 +879,12 @@ emit_argv() {
       claude_tail
       ;;
     codex) words=(codex -m "$model" "$(bootstrap_prompt)") ;;
-    grok)  words=(grok  -m "$model" "$(bootstrap_prompt)") ;;
+    grok)
+      # An unresolved dynamic token must never become an argv: `grok -m latest`
+      # is not a model, and a consumer that ignored exit 3 would launch it.
+      [ "$model" = "$GROK_DYNAMIC" ] && return 0
+      words=(grok  -m "$model" "$(bootstrap_prompt)")
+      ;;
     kimi)
       # Two-phase seed+continue (see the launch-shape note in the header). The
       # model and the prompt are passed as "$1"/"$2" positionals — NOT spliced
@@ -913,10 +1004,37 @@ subcmd_resolve() {
   local flag cli model supports mode kind
   IFS='|' read -r flag cli model supports mode kind <<<"$record"
 
+  # grok: make the selection CONCRETE here, once. `name` keeps the intent
+  # (`grok:latest` stays dynamic when saved as a default; a pin stays a pin),
+  # `model` becomes the id that is frozen into the argv — so the launched worker
+  # and any later manual relaunch of this record run the same model, whatever is
+  # released meanwhile. The provenance lines let the skill ANNOUNCE what was
+  # chosen and why, instead of implying "available" means "the latest".
+  local name="$cli:$model" grok_unresolved=""
+  if [ "$cli" = grok ]; then
+    grok_resolve_latest
+    printf 'model_requested=%s\n' "$model"
+    if [ "$model" = "$GROK_DYNAMIC" ]; then
+      printf 'model_source=latest\n'
+      if [ -n "$GROK_CONCRETE" ]; then model="$GROK_CONCRETE"; else grok_unresolved=1; fi
+    else
+      printf 'model_source=pinned\n'
+    fi
+    printf 'model_latest=%s\n' "$GROK_CONCRETE"
+    printf 'model_catalog=%s\n' "$GROK_CATALOG"
+  fi
+
   local avail note
   IFS=$'\t' read -r avail note < <(entry_status "$cli" "$model")
 
-  emit_record "$cli:$model" "$cli" "$model" "$avail" "$supports" \
+  # `latest` could not be named although grok is installed and logged in: that
+  # is NOT available, whatever the generic probe assumed (it trusts auth when the
+  # listing is unreachable — right for a pin, wrong for a model we cannot name).
+  if [ -n "$grok_unresolved" ] && [ "$GROK_CATALOG" != "not-probed" ]; then
+    avail=no; note="$GROK_WHY"
+  fi
+
+  emit_record "$name" "$cli" "$model" "$avail" "$supports" \
     "$mode" "$kind" "$note" "$model" "$session"
 }
 
@@ -936,10 +1054,21 @@ subcmd_list() {
 
   # Build rows: name cli model available note (TAB-separated internally).
   local rows="" flag cli model supports mode kind avail note
+  local name
   while IFS='|' read -r flag cli model supports mode kind; do
     [ -n "$cli" ] || continue
+    # Same concretization as `resolve`: NAME keeps the dynamic intent, MODEL shows
+    # what it resolves to right now (or stays `latest`, unavailable, with why).
+    name="$cli:$model"
+    if [ "$cli" = grok ] && [ "$model" = "$GROK_DYNAMIC" ]; then
+      grok_resolve_latest
+      [ -n "$GROK_CONCRETE" ] && model="$GROK_CONCRETE"
+    fi
     IFS=$'\t' read -r avail note < <(entry_status "$cli" "$model")
-    rows+="$cli:$model	$cli	$model	$avail	$note"$'\n'
+    if [ "$model" = "$GROK_DYNAMIC" ] && [ "$cli" = grok ] && [ "$GROK_CATALOG" != "not-probed" ]; then
+      avail=no; note="$GROK_WHY"
+    fi
+    rows+="$name	$cli	$model	$avail	$note"$'\n'
   done < <(registry_rows)
   # Append harness rows when the helper is present and healthy. A missing helper,
   # exit 3 (no token), or a timed-out list is a silent no-op — one `command -v` is

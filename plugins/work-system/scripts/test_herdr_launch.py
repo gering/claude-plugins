@@ -186,7 +186,7 @@ class Env:
         # flaky locally (a slow `grok models` alone changes the outcome).
         for name, body in (
             ("codex", 'if [ "$1" = "login" ]; then exit 0; fi\nexit 0\n'),
-            ("grok", 'if [ "$1" = "models" ]; then echo "grok-4.5"; fi\nexit 0\n'),
+            ("grok", 'if [ "$1" = "models" ]; then echo "  * grok-4.5 (default)"; fi\nexit 0\n'),
             ("kimi", 'if [ "$1" = "provider" ]; then '
                      "echo '{\"models\": {\"kimi-code/k3-256k\": {}}}'; fi\nexit 0\n"),
         ):
