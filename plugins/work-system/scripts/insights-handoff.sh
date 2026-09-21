@@ -120,7 +120,25 @@ declare -f stat_field >/dev/null 2>&1 || stat_field() { return 0; }
 # /close that is interrupted must not leave one behind.
 TMPFILES=()
 cleanup() { [ ${#TMPFILES[@]} -gt 0 ] && rm -f "${TMPFILES[@]}" 2>/dev/null; return 0; }
-trap cleanup EXIT INT TERM HUP
+
+# EXIT cleans up. Signals clean up AND TERMINATE — the handler used to end in
+# `return 0` for all four traps, which SWALLOWED the signal: a SIGTERM during the
+# draft overlay deleted the still-tracked draft, the script then resumed, printed
+# `action=draft` with the path it had just unlinked, and returned 0. The caller
+# opened nothing. (It also made SIGINT unable to abort a /close mid-flight.)
+# Re-raising with the default disposition gives the parent the real 128+N status.
+on_signal() {
+  local sig="$1"
+  cleanup
+  trap - "$sig"
+  kill -s "$sig" $$
+}
+trap cleanup EXIT
+for _sig in INT TERM HUP; do
+  # shellcheck disable=SC2064 — expand $_sig NOW, not when the trap fires.
+  trap "on_signal $_sig" "$_sig"
+done
+unset _sig
 
 # Returns the path in MKTEMP_OUT, NOT on stdout. Every caller used
 # `f="$(mktemp_tracked)"`, and a command substitution runs in a SUBSHELL — so the
@@ -155,6 +173,25 @@ bounded() {
 }
 
 die_usage() { echo "$*" >&2; exit "$EXIT_USAGE"; }
+
+# Pull the FIRST non-option argument out of "$@", leaving the rest for the
+# caller's own option loop (which re-parses via "${REST[@]}"). Taking `$1`
+# unconditionally meant `redact --in-place FILE` read `--in-place` as the
+# filename and then died with "unknown option: <the file path>" — naming the
+# file as the offending flag, on the one path where the note is the last copy
+# of the observation.
+POSITIONAL=""; REST=()
+take_positional() {
+  POSITIONAL=""; REST=()
+  local seen=no a
+  for a in "$@"; do
+    if [ "$seen" = no ] && [ "${a#-}" = "$a" ] && [ -n "$a" ]; then
+      POSITIONAL="$a"; seen=yes
+    else
+      REST+=("$a")
+    fi
+  done
+}
 
 
 # --------------------------------------------------------------- locating insights
@@ -344,7 +381,7 @@ list_reports() {   # <task> [<trigger>] [<project-dir>] -> HELPER_OUT holds the 
 
 cmd_reported() {
   local task="" trigger="" project_dir=""
-  [ $# -ge 1 ] && { task="$1"; shift; }
+  take_positional "$@"; task="$POSITIONAL"; set -- ${REST[@]+"${REST[@]}"}
   [ -n "$task" ] || die_usage "usage: ${0##*/} reported <task-name> [--trigger T] [--project-dir DIR]"
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -561,10 +598,23 @@ if best:
   #    what tells an old namesake from this task's own report.
   # Neither is worth a lock or a second identity: a duplicate report is a
   # harmless extra record, and inventing a run id was ruled out by design.
+  # Skip ONLY when the namesake filter actually ran. When it could not, the
+  # stored report might belong to an earlier task that reused the name — and
+  # `unavailable` is not a corner case: it is the NORMAL state on the retry path
+  # this skip exists for (the worktree is gone, so the lane is the main checkout
+  # and there is no `main..HEAD` range). Skipping there risks losing the new
+  # task's only close report, which is unrecoverable; drafting risks a duplicate
+  # record, which is not. So the default flips with the filter's availability,
+  # and the caller gets the data to overrule it either way.
   if [ "$trigger" = close ] && [ -n "$existing_close" ]; then
-    printf 'action=skip\nreason=a close report for this task is already stored\nreport=%s\nreport_recorded_at=%s\n' \
+    if [ -n "$lane_since" ]; then
+      printf 'action=skip\nreason=a close report for this task is already stored\nreport=%s\nreport_recorded_at=%s\n' \
+        "$existing_close" "$existing_close_at"
+      return "$EXIT_OK"
+    fi
+    printf 'possible_duplicate=%s\npossible_duplicate_recorded_at=%s\n' \
       "$existing_close" "$existing_close_at"
-    return "$EXIT_OK"
+    printf 'reason=a close report exists for this NAME, but the lane has no commit range to date it against — drafting rather than skipping, because a lost report cannot be recovered and a duplicate can be ignored\n'
   fi
 
   local args=(skeleton --trigger "$trigger")
@@ -640,7 +690,7 @@ sys.stdout.write("\n")
 # shell commands.
 cmd_write() {
   local draft="" project_dir=""
-  [ $# -ge 1 ] && { draft="$1"; shift; }
+  take_positional "$@"; draft="$POSITIONAL"; set -- ${REST[@]+"${REST[@]}"}
   [ -n "$draft" ] || die_usage "usage: ${0##*/} write <draft-file> [--project-dir DIR]"
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -694,7 +744,7 @@ cmd_note_file() {
 # ------------------------------------------------------------------------ redact
 cmd_redact() {
   local file="" in_place=no
-  [ $# -ge 1 ] && { file="$1"; shift; }
+  take_positional "$@"; file="$POSITIONAL"; set -- ${REST[@]+"${REST[@]}"}
   while [ $# -gt 0 ]; do
     case "$1" in
       --in-place) in_place=yes; shift ;;

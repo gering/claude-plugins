@@ -395,11 +395,19 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
     one is already in the draft. The helper cannot decide this for you: it knows a report's
     ID, trigger, status and time — not which commit or review round it covered.
 
-    Fill the draft, then `bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" write '<draft file>'`
-    and `rm` it immediately, saved or not (it is unredacted until the helper touches it). Exit 0 →
-    name the `report_id`. Exit 1 → fix the fields stderr names and retry at most twice.
-    Exit 4 or 5, or a third rejection → say plainly that **nothing was saved** and show
-    the error. There is no fallback store here; `/close` attempts its own report later.
+    Fill the draft, then bind its path once and write it — never paste a repo-derived
+    value into a command:
+    ```sh
+    DRAFT="<the draft= path prepare printed>"
+    bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" write "$DRAFT"
+    ```
+    Exit 0 → name the `report_id`. Exit 1 → fix the fields stderr names **in that same
+    file** and retry at most twice, which means the draft must still exist. Exit 4 or 5,
+    or a third rejection → say plainly that **nothing was saved** and show the error.
+    `rm "$DRAFT"` only once you are done with it — after a success, or after the last
+    retry. It holds unredacted report text, so it must not outlive this step; deleting it
+    *before* the retry discards the file you were told to fix. There is no fallback store
+    here; `/close` attempts its own report later.
 
     **Fields this skill is the only one that can fill honestly** (field meanings: the
     report contract at the `contract=` path `prepare` printed above):

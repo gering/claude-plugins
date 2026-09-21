@@ -193,6 +193,9 @@ Rules:
    command substitution. Pass a **directory** and let the helper derive the identity.
 
    Save step 1's helper output to a file and let the bridge read the identity from it.
+   **Type no repo-derived value into any command in this step** — bind it to a shell
+   variable from a helper's output once, then reference `"$VAR"`. This holds for the
+   `write`, `redact` and `--note-file` calls further down too, not only here.
    **Type no repo-derived value into this command** — not the task name, not the branch,
    not a path: a refname or a worktree directory may legally contain `$(…)`, and the
    shell expands that before any script sees an argument. Every value below comes from a
@@ -202,16 +205,23 @@ Rules:
    LANE="$PWD"; [ -e "$LANE/.git" ] || LANE="$MAIN"
    #   run from the main repo, or the worktree is already gone → the lane is $MAIN
    TS="$(mktemp "${TMPDIR:-/tmp}/ws-resolve.XXXXXX")"
-   ( cd "$LANE" && bash "${CLAUDE_PLUGIN_ROOT}/scripts/task-status.sh" resolve ) > "$TS"
+   #   Step 1 ALREADY resolved this task (that is where `<task-name>` came from).
+   #   Re-run the SAME assess call it used, into the file — with "$ARGUMENTS"
+   #   when closing by name. Calling bare `resolve` here instead looks harmless
+   #   and is not: from the main checkout it yields an EMPTY task name, `prepare`
+   #   answers `action=blocked`, and the remedy this step names is the very call
+   #   that produced it — so the retry path blocks forever.
+   ( cd "$LANE" && bash "${CLAUDE_PLUGIN_ROOT}/scripts/task-status.sh" assess "$ARGUMENTS" ) > "$TS"
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" prepare close --caller close \
         --lane "$LANE" --project-dir "$MAIN" --resolve-from "$TS" \
         --status <completed|aborted|unknown> [--pr <pr_number>]
    rm -f "$TS"   # the identity file has been read; it is not needed past this point
    ```
    `--lane` needs an existing directory. A task whose **worktree is already gone** (a
-   retried teardown) has none — pass the main repo, and `--resolve-from` is then what
-   keeps the report attributable: on `main` the helper resolves an empty task name, and a
-   close report without one can neither be deduplicated nor found again. A non-existent
+   retried teardown) has none — pass the main repo. `--resolve-from` is what keeps the
+   report attributable there, and only because it carries step 1's **assess** output: a
+   bare `resolve` in the main checkout resolves an empty task name, and a close report
+   without one can neither be deduplicated nor found again. A non-existent
    `--lane` is a usage error (**exit 2**): treat it like exit 4 — one line in the summary,
    no report, cleanup continues.
    `--status` is the *task's* state, independent of the trigger: `completed` only when
@@ -271,8 +281,9 @@ Rules:
 
    **c) Write it.**
    ```sh
-   bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" write '<draft file>' \
-        --project-dir "<main-repo-path>"
+   DRAFT="<the draft= path prepare printed>"      # assign once, then reference it
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" write "$DRAFT" \
+        --project-dir "$MAIN"
    ```
    Outcomes:
    - **0** (`status=stored`/`unchanged`) → note `insights: report <id>` in the summary.
@@ -300,7 +311,8 @@ Rules:
    2. Redact it mechanically — the archive it lands in may be committed and pushed, and
       "I was careful" is not a boundary:
       ```sh
-      bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" redact '<note file>' --in-place
+      NOTE="<the note= path the call above printed>"
+      bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" redact "$NOTE" --in-place
       ```
       On a non-zero exit the note is left **unchanged** and you must **not** archive it:
       drop the `--note-file` flag and report the summary as lost. Never archive text that
@@ -399,7 +411,7 @@ Rules:
       ```sh
       bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" archive <main-repo-path> <task-name> <task-branch>
       ```
-    - **If step 6b could not save its report**, append `--note-file '<note file>'` to
+    - **If step 6b could not save its report**, append `--note-file "$NOTE"` to
       whichever of the two calls above applies. That preserves the compact unsaved summary
       in the archived task file — the only durable place left once the worktree is gone.
       A bad note path is a usage error (exit 2) that leaves the task file untouched: drop

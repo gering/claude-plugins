@@ -462,6 +462,28 @@ with tempfile.TemporaryDirectory() as td:
           str(note_path).startswith(str(Path(os.environ.get("TMPDIR", "/tmp")))))
     note_path.unlink(missing_ok=True)
 
+    # ------------------------------------------- argument order and signals
+    # `redact --in-place FILE` read the FLAG as the filename and then died with
+    # "unknown option: <the file path>" — naming the file as the offending flag,
+    # on the one path where the note is the last copy of the observation.
+    for args, label in ((["--in-place"], "flag first"), ([], "flag last")):
+        probe = tmp / f"note-order-{len(args)}.txt"
+        probe.write_text("tok sk-ant-0123456789abcdefghijklmno\n")
+        call = ["redact"] + args + [str(probe)] + ([] if args else ["--in-place"])
+        r = run(real, *call, store=store, home=home, cwd=proj)
+        check(f"redact accepts the {label} order", r.returncode == 0)
+        check(f"the {label} order actually redacted", "sk-ant-0123" not in probe.read_text())
+    stray = tmp / "note-stray.txt"
+    stray.write_text("text\n")
+    check("an unknown option is still refused",
+          run(real, "redact", str(stray), "--bogus", store=store, home=home, cwd=proj).returncode == 2)
+
+    # The signal handler used to clean up and RESUME, so a signal during the
+    # overlay deleted the tracked draft and the script still printed its path.
+    SCRIPT_SRC = SCRIPT.read_text()
+    check("EXIT and signals get different handlers", "trap cleanup EXIT\n" in SCRIPT_SRC)
+    check("signals re-raise instead of returning", "kill -s" in SCRIPT_SRC)
+
     # ---------------------------------------------------------------- redact
     # The /close fallback note is not a report, but it lands in a file this repo
     # may commit and push — so it goes through insights' own patterns, not prose.

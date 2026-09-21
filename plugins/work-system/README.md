@@ -361,7 +361,7 @@ nothing new, which makes a retried teardown idempotent without any extra bookkee
 
 `work-system` never writes a report file, never validates one, and never redacts one
 itself — everything goes through `scripts/insights-handoff.sh`, its single bridge to the
-plugin (`probe` · `prepare` · `reported` · `write` · `redact`). `prepare` answers
+plugin (`probe` · `prepare` · `reported` · `write` · `redact` · `note-file`). `prepare` answers
 skip / absent / unusable / draft in one call, and it takes the lane **directory** rather
 than a task name: a git refname may legally contain `$(…)`, and a name pasted into a
 command line is executed before any script sees it.

@@ -1241,8 +1241,22 @@ def cmd_redact(args) -> int:
         if args.input == "-":
             raw = sys.stdin.buffer.read(MAX_REPORT_BYTES + 1)
         else:
-            with open(args.input, "rb") as fh:
-                raw = fh.read(MAX_REPORT_BYTES + 1)
+            # O_NOFOLLOW: the caller names this path, and the text it returns is
+            # written back over the same path by the bridge's --in-place mode. A
+            # symlink here would make redaction read one file and the caller
+            # overwrite another — the same class the report store already refuses
+            # for its own files. Regular files only, for the same reason.
+            fd = os.open(args.input, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+            try:
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode):
+                    raise UsageError(f"{args.input}: not a regular file")
+                with os.fdopen(fd, "rb") as fh:
+                    fd = -1
+                    raw = fh.read(MAX_REPORT_BYTES + 1)
+            finally:
+                if fd >= 0:
+                    os.close(fd)
     except OSError as e:
         raise UsageError(f"cannot read {args.input}: {e}")
     if len(raw) > MAX_REPORT_BYTES:
