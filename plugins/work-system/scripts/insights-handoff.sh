@@ -60,25 +60,6 @@
 #       only want to know what exists.
 #   write <draft-file> [--project-dir DIR]
 #       Store a finished draft.
-#   note-file
-#       Create an empty, private note file and print its path. The /close
-#       fallback note must land somewhere `archive-task.sh --note-file` accepts,
-#       and that is NOT "your scratchpad": on macOS the session scratchpad
-#       (/private/tmp/claude-…) is a different tree from $TMPDIR (/var/folders/…),
-#       so a note written where the skill said was refused by the script — in the
-#       one path that exists for when everything else already failed. Creating it
-#       here means the two cannot disagree: both sides use ${TMPDIR:-/tmp}.
-#   redact <file> [--in-place]
-#       Run insights' own credential redaction over a plain text file, printing
-#       the redacted text, or rewriting the file when --in-place is given.
-#       --in-place exists so the caller does not have to perform a
-#       redirect-then-rename ritual by hand at the one moment when that file is
-#       the last surviving copy of the observation: a `> file.tmp && mv` written
-#       out as prose loses the note whenever any step of it goes wrong. For the one thing that is NOT a report: the compact
-#       summary /close preserves in the archived task file when a write failed.
-#       That archive can be committed and pushed, and "the model was told not to
-#       paste a secret" is not a boundary. Redaction lives in insights (one set of
-#       patterns); this only exposes it.
 #
 # Exit codes — THIS script's namespace. insights.py's codes are MAPPED into it,
 # never relayed raw: its 2 (usage) and 3 (ID collision) would otherwise collide
@@ -105,16 +86,6 @@ EXIT_OK=0; EXIT_INVALID=1; EXIT_USAGE=2; EXIT_ABSENT=3; EXIT_UNUSABLE=4; EXIT_CO
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
 # shellcheck source=lib-bounded.sh
 [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/lib-bounded.sh" ] && . "$SCRIPT_DIR/lib-bounded.sh"
-# shellcheck source=lib-stat.sh
-[ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/lib-stat.sh" ] && . "$SCRIPT_DIR/lib-stat.sh"
-
-# If the lib is absent (an incomplete install), define the same contract as a
-# stub rather than leaving the callers to hit "command not found". Every caller
-# reads the VALUE and refuses on empty, so this degrades CLOSED — a note whose
-# identity cannot be verified is rejected, never accepted unchecked. Making it
-# explicit keeps that a decision instead of an accident.
-declare -f stat_field >/dev/null 2>&1 || stat_field() { return 0; }
-
 # Temp files hold helper stderr and skeleton drafts. Clean them on ANY exit,
 # including a signal: a draft is unredacted until insights.py touches it, and a
 # /close that is interrupted must not leave one behind.
@@ -173,25 +144,6 @@ bounded() {
 }
 
 die_usage() { echo "$*" >&2; exit "$EXIT_USAGE"; }
-
-# Pull the FIRST non-option argument out of "$@", leaving the rest for the
-# caller's own option loop (which re-parses via "${REST[@]}"). Taking `$1`
-# unconditionally meant `redact --in-place FILE` read `--in-place` as the
-# filename and then died with "unknown option: <the file path>" — naming the
-# file as the offending flag, on the one path where the note is the last copy
-# of the observation.
-POSITIONAL=""; REST=()
-take_positional() {
-  POSITIONAL=""; REST=()
-  local seen=no a
-  for a in "$@"; do
-    if [ "$seen" = no ] && [ "${a#-}" = "$a" ] && [ -n "$a" ]; then
-      POSITIONAL="$a"; seen=yes
-    else
-      REST+=("$a")
-    fi
-  done
-}
 
 
 # --------------------------------------------------------------- locating insights
@@ -381,8 +333,10 @@ list_reports() {   # <task> [<trigger>] [<project-dir>] -> HELPER_OUT holds the 
 
 cmd_reported() {
   local task="" trigger="" project_dir=""
-  take_positional "$@"; task="$POSITIONAL"; set -- ${REST[@]+"${REST[@]}"}
+  task="${1:-}"
   [ -n "$task" ] || die_usage "usage: ${0##*/} reported <task-name> [--trigger T] [--project-dir DIR]"
+  case "$task" in -*) die_usage "the task name comes first: ${0##*/} reported <task-name> [options]" ;; esac
+  shift
   while [ $# -gt 0 ]; do
     case "$1" in
       --trigger)     [ $# -ge 2 ] || die_usage "--trigger needs a value";     trigger="$2";     shift 2 ;;
@@ -690,17 +644,19 @@ sys.stdout.write("\n")
 # shell commands.
 cmd_write() {
   local draft="" project_dir=""
-  take_positional "$@"; draft="$POSITIONAL"; set -- ${REST[@]+"${REST[@]}"}
+  draft="${1:-}"
   [ -n "$draft" ] || die_usage "usage: ${0##*/} write <draft-file> [--project-dir DIR]"
+  case "$draft" in -*) die_usage "the draft file comes first: ${0##*/} write <draft-file> [options]" ;; esac
+  shift
   while [ $# -gt 0 ]; do
     case "$1" in
       --project-dir) [ $# -ge 2 ] || die_usage "--project-dir needs a value"; project_dir="$2"; shift 2 ;;
       *) die_usage "unknown option: $1" ;;
     esac
   done
-  # `-f` follows symlinks, so refuse one explicitly — the same class of
-  # caller-supplied path archive-task.sh refuses for --note-file, and the two
-  # must not disagree about it.
+  # `-f` follows symlinks, so refuse one explicitly: the draft is a
+  # caller-supplied path, and a symlinked one would hand insights.py a file the
+  # caller never wrote.
   [ -e "$draft" ] || die_usage "no draft file at $draft"
   [ -L "$draft" ] && die_usage "draft must not be a symlink: $draft"
   [ -f "$draft" ] || die_usage "draft must be a regular file: $draft"
@@ -725,109 +681,11 @@ cmd_write() {
   esac
 }
 
-# --------------------------------------------------------------------- note-file
-cmd_note_file() {
-  [ $# -eq 0 ] || die_usage "usage: ${0##*/} note-file"
-  # `note-` prefix and ${TMPDIR:-/tmp} location are exactly what archive-task.sh
-  # enforces. Untracked on purpose: the caller writes into it and hands it to the
-  # archive step, so it must outlive this process.
-  local f
-  f="$(mktemp "${TMPDIR:-/tmp}/note-insights.XXXXXX")" || {
-    echo "could not create a note file under ${TMPDIR:-/tmp}" >&2
-    return "$EXIT_UNUSABLE"
-  }
-  chmod 600 "$f" 2>/dev/null || true
-  printf 'note=%s\n' "$f"
-  return "$EXIT_OK"
-}
-
-# ------------------------------------------------------------------------ redact
-cmd_redact() {
-  local file="" in_place=no
-  take_positional "$@"; file="$POSITIONAL"; set -- ${REST[@]+"${REST[@]}"}
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --in-place) in_place=yes; shift ;;
-      *) die_usage "unknown option: $1" ;;
-    esac
-  done
-  [ -n "$file" ] || die_usage "usage: ${0##*/} redact <file> [--in-place]"
-  [ -e "$file" ] || die_usage "no file at $file"
-  [ -L "$file" ] && die_usage "file must not be a symlink: $file"
-  [ -f "$file" ] || die_usage "file must be a regular file: $file"
-  require_helper
-  local rc=0
-  if [ "$in_place" = yes ]; then
-    # Redact into a temp file and rename over the original only on success: a
-    # failed pass must leave the ORIGINAL note intact, never a truncated one.
-    local out pre post
-    mktemp_tracked || { echo "could not create a temp file" >&2; return "$EXIT_UNUSABLE"; }
-    out="$MKTEMP_OUT"
-    # Capture the helper's status DIRECTLY. Taking `rc=$?` after a closed `if`
-    # read the status of the `if` statement itself — always 0 — so the
-    # invalid-vs-unusable mapping below was dead code and every failure came back
-    # as "insights installed but unusable".
-    pre="$(stat_field inode "$file")"
-    rc=0
-    bounded python3 "$HELPER" redact "$file" > "$out" || rc=$?
-    if [ "$rc" -ne 0 ]; then
-      echo "redaction failed — $file is unchanged" >&2
-      case "$rc" in 1|2) return "$EXIT_INVALID" ;; *) return "$EXIT_UNUSABLE" ;; esac
-    fi
-    # The rename targets a path, and the note we just read may no longer be the
-    # file sitting there. Same check-to-use gap as archive-task.sh's note open.
-    post="$(stat_field inode "$file")"
-    if [ -z "$pre" ] || [ "$pre" != "$post" ]; then
-      echo "$file changed while it was being redacted — refusing to overwrite it" >&2
-      return "$EXIT_UNUSABLE"
-    fi
-    # Replace by ATOMIC RENAME from the note's OWN directory. The two obvious
-    # alternatives are both wrong here:
-    #   * `cat "$out" > "$file"` truncates the target before writing, so a write
-    #     that fails part-way (full disk, quota) destroys the note while the error
-    #     below still claims it is unchanged — and `>` re-resolves the path, which
-    #     reopens the check-to-use gap the inode comparison just closed and would
-    #     follow a symlink planted in that window.
-    #   * `mv` from ${TMPDIR:-/tmp} can cross a filesystem boundary, which turns
-    #     into copy+unlink: a new inode, and the target's owner/mode replaced.
-    # A sibling temp file plus `mv` is same-filesystem (so a real rename),
-    # atomic (no truncated intermediate state), and rename does NOT follow a
-    # symlink at the destination — it replaces the name itself.
-    local dest_dir sib
-    dest_dir="$(dirname "$file")"
-    sib="$(mktemp "$dest_dir/.note-redacted.XXXXXX")" || {
-      echo "could not stage the redacted note next to $file — it is unchanged" >&2
-      return "$EXIT_UNUSABLE"
-    }
-    TMPFILES+=("$sib")
-    chmod 600 "$sib" 2>/dev/null || true
-    if cat "$out" > "$sib" && mv "$sib" "$file"; then
-      untrack "$sib"
-      rm -f "$out"; untrack "$out"
-      return "$EXIT_OK"
-    fi
-    rm -f "$sib"; untrack "$sib"
-    echo "redacted copy could not replace $file — the note is unchanged" >&2
-    return "$EXIT_UNUSABLE"
-  fi
-  bounded python3 "$HELPER" redact "$file" || rc=$?
-  case "$rc" in
-    0) return "$EXIT_OK" ;;
-    1) return "$EXIT_INVALID" ;;
-    # Same mapping as cmd_write: the helper's usage exit (unreadable or oversize
-    # input) is a problem with what we handed it, not a broken plugin.
-    2) return "$EXIT_INVALID" ;;
-    *) return "$EXIT_UNUSABLE" ;;
-  esac
-}
-
 case "${1:-}" in
   probe)     shift; cmd_probe "$@" ;;
-  note-file) shift; cmd_note_file "$@" ;;
   prepare)  shift; cmd_prepare "$@" ;;
   reported) shift; cmd_reported "$@" ;;
   write)    shift; cmd_write "$@" ;;
-  redact)   shift; cmd_redact "$@" ;;
   ""|-h|--help|help)
     # Bounded by the header's own end, like the sibling scripts — not a line
     # range that silently truncates as the header grows.

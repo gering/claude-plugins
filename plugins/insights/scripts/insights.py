@@ -15,11 +15,6 @@ Subcommands:
   write FILE|- [--project-dir DIR] Fill report_id/recorded_at/project if absent,
         [--json]                   sanitize URLs, redact credentials, validate, publish atomically.
   validate FILE|- [--project-dir DIR]  Same fill + validation, never writes.
-  redact FILE|-                    Redact credentials in PLAIN TEXT (not a report):
-                                   strips control/bidi characters, applies the same
-                                   substitutions `write` does, prints the result.
-                                   For a producer that must keep text outside a report
-                                   (work-system's /close fallback note).
   read REPORT_ID                   Print one stored report (validated on read).
   list [--here|--project P] [--task T] [--trigger X] [--status S] [--limit N] [--json]
   store                            Print the resolved store directory and its source.
@@ -829,36 +824,24 @@ REDACTION_EXEMPT = {"schema", "report_id", "recorded_at", "project", "branch", "
 MAX_REDACTION_PASSES = 5
 
 
-def scrub_text(text):
-    """Redact credential shapes in one string. Returns (text, replacements).
+def redact_secrets(report) -> int:
+    """Replace credential shapes in free-text strings, in place; return the count.
 
     Repeats until nothing changes: one substitution can remove a character that
     was blocking another pattern, and the validator re-checks with the same set.
-
-    The single implementation. `redact` used to carry its own copy of this loop,
-    which meant the two could drift in algorithm while both claimed to apply
-    "the same substitutions" — only the patterns were actually shared.
     """
-    count = 0
-    for _ in range(MAX_REDACTION_PASSES):
-        changed = 0
-        for rx, repl in SECRET_SUBS:
-            text, n = rx.subn(repl, text)
-            changed += n
-        count += changed
-        if not changed:
-            break
-    return text, count
-
-
-def redact_secrets(report) -> int:
-    """Replace credential shapes in free-text strings, in place; return the count."""
     count = 0
 
     def scrub(text):
         nonlocal count
-        text, n = scrub_text(text)
-        count += n
+        for _ in range(MAX_REDACTION_PASSES):
+            changed = 0
+            for rx, repl in SECRET_SUBS:
+                text, n = rx.subn(repl, text)
+                changed += n
+            count += changed
+            if not changed:
+                break
         return text
 
     def walk(val, key=None):
@@ -1226,60 +1209,6 @@ def cmd_write(args) -> int:
     return EXIT_OK
 
 
-def cmd_redact(args) -> int:
-    """Redact credential shapes in a plain text file.
-
-    A report is redacted by `write`. This exposes the SAME substitutions for the
-    one case that has no report to write: work-system's `/close` preserves a
-    compact summary in the archived task file when a report could not be stored,
-    and that archive may be committed and pushed. Without this, the only options
-    were copying SECRET_SUBS into another plugin (a second set to drift) or
-    trusting prose not to paste a secret. Text-only — no schema, no storage — so
-    it never becomes a second way to make a report.
-    """
-    try:
-        if args.input == "-":
-            raw = sys.stdin.buffer.read(MAX_REPORT_BYTES + 1)
-        else:
-            # O_NOFOLLOW: the caller names this path, and the text it returns is
-            # written back over the same path by the bridge's --in-place mode. A
-            # symlink here would make redaction read one file and the caller
-            # overwrite another — the same class the report store already refuses
-            # for its own files. Regular files only, for the same reason.
-            fd = os.open(args.input, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
-            try:
-                st = os.fstat(fd)
-                if not stat.S_ISREG(st.st_mode):
-                    raise UsageError(f"{args.input}: not a regular file")
-                with os.fdopen(fd, "rb") as fh:
-                    fd = -1
-                    raw = fh.read(MAX_REPORT_BYTES + 1)
-            finally:
-                if fd >= 0:
-                    os.close(fd)
-    except OSError as e:
-        raise UsageError(f"cannot read {args.input}: {e}")
-    if len(raw) > MAX_REPORT_BYTES:
-        raise UsageError(f"input exceeds {MAX_REPORT_BYTES} bytes")
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError as e:
-        print(f"{args.input}: not valid UTF-8 ({e})", file=sys.stderr)
-        return EXIT_INVALID
-    # STRIP control characters and bidi overrides rather than refusing the file.
-    # A report is rejected because a bad report should not be stored; this text
-    # is a note whose only alternative is being used UNREDACTED, so a single CR
-    # or bidi override would have disabled redaction exactly when the input is
-    # least trustworthy. Stripping keeps the output usable and safe.
-    text, stripped = CTRL_RE.subn("", text)
-    text, count = scrub_text(text)
-    sys.stdout.write(text)
-    if not text.endswith("\n"):
-        sys.stdout.write("\n")
-    print(f"redactions={count} stripped={stripped}", file=sys.stderr)
-    return EXIT_OK
-
-
 def cmd_read(args) -> int:
     if not ID_RE.fullmatch(args.report_id):
         raise UsageError("report ID must match ins-YYYYMMDDTHHMMSSZ-<12 hex>")
@@ -1367,10 +1296,6 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "write":
             p.add_argument("--json", action="store_true")
         p.set_defaults(fn=fn)
-    p = sub.add_parser("redact")
-    p.add_argument("input", help="text file, or - for stdin")
-    p.set_defaults(fn=cmd_redact)
-
     p = with_store(sub.add_parser("read"))
     p.add_argument("report_id")
     p.set_defaults(fn=cmd_read)

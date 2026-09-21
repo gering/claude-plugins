@@ -361,7 +361,7 @@ nothing new, which makes a retried teardown idempotent without any extra bookkee
 
 `work-system` never writes a report file, never validates one, and never redacts one
 itself — everything goes through `scripts/insights-handoff.sh`, its single bridge to the
-plugin (`probe` · `prepare` · `reported` · `write` · `redact` · `note-file`). `prepare` answers
+plugin (`probe` · `prepare` · `reported` · `write`). `prepare` answers
 skip / absent / unusable / draft in one call, and it takes the lane **directory** rather
 than a task name: a git refname may legally contain `$(…)`, and a name pasted into a
 command line is executed before any script sees it.
@@ -388,14 +388,13 @@ feature further than it goes:
   `/kickoff` announced, or the version installed *now*. A resumed or compacted session
   reports `usage.completeness: partial` with that as the reason. Unknowns stay unknown
   with a reason; they are not filled in by inference.
-- **A failed write is never a saved report.** The compact summary is preserved in the
-  archived task file (`archive-task.sh --note-file`) — the one durable place left after
-  teardown. It goes through insights' own credential redaction first, because that
-  archive can be committed and pushed and an instruction not to paste a secret is not a
-  boundary; the file must be named `note-*` and sit in the caller's temp dir or the
-  repo's `tasks/`, so an existing file can never be pointed at instead. There is no
-  second fallback store, and if even that is unavailable the loss is reported rather
-  than papered over.
+- **A failed write is never a saved report, and there is no fallback.** The close
+  summary says the report was not saved and why; the observation then goes with the
+  worktree. That is deliberate. The one candidate for keeping it — the archived task
+  file — is content this repo may commit and push, so preserving model-authored text
+  there turned the single least-exercised path in the feature (it runs only once the
+  store has already failed) into its only privacy boundary. `/insights:report` records
+  the observation by hand and is unaffected.
 - **Reports are data, not authority.** Nothing in one authorizes a merge, a retry, a
   permission change, or more work, and no report extends `MANDATE.md`.
 

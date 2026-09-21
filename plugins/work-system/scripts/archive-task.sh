@@ -29,36 +29,11 @@
 #
 # Subcommands:
 #   archive <main-repo-path> <task-name> <task-branch> [--pr <n>] [--sha <sha>]
-#           [--note-file <path>]
 #       Move <main-repo>/tasks/<name>.md → tasks/archive/<name>.md with a stamp,
 #       and append an _index.md line. With --pr the stamp records a merged PR (and
 #       --sha its merge commit, shortened — an empty or literal "null" sha = no
 #       sha); without --pr it records a manual close. On a name collision the file
 #       is suffixed -2, -3, … (never clobbered).
-#       --note-file appends the file's text as a blockquote under the stamp. It
-#       exists so /close can preserve a short handoff note in the one durable
-#       place left after teardown — in practice: an insights report that could
-#       NOT be stored (see the insights plugin's report contract), so the
-#       observation is not lost with the worktree. The note travels as a FILE, never
-#       an argument or a heredoc, because it can carry free text.
-#       The note ends up in a file this repo may COMMIT AND PUSH (see the
-#       autocommit opt-in below), so the path is constrained twice over. It must
-#       (a) resolve — parents included — inside the caller's temp dir
-#       (`${TMPDIR:-/tmp}`) or the repo's tasks/, and (b) be NAMED `note-*`. The name rule is
-#       what makes the location rule bite: a temp dir is broad, and on a checkout
-#       that itself lives under /tmp it would allow nearly everything. Together
-#       they mean the note must be a file the caller created for this purpose,
-#       never an existing one it merely points at (`~/.ssh/id_rsa`, `/repo/.env`).
-#       BOTH ends of the path are checked, because each alone was bypassable:
-#       resolving only the PARENT let `ln -s ~/.ssh/id_rsa /tmp/note-leak` through
-#       (correct name, allowed directory, symlinked final component), and testing
-#       only the final component said nothing about a symlinked parent. A hardlink
-#       is refused too (st_nlink > 1) — it has no symlink to detect. The content
-#       is then read through an ALREADY-OPEN descriptor, so a swap between check
-#       and read is impossible.
-#       Content is bounded to 4 KiB AFTER quoting and stripped of every C0/C1
-#       control character and DEL. Redaction is the CALLER's job (the insights
-#       bridge exposes it): this script cannot tell a summary from a secret.
 #   commit-push <main-repo-path> <task-name> <archived-rel-path> <main-branch>
 #       After /close's user approval: stage exactly the archive change (the new
 #       file when not gitignored, _index.md, and the original's removal when
@@ -132,16 +107,6 @@ set -eu
 # whatever happens to sit at that path there.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# shellcheck source=lib-stat.sh
-[ -f "$SCRIPT_DIR/lib-stat.sh" ] && . "$SCRIPT_DIR/lib-stat.sh"
-
-# If the lib is absent (an incomplete install), define the same contract as a
-# stub rather than leaving the callers to hit "command not found". Every caller
-# reads the VALUE and refuses on empty, so this degrades CLOSED — a note whose
-# identity cannot be verified is rejected, never accepted unchecked. Making it
-# explicit keeps that a decision instead of an accident.
-declare -f stat_field >/dev/null 2>&1 || stat_field() { return 0; }
-
 # `:(literal)` pathspec prefix. Task names flow in from task files and reach git
 # as PATHSPECS, where `*`/`?`/`[` are globs: a task named `x*` yields
 # `tasks/archive/x*.md`, matching every archived file with that prefix. The rule
@@ -157,19 +122,18 @@ lit() { printf ':(literal)%s' "$1"; }
 archive() {
   local repo="${1:-}" name="${2:-}" branch="${3:-}"
   if [ -z "$repo" ] || [ -z "$name" ] || [ -z "$branch" ]; then
-    echo "usage: ${0##*/} archive <main-repo-path> <task-name> <task-branch> [--pr <n>] [--sha <sha>] [--note-file <path>]" >&2
+    echo "usage: ${0##*/} archive <main-repo-path> <task-name> <task-branch> [--pr <n>] [--sha <sha>]" >&2
     exit 2
   fi
   shift 3 || true
 
-  local pr="" sha="" note_file=""
+  local pr="" sha=""
   while [ $# -gt 0 ]; do
     case "$1" in
       # Require a value: a bare trailing `--pr` must error, not silently fall
       # through to a "closed manually" stamp on a genuinely merged task.
       --pr)  [ $# -ge 2 ] || { echo "--pr needs a value" >&2; exit 2; }; pr="$2";  shift 2 ;;
       --sha) [ $# -ge 2 ] || { echo "--sha needs a value" >&2; exit 2; }; sha="$2"; shift 2 ;;
-      --note-file) [ $# -ge 2 ] || { echo "--note-file needs a value" >&2; exit 2; }; note_file="$2"; shift 2 ;;
       *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
   done
@@ -205,155 +169,6 @@ archive() {
   local date; date="$(date +%F 2>/dev/null || echo unknown)"
   local stamp="> Archived $date · $mid · $branch"
 
-  # The note is rendered here so a bad --note-file fails BEFORE the source file is
-  # touched: a usage error must never leave a half-archived task.
-  #
-  # The path is CONSTRAINED, not pattern-matched. What lands here can be
-  # committed and pushed, and `[ -L ]` on the final component proves nothing: a
-  # symlinked parent (`ln -s ~/.ssh /tmp/n` → `--note-file /tmp/n/id_rsa`), a
-  # hardlink, or simply `--note-file /repo/.env` all pass it. So: require a
-  # purpose-made NAME, require the fully resolved path to sit in a directory the
-  # caller legitimately owns for this, then open ONCE and read the descriptor we
-  # already validated (no check/read window to swap).
-  local note_block=""
-  if [ -n "$note_file" ]; then
-    local note_real note_root note_base ok=no
-    # The name rule carries most of the weight: $TMPDIR is broad, and a checkout
-    # under /tmp would otherwise make the location rule vacuous.
-    note_base="$(basename -- "$note_file")"
-    case "$note_base" in
-      note-*) ;;
-      *) echo "--note-file must be named note-* (a file written for this purpose): $note_base" >&2
-         exit 2 ;;
-    esac
-    # The FINAL component must not be a link of any kind. `pwd -P` below resolves
-    # the parents, but a symlink at the end would still be followed by the open,
-    # landing an arbitrary target's content in a committable archive — the exact
-    # bypass a parents-only resolve left open (`ln -s ~/.ssh/id_rsa /tmp/note-leak`).
-    if [ -L "$note_file" ]; then
-      echo "--note-file must not be a symlink: $note_file" >&2
-      exit 2
-    fi
-    # A FIFO would block `exec 9<` forever, before any check on the descriptor
-    # could run. Refuse it by path first; a swap to a FIFO inside the window
-    # below is a hang, not a disclosure (see the residual note there).
-    if [ -p "$note_file" ]; then
-      echo "--note-file must not be a FIFO: $note_file" >&2
-      exit 2
-    fi
-    # A hardlink has no link to detect, so check the link count. BSD and GNU stat
-    # disagree on the flag; both default to lstat, which is what we want.
-    # FAIL CLOSED when neither works: this is a security check on an optional
-    # feature, and "assume 1" silently turns it off exactly where it matters.
-    local note_links
-    note_links="$(stat_field links "$note_file")"
-    case "$note_links" in
-      1) ;;
-      ''|*[!0-9]*)
-         echo "--note-file: cannot determine the link count (no usable stat) — refusing rather than assuming it is not a hardlink" >&2
-         exit 2 ;;
-      *) echo "--note-file must not be a hardlink (link count $note_links): $note_file" >&2
-         exit 2 ;;
-    esac
-    # Identity of the file we just vetted, by lstat (both stat variants default
-    # to it). Compared against the OPEN descriptor below, this is what makes the
-    # path checks stick: on their own they describe the path at check time, and
-    # nothing stopped a swap before the open. `/tmp` is an allowed root and is
-    # world-writable, so that window is reachable, not theoretical.
-    # INODE only, deliberately: `/dev/fd/N` reports the devfs node's device on
-    # macOS, not the underlying file's, so `%d` is not comparable across the two
-    # stat calls. Within one directory two distinct files cannot share an inode,
-    # and the path is already pinned to an allowed root, so the inode is the
-    # identity that matters here.
-    local note_ident
-    note_ident="$(stat_field inode "$note_file")"
-    # -P resolves every symlink in the parent path. A path that does not resolve
-    # at all is refused rather than retried unresolved.
-    note_real="$(cd "$(dirname "$note_file")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$note_file")")" \
-      || { echo "--note-file path does not resolve: $note_file" >&2; exit 2; }
-    # `${TMPDIR:-/tmp}` already covers a host with no TMPDIR, so a SEPARATE literal
-    # `/tmp` root only widened the rule to a world-writable directory the caller
-    # never asked for — and made the refusal untestable wherever the test tree
-    # itself lives under /tmp (Linux CI), where it silently allowed everything.
-    for note_root in "${TMPDIR:-/tmp}" "$tasks_dir"; do
-      [ -n "$note_root" ] || continue
-      note_root="$(cd "$note_root" 2>/dev/null && pwd -P)" || continue
-      case "$note_real" in "$note_root"/*) ok=yes; break ;; esac
-    done
-    if [ "$ok" != yes ]; then
-      echo "--note-file must resolve inside \$TMPDIR (${TMPDIR:-/tmp}) or $tasks_dir (got: $note_real)" >&2
-      exit 2
-    fi
-    # One open, then validate THAT descriptor — a regular file, and the SAME file
-    # the checks above vetted. `[ -f /dev/fd/9 ]` alone is not enough: it follows
-    # to whatever the descriptor points at, so a symlink swapped in after the
-    # `[ -L ]` test still passes it. Comparing device+inode is what closes that.
-    exec 9<"$note_real" || { echo "--note-file could not be opened: $note_real" >&2; exit 2; }
-    if [ ! -f /dev/fd/9 ]; then
-      exec 9<&-
-      echo "--note-file must be a regular file: $note_real" >&2
-      exit 2
-    fi
-    local fd_ident post_ident
-    fd_ident="$(stat_field inode /dev/fd/9 --deref)"
-    # And the path must STILL name that same file: the fd check alone would pass
-    # if the swap happened before the open, since the descriptor then honestly
-    # describes the attacker's file.
-    post_ident="$(stat_field inode "$note_file")"
-    if [ -z "$note_ident" ] || [ -z "$fd_ident" ] \
-       || [ "$note_ident" != "$fd_ident" ] || [ "$note_ident" != "$post_ident" ]; then
-      exec 9<&-
-      echo "--note-file changed between the check and the open (vetted inode $note_ident, opened $fd_ident, path now $post_ident) — refusing" >&2
-      exit 2
-    fi
-    # RESIDUAL: a swap to a FIFO inside that same window makes the open above
-    # block. That is a hang of this one archive call, not a disclosure, and
-    # closing it needs O_NONBLOCK, which the shell cannot express.
-    # Bound AFTER quoting, not before: `> ` adds two bytes per line, so a 4 KiB
-    # raw cap let a ~3× larger block into the archive. The awk bound emits WHOLE
-    # quoted lines only, so the block never ends in a half-quoted fragment the
-    # way a plain `head -c` would leave it.
-    #
-    # Two passes strip controls, because `tr` is BYTE-oriented: it clears C0
-    # (CR included — an earlier set skipped it) and DEL, but a C1 control arrives
-    # UTF-8-encoded as 0xC2 0x80–0x9F and survives it. 0x9B is an 8-bit CSI, so a
-    # `cat` of the committed archive would execute it as a control sequence.
-    #
-    # `pipefail` in a subshell (not the whole function): a failure in any stage
-    # must be a hard error, because this note is the last place the observation
-    # exists — a silently truncated or empty note is worse than a refusal.
-    #
-    # The awk stage must NEVER `exit` early. It did, and on any note larger than
-    # the pipe buffer (~64 KiB) the upstream `tr`/`sed` then died of SIGPIPE,
-    # which `pipefail` turned into "could not be read" — so the bound ABORTED the
-    # whole archive instead of truncating it, and /close went on to report the
-    # note as lost. Reproduced with an 80 KiB note; the old 16 KiB fixture fit the
-    # buffer and never showed it. So: stop printing, keep consuming.
-    #
-    # `LC_ALL=C` on awk too, so `length()` counts BYTES like every other stage —
-    # a character-counting awk made a multibyte note several times the intended
-    # size. A first line longer than the whole bound is truncated rather than
-    # dropped, which used to yield an empty block and a refused note.
-    note_block="$( set -o pipefail
-      LC_ALL=C tr -d '\000-\010\013-\037\177' <&9 \
-      | LC_ALL=C sed $'s/\xc2[\x80-\x9f]//g' \
-      | LC_ALL=C sed $'s/\xe2\x80[\xaa-\xae]//g; s/\xe2\x81[\xa6-\xa9]//g' \
-      | LC_ALL=C sed 's/^/> /' \
-      | LC_ALL=C awk -v lim=4096 '
-          done { next }
-          { if (n + length($0) + 1 > lim) {
-              if (n == 0) print substr($0, 1, lim - 1)
-              done = 1; next
-            }
-            n += length($0) + 1; print }' )" \
-      || { exec 9<&-; echo "--note-file could not be read: $note_real" >&2; exit 2; }
-    exec 9<&-
-    if [ -z "$note_block" ]; then
-      echo "--note-file is empty after sanitizing: $note_real" >&2
-      exit 2
-    fi
-  fi
-
   # Title for the index line: the document title is the FIRST non-blank line when it
   # is an ATX heading ('#'-run THEN a space). Looking only at the first non-blank
   # line (not any '#' line anywhere, which grep would catch inside a leading code
@@ -377,12 +192,8 @@ archive() {
     echo "failed to create a temp file in $tasks_dir/archive" >&2
     exit 1
   fi
-  # An `if` (not `stamp && note`): under `set -e` a false test in an AND-list
-  # inside this group would abort the whole write.
   emit_stamped() {
-    printf '%s\n' "$stamp"
-    if [ -n "$note_block" ]; then printf '>\n%s\n' "$note_block"; fi
-    printf '\n'
+    printf '%s\n\n' "$stamp"
     cat "$src"
   }
   if ! emit_stamped > "$tmp"; then

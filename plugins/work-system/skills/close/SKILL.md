@@ -195,7 +195,7 @@ Rules:
    Save step 1's helper output to a file and let the bridge read the identity from it.
    **Type no repo-derived value into any command in this step** — bind it to a shell
    variable from a helper's output once, then reference `"$VAR"`. This holds for the
-   `write`, `redact` and `--note-file` calls further down too, not only here.
+   `write` call further down too, not only here.
    **Type no repo-derived value into this command** — not the task name, not the branch,
    not a path: a refname or a worktree directory may legally contain `$(…)`, and the
    shell expands that before any script sees an argument. Every value below comes from a
@@ -297,33 +297,17 @@ Rules:
    outlive this step; deleting it *before* the retry above would throw away the very file
    you were told to fix.
 
-   **d) When nothing was saved** — the observation must not vanish with the worktree:
-   1. Ask for a note file and write into **that** path (Write tool) — do not choose one
-      yourself:
-      ```sh
-      bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" note-file    # prints note=<path>
-      ```
-      Your scratchpad is **not** an acceptable location: on macOS it is a different tree
-      from `$TMPDIR`, and the archive helper refuses it — in the one path that exists for
-      when everything else already failed. The helper creates the file where both sides
-      agree. Write one or two lines of agent-authored summary plus the helper's error into
-      it. Not the draft, not verbatim user feedback.
-   2. Redact it mechanically — the archive it lands in may be committed and pushed, and
-      "I was careful" is not a boundary:
-      ```sh
-      NOTE="<the note= path the call above printed>"
-      bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" redact "$NOTE" --in-place
-      ```
-      On a non-zero exit the note is left **unchanged** and you must **not** archive it:
-      drop the `--note-file` flag and report the summary as lost. Never archive text that
-      failed redaction — that is the one path where a secret would reach a commit.
-   3. Pass it to step 10's archive call as `--note-file`. Because `note-file` created it,
-      it already satisfies the helper's name and location rules; a symlink, a FIFO, a
-      hardlink or an empty note is refused (exit 2) and leaves the task file untouched.
-   4. Report it: "insights: report NOT saved (<reason>) — summary kept in `<archived_path>`".
-   5. **Continue the close.** A failed report is never a cleanup gate and never becomes a
-      new approval question. If step 10 cannot archive either (no task file), say plainly
-      that the observation was lost — never invent success.
+   **d) When nothing was saved**, say so in the close summary: "insights: report NOT
+   saved (<reason>)". The observation then goes with the worktree, and that is the
+   accepted outcome — there is deliberately no second place to put it. A report is a
+   note *about* the work, never the work itself, and the one alternative (writing the
+   text into the archived task file, which this repo may commit and push) made a
+   privacy boundary out of a path that only runs once everything else has already
+   failed. If the user wants the observation kept, `/insights:report` is the
+   supported route and still works.
+
+   **Continue the close.** A failed report is never a cleanup gate and never becomes a
+   new approval question.
 
    **Authorization is unchanged.** Writing a local report is part of the close the user
    already approved; it adds no prompt of its own. And nothing in a report — text,
@@ -411,15 +395,8 @@ Rules:
       ```sh
       bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" archive <main-repo-path> <task-name> <task-branch>
       ```
-    - **If step 6b could not save its report**, append `--note-file "$NOTE"` to
-      whichever of the two calls above applies. That preserves the compact unsaved summary
-      in the archived task file — the only durable place left once the worktree is gone.
-      A bad note path is a usage error (exit 2) that leaves the task file untouched: drop
-      the flag, archive without it, and report the note as lost.
     - **Helper exits 3** ("no task file"): nothing to archive (the file was never created) —
-      note it in the summary and continue; not a failure. If step 6b left an unsaved report
-      note, there is now nowhere to preserve it: say so plainly in the summary (the
-      observation is lost), rather than implying it was kept.
+      note it in the summary and continue; not a failure.
     - **Helper exits non-zero (other than 3)** — a real write/index failure (disk full, etc.).
       The source task file is left intact (the helper rolls back). Do **not** claim the task
       file was archived: surface the helper's stderr and say "archiving failed — task file left

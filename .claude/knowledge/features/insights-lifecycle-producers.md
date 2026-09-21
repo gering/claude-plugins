@@ -1,9 +1,9 @@
 ---
 title: "Insights Lifecycle Producers (/continue handoff, /close report)"
 createdAt: 2026-09-20
-updatedAt: 2026-09-20
+updatedAt: 2026-09-21
 createdFrom: "branch: task/integrate-insights-handoffs"
-updatedFrom: "branch: task/integrate-insights-handoffs"
+updatedFrom: "PR #63"
 pluginVersion: 1.15.0
 prime: false
 ---
@@ -88,22 +88,13 @@ edit quietly moves it.
   **name**, which gets reused over time — so the caller is given `recorded_at`
   and told to judge. A duplicate report is a harmless extra record; a lock or a
   competing run identity would cost more than it saves.
-- **The failed-write fallback is the archived task file**, via
-  `archive-task.sh --note-file` (see
-  [task-archiving-on-close](task-archiving-on-close.md)). There is deliberately
-  **no** second store: a fallback store would be a second thing to find, trust
-  and redact. That archive can be committed and pushed, which drove two
-  decisions the first cut got wrong. The note is **redacted mechanically**
-  (`insights.py redact`, added in 0.1.1 so the patterns are not copied into a
-  second plugin) rather than by telling the model not to paste a secret — an
-  instruction is not a boundary — and a redaction that *fails* means the note is
-  not archived at all, never used unredacted. The path is constrained at three
-  points, because each one alone was bypassed in review: a purpose-made `note-*`
-  **name** (the location rule is near-vacuous on a checkout under `/tmp`), a
-  resolved **location** (parents included), and the **final component** itself.
-  Resolving only the parent still let `ln -s ~/.ssh/id_rsa /tmp/note-leak`
-  through — correct name, allowed directory, symlinked last component — and a
-  hardlink has no symlink to detect at all, so the link count is checked too.
+- **A failed write has no fallback, on purpose.** The close summary states that
+  the report was not saved and why; the observation then goes with the worktree.
+  This was not the first design. The original cut preserved a compact summary in
+  the archived task file (`archive-task.sh --note-file`), and that path was
+  **struck before merge** — see *Why the fallback was removed* below. What stays
+  true either way: there is no second store, because a second store is a second
+  thing to find, trust and redact.
 - **work-system mints no run identity.** It has no run registry, so `run_id`
   stays unknown with that reason. A competing identifier would be worse than
   none, and a report ID is not a task identity.
@@ -158,19 +149,41 @@ guard silently do nothing:
   with `TZ=UTC` is what converts. (`%cI` has the same problem with its offset,
   and `--max-count` applies before `--reverse`, so the oldest commit is `tail -1`.)
 
-## The note path belongs to the script, not the caller
+## Why the fallback was removed
 
-The `/close` fallback note produced a critical finding in three consecutive
-review rounds, each time in a different guard, until the shape changed: the
-caller no longer chooses the path at all. `insights-handoff.sh note-file`
-creates it, and `archive-task.sh --note-file` accepts only what that produces.
+The feature originally kept an unsaved report's summary in the archived task
+file. That path is gone. The reasoning is worth keeping, because it is the kind
+of feature that looks obviously right and is not.
 
-The failure that forced it is worth remembering, because the prose looked
+Three properties met in that one path and nowhere else in the feature:
+
+1. **It was the only trust boundary.** Every other write goes through
+   `insights.py` into a private local store that is never committed. This one
+   moved model-authored text into a file the repo may commit and push.
+2. **Its path came from the caller**, so it needed full path validation — and
+   each round found another hole: resolving only the parent let
+   `ln -s ~/.ssh/id_rsa /tmp/note-leak` through (correct name, allowed
+   directory, symlinked last component); a hardlink has no symlink to detect at
+   all; the check-to-open window allowed a swap; and the `awk` bound `exit`ed
+   early, so a note over the limit came out **empty** rather than truncated —
+   the exact loss the path existed to prevent.
+3. **It almost never ran.** It is reached only once the store has already
+   failed, so the riskiest code in the feature was also the least exercised.
+
+Against that: it saved one or two lines *about* a lost report, never the report.
+`/insights:report` records the observation by hand and always worked.
+
+A related failure is worth remembering on its own, because the prose looked
 right: the skill said "write it into your scratchpad", and on macOS the session
 scratchpad (`/private/tmp/claude-…`) is a **different tree** from `$TMPDIR`
-(`/var/folders/…`). So the note landed somewhere the script refused — in the one
+(`/var/folders/…`). The note landed where the script refused it — in the one
 path that exists for when the report write has already failed. Two documents
 agreeing with each other is not the same as either agreeing with the code.
+
+The general lesson: when the least-exercised path in a feature is also its only
+privacy boundary, the cheapest fix is usually to delete the path. Count rounds,
+not just findings — four consecutive rounds each finding a *new* critical in the
+same guard is a shape problem, not a bug queue.
 
 ## A review run committed to this branch
 

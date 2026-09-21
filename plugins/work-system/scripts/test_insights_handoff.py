@@ -53,7 +53,7 @@ def make_tree(root, insights="real"):
     """
     ws = root / "plugins" / "work-system" / "scripts"
     ws.mkdir(parents=True)
-    for name in (SCRIPT.name, "lib-bounded.sh", "lib-stat.sh",
+    for name in (SCRIPT.name, "lib-bounded.sh",
                  "task-status.sh", "main-repo-path.sh"):
         shutil.copy(HERE / name, ws / name)
     if insights == "real":
@@ -345,7 +345,7 @@ with tempfile.TemporaryDirectory() as td:
           run(real, "write", str(tmp / "nope.json"), store=store, home=home).returncode == 2)
     link = tmp / "draft-link.json"
     link.symlink_to(tmp / "nope.json")
-    check("a symlinked draft is refused, like --note-file",
+    check("a symlinked draft is refused",
           run(real, "write", str(link), store=store, home=home).returncode == 2)
 
     # ------------------------------------------------- the exit-code namespace
@@ -447,90 +447,33 @@ with tempfile.TemporaryDirectory() as td:
               drafted["work"]["task_name"]["value"] == "recovered-task")
         os.unlink(d["draft"])
 
-    # note-file: the bridge picks the location, because the session scratchpad is
-    # NOT $TMPDIR on macOS and archive-task.sh refuses it — in the one path that
-    # exists for when everything else already failed.
-    r = run(real, "note-file", store=store, home=home, cwd=proj)
-    d = kv(r.stdout)
-    note_path = Path(d.get("note", ""))
-    check("note-file prints a path", r.returncode == 0 and d.get("note"))
-    check("the note file exists and is private",
-          note_path.is_file() and (note_path.stat().st_mode & 0o077) == 0)
-    check("the note is named the way archive-task.sh requires",
-          note_path.name.startswith("note-"))
-    check("the note sits under the temp root archive-task.sh accepts",
-          str(note_path).startswith(str(Path(os.environ.get("TMPDIR", "/tmp")))))
-    note_path.unlink(missing_ok=True)
-
     # ------------------------------------------- argument order and signals
-    # `redact --in-place FILE` read the FLAG as the filename and then died with
-    # "unknown option: <the file path>" — naming the file as the offending flag,
-    # on the one path where the note is the last copy of the observation.
-    for args, label in ((["--in-place"], "flag first"), ([], "flag last")):
-        probe = tmp / f"note-order-{len(args)}.txt"
-        probe.write_text("tok sk-ant-0123456789abcdefghijklmno\n")
-        call = ["redact"] + args + [str(probe)] + ([] if args else ["--in-place"])
-        r = run(real, *call, store=store, home=home, cwd=proj)
-        check(f"redact accepts the {label} order", r.returncode == 0)
-        check(f"the {label} order actually redacted", "sk-ant-0123" not in probe.read_text())
-    stray = tmp / "note-stray.txt"
-    stray.write_text("text\n")
+    # The positional comes FIRST, and a swapped order must SAY so. The previous
+    # parser scanned for the first non-flag argument instead, which on every
+    # remaining subcommand picks up a FLAG'S VALUE (`--project-dir DIR DRAFT`
+    # → DIR) and silently uses it as the file.
+    missing = tmp / "no-such-draft.json"
+    r = run(real, "write", "--project-dir", str(proj), str(missing),
+            store=store, home=home, cwd=proj)
+    check("a swapped write order is refused", r.returncode == 2)
+    check("and it names the real problem, not the path that followed",
+          "comes first" in r.stderr and str(missing) not in r.stderr)
+    r = run(real, "reported", "--trigger", "close", "some-task",
+            store=store, home=home, cwd=proj)
+    check("the same holds for reported", r.returncode == 2 and "comes first" in r.stderr)
+    r = run(real, "write", str(missing), "--project-dir", str(proj),
+            store=store, home=home, cwd=proj)
+    check("the documented order reaches the file check",
+          "no draft file at" in r.stderr)
+    r = run(real, "write", str(missing), "--bogus", store=store, home=home, cwd=proj)
     check("an unknown option is still refused",
-          run(real, "redact", str(stray), "--bogus", store=store, home=home, cwd=proj).returncode == 2)
+          r.returncode == 2 and "unknown option: --bogus" in r.stderr)
 
     # The signal handler used to clean up and RESUME, so a signal during the
     # overlay deleted the tracked draft and the script still printed its path.
     SCRIPT_SRC = SCRIPT.read_text()
     check("EXIT and signals get different handlers", "trap cleanup EXIT\n" in SCRIPT_SRC)
     check("signals re-raise instead of returning", "kill -s" in SCRIPT_SRC)
-
-    # ---------------------------------------------------------------- redact
-    # The /close fallback note is not a report, but it lands in a file this repo
-    # may commit and push — so it goes through insights' own patterns, not prose.
-    note = tmp / "note.txt"
-    note.write_text("write failed. token sk-ant-0123456789abcdefghijklmno stays out of git\n")
-    r = run(real, "redact", str(note), store=store, home=home, cwd=proj)
-    check("redact exits 0", r.returncode == 0)
-    check("redact removes the credential shape", "sk-ant-0123" not in r.stdout)
-    check("redact keeps the surrounding text", "write failed." in r.stdout)
-    check("redact reports how much it replaced", "redactions=1" in r.stderr)
-    check("redact is unavailable when insights is absent",
-          run(absent, "redact", str(note), home=home).returncode == 3)
-
-    # Refusing on a control character left the caller with UNREDACTED text — the
-    # one input where redaction matters most. It strips instead.
-    ctl = tmp / "note-ctl.txt"
-    ctl.write_text("tok sk-ant-0123456789abcdefghijklmno\x01end\n")
-    r = run(real, "redact", str(ctl), store=store, home=home, cwd=proj)
-    check("a control character no longer disables redaction", r.returncode == 0)
-    check("the credential is still removed", "sk-ant-0123" not in r.stdout)
-    check("the control character is stripped", "\x01" not in r.stdout)
-
-    # --in-place exists so the SKILL does not spell out a redirect-then-rename at
-    # the one moment the note is the last copy of the observation.
-    inplace = tmp / "note-inplace.txt"
-    inplace.write_text("keep this. sk-ant-0123456789abcdefghijklmno\n")
-    r = run(real, "redact", str(inplace), "--in-place", store=store, home=home, cwd=proj)
-    check("--in-place exits 0", r.returncode == 0)
-    check("--in-place rewrites the file", "sk-ant-0123" not in inplace.read_text())
-    check("--in-place keeps the rest of the note", "keep this." in inplace.read_text())
-    # A failed pass must leave the ORIGINAL intact, never a truncated one.
-    untouched = tmp / "note-untouched.txt"
-    untouched.write_text("original content\n")
-    r = run(broken, "redact", str(untouched), "--in-place", home=home)
-    check("a failed --in-place leaves the note unchanged",
-          untouched.read_text() == "original content\n")
-    check("a failed --in-place is not reported as success", r.returncode != 0)
-
-    # `rc=$?` taken after a closed `if` always read 0, so the invalid-vs-unusable
-    # mapping was dead and every failure came back as 4 ("installed but
-    # unusable") — blaming the plugin for a bad input.
-    badinput = tmp / "note-badutf8.txt"
-    badinput.write_bytes(b"\xff\xfe not utf-8\n")
-    r = run(real, "redact", str(badinput), "--in-place", store=store, home=home, cwd=proj)
-    check("a rejected input maps to exit 1, not 'plugin unusable'", r.returncode == 1)
-    check("a rejected --in-place leaves the file byte-identical",
-          badinput.read_bytes() == b"\xff\xfe not utf-8\n")
 
     # The cleanup trap was dead code: `f="$(mktemp_tracked)"` appended inside a
     # subshell, so the parent's array was always empty. Assert no stray temp
@@ -568,10 +511,13 @@ check("a failed report never blocks cleanup", "never a cleanup gate" in step6b)
 check("an unsaved report is never described as recorded",
       "never describe it as recorded" in step6b)
 check("a report grants no authority", "authorizes anything" in step6b)
-check("the unsaved summary is redacted before it can be committed",
-      "redact" in step6b)
-check("the unsaved summary lands in the archived task file",
-      "--note-file" in step6b and "--note-file" in CLOSE[removal:])
+# There is deliberately NO second place for an unsaved report: the one
+# alternative wrote model-authored text into the archived task file, which this
+# repo may commit and push. Assert that neither the skill nor the scripts have
+# grown that path back.
+check("an unsaved report has no fallback store",
+      "no second place to put it" in step6b)
+check("the close skill prescribes no note fallback", "--note-file" not in CLOSE)
 # The lane's identity is DERIVED, never pasted: a refname may legally contain
 # `$(...)`. Scoped to the INSIGHTS calls, which is all this change controls — the
 # pre-existing archive-task.sh invocation in step 10 still interpolates
@@ -587,7 +533,7 @@ for label, text in (("close", step6b), ("continue", CONTINUE)):
 SCRIPT_TEXT = SCRIPT.read_text()
 FLAG_RE = re.compile(r"--[a-z][a-z-]+")
 KNOWN_NON_BRIDGE = {"--pr", "--json", "--jq", "--ff-only", "--quiet", "--short",
-                    "--sha", "--note-file", "--date", "--format", "--admin"}
+                    "--sha", "--date", "--format", "--admin"}
 for label, text in (("close", CLOSE), ("continue", CONTINUE)):
     # Join backslash-continued lines first: the SKILLs wrap their commands, and
     # scanning raw lines saw only each command's first fragment.
@@ -602,10 +548,10 @@ for label, text in (("close", CLOSE), ("continue", CONTINUE)):
 check("no SKILL prescribes a --related flag",
       "--related" not in CLOSE and "--related" not in CONTINUE)
 check("--related is not a bridge flag either", "--related)" not in SCRIPT_TEXT)
-check("--in-place is what the SKILLs prescribe for redaction",
-      "--in-place" in CLOSE and "--in-place)" in SCRIPT_TEXT)
-check("a failed redaction never archives the note",
-      "must **not** archive it" in CLOSE)
+ARCHIVE_TEXT = (HERE / "archive-task.sh").read_text()
+check("the archive helper has no note flag either",
+      "--note-file" not in ARCHIVE_TEXT)
+check("the bridge exposes no redaction of its own", "redact)" not in SCRIPT_TEXT)
 
 check("the handoff report is bounded to real handoffs",
       "Never at a tool call, a turn end, a commit, or an unchanged idle" in CONTINUE)
