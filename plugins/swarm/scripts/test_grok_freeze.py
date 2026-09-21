@@ -120,7 +120,8 @@ if frag:
             arglog = Path(td) / f"args.{shell}"
             r = subprocess.run([shell, "-c", frag.group(0)], capture_output=True, text=True, timeout=30,
                                env=dict(os.environ, CLAUDE_PLUGIN_ROOT=str(root), ARGLOG=str(arglog),
-                                        SWARM_GROK_MODEL="grok-4.5"))
+                                        SWARM_GROK_MODEL="grok-4.5", PROMPT_BYTES="100",
+                                        OVERSIZE_THRESHOLD="200"))
             argv = arglog.read_text().split("\n") if arglog.exists() else ["?"]
             check(f"{shell}: the adapter is called with exactly `grok-model` (the pin travels by env)",
                   argv[:2] == ["1", "grok-model"])
@@ -131,6 +132,15 @@ if frag:
                   freeze(out.get("GROK_RUN", ""))["flag"] == " --model 'grok-4.5'")
             check(f"{shell}: the free-text reason is printed, never executed",
                   "$(id)" in out.get("GROK_DEGRADED", "") and "uid=" not in r.stdout)
+            # Oversize: the externals will be skipped, so nothing may be selected (or paid for).
+            arglog.unlink()
+            r = subprocess.run([shell, "-c", frag.group(0)], capture_output=True, text=True, timeout=30,
+                               env=dict(os.environ, CLAUDE_PLUGIN_ROOT=str(root), ARGLOG=str(arglog),
+                                        PROMPT_BYTES="300", OVERSIZE_THRESHOLD="200"))
+            check(f"{shell}: an oversize diff never calls grok-model (no probe for a skipped voice)",
+                  not arglog.exists() and "GROK_RUN=selected=;" in r.stdout)
+check("skill: the report layout renders the run's grok model and a dropped grok",
+      "balance.grokModel.model" in SKILL and "balance.grokDropped" in SKILL)
 check("skill: no `${VAR:+--flag …}` argument splicing in the prep fragment",
       not re.search(r"grok-model\s+\$\{", SKILL))
 check("skill: the token is passed as args.grok", 'grok: "<GROK_RUN>"' in SKILL)

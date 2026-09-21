@@ -75,6 +75,9 @@ MAX_STDOUT_BYTES = 262144
 # (providers fix this); an inconclusive probe is held just long enough that the
 # sibling cluster processes of ONE review do not each re-pay for it.
 TTL = {"ok": 14 * 86400, "failed": 86400, "unknown": 600}
+# A CLI whose version cannot be read gives the key nothing to tell two builds
+# apart, so no verdict about it may outlive one review.
+TTL_UNVERSIONED = 600
 # `ensure` re-measures a pass this long BEFORE it expires. A review freezes the
 # model `ensure` returned and its voices then only `check`: without the margin a
 # pass read at 13d23h59m would expire between the prep step and the first voice.
@@ -160,6 +163,8 @@ def read_record(path, model, cli_version, now, margin=0):
     ttl = TTL[rec["compat"]]
     if rec["compat"] == "ok":
         ttl -= margin
+    if cli_version == "unknown":
+        ttl = min(ttl, TTL_UNVERSIONED)
     if now - checked > ttl:
         return None, "cache record expired"
     for k in ("reason", "actual_model"):
@@ -225,6 +230,20 @@ def detect_cli_version(grok_bin):
     return "unknown"
 
 
+def served_by(served, model):
+    """Is `served` the requested model — itself, or itself plus a build tag?
+
+    grok-4.7 is served as grok-4.7-build. A bare prefix test would also accept
+    grok-4.70-build for grok-4.7 and grok-4.7-build for a pin `grok-4`, caching
+    one model's verdict under another's id; so the character after the id must
+    start a tag (`-` then a non-digit), never continue the version.
+    """
+    if served == model:
+        return True
+    rest = served[len(model):]
+    return served.startswith(model) and len(rest) >= 2 and rest[0] == "-" and not rest[1].isdigit()
+
+
 def judge(rc, out, model=""):
     """(compat, reason, actual_model) from one finished probe call."""
     if isinstance(rc, OSError):
@@ -246,7 +265,7 @@ def judge(rc, out, model=""):
     # The served id may carry a suffix (grok-4.7 is served as grok-4.7-build), but
     # it must BE the requested model. A CLI that quietly fell back to its default
     # would otherwise get that default's verdict cached under the new id.
-    if model and isinstance(usage, dict) and usage and not any(str(k).startswith(model) for k in usage):
+    if model and isinstance(usage, dict) and usage and not any(served_by(str(k), model) for k in usage):
         return "unknown", f"the call was served by {actual}, not by {model}", actual
     # From here the call COMPLETED, so a bad shape is a definite answer about the
     # model, not about the environment. A successful exit alone proves nothing.
@@ -377,7 +396,14 @@ def main(argv=None):
     if args.mode == "check":
         return emit(dict(base, compat="unknown", reason=why), "none")
 
-    fd = lock(directory, path, args.timeout + 15)
+    try:
+        fd = lock(directory, path, args.timeout + 15)
+    except OSError as exc:
+        # e.g. a symlink planted at the lock path (O_NOFOLLOW -> ELOOP). An
+        # uncaught error would exit 1, which callers read as "this MODEL does not
+        # enforce the schema" — a verdict about a probe that never ran.
+        return emit(dict(base, compat="unknown",
+                         reason=f"the probe lock could not be taken ({errno.errorcode.get(exc.errno, exc.errno)})"), "none")
     if fd is None:
         return emit(dict(base, compat="unknown",
                          reason="another probe for this model did not finish in time"), "none")

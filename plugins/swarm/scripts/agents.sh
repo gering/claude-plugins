@@ -1425,8 +1425,15 @@ _probe_degraded() {
   # degrade, so each must be equally audible: the docs promise the check falls
   # back "never silently", and a promise that holds on only some routes (or for
   # only one backend) is the runtime-lie this branch removes.
-  local fallback="auth alone" what="the schema-verified-model check"
-  if [[ "$1" == "kimi" ]]; then fallback="authenticated install"; what="the ACP/model check"; fi
+  # grok no longer trusts auth here: without a readable catalog it can only run
+  # a LAST-KNOWN measured model or a pin, and is otherwise not ready. The warning
+  # must say that — "falls back to auth" followed by exit 1 sends the operator
+  # looking for an auth problem that does not exist.
+  if [[ "$1" == "grok" ]]; then
+    echo "warning: grok model catalog unavailable ($2) — only a last-known measured model or an explicit pin can run; otherwise grok is not ready" >&2
+    return 0
+  fi
+  local fallback="authenticated install" what="the ACP/model check"
   echo "warning: $1 model probe unavailable ($2) — readiness falls back to $fallback; $what did not run" >&2
 }
 # Which timeout wrapper exists, resolved once. Availability is a property of the

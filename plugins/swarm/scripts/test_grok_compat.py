@@ -138,6 +138,33 @@ rc, kv, _ = s.run("ensure", FAKE_SERVED="grok-4.5-build")
 check("a call SERVED by another model is no verdict about the requested one",
       rc == 3 and kv.get("compat") == "unknown" and "served by" in kv.get("reason", ""))
 
+for served, want in [("grok-4.7", 0), ("grok-4.7-build", 0), ("grok-4.7-build-fast", 0),
+                     ("grok-4.70-build", 3), ("grok-4.71", 3), ("grok-4.7-2", 3), ("grok-4.7x", 3)]:
+    s = Env()
+    rc, kv, _ = s.run("ensure", FAKE_SERVED=served)
+    check(f"served-model identity: {served} for grok-4.7 -> exit {want}", rc == want)
+s = Env()
+rc, kv, _ = s.run("ensure", model="grok-4", FAKE_SERVED="grok-4.7-build")
+check("a pin `grok-4` does not inherit grok-4.7's verdict", rc == 3)
+
+# An unreadable CLI version cannot tell two builds apart: no verdict outlives a review.
+v = Env()
+v.run("ensure", version="nightly")
+rec = json.loads(v.records()[0].read_text())
+check("unparseable CLI version is keyed as unknown", rec["cli_version"] == "unknown")
+d = dict(rec, checked_at=rec["checked_at"] - 700); v.records()[0].write_text(json.dumps(d)); v.records()[0].chmod(0o600)
+rc, kv, _ = v.run("ensure", version="nightly")
+check("...and its pass is re-measured after minutes, not 14 days", kv.get("source") == "probe" and len(v.probes()) == 2)
+
+# A symlink planted at the lock path must not read as "this model fails the schema".
+l = Env(); l.run("check")
+import hashlib
+key = hashlib.sha256("grok-4.7\0001.0.40\000grok-schema-probe/v1".encode()).hexdigest()[:16]
+(l.cache / f"grok-4.7--{key}.json.lock").symlink_to(l.root / "elsewhere")
+rc, kv, _ = l.run("ensure")
+check("unusable lock -> unknown / exit 3 (never exit 1), and no probe is run",
+      rc == 3 and kv.get("compat") == "unknown" and "lock" in kv.get("reason", "") and not l.probes())
+
 # --- definite failures: exit 0 from grok is NOT proof ----------------------------
 for fake, needle in [("null", "null"), ("prose", "enum"), ("extra", "exact keys"), ("strsum", "integer")]:
     f = Env()

@@ -795,7 +795,7 @@ entry_status() {
       if ! command -v grok >/dev/null 2>&1; then note="not installed"
       elif [ ! -s "$GROK_AUTH_FILE" ]; then note="run: grok login"
       else
-        local _raw grc=0
+        local _raw _gline grc=0
         _raw="$(grok_models_raw)" || grc=$?   # exit code = fetch status
         if [ "$grc" -ne 0 ]; then
           # unreachable/timed out — inconclusive, not a drop. Trust auth so a
@@ -815,12 +815,18 @@ entry_status() {
           # Exact id, not substring: grok-4.7 is not "offered" because
           # grok-4.7-build-fast is.
           avail=yes
-        elif grep -qE "^[[:space:]]*[*-][[:space:]]+[\`\"]?$(printf '%s' "$model" | sed 's/[.]/[.]/g')[\`\"]?[.,;:]*([[:space:]]|\$)" <<<"$_raw"; then
-          # On its own bullet, but the parser dropped the line: it carries
-          # withdrawal wording (deprecated, sunset, …). That filter protects the
-          # AUTOMATIC choice; a deliberate pin is honoured — deprecated is not
-          # "rejected by -m" — and told what it is pinned to.
-          avail=yes; note="listed by this grok CLI with withdrawal wording (deprecated/retired/…) — pin honoured"
+        elif _gline="$(grep -E "^[[:space:]]*[*-][[:space:]]+[\`\"]?$(printf '%s' "$model" | sed 's/[.]/[.]/g')[\`\"]?[.,;:]*([[:space:]]|\$)" <<<"$_raw" | head -n 1)" && [ -n "$_gline" ]; then
+          # On its own bullet, but the parser dropped the line. WHY it dropped it
+          # decides: "deprecated/retired/sunset" still runs — that filter only
+          # protects the AUTOMATIC choice, so a deliberate pin is honoured and
+          # told what it is pinned to. "coming soon/unavailable/disabled/removed"
+          # says the CLI will REJECT `-m`, so honouring the pin would hand the
+          # user a worker tab that dies at launch.
+          if printf '%s' "$_gline" | grep -qiE 'coming soon|unavailable|not available|disabled|removed'; then
+            note="listed by this grok CLI as not usable yet/any more (coming soon/unavailable/…) — see: grok models"
+          else
+            avail=yes; note="listed by this grok CLI with withdrawal wording (deprecated/retired/…) — pin honoured"
+          fi
         else note="model not offered by this grok CLI (see: grok models)"; fi
       fi
       ;;

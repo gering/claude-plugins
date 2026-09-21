@@ -4,7 +4,7 @@ createdAt: 2026-07-17
 updatedAt: 2026-09-21
 createdFrom: "session: 2026-07-17 (task/kickoff-agent-selection)"
 updatedFrom: "session: 2026-09-21 (task/auto-select-latest-grok)"
-pluginVersion: 1.15.0
+pluginVersion: 1.9.0
 prime: false
 ---
 

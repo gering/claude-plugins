@@ -423,7 +423,12 @@ echo "JAIL=$JAIL"
 # which turned a pin into "Unknown flag", an empty token, and a run on "latest".
 # Only charset-safe fields go into the token; the free-text reason is echoed
 # separately for the announcement and never reaches a command line.
-GROK_KV="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" grok-model 2>/dev/null)" || true   # exit 1 = nothing selected; GROK_DEGRADED says why
+# Skipped when the diff is oversize: the externals will not run, so selecting a
+# model could only spend metered probes on a voice that is about to be dropped.
+GROK_KV=""
+if [ "$PROMPT_BYTES" -le "$OVERSIZE_THRESHOLD" ]; then
+  GROK_KV="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" grok-model 2>/dev/null)" || true   # exit 1 = nothing selected; GROK_DEGRADED says why
+fi
 _gk() { printf '%s\n' "$GROK_KV" | sed -n "s/^$1=//p" | head -n 1 | tr -cd 'A-Za-z0-9._-'; }
 echo "GROK_RUN=selected=$(_gk selected);latest_candidate=$(_gk latest_candidate);source=$(_gk source);catalog=$(_gk catalog);cli_version=$(_gk cli_version)"
 echo "GROK_DEGRADED=$(printf '%s\n' "$GROK_KV" | sed -n 's/^degraded=//p' | head -n 1)"
@@ -636,6 +641,7 @@ Then the balance block (ALWAYS, this shape), from `balance`:
 Bilanz:  <total> Findings (🔴<c> 🟡<w> ⚪<m> · <design> Design) · Konsens <consensus> · Solo <solo> · REFUTED <refuted> · Verdict ✅<a> 🟨<p> ❌<d>
 Agents:  <model> <findings> · …   (from balance.agents; EVERY backend is multi-voice — one call per gated cluster, per lens under --max. Render each backend's voice count so the topology is honest, e.g. `opus×5 7 · gpt×5 3 · grok×5 5 · kimi×5 4`; claude runs in-session, codex/grok/kimi through the adapter. When `failedVoices > 0`, append `(<failedVoices> ohne Ergebnis)` to THAT backend — `grok×5 0` alone reads as "reviewed, found nothing", which is exactly the sentence three silent runs printed while most of their calls were being denied.)
 Lenses:  <gate.run joined>  —  gated-out: <gate.skip lenses>
+Grok:    <balance.grokModel.model> (<balance.grokModel.source>)   (ONLY when balance.grokModel is non-null. When `source` is not `latest`, or `latest` differs from `model`, append ` — latest on offer: <balance.grokModel.latest>`; "grok×5" alone never says WHICH model reviewed, and a fallback/pinned model must not read as the newest. When `balance.grokDropped` is true print instead: `Grok:    nicht gelaufen — kein Modell festlegbar`; the coverage note carries the reason.)
 ```
 
 Then, when present:

@@ -497,11 +497,16 @@ def grok_call_count(e):
 # A model the CLI lists WITH withdrawal wording: never auto-selected, but a
 # deliberate pin is honoured (deprecated is not "rejected by -m") and says so.
 e = Env()
-raw_grok(e, "Available models:\n  * grok-4.7 (default)\n  - grok-4.8 (deprecated)\n  - grok-4.6 [sunset 2026-12]\n")
+raw_grok(e, "Available models:\n  * grok-4.7 (default)\n  - grok-4.8 (deprecated)\n  - grok-4.6 [sunset 2026-12]\n"
+            "  - grok-5.1 (coming soon)\n  - grok-4.2 [unavailable]\n")
 check("withdrawn wording: latest skips it", grok_resolve(e)[1].get("model") == "grok-4.7")
 rc, r = grok_resolve(e, "grok:grok-4.6")
 check("withdrawn wording: an explicit pin still launches, with a note",
       rc == 0 and "withdrawal" in r.get("note", "") and r["argv"][:3] == ["grok", "-m", "grok-4.6"])
+for nope in ("grok:grok-5.1", "grok:grok-4.2"):
+    rc, r = grok_resolve(e, nope)
+    check(f"{nope}: listed as NOT usable (coming soon/unavailable) -> refused, with that reason",
+          rc == 3 and "not usable" in r.get("note", ""))
 check("...but a pin that is on NO bullet is still refused", grok_resolve(e, "grok:grok-4.5")[0] == 3)
 check("...and a substring of a listed id is not a bullet match", grok_resolve(e, "grok:grok-4")[0] == 3)
 
