@@ -1,9 +1,9 @@
 ---
 title: "Swarm Backend Adapter Layer"
 createdAt: 2026-07-03
-updatedAt: 2026-09-10
+updatedAt: 2026-09-21
 createdFrom: "PR #21"
-updatedFrom: "add-kimi-swarm-voice"
+updatedFrom: "auto-select-latest-grok"
 pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
@@ -368,30 +368,69 @@ backend rc null.
   `--output-last-message <file>` (stdout carries the agent transcript,
   stderr the progress log); grok prints a response **envelope** on stdout —
   the validated object is its `.structuredOutput` field.
-- **The grok model is DISCOVERED, not pinned** (0.9.2). The adapter selects the
-  newest canonical id the CLI lists whose `--json-schema` enforcement is
-  *verified*; `GROK_DEFAULT_MODEL` is only the fallback floor. Ported from
-  `~/dotfiles`' `cc-harness-agents`, which tracks the same provider, with one
-  gate substituted: that helper withholds an upgrade until a model's context
-  window is known, the adapter until its SCHEMA ENFORCEMENT is known — a model
-  that merely accepts the flag and returns `structuredOutput: null` fails late,
-  after a full review is paid for.
-  - `GROK_CANONICAL_RE` accepts only **bare version ids, major ≥ 4**. A provider
-    catalog mixes canonical releases with non-substitutes: dated snapshots,
-    reasoning/non-reasoning splits, multi-agent, build, composer, image/video.
-    Major ≥ 4 keeps a catalog that regresses to `grok-3*` from pulling the
-    ensemble backwards.
-  - Version order is **component-wise**, so `grok-4.20` beats `grok-4.6` — as a
-    decimal fraction it would lose, but the provider means the 20th minor
-    release and already ships 4.20-derived ids.
-  - `GROK_SCHEMA_VERIFIED` is the hard gate and the upgrade ritual: a newer
-    canonical model is **named on stderr, never selected**, so adopting it is a
-    one-line edit after a hand check. Verified 2026-08-16 on CLI 1.0.3:
-    grok-4.5 and grok-4.6 both return an envelope whose `.structuredOutput`
-    carries the schema's `findings`.
-  - Readiness asks "is ANY verified model on offer", matching what the run would
-    actually select. The old "is THIS id listed" form is what let the 1.0.3
-    marker change drop grok from every review.
+- **The grok model is SELECTED per run and its schema enforcement is MEASURED**
+  (0.12.0; discovery since 0.9.2). Two independent questions:
+  - *Which id is newest?* `lib-grok-latest.sh` — exactly `grok-(4|5).<minor>`,
+    integer order (`grok-4.20` beats `grok-4.9`; the provider means the 20th
+    minor). Bare majors, patch versions, every suffixed variant and majors 3/6+
+    are never auto-selected: a provider catalog mixes canonical releases with
+    non-substitutes (dated snapshots, reasoning splits, build, composer,
+    image/video), and a new major is a decision, not a drop-in. Shared
+    byte-identically with work-system (see [[kickoff-agent-selection]]).
+  - *Does it enforce `--json-schema`?* `grok-compat.py`. This replaced the
+    hand-edited `GROK_SCHEMA_VERIFIED` allowlist, which was correct but made
+    every release a code edit (4.7 shipped as the CLI default while the adapter
+    still ran 4.6). The gate is as strict as before — a model that accepts the
+    flag and returns `structuredOutput: null` still fails late, after a full
+    review is paid for — it is just measured instead of typed.
+  - **Probe design.** One call, `--tools "" --disable-web-search --max-turns 1`,
+    empty temp cwd (grok loads `AGENTS.md`/rules from cwd — an empty dir is what
+    makes "no repo data" true). The prompt asks for a plain-English sentence and
+    never mentions JSON; the schema carries an enum token. So a conforming
+    `structuredOutput` can only come from *enforcement*, not cooperation. Exit 0
+    or a model listing proves nothing. Verified 2026-09-21, CLI 1.0.34/1.0.40:
+    grok-4.7 passes (~9 s, ~$0.04; the envelope's `modelUsage` names
+    `grok-4.7-build` — requested id ≠ served id, so keep both in telemetry).
+  - **Three verdicts, not two.** `ok` / `failed` (call completed, output not
+    enforced — a fact about the model) / `unknown` (timeout, non-zero exit,
+    error envelope — a fact about the environment). Collapsing unknown into
+    failed would blacklist a model over a network blip; into ok, the reverse.
+    TTLs 14 d / 1 d / 10 min: the short unknown hold exists only so the sibling
+    cluster processes of ONE review do not each re-pay.
+  - **The cache is validated, not trusted**: keyed by (model, CLI version,
+    probe contract — bump the contract when prompt/schema/argv/acceptance
+    change); 0700/0600; `O_NOFOLLOW`; owner/mode/size/type/future-date checks;
+    a record must sit at the path its own key hashes to; a non-private store is
+    **refused, never chmod-ed** (tightening a dir someone could write launders
+    whatever was planted). Python `re.match` + `$` accepts a trailing newline —
+    ids are validated with `fullmatch` (a test caught `"grok-4.7\n"`).
+  - **Probe once, not per voice.** The workflow spawns one adapter per gated
+    cluster. `/swarm:review`'s prep calls `agents.sh grok-model` ONCE; the
+    workflow pins `--model <id>`, `SWARM_GROK_PROBE=0` (voices `check` the
+    cache, never `ensure`) and `SWARM_GROK_CLI_VERSION` on every grok voice.
+    The version pin matters: keying the cache needs the CLI version, and a
+    `grok --version` in `run` would be a 4th pre-timer probe the margin
+    (`SWARM_MAX_PROBES_PER_RUN`) is not budgeted for. A flock covers direct,
+    un-prepped concurrent runs.
+  - **One model per run** is the same mechanism: the frozen `--model` means a
+    release mid-review cannot split the grok family, and a resumed/looped run
+    re-sends its first token. `args.grok` is ONE charset-checked token (same
+    reasoning as `args.config`); the free-text reason is display-only and never
+    reaches a command line.
+  - **Degradation is data**: `source` = latest | older-compatible (at most
+    `GROK_MAX_COMPAT_PROBES`=2 candidates are ever paid for) | last-known (only
+    when the catalog is unreadable; a model THIS host measured — there is no
+    baked-in default id any more, the old `grok-4.5` floor was a guess that aged
+    silently) | pinned | none. `ready`/`list` say "usable", never "latest".
+  - **A pin is never reinterpreted** — it must be offered and pass the probe,
+    or nothing runs.
+  - Readiness == "selection yields a model", by construction. Two separate
+    predicates is what let the 1.0.3 marker change drop grok from every review.
+  - **Test trap:** `test_sandbox_deny.py` ran `run_grok` with only the help
+    probe stubbed, so it hit the host's real `grok models` — and would now have
+    *paid for a probe from a unit test* (and failed on CI, which has no grok).
+    Any harness that reaches `run_grok` must stub `_grok_models*` and
+    `_grok_compat` (the single seam to the tool).
 - **`grok models` output format has changed twice — parse it defensively.**
   0.2.101 renamed `grok-build` → `grok-4.5`; **1.0.3 changed the bullet marker**
   so only the DEFAULT keeps `*` and the rest use `-`. The `*`-only matcher then
