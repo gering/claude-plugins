@@ -1,7 +1,9 @@
 # Insights report contract — `insights.report/v1`
 
 The one contract every insights producer follows: the manual `/insights:report`
-skill today, lifecycle handoffs (worker/Manager/close) later. `scripts/insights.py`
+skill, and work-system's lifecycle producers (a worker's `handoff` report, the
+`close` report before teardown), which reach it through that plugin's
+`scripts/insights-handoff.sh`. `scripts/insights.py`
 enforces it — producers **never** write report files themselves and never copy
 the validation or storage logic.
 

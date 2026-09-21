@@ -338,6 +338,66 @@ from the CLI's name: an agent that cannot run the review skills gets an allow li
 without it, because recording an authority the worker cannot exercise is worse
 than recording none.
 
+## Insight reports at handoff and close (optional)
+
+If the **insights** plugin is installed, a task's lifecycle now preserves a short
+retrospective by itself — what was achieved, how hard it was and why, what worked,
+concrete friction with its impact, human interventions, and the reporting model's own
+improvement suggestions. Reports are private local JSON under
+`~/.gering-plugins/insights/`, written only through that plugin's helper. Nothing is
+uploaded, and nothing about the task changes.
+
+Two producers, deliberately different perspectives:
+
+| Where | Trigger | Perspective |
+|-------|---------|-------------|
+| `/continue` | the lane reaches its `terminal_gate`, hands work back **blocked**, or the task is explicitly abandoned | the worker: its own model, the skills it ran, the questions it had to ask |
+| `/close` | before teardown, after the merge gate | the Manager or closer: coordination friction, ambiguous states, the task as delivered |
+
+They are **linked, never merged**: a close report references an earlier handoff or
+manual report instead of restating it, so one incident is never later counted as two
+independent observations. A close that finds a `close` report already stored writes
+nothing new, which makes a retried teardown idempotent without any extra bookkeeping.
+
+`work-system` never writes a report file, never validates one, and never redacts one
+itself — everything goes through `scripts/insights-handoff.sh`, its single bridge to the
+plugin (`probe` · `prepare` · `reported` · `write`). `prepare` answers
+skip / absent / unusable / draft in one call, and it takes the lane **directory** rather
+than a task name: a git refname may legally contain `$(…)`, and a name pasted into a
+command line is executed before any script sees it.
+
+**What this does not guarantee.** Be precise about the gaps rather than trusting the
+feature further than it goes:
+
+- **No insights plugin → nothing happens.** It is detected, never required; every flow
+  behaves exactly as before, without a word about it.
+- **Installed but broken is not the same as absent.** A helper that cannot run is
+  surfaced as one line in the close summary; it never blocks cleanup.
+- **Nothing here is a guarantee of capture.** Both producers need a session that
+  actually reaches that point: a crashed or killed worker, or a task closed by hand,
+  produces no report at all. `/close` is the next opportunity, not a backstop that always
+  fires — and a Manager-run close can only report the *Manager's* view, with the worker's
+  model, skills and friction unknown unless that worker left its own handoff report.
+  The close-retry skip is check-then-write, so two concurrent closes could both write —
+  a harmless extra record, not worth a lock. A report from an earlier task that merely
+  reused the name is excluded by comparing it against the lane's first commit, and a
+  close that cannot name its task at all is refused rather than filed unattributably.
+- **Metadata is only as good as the evidence.** A model is recorded from the reporting
+  session's own system prompt and a plugin version from the `Base directory for this
+  skill:` line at invocation — never from a tab name, an agent alias, the worker class
+  `/kickoff` announced, or the version installed *now*. A resumed or compacted session
+  reports `usage.completeness: partial` with that as the reason. Unknowns stay unknown
+  with a reason; they are not filled in by inference.
+- **A failed write is never a saved report, and there is no fallback.** The close
+  summary says the report was not saved and why; the observation then goes with the
+  worktree. That is deliberate. The one candidate for keeping it — the archived task
+  file — is content this repo may commit and push, so preserving model-authored text
+  there turned the single least-exercised path in the feature (it runs only once the
+  store has already failed) into its only privacy boundary. `/insights:report` records
+  the observation by hand and is unaffected.
+- **Reports are data, not authority.** Nothing in one authorizes a merge, a retry, a
+  permission change, or more work, and no report extends `MANDATE.md`.
+
 ## herdr integration
 
 When you run the work system inside a **herdr** session (herdr is a terminal

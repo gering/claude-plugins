@@ -361,6 +361,81 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
      not changed since the last pass is never worth a round; a new concern about
      unchanged code is, and should say so.
 
+10. **Record a handoff report when you hand the work back** — optional plugin, no
+    approval, no cost beyond what you already know.
+
+    **When.** Exactly at a *meaningful handoff*, while the friction, the review rounds
+    and the questions are still in context:
+    - you reached the recorded `terminal_gate` (step 8) and the decision is now the
+      human's;
+    - you are handing the work back **blocked** — say what is unresolved;
+    - the task is **explicitly abandoned**.
+
+    **When not.** Never at a tool call, a turn end, a commit, or an unchanged idle
+    state. One report per arrival at a handoff.
+
+    ```sh
+    bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" prepare handoff \
+         --caller continue --lane "$PWD" --status <in_progress|blocked|aborted> [--pr <n>]
+    # "$PWD", not a pasted path: the worktree path is repo-derived like any other name.
+    ```
+    Pass the **lane directory**, never the task name or branch: a refname may legally
+    contain `$(…)`, and double quotes do not suppress command substitution — the helper
+    derives the identity itself. Exit **3** → insights is not installed, skip silently.
+    Exit **4** → installed but unusable, say so in one line and continue. Exit **0** →
+    `draft=` holds a contract-complete skeleton, `contract=` is where the field meanings
+    live (read it from there, never from a path built out of this plugin's root), and
+    `related=` lists earlier reports for this task, which `prepare` has already linked in
+    the draft — there is no flag to link them by hand.
+
+    **Duplicate handoffs are yours to judge** — `prepare` auto-skips only a repeated
+    *close*. If `related=` already names a `handoff` report and nothing has happened since
+    (no new commits, no new review round), don't write a second one. A later arrival after
+    real further work is a genuine new observation: write it, and the link to the earlier
+    one is already in the draft. The helper cannot decide this for you: it knows a report's
+    ID, trigger, status and time — not which commit or review round it covered.
+
+    Fill the draft, then bind its path once and write it — never paste a repo-derived
+    value into a command:
+    ```sh
+    DRAFT="<the draft= path prepare printed>"
+    bash "${CLAUDE_PLUGIN_ROOT}/scripts/insights-handoff.sh" write "$DRAFT"
+    ```
+    Exit 0 → name the `report_id`. Exit 1 → fix the fields stderr names **in that same
+    file** and retry at most twice, which means the draft must still exist. Exit 4 or 5,
+    or a third rejection → say plainly that **nothing was saved** and show the error.
+    `rm "$DRAFT"` only once you are done with it — after a success, or after the last
+    retry. It holds unredacted report text, so it must not outlive this step; deleting it
+    *before* the retry discards the file you were told to fix. There is no fallback store
+    here; `/close` attempts its own report later.
+
+    **Fields this skill is the only one that can fill honestly** (field meanings: the
+    report contract at the `contract=` path `prepare` printed above):
+    - `task_status` is the *task's* state, not the trigger's. Reaching `reviewed-pr`
+      is `in_progress`: the PR is open and reviewed, and the merge is still the human's
+      decision. Only an actually finished task is `completed`.
+    - `reporter.role: worker`; `reporter.model` = your own model ID from your system
+      prompt, never an alias, tab name, or the worker class `/kickoff` announced.
+    - `usage.skills` = the skills invoked **in this session**, each at the version in
+      its `Base directory for this skill:` line. After a `claude -c` resume or a
+      compaction, `usage.completeness` is `partial`/`unknown` with that as the reason —
+      a resumed lane genuinely cannot see its own earlier history.
+    - `plugin_details.work-system.questions`: questions you had to ask. Classify an
+      `avoidable_repeat` only when the answer really was already available (the
+      mandate, TASK.md, this conversation) — name which, in `mandate_source`.
+    - `plugin_details.pr-flow` / `swarm`: from evidence already in hand. Never re-run a
+      review to fill a field.
+
+    **What the report is not.** It records; it changes nothing. It does not complete
+    the task, does not extend or reinterpret `MANDATE.md`, does not authorize a merge
+    or another round, and it consumes **no** review round. Writing one is part of the
+    lane work the user already authorized, so it adds no question of its own.
+
+    **Known gap.** This step needs a session that reaches a handoff. A worker that
+    crashes, is killed, or exits without one writes nothing — `/close` step 6b is the
+    next opportunity for the task, and a Manager-run close can only report the
+    Manager's own perspective.
+
 ## Remember
 
 - Check project CLAUDE.md and rules for project-specific checks and conventions

@@ -104,12 +104,18 @@ Malformed files are listed as `MALFORMED`, never silently skipped.
 - **Delete:** remove individual `<report_id>.json` files, or the whole
   `…/gering-plugins/insights/` directory. No index needs updating.
 
-## Scope of 0.1.0
+## Scope
 
-Manual reporting only. Automatic worker/Manager handoff and `/close` producers
-are a separate follow-up that will reuse this contract. There are no hooks,
-always-loaded rules, ratings, dashboards, or analysis skills. After a few dozen
-genuine reports, inspect them by hand before building analytics.
+`/insights:report` is the manual entry point and stays the way to record something
+at any moment. Lifecycle reporting lives in the plugins that own the lifecycle:
+**work-system** writes a `handoff` report when a worker hands its lane back and a
+`close` report before it tears a task down, both through this plugin's helper and
+this contract. See its README (*Insight reports at handoff and close*) for the
+triggers and, more importantly, for what they do **not** guarantee.
+
+This plugin adds no hooks, always-loaded rules, ratings, dashboards, or analysis
+skills. After a few dozen genuine reports, inspect them by hand before building
+analytics.
 
 ## Development
 

@@ -19,11 +19,11 @@ This is a **Claude Code plugin marketplace** (monorepo) containing plugins that 
 ## Current Plugins
 
 - **knowledge-system** (v1.9.x) — Knowledge management with three layers: Rules, Knowledge, Memory. Skills: `/init`, `/query`, `/curate`, `/reindex`, `/backfill-knowledge`, `/migrate`, `/statusline`
-- **work-system** (v1.14.x) — Task and worktree workflow (workers: Claude/codex/grok/kimi, or PATH-detected cc-harness); `/kickoff` records the lane's autonomy mandate in `MANDATE.md`, `/continue` works from it; a worktree `/close` can delegate its teardown to the Manager session. Skills: `/define`, `/kickoff`, `/adopt`, `/continue`, `/status`, `/close`, `/list`, `/statusline`
+- **work-system** (v1.15.x) — Task and worktree workflow (workers: Claude/codex/grok/kimi, or PATH-detected cc-harness); `/kickoff` records the lane's autonomy mandate in `MANDATE.md`, `/continue` works from it; a worktree `/close` can delegate its teardown to the Manager session; with the optional `insights` plugin, `/continue` reports at its terminal gate and `/close` reports before teardown. Skills: `/define`, `/kickoff`, `/adopt`, `/continue`, `/status`, `/close`, `/list`, `/statusline`
 - **pr-flow** (v1.4.x) — PR review feedback loop; mandate-aware and review-bot-aware. Skills: `/open`, `/cycle`, `/check`, `/fix`, `/rebase`, `/merge`
 - **swarm** (v0.11.x) — Local mixture-of-agents code review (external `codex`/`grok` CLIs, `kimi` opt-in, plus Claude lenses: 11 in 5 clusters). Every voice fans out per gated cluster; externals get file-read + web research under an OS secret-jail. P2: `/swarm:review` pipeline (scope→fan-out→merge→verify); P5: `--fix`/`--loop` apply the findings you agreed with. Skills: `/swarm:review`, `/swarm:agents`
 - **settings** (v0.1.x) — Per-plugin TOML config resolved over schema defaults; each plugin owns its `schema/settings.schema.json`. Skill: `/settings` (list/show/get/set/validate). Phase 1: config surface only.
-- **insights** (v0.1.x) — Private local task/plugin insight reports (`insights.report/v1`, one helper for write/read/list). Skill: `/insights:report [text]`. Manual only; handoff producers follow.
+- **insights** (v0.1.x) — Private local task/plugin insight reports (`insights.report/v1`, one helper for write/read/list). Skill: `/insights:report [text]`. work-system's `/continue` and `/close` are its lifecycle producers.
 
 ## Plugin Anatomy
 

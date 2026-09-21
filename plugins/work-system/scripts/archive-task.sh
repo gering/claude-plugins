@@ -118,6 +118,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # `check-ignore` breaks gitignore detection entirely.
 lit() { printf ':(literal)%s' "$1"; }
 
+
 archive() {
   local repo="${1:-}" name="${2:-}" branch="${3:-}"
   if [ -z "$repo" ] || [ -z "$name" ] || [ -z "$branch" ]; then
@@ -191,7 +192,11 @@ archive() {
     echo "failed to create a temp file in $tasks_dir/archive" >&2
     exit 1
   fi
-  if ! { printf '%s\n\n' "$stamp"; cat "$src"; } > "$tmp"; then
+  emit_stamped() {
+    printf '%s\n\n' "$stamp"
+    cat "$src"
+  }
+  if ! emit_stamped > "$tmp"; then
     rm -f "$tmp" 2>/dev/null || true
     echo "failed to write archive $dest" >&2
     exit 1

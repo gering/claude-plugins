@@ -1,9 +1,9 @@
 ---
 title: "Insights Report Store (insights.report/v1)"
 createdAt: 2026-09-16
-updatedAt: 2026-09-16
+updatedAt: 2026-09-21
 createdFrom: "branch: task/add-plugin-insights-report"
-updatedFrom: "branch: task/add-plugin-insights-report"
+updatedFrom: "PR #63"
 pluginVersion: 1.9.0
 prime: false
 ---
@@ -11,10 +11,11 @@ prime: false
 # Insights Report Store (insights.report/v1)
 
 `plugins/insights/scripts/insights.py` is the **only** write/read path for
-insights reports: the manual `/insights:report` skill today, and worker/Manager/
-close handoff producers later. Producers never write report files or copy
-validation. The contract is in `plugins/insights/docs/REPORT-CONTRACT.md`. This
-entry records the *why* behind decisions a later producer could easily undo.
+insights reports: the manual `/insights:report` skill, plus worker/Manager/
+close handoff producers through the insights plugin. Producers never write report
+files or copy validation — all paths go through insights.py. The contract is in
+`plugins/insights/docs/REPORT-CONTRACT.md`. This entry records the *why* behind
+decisions a producer or future change could easily undo.
 
 ## Decisions and the failures they prevent
 
@@ -61,6 +62,10 @@ entry records the *why* behind decisions a later producer could easily undo.
 
 ## Scope boundary
 
-The 0.1.0 release is manual only. Automatic handoff producers are
-`tasks/integrate-insights-handoffs.md`; they must reuse this helper. Fixtures in
+This entry covers the store and contract only. The lifecycle producers that use
+them — work-system's `handoff` and `close` reports — are
+[insights-lifecycle-producers](insights-lifecycle-producers.md); they reuse this
+helper and never write a report file themselves. Every subcommand here operates
+on a report: a `redact` entry point for non-report text existed briefly in 0.1.1
+for a `/close` fallback note, and went out with that fallback. Fixtures in
 `scripts/fixtures/` are historical examples, not current bug status.

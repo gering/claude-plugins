@@ -13,6 +13,7 @@ The tests run against REAL git repos (not bare temp dirs) because the flag is
 only honored when git-tracked and unmodified: presence alone must never
 authorize skipping /close's push-approval gate.
 """
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -31,9 +32,7 @@ def check(name, cond):
 
 
 def run(*args):
-    return subprocess.run(
-        ["bash", str(SCRIPT), *args], capture_output=True, text=True
-    )
+    return subprocess.run(["bash", str(SCRIPT), *args], capture_output=True, text=True)
 
 
 def git(repo, *args):
