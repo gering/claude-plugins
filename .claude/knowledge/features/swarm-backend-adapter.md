@@ -423,7 +423,23 @@ backend rc null.
     baked-in default id any more, the old `grok-4.5` floor was a guess that aged
     silently) | pinned | none. `ready`/`list` say "usable", never "latest".
   - **A pin is never reinterpreted** — it must be offered and pass the probe,
-    or nothing runs.
+    or nothing runs. Review round 1 found two ways it still was, both in the
+    HAND-OVER rather than the selection: (a) the prep block passed
+    `${SWARM_GROK_MODEL:+--model "$SWARM_GROK_MODEL"}` — ONE word under zsh (no
+    word splitting; the Bash tool runs the user's shell), so the adapter said
+    "Unknown flag", `2>/dev/null || true` swallowed it, the token came back
+    empty and the voices ran "latest"; (b) `list` judged readiness for "latest"
+    while `grok-model` judged the pin. Fixes, as rules: **read an env knob in
+    the adapter, once, at the point every entry path shares** (`grok_select_model`),
+    never splice optional flags in skill shell; and **the workflow fails closed**
+    — grok requested without a valid frozen model is DROPPED and reported
+    (`grokDropped`, coverage note), never run unfrozen. `test_grok_freeze.py`
+    now EXECUTES the prep fragment under bash, zsh and sh instead of grepping it.
+  - The paid-probe budget must count `source=probe` only: counting lookups let
+    two *cached* failures hide an older model already known to be fine.
+  - Two version parsers = two cache keys: a `\b`-anchored regex reads
+    `grok v1.0.13` as `0.13` while `grep -Eo` reads `1.0.13`. Keep them
+    equivalent (test-pinned).
   - Readiness == "selection yields a model", by construction. Two separate
     predicates is what let the 1.0.3 marker change drop grok from every review.
   - **Test trap:** `test_sandbox_deny.py` ran `run_grok` with only the help

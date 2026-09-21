@@ -160,9 +160,16 @@ _grok_compat() {
   # every call is logged, so "how many probes would have been paid" is asserted.
   echo "$1 ${2:-}" >>"$COMPAT_LOG"
   if [[ "$1" == "known" ]]; then printf '%s\n' ${COMPAT_KNOWN:-}; return 0; fi
-  case " ${COMPAT_OK:-} " in *" $2 "*) printf 'compat=ok\nsource=%s\n' "${COMPAT_SRC:-cache}"; return 0 ;; esac
-  case " ${COMPAT_FAIL:-} " in *" $2 "*) printf 'compat=failed\nsource=probe\nreason=structuredOutput is null\n'; return 1 ;; esac
-  printf 'compat=unknown\nsource=none\nreason=probe timed out\n'; return 3
+  # COMPAT_CACHED = verdicts already in the cache (free); anything else costs a
+  # probe under `ensure` and has no verdict under `check`.
+  local src=probe
+  case " ${COMPAT_CACHED:-} " in *" $2 "*) src=cache ;; esac
+  if [[ "$1" == "check" && "$src" == "probe" ]]; then printf 'compat=unknown\nsource=none\nreason=not cached\n'; return 3; fi
+  [[ -n "${COMPAT_SRC:-}" ]] && src="$COMPAT_SRC"
+  case " ${COMPAT_OK:-} " in *" $2 "*) printf 'compat=ok\nsource=%s\n%s' "$src" "${COMPAT_NOTE:+cache_note=$COMPAT_NOTE
+}"; return 0 ;; esac
+  case " ${COMPAT_FAIL:-} " in *" $2 "*) printf 'compat=failed\nsource=%s\nreason=structuredOutput is null\n' "$src"; return 1 ;; esac
+  printf 'compat=unknown\nsource=probe\nreason=probe timed out\n'; return 3
 }
 """
 
@@ -247,8 +254,16 @@ check("…the latest candidate is still REPORTED, and the reason names it",
       and "using grok-4.6" in f["deg"])
 
 f, calls = select(LIVE_CATALOG, ok="grok-4.3")
-check("paid probing is BOUNDED: at most two candidates, then none selected",
-      f["sel"] == "" and f["src"] == "none" and calls == ["ensure grok-4.7", "ensure grok-4.6"])
+check("PAID probing is bounded: two probes, then the rest are cache-only lookups",
+      f["sel"] == "" and f["src"] == "none"
+      and calls == ["ensure grok-4.7", "ensure grok-4.6", "check grok-4.5", "check grok-4.3"])
+f, calls = select(LIVE_CATALOG, fail="grok-4.7 grok-4.6", ok="grok-4.5", cached="grok-4.7 grok-4.6 grok-4.5")
+check("cached failures are FREE: they must not hide an older model known to be fine",
+      f["sel"] == "grok-4.5" and f["src"] == "older-compatible")
+f, calls = select("\n".join(f"grok-4.{i}" for i in range(30)), cached=" ".join(f"grok-4.{i}" for i in range(30)),
+                  fail=" ".join(f"grok-4.{i}" for i in range(30)))
+check("a huge catalog cannot drive an unbounded walk", len(calls) == 6 and f["sel"] == "")
+f, calls = select(LIVE_CATALOG, ok="grok-4.3")
 check("…and an inconclusive probe is reported as not established, not as a failure of the model",
       "not established" in f["deg"] and "timed out" in f["deg"])
 
@@ -284,12 +299,38 @@ check("an incompatible pin → nothing runs (NOT silently the latest)",
 f, _ = select("", state="unreachable", pin="grok-4.5", ok="grok-4.5")
 check("a pin still runs when the catalog is unreadable (absence of evidence)", f["sel"] == "grok-4.5")
 
+# --- the pin is read by the ADAPTER, so every entry point judges the same request ---------
+def select_env(models, swarm_model, **compat):
+    _n[0] += 1
+    log = os.path.join(_LOGDIR, f"compat-{_n[0]}.log"); open(log, "w").close()
+    env = {"COMPAT_LOG": log, "SWARM_GROK_MODEL": swarm_model}
+    env.update({f"COMPAT_{k.upper()}": v for k, v in compat.items()})
+    r = run_bash(FAKE_COMPAT, 'grok_model_offered && echo READY || echo NOT-READY',
+                 'printf "sel=%s\nsrc=%s\nreq=%s\ndeg=%s\n" "$GROK_SELECTED_MODEL" "$GROK_SELECT_SOURCE" '
+                 '"$GROK_REQUESTED" "$GROK_SELECT_DEGRADED"', models=models, env=env)
+    f = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
+    f["ready"] = "NOT-READY" not in r.stdout
+    return f
+
+
+f = select_env(LIVE_CATALOG, "grok-4.5", ok="grok-4.7 grok-4.5")
+check("SWARM_GROK_MODEL pins READINESS too (list/ready judge the pin, not latest)",
+      f["ready"] and f["sel"] == "grok-4.5" and f["src"] == "pinned")
+f = select_env(LIVE_CATALOG, "grok-4.5", ok="grok-4.7", fail="grok-4.5")
+check("a failed env pin → NOT ready, nothing selected (never silently latest)",
+      not f["ready"] and f["sel"] == "" and f["src"] == "pinned")
+for bad in ("grok-4.5\nselected=grok-9.9", "gpt-5", "grok-", "grok-4.5 --tools all", "$(id)"):
+    f = select_env(LIVE_CATALOG, bad, ok="grok-4.7")
+    check(f"malformed pin {bad!r} → nothing runs, and the raw text is never echoed",
+          not f["ready"] and f["sel"] == "" and f["req"] == "(malformed)" and "malformed" in f["deg"])
+
 # --- voices never pay: SWARM_GROK_PROBE=0 reads the cache only ------------------------
 _n[0] += 1
 _log = os.path.join(_LOGDIR, "voice.log"); open(_log, "w").close()
 r = run_bash(FAKE_COMPAT, 'grok_select_model grok-4.7', 'grok_select_model grok-4.7',
              'printf "%s" "$GROK_SELECTED_MODEL"', models=LIVE_CATALOG,
-             env={"COMPAT_LOG": _log, "COMPAT_OK": "grok-4.7", "SWARM_GROK_PROBE": "0"})
+             env={"COMPAT_LOG": _log, "COMPAT_OK": "grok-4.7", "COMPAT_CACHED": "grok-4.7",
+                  "SWARM_GROK_PROBE": "0"})
 check("a workflow voice uses `check` (never probes) and the selection is memoized",
       r.stdout == "grok-4.7" and open(_log).read() == "check grok-4.7\n")
 
@@ -332,6 +373,20 @@ r = run_bash(FAKE_COMPAT, 'backend_installed() { return 0; }', 'available_versio
              f'GROK_AUTH_FILE={_q(str(ADAPTER))}', 'subcmd_grok_model || echo "rc=$?"', models=LIVE_CATALOG,
              env={"COMPAT_LOG": os.devnull})
 kv = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
+r = run_bash(FAKE_COMPAT, 'backend_installed() { return 0; }', 'available_version() { echo "grok 1.0.40"; }',
+             f'GROK_AUTH_FILE={_q(str(ADAPTER))}', 'subcmd_grok_model --model grok-4.5; echo "rc=$?"',
+             models=LIVE_CATALOG, env={"COMPAT_LOG": os.devnull, "COMPAT_OK": "grok-4.5 grok-4.7"})
+kvp = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
+check("grok-model --model <pin>: pinned, requested echoed, latest still reported",
+      kvp.get("selected") == "grok-4.5" and kvp.get("requested") == "grok-4.5"
+      and kvp.get("source") == "pinned" and kvp.get("latest_candidate") == "grok-4.7")
+r = run_bash(FAKE_COMPAT, 'backend_installed() { return 0; }', 'available_version() { echo "grok 1.0.40"; }',
+             f'GROK_AUTH_FILE={_q(str(ADAPTER))}', 'subcmd_grok_model || echo "rc=$?"', models=LIVE_CATALOG,
+             env={"COMPAT_LOG": os.devnull, "COMPAT_OK": "grok-4.7",
+                  "COMPAT_NOTE": "verdict could not be cached (EACCES)"})
+kvp = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
+check("grok-model: a verdict that could not be CACHED cannot be frozen (voices only read the cache)",
+      kvp.get("selected") == "" and kvp.get("rc") == "1" and "could not be cached" in kvp.get("degraded", ""))
 check("grok-model: nothing selectable → selected empty, exit 1, reason present",
       kv.get("selected") == "" and kv.get("rc") == "1" and kv.get("degraded"))
 

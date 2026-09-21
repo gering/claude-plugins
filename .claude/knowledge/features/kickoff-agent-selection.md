@@ -181,11 +181,12 @@ checks the model is in `grok models`, not just auth. The probe is **always
 bounded** (timeout → gtimeout → a self-contained background-killer watchdog with
 fds detached so the command substitution doesn't block) so `list`/the picker
 never hangs. A failed *or* empty-but-successful (reformatted) `grok models` is
-**inconclusive → trust auth (available)**, not "model gone" — a network hiccup
+**inconclusive → trust auth (available)** *for an explicit pin* (since 1.16.0 the
+dynamic `latest` cannot be named then and is unavailable — see below), not "model gone" — a network hiccup
 or format drift must not disable the backend. codex/claude stay auth-only (no
 clean model-list command). See [[swarm-backend-adapter]] for the sibling probe.
 
-## grok's model is a dynamic token, not a version (1.15.0)
+## grok's model is a dynamic token, not a version (1.16.0)
 The registry row is `--grok|grok|latest|…`: `--grok`, `grok` and `grok:latest`
 resolve at call time to the newest **canonical** id in `grok models` — exactly
 `grok-(4|5).<minor>`, integer-ordered (`5.0 > 4.20 > 4.9`). A hard-coded

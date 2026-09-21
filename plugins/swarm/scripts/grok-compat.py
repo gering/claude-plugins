@@ -75,6 +75,10 @@ MAX_STDOUT_BYTES = 262144
 # (providers fix this); an inconclusive probe is held just long enough that the
 # sibling cluster processes of ONE review do not each re-pay for it.
 TTL = {"ok": 14 * 86400, "failed": 86400, "unknown": 600}
+# `ensure` re-measures a pass this long BEFORE it expires. A review freezes the
+# model `ensure` returned and its voices then only `check`: without the margin a
+# pass read at 13d23h59m would expire between the prep step and the first voice.
+REFRESH_MARGIN = 86400
 CLOCK_SKEW = 120
 
 EXIT = {"ok": 0, "failed": 1, "unknown": 3}
@@ -117,7 +121,7 @@ def record_path(directory, model, cli_version):
     return os.path.join(directory, f"{model}--{key}.json")
 
 
-def read_record(path, model, cli_version, now):
+def read_record(path, model, cli_version, now, margin=0):
     """Return (record, None) for a usable verdict, else (None, why-not)."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -153,7 +157,10 @@ def read_record(path, model, cli_version, now):
         return None, "cache record has no valid timestamp"
     if checked > now + CLOCK_SKEW:
         return None, "cache record is dated in the future"
-    if now - checked > TTL[rec["compat"]]:
+    ttl = TTL[rec["compat"]]
+    if rec["compat"] == "ok":
+        ttl -= margin
+    if now - checked > ttl:
         return None, "cache record expired"
     for k in ("reason", "actual_model"):
         if not isinstance(rec.get(k, ""), str):
@@ -209,13 +216,16 @@ def run_bounded(argv, timeout, cwd=None):
 def detect_cli_version(grok_bin):
     rc, out = run_bounded([grok_bin, "--version"], 10)
     if rc == 0:
-        m = re.search(r"\b([0-9]+(?:\.[0-9]+){1,3})\b", out.decode("utf-8", "replace"))
+        # Leftmost dotted number, NOT \b-anchored: "grok v1.0.13" has no word
+        # boundary before the 1, and a \b regex keyed the cache as "0.13" while
+        # the adapter's grep keyed it as "1.0.13" — a miss, and a second paid probe.
+        m = re.search(r"(?<![0-9.])([0-9]+(?:\.[0-9]+){1,3})", out.decode("utf-8", "replace"))
         if m:
             return m.group(1)
     return "unknown"
 
 
-def judge(rc, out):
+def judge(rc, out, model=""):
     """(compat, reason, actual_model) from one finished probe call."""
     if isinstance(rc, OSError):
         return "unknown", f"grok could not be launched ({errno.errorcode.get(rc.errno, rc.errno)})", ""
@@ -233,6 +243,11 @@ def judge(rc, out):
         return "unknown", "grok reported an error: " + one_line(doc.get("message", "unknown"), 120), ""
     usage = doc.get("modelUsage")
     actual = ",".join(sorted(one_line(k, MAX_ID_LEN) for k in usage)) if isinstance(usage, dict) else ""
+    # The served id may carry a suffix (grok-4.7 is served as grok-4.7-build), but
+    # it must BE the requested model. A CLI that quietly fell back to its default
+    # would otherwise get that default's verdict cached under the new id.
+    if model and isinstance(usage, dict) and usage and not any(str(k).startswith(model) for k in usage):
+        return "unknown", f"the call was served by {actual}, not by {model}", actual
     # From here the call COMPLETED, so a bad shape is a definite answer about the
     # model, not about the environment. A successful exit alone proves nothing.
     so = doc.get("structuredOutput")
@@ -257,7 +272,7 @@ def probe(model, grok_bin, timeout):
                 "--max-turns", "1", "--cwd", work,
                 "--json-schema", json.dumps(PROBE_SCHEMA, separators=(",", ":")),
                 "--prompt-file", prompt]
-        return judge(*run_bounded(argv, timeout, cwd=work))
+        return judge(*run_bounded(argv, timeout, cwd=work), model=model)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -355,7 +370,8 @@ def main(argv=None):
     base = {"schema": RECORD_SCHEMA, "contract": CONTRACT, "model": args.model,
             "cli_version": cli_version}
 
-    rec, why = read_record(path, args.model, cli_version, int(time.time()))
+    margin = REFRESH_MARGIN if args.mode == "ensure" else 0
+    rec, why = read_record(path, args.model, cli_version, int(time.time()), margin)
     if rec:
         return emit(rec, "cache")
     if args.mode == "check":
@@ -367,7 +383,7 @@ def main(argv=None):
                          reason="another probe for this model did not finish in time"), "none")
     try:
         # Someone else may have probed while we waited — that is the point.
-        rec, _ = read_record(path, args.model, cli_version, int(time.time()))
+        rec, _ = read_record(path, args.model, cli_version, int(time.time()), margin)
         if rec:
             return emit(rec, "cache")
         compat, reason, actual = probe(args.model, args.grok_bin, args.timeout)

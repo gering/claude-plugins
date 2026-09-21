@@ -477,6 +477,58 @@ check("unparseable catalog -> exit 3 with catalog=unparseable",
 check("unparseable catalog + pin -> assumed available", grok_resolve(e, "grok:grok-4.6")[0] == 0)
 e.close()
 
+def raw_grok(e, listing):
+    """Replace the grok stub with one printing `listing` verbatim and counting calls."""
+    stub = e.harness_bin.parent / "grok"
+    e.grok_calls = e.harness_bin.parent.parent / "grok_calls"
+    (e.harness_bin.parent.parent / "grok_listing").write_text(listing)
+    stub.write_text('#!/bin/sh\nif [ "$1" = "models" ]; then echo x >>"%s"; cat "%s"; fi\nexit 0\n'
+                    % (e.grok_calls, e.harness_bin.parent.parent / "grok_listing"))
+    stub.chmod(0o755)
+
+
+def grok_call_count(e):
+    n = len(e.grok_calls.read_text().split()) if e.grok_calls.exists() else 0
+    if e.grok_calls.exists():
+        e.grok_calls.unlink()
+    return n
+
+
+# A model the CLI lists WITH withdrawal wording: never auto-selected, but a
+# deliberate pin is honoured (deprecated is not "rejected by -m") and says so.
+e = Env()
+raw_grok(e, "Available models:\n  * grok-4.7 (default)\n  - grok-4.8 (deprecated)\n  - grok-4.6 [sunset 2026-12]\n")
+check("withdrawn wording: latest skips it", grok_resolve(e)[1].get("model") == "grok-4.7")
+rc, r = grok_resolve(e, "grok:grok-4.6")
+check("withdrawn wording: an explicit pin still launches, with a note",
+      rc == 0 and "withdrawal" in r.get("note", "") and r["argv"][:3] == ["grok", "-m", "grok-4.6"])
+check("...but a pin that is on NO bullet is still refused", grok_resolve(e, "grok:grok-4.5")[0] == 3)
+check("...and a substring of a listed id is not a bullet match", grok_resolve(e, "grok:grok-4")[0] == 3)
+
+# One `grok models` call per invocation, whatever the path.
+grok_call_count(e)
+grok_resolve(e)
+check("resolve --grok fetches the listing exactly once", grok_call_count(e) == 1)
+grok_resolve(e, "grok:grok-4.7")
+check("resolve <pin> fetches the listing exactly once", grok_call_count(e) == 1)
+e.run("list", "--tsv")
+check("list fetches the listing exactly once", grok_call_count(e) == 1)
+e.close()
+
+# NON-empty but unparseable (format drift: no bullets). The pin keeps the
+# drift-tolerant substring answer — labelled as an assumption — and an id that
+# appears nowhere is still refused.
+e = Env()
+raw_grok(e, "models: grok-4.7, grok-4.5\n")
+rc, r = grok_resolve(e, "grok:grok-4.5")
+check("unreadable listing containing the pin -> assumed available, and SAYS assumed",
+      rc == 0 and "assumed" in r.get("note", "") and r.get("model_catalog") == "unparseable")
+check("unreadable listing NOT containing the pin -> exit 3", grok_resolve(e, "grok:grok-4.4")[0] == 3)
+check("unreadable listing -> latest cannot be named", grok_resolve(e)[0] == 3)
+check("an empty pin id is not a selector", e.run("resolve", "grok:grok-").returncode == 2)
+check("...nor storable as a default", e.run("default", "set", "grok:grok-").returncode == 2)
+e.close()
+
 e = Env(grok_authed=False)
 rc, r = grok_resolve(e)
 check("not logged in -> the auth note wins, catalog not probed",

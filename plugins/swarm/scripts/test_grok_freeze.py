@@ -27,7 +27,7 @@ def check(name, cond):
         FAILS.append(name)
 
 
-m = re.search(r"^const GROK_RUN = \(\(\) => \{.*?^const GROK_FROZEN_FLAG = [^\n]*\n", SOURCE, re.S | re.M)
+m = re.search(r"^const GROK_RUN = \(\(\) => \{.*?^const GROK_DROPPED = [^\n]*\n", SOURCE, re.S | re.M)
 q = re.search(r"^const shQuote = [^\n]*\n", SOURCE, re.M)
 if not (m and q):
     print("grok-freeze tests FAILED:\n  - could not find the GROK_RUN block / shQuote in swarm-review.js "
@@ -38,14 +38,15 @@ if not shutil.which("node"):
     sys.exit(1)
 
 
-def freeze(token):
+def freeze(token, voices=("codex", "grok")):
     js = (f"const INPUT = {json.dumps({'grok': token} if token is not None else {})}\n"
+          f"const wantVoices = {json.dumps(list(voices))}\n"
           + q.group(0) + m.group(0)
-          + "console.log(JSON.stringify({run: GROK_RUN, env: GROK_FROZEN_ENV, flag: GROK_FROZEN_FLAG}))\n")
+          + "console.log(JSON.stringify({run: GROK_RUN, env: GROK_FROZEN_ENV, flag: GROK_FROZEN_FLAG, dropped: GROK_DROPPED}))\n")
     r = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         FAILS.append(f"node failed for {token!r}: {r.stderr[:200]}")
-        return {"run": {}, "env": "", "flag": ""}
+        return {"run": {}, "env": "", "flag": "", "dropped": None}
     return json.loads(r.stdout)
 
 
@@ -75,6 +76,13 @@ for label, token in [("absent", None), ("empty", ""), ("no selection", "selected
     f = freeze(token)
     check(f"{label}: nothing is frozen and nothing reaches the command line",
           f["flag"] == "" and f["env"] == "" and f["run"].get("model") == "")
+    check(f"{label}: grok is DROPPED, never run unfrozen (a failed pin must not become latest)",
+          f["dropped"] is True)
+check("a valid token does not drop grok", freeze(GOOD)["dropped"] is False)
+check("grok not requested → nothing to drop", freeze(None, voices=("codex",))["dropped"] is False)
+check("workflow: a dropped grok is filtered out of the live externals and reported",
+      "b.backend === 'grok' && GROK_DROPPED" in SOURCE and "grokDropped: GROK_DROPPED" in SOURCE
+      and "if (GROK_DROPPED) coverageNotes.push" in SOURCE)
 
 f = freeze("selected=grok-4.7;source=latest;cli_version=1.0.40 SWARM_TIMEOUT=1")
 check("a hostile cli_version is dropped, not interpolated", "SWARM_TIMEOUT" not in f["env"])
@@ -90,6 +98,41 @@ check("skill: prep selects once via `agents.sh grok-model`, BEFORE `list`",
 for field in ("selected", "latest_candidate", "source", "cli_version"):
     check(f"skill token and workflow parser agree on `{field}`",
           f"{field}=$(_gk {field})" in SKILL and f"kv.{field}" in SOURCE)
+# --- the prep fragment, EXECUTED under the shells a user actually has -------------------
+# The block runs in the user's shell. `${VAR:+--model "$VAR"}` was one word under
+# zsh: the adapter answered "Unknown flag", the token came back empty and the pin
+# ran as "latest". The fragment now passes no argument at all; pin that here.
+import os, tempfile
+frag = re.search(r'^GROK_KV=.*?^echo "GROK_DEGRADED=[^\n]*\n', SKILL, re.S | re.M)
+check("skill: the prep fragment is extractable", bool(frag))
+if frag:
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "plug"; (root / "scripts").mkdir(parents=True)
+        (root / "scripts" / "agents.sh").write_text(
+            '#!/bin/bash\nprintf "%s\\n" "$#" "$@" >"$ARGLOG"\n'
+            'printf "selected=%s\\nlatest_candidate=grok-4.7\\nsource=pinned\\ncatalog=ok\\ncli_version=1.0.40\\n" '
+            '"${SWARM_GROK_MODEL:-grok-4.7}"\n'
+            # single-quoted: the STUB must not run it either — only the fragment is under test
+            "printf '%s\\n' 'degraded=pinned; $(id) `id`'\n")
+        for shell in ("bash", "zsh", "sh"):
+            if not shutil.which(shell):
+                continue
+            arglog = Path(td) / f"args.{shell}"
+            r = subprocess.run([shell, "-c", frag.group(0)], capture_output=True, text=True, timeout=30,
+                               env=dict(os.environ, CLAUDE_PLUGIN_ROOT=str(root), ARGLOG=str(arglog),
+                                        SWARM_GROK_MODEL="grok-4.5"))
+            argv = arglog.read_text().split("\n") if arglog.exists() else ["?"]
+            check(f"{shell}: the adapter is called with exactly `grok-model` (the pin travels by env)",
+                  argv[:2] == ["1", "grok-model"])
+            out = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
+            check(f"{shell}: the pin arrives in the token",
+                  out.get("GROK_RUN", "").startswith("selected=grok-4.5;latest_candidate=grok-4.7;source=pinned"))
+            check(f"{shell}: the token round-trips through the workflow parser",
+                  freeze(out.get("GROK_RUN", ""))["flag"] == " --model 'grok-4.5'")
+            check(f"{shell}: the free-text reason is printed, never executed",
+                  "$(id)" in out.get("GROK_DEGRADED", "") and "uid=" not in r.stdout)
+check("skill: no `${VAR:+--flag …}` argument splicing in the prep fragment",
+      not re.search(r"grok-model\s+\$\{", SKILL))
 check("skill: the token is passed as args.grok", 'grok: "<GROK_RUN>"' in SKILL)
 check("skill: a resumed/looped run keeps its first token", "resumeFromRunId" in SKILL and "FIRST prep block" in SKILL)
 

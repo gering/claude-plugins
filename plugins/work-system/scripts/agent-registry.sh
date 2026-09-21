@@ -621,7 +621,7 @@ row_for_name() {
       # grok row with the model slot replaced, so every other field stays single-
       # sourced in REGISTRY.
       local pin="${1#grok:}" rec
-      case "$pin" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+      case "$pin" in grok-|*[!A-Za-z0-9._-]*) return 1 ;; esac
       [ "${#pin}" -le 64 ] || return 1
       rec="$(find_row cli grok)" || return 1
       printf '%s\n' "$rec" | awk -F'|' -v OFS='|' -v m="$pin" '{ $1 = "-"; $3 = m; print }'
@@ -804,14 +804,23 @@ entry_status() {
         elif [ -z "$_raw" ]; then
           # succeeded but produced nothing — inconclusive too, not "model gone".
           avail=yes; note="grok models empty — availability assumed"
-        elif grep -qF -- "$model" <<<"$_raw" \
-             && { [ -z "$(printf '%s\n' "$_raw" | grok_latest_parse)" ] \
-                  || printf '%s\n' "$_raw" | grok_latest_parse | grep -qxF -- "$model"; }; then
-          # Listed. The exact-id check only applies when the listing parses: a
-          # bare substring would call grok-4.7 "offered" when only
-          # grok-4.7-build-fast is, but a reformatted listing the parser cannot
-          # read keeps the old drift-tolerant substring answer.
+        elif ! grep -qF -- "$model" <<<"$_raw"; then
+          note="model not offered by this grok CLI (see: grok models)"
+        elif [ -z "$(printf '%s\n' "$_raw" | grok_latest_parse)" ]; then
+          # The id appears, but in a listing the parser cannot read (format
+          # drift). Keep the drift-tolerant substring answer — and SAY it is an
+          # assumption, like the unreachable/empty arms do.
+          avail=yes; note="grok models unreadable — availability assumed (id appears in the output)"
+        elif printf '%s\n' "$_raw" | grok_latest_parse | grep -qxF -- "$model"; then
+          # Exact id, not substring: grok-4.7 is not "offered" because
+          # grok-4.7-build-fast is.
           avail=yes
+        elif grep -qE "^[[:space:]]*[*-][[:space:]]+[\`\"]?$(printf '%s' "$model" | sed 's/[.]/[.]/g')[\`\"]?[.,;:]*([[:space:]]|\$)" <<<"$_raw"; then
+          # On its own bullet, but the parser dropped the line: it carries
+          # withdrawal wording (deprecated, sunset, …). That filter protects the
+          # AUTOMATIC choice; a deliberate pin is honoured — deprecated is not
+          # "rejected by -m" — and told what it is pinned to.
+          avail=yes; note="listed by this grok CLI with withdrawal wording (deprecated/retired/…) — pin honoured"
         else note="model not offered by this grok CLI (see: grok models)"; fi
       fi
       ;;

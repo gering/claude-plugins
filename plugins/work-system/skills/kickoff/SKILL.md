@@ -204,7 +204,10 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
          resolves to.** (claude's first row is `fable`, so "claude — fable (also:
          opus, sonnet)"; labelling a non-default model and then resolving via the
          bare CLI silently launches a different one.) If the user wants a named
-         alternate, set `SELECTOR` to the full `cli:model` instead.
+         alternate, set `SELECTOR` to that row's **field 1 (`name`)** instead — never
+         assemble `cli:model` from fields 2+3: for grok, field 3 is the id `latest`
+         resolved to *right now*, so `grok:<field 3>` would silently PIN it (and a
+         saved default would stop tracking releases). The selector is `grok:latest`.
       3. **Order the CLIs by this fixed rule** — with 4 shipped CLIs and a reserved
          aggregate slot the set does not fit, so *which* CLI drops out must not be
          improvisation that differs run to run:
@@ -453,7 +456,7 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     Worktree created and launched in herdr!
 
     Tab:      <LABEL>   (workspace <HERDR_WORKSPACE_ID>, opened in the background)
-    Agent:    <cli:model>
+    Agent:    <name= line>  (grok: add "→ <model=> (<model_source=>)" from step 12 — `grok:latest` alone does not say what runs)
     Location: .claude/worktrees/<task-name>
     Branch:   task/<task-name>
 
@@ -480,7 +483,7 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
 
     Location: .claude/worktrees/<task-name>
     Branch:   task/<task-name>
-    Agent:    <cli:model from the `name=` line>
+    Agent:    <the `name=` line; for grok add "→ <model=> (<model_source=>)">
     Task file: TASK.md (copied into the worktree)
     Mandate:   MANDATE.md — <preset>, gate <terminal_gate>, <n> review round(s).
                Edit it by hand to widen or narrow the lane.

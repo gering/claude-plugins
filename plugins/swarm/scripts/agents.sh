@@ -190,6 +190,13 @@ GROK_COMPAT_TOOL="$SCRIPT_DIR/grok-compat.py"
 # incompatible newest model costs at most one further probe, not a walk down the
 # whole list.
 GROK_MAX_COMPAT_PROBES=2
+# Hard cap on candidates even LOOKED at (cache hits are free, but the catalog is
+# untrusted input and must not drive an unbounded loop).
+GROK_MAX_CANDIDATES=6
+# Wall for ONE synthetic probe (a healthy one takes ~10s). Sized so the review's
+# prep step — version + catalog + at most two probes, then `list` — stays inside
+# a default Bash-tool window instead of being killed mid-setup.
+GROK_COMPAT_TIMEOUT=45
 # Default HOME so `$HOME` expansions below (auth file, sandbox deny paths) don't
 # abort the whole script under `set -u` when HOME is unset.
 HOME="${HOME:-$(cd ~ 2>/dev/null && pwd || echo /nonexistent)}"
@@ -1870,7 +1877,7 @@ _grok_compat() {
     return 3
   fi
   local mode="$1" args=()
-  [[ "$mode" != "known" ]] && args+=(--model "$2")
+  [[ "$mode" != "known" ]] && args+=(--model "$2" --timeout "$GROK_COMPAT_TIMEOUT")
   [[ -n "${SWARM_GROK_CLI_VERSION:-}" ]] && args+=(--cli-version "$SWARM_GROK_CLI_VERSION")
   python3 "$GROK_COMPAT_TOOL" "$mode" ${args[@]+"${args[@]}"} 2>&1
 }
@@ -1896,14 +1903,34 @@ GROK_LATEST_CANDIDATE=""
 GROK_SELECT_SOURCE="none"
 GROK_SELECT_DEGRADED=""
 GROK_CATALOG=""
+GROK_REQUESTED="latest"   # the vetted pin, or `latest` — never raw operator text
 GROK_COMPAT_SOURCE="none"
+GROK_COMPAT_NOTE=""   # the tool's cache_note, e.g. "verdict could not be cached"
 _grok_select_done=""
 grok_select_model() {
   # $1 = an explicit pin ("" = dynamic "latest"). Memoized: discovery is a
   # network call and compatibility may be a paid one.
-  local pin="${1:-}"
+  # The pin is read HERE, from the argument or SWARM_GROK_MODEL, so every entry
+  # point — `list`, `ready`, `run`, `grok-model` — judges the SAME request. Read
+  # only by the review's prep step, `list` reported readiness for "latest" while
+  # `grok-model` answered for the pin; a failed pin then ran as latest.
+  local pin="${1:-${SWARM_GROK_MODEL:-}}"
   [[ -n "$_grok_select_done" ]] && return 0
   _grok_select_done=1
+  GROK_REQUESTED="latest"
+  if [[ -n "$pin" ]]; then
+    case "$pin" in
+      grok-?*) ;;
+      *) pin="!" ;;
+    esac
+    case "$pin" in *[!A-Za-z0-9._-]*)
+      GROK_REQUESTED="(malformed)"; GROK_SELECT_SOURCE="pinned"
+      GROK_SELECT_DEGRADED="the pinned grok model id is malformed (expected grok-<id>, letters/digits/._- only) — nothing runs"
+      return 0 ;;
+    esac
+    [[ "${#pin}" -le 64 ]] || { GROK_REQUESTED="(malformed)"; GROK_SELECT_SOURCE="pinned"; GROK_SELECT_DEGRADED="the pinned grok model id is too long — nothing runs"; return 0; }
+    GROK_REQUESTED="$pin"
+  fi
 
   grok_model_fetch
   if [[ -n "$_grok_models" ]]; then
@@ -1928,6 +1955,7 @@ grok_select_model() {
     fi
     rc=0; out="$(_grok_compat "$mode" "$pin")" || rc=$?
     GROK_COMPAT_SOURCE="$(_kv source "$out")"
+    GROK_COMPAT_NOTE="$(_kv cache_note "$out")"
     if (( rc == 0 )); then
       GROK_SELECTED_MODEL="$pin"
       if [[ -n "$GROK_LATEST_CANDIDATE" && "$GROK_LATEST_CANDIDATE" != "$pin" ]]; then
@@ -1941,15 +1969,23 @@ grok_select_model() {
 
   case "$GROK_CATALOG" in
     ok)
-      local cand tried=0 skipped=""
+      # The budget counts PAID probes only. A cached verdict is free, so two
+      # cached failures must not hide an older model already known to be fine.
+      local cand paid=0 seen=0 skipped=""
       while IFS= read -r cand; do
         [[ -n "$cand" ]] || continue
-        (( tried >= GROK_MAX_COMPAT_PROBES )) && break
-        tried=$(( tried + 1 ))
-        rc=0; out="$(_grok_compat "$mode" "$cand")" || rc=$?
+        (( seen >= GROK_MAX_CANDIDATES )) && break
+        seen=$(( seen + 1 ))
+        if (( paid >= GROK_MAX_COMPAT_PROBES )); then
+          rc=0; out="$(_grok_compat check "$cand")" || rc=$?
+        else
+          rc=0; out="$(_grok_compat "$mode" "$cand")" || rc=$?
+        fi
+        [[ "$(_kv source "$out")" == "probe" ]] && paid=$(( paid + 1 ))
         if (( rc == 0 )); then
           GROK_SELECTED_MODEL="$cand"
           GROK_COMPAT_SOURCE="$(_kv source "$out")"
+          GROK_COMPAT_NOTE="$(_kv cache_note "$out")"
           if [[ -z "$skipped" ]]; then GROK_SELECT_SOURCE="latest"
           else
             GROK_SELECT_SOURCE="older-compatible"
@@ -2255,9 +2291,17 @@ subcmd_grok_model() {
     GROK_SELECT_DEGRADED="grok is not logged in (run: grok login)"
   else
     grok_select_model "$pin"
+    # This answer is about to be FROZEN onto voices that only read the cache. A
+    # verdict that could not be stored is one they cannot see: every grok voice
+    # would then fail "not established" on a model just measured as fine. Say so
+    # here, once, instead of losing the family N times downstream.
+    if [[ -n "$GROK_SELECTED_MODEL" && "$GROK_COMPAT_NOTE" == *"could not be cached"* ]]; then
+      GROK_SELECT_DEGRADED="$GROK_SELECTED_MODEL passed the probe but the $GROK_COMPAT_NOTE — voices read the cache, so grok cannot be frozen for this run (check the cache directory)"
+      GROK_SELECTED_MODEL=""; GROK_SELECT_SOURCE="none"
+    fi
   fi
   echo "selected=$GROK_SELECTED_MODEL"
-  echo "requested=${pin:-latest}"
+  echo "requested=${GROK_REQUESTED:-latest}"
   echo "latest_candidate=$GROK_LATEST_CANDIDATE"
   echo "source=$GROK_SELECT_SOURCE"
   echo "catalog=$GROK_CATALOG"

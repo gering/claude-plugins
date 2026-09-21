@@ -30,12 +30,13 @@ FAKE = r'''#!/usr/bin/env python3
 import json, os, sys, time
 args = sys.argv[1:]
 if args == ["--version"]:
-    print("grok %s (deadbeef) [stable]" % os.environ.get("FAKE_VERSION", "1.0.40")); sys.exit(0)
+    print("grok %s%s (deadbeef) [stable]" % (os.environ.get("FAKE_VPREFIX", ""), os.environ.get("FAKE_VERSION", "1.0.40"))); sys.exit(0)
 with open(os.environ["FAKE_CALLS"], "a") as fh:
     fh.write(json.dumps({"argv": args, "cwd": os.getcwd(), "ls": sorted(os.listdir("."))}) + "\n")
 mode = os.environ.get("FAKE_MODE", "ok")
 time.sleep(float(os.environ.get("FAKE_SLEEP", "0")))
-env = {"text": "x", "modelUsage": {args[args.index("-m") + 1] + "-build": {"modelCalls": 1}}}
+served = os.environ.get("FAKE_SERVED") or (args[args.index("-m") + 1] + "-build")
+env = {"text": "x", "modelUsage": {served: {"modelCalls": 1}}}
 if mode == "ok":
     env["structuredOutput"] = {"probe": "@TOKEN@", "sum": 7}
 elif mode == "null":
@@ -128,6 +129,15 @@ check("a later model needs no code edit — it is simply probed",
 rc, kv, _ = t.run("ensure", extra=("--cli-version", "1.0.40"))
 check("caller-supplied CLI version hits the same record", kv.get("source") == "cache")
 
+rc, kv, _ = t.run("check", FAKE_VPREFIX="v")
+check("`grok v1.0.40` keys the cache as 1.0.40 (same as the adapter's grep), not 0.40",
+      kv.get("cli_version") == "1.0.40" and kv.get("source") == "cache")
+
+s = Env()
+rc, kv, _ = s.run("ensure", FAKE_SERVED="grok-4.5-build")
+check("a call SERVED by another model is no verdict about the requested one",
+      rc == 3 and kv.get("compat") == "unknown" and "served by" in kv.get("reason", ""))
+
 # --- definite failures: exit 0 from grok is NOT proof ----------------------------
 for fake, needle in [("null", "null"), ("prose", "enum"), ("extra", "exact keys"), ("strsum", "integer")]:
     f = Env()
@@ -173,6 +183,12 @@ rc, kv, _ = x.run("check")
 check("an expired pass is not served", rc == 3 and "expired" in kv.get("reason", ""))
 rc, kv, _ = x.run("ensure")
 check("…and is re-measured, saying why", kv.get("source") == "probe" and "expired" in kv.get("cache_note", ""))
+x = Env(); x.run("ensure"); age(x, 13 * 86400 + 3600)
+rc, kv, _ = x.run("check")
+check("a pass in its last day is still VALID for a voice (check)", rc == 0 and kv.get("source") == "cache")
+rc, kv, _ = x.run("ensure")
+check("…but the prep step (ensure) re-measures it early, so a frozen run cannot expire mid-review",
+      rc == 0 and kv.get("source") == "probe" and len(x.probes()) == 2)
 x = Env(); x.run("ensure", fake="null"); age(x, 2 * 86400)
 rc, kv, _ = x.run("ensure", fake="ok")
 check("an expired FAILURE is retried and can recover", rc == 0 and kv.get("source") == "probe")

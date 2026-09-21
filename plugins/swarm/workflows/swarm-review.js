@@ -880,6 +880,13 @@ const GROK_FROZEN_ENV = GROK_RUN.model
   ? `SWARM_GROK_PROBE=0 ${GROK_RUN.cliVersion ? `SWARM_GROK_CLI_VERSION=${GROK_RUN.cliVersion} ` : ''}`
   : ''
 const GROK_FROZEN_FLAG = GROK_RUN.model ? ` --model ${shQuote(GROK_RUN.model)}` : ''
+// FAIL CLOSED: grok was asked for but no concrete model came with it (no token,
+// a token that does not validate, or a selection that produced nothing — e.g. a
+// pin that is not offered). Running the voices anyway would let each of them
+// select for itself: a failed PIN would silently run as "latest", every cluster
+// process could buy its own probe, and the run would not be one model. No model,
+// no grok voices — reported, not silent.
+const GROK_DROPPED = wantVoices.includes('grok') && !GROK_RUN.model
 const EXTERNAL_BACKENDS = [
   { backend: 'codex', flags: MAX ? '--effort xhigh' : '--effort medium' },
   { backend: 'grok', flags: (MAX ? '--effort medium' : '--effort low') + GROK_FROZEN_FLAG, env: GROK_FROZEN_ENV },
@@ -900,7 +907,7 @@ const unitsForBackend = (b, units) => {
 // Identical to finderUnits whenever a gate ran — reuse it rather than recompute,
 // so the two sides can never drift apart by construction.
 const externalUnits = runClaude ? finderUnits : unitsFor(CANDIDATE_LENSES)
-const liveExternals = EXTERNAL_BACKENDS.filter((b) => wantVoices.includes(b.backend))
+const liveExternals = EXTERNAL_BACKENDS.filter((b) => wantVoices.includes(b.backend) && !(b.backend === 'grok' && GROK_DROPPED))
 const liveBackends = liveExternals.map((b) => b.backend)
 const reviewSources = [...(runClaude ? ['claude'] : []), ...liveBackends].join('/') || 'no live backend'
 const externalVoiceSpecs = liveExternals
@@ -940,10 +947,9 @@ const externalVoiceSpecs = liveExternals
       (TELEMETRY ? ` --unit ${shQuote(u.name)} --telemetry ${shQuote(TELEMETRY)}` : ''),
   })))
 if (liveBackends.includes('grok')) {
-  log(GROK_RUN.model
-    ? `grok model for this run: ${GROK_RUN.model} (${GROK_RUN.source}${GROK_RUN.latest && GROK_RUN.latest !== GROK_RUN.model ? `; latest on offer: ${GROK_RUN.latest}` : ''}) — frozen onto every grok voice`
-    : 'grok model NOT frozen for this run (no valid args.grok) — each grok voice resolves it itself from the shared compatibility cache')
+  log(`grok model for this run: ${GROK_RUN.model} (${GROK_RUN.source}${GROK_RUN.latest && GROK_RUN.latest !== GROK_RUN.model ? `; latest on offer: ${GROK_RUN.latest}` : ''}) — frozen onto every grok voice`)
 }
+if (GROK_DROPPED) log('grok DROPPED from this run: no concrete model was selected for it (args.grok carries no valid `selected`) — see the prep step\'s GROK_DEGRADED for the reason')
 if (externalVoiceSpecs.length) {
   log(`External fan-out: ${externalVoiceSpecs.length} call(s) — ` +
       liveExternals.map((b) => `${b.backend}×${unitsForBackend(b, externalUnits).length}`).join(' + ') +
@@ -1189,6 +1195,9 @@ if (consensusReachable && unitsDegraded.length) {
   log(`Cluster coverage: ${unitsDegraded.join(', ')} had fewer than 2 families return — findings there cannot reach consensus and fall back to solo + verifier`)
 }
 // swarm-test-region-end
+// Outside the test region on purpose: it depends on run-level state (GROK_DROPPED),
+// not on the voice results the region is lifted out to be tested against.
+if (GROK_DROPPED) coverageNotes.push('grok hat in diesem Lauf NICHT reviewt: für den Lauf konnte kein konkretes Grok-Modell festgelegt werden (Grund: GROK_DEGRADED aus dem Prep-Schritt). Es wurde bewusst kein anderes Modell ersatzweise gestartet.')
 
 const pool = []
 for (const v of voices) {
@@ -1569,6 +1578,7 @@ return {
     // (null when grok did not run). `source !== 'latest'` is a degradation the
     // presenter must show: "grok reviewed" does not mean "the latest grok did".
     grokModel: liveBackends.includes('grok') ? GROK_RUN : null,
+    grokDropped: GROK_DROPPED,
     // Backends that actually entered the workflow with at least one surviving
     // voice — the pr-post footer names exactly these; the skill passes the list
     // through verbatim instead of re-deriving it from `agents` in prose.

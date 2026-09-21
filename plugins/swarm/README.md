@@ -212,23 +212,29 @@ offers that enforces structured output.** No release needs a code edit.
   `structuredOutput` can only come from enforcement. The verdict is cached per
   (model, CLI version, probe contract) under `~/.cache/gering-swarm/grok-compat/`
   (0700/0600, atomic writes, every record re-validated on read, non-private
-  stores refused). Passes stand 14 days, failures 1 day, inconclusive probes 10
-  minutes. A lock makes concurrent processes share one probe; review voices
+  stores refused). Passes stand 14 days (the review's prep re-measures in the
+  last day, so a frozen run cannot expire mid-review), failures 1 day,
+  inconclusive probes 10 minutes. One probe is bounded to 45 s, and a verdict
+  only counts when the call was actually served by the requested model. A lock makes concurrent processes share one probe; review voices
   never probe at all.
 - **One model per run.** The review's prep step calls `agents.sh grok-model`
   once and the workflow pins that id as `--model` on every grok voice; a resumed
-  or looped run keeps it.
+  or looped run keeps it. If no model could be fixed for the run, the workflow
+  **drops the grok voices and reports it** — it never lets them pick for
+  themselves (that is how a failed pin would become "latest").
 - **Degradation is explicit.** `grok-model` prints `selected`,
   `latest_candidate`, `source` (`latest` · `older-compatible` · `last-known` ·
   `pinned` · `none`), `catalog` (`ok` · `no-candidate` · `unparseable` ·
   `unreachable`) and `degraded` (the reason). If the newest model fails the
-  probe, at most one older candidate is tried and named as a fallback. If the
+  probe, at most one further *paid* probe is spent (cached verdicts are free and
+  are consulted for up to six candidates); the fallback is named as such. If the
   catalog cannot be read, only a *last-known* model this host already measured is
   used — there is no baked-in default id. Otherwise grok is reported not-ready
   with the reason.
 - **Pin deliberately** with `SWARM_GROK_MODEL=<id>` (or `run grok --model <id>`).
-  A pin is never reinterpreted as "latest": it must be offered and pass the same
-  probe, or nothing runs.
+  The adapter reads the variable itself, so `list`, `ready`, `grok-model` and
+  `run` all judge the same request. A pin is never reinterpreted as "latest": it
+  must be well-formed, offered and pass the same probe, or nothing runs.
 
 The prompt always reaches a backend **out-of-band** — never as an argv word — so
 the diff is bounded by model context rather than `exec`'s `MAX_ARG_STRLEN`:
