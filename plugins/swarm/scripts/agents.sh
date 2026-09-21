@@ -9,6 +9,14 @@
 #   available <backend>   Exit 0 if the CLI is installed; prints its version
 #   ready <backend>       Exit 0 if authenticated/usable; hint on stderr if not
 #   jail                  Print jail=yes|no (working OS sandbox wrapper?)
+#   grok-model [--model <id>]  Select the grok model for ONE run and print it as
+#                         key=value data: selected, latest_candidate, source
+#                         (latest|older-compatible|last-known|pinned|none),
+#                         catalog, compat_source, cli_version, degraded. May pay
+#                         for ONE-TWO bounded synthetic probes (cached after).
+#                         Exit 0 = a model was selected, 1 = none (see degraded).
+#                         `ready`/`list` say grok is usable; only THIS says which
+#                         model runs and whether it is the latest.
 #   config                Print the RESOLVED numeric config (max_prompt_bytes,
 #                         cap_headroom, oversize_threshold, timeout_seconds,
 #                         probe_timeout_seconds, probe_budget_seconds). Callers
@@ -54,11 +62,12 @@
 #            Auth: `codex login status`. Effort has no "max" tier -> max→xhigh.
 #   grok   — headless `--prompt-file` with inline --json-schema; the validated
 #            object is `.structuredOutput` of a response envelope. Needs an
-#            explicit model (-m). The model is DISCOVERED, not hard-pinned: the
-#            newest canonical id the CLI lists (bare version ids, major >= 4)
-#            whose --json-schema enforcement is verified in
-#            GROK_SCHEMA_VERIFIED; a newer unverified model is reported, never
-#            silently chosen. GROK_DEFAULT_MODEL is only the fallback floor.
+#            explicit model (-m). The model is SELECTED per run, never
+#            hard-coded: the newest canonical id the CLI lists (exactly
+#            grok-(4|5).<minor>) whose --json-schema enforcement grok-compat.py
+#            has MEASURED (one cached synthetic probe). `--model` is a deliberate
+#            pin and is never reinterpreted; `grok-model` prints the selection,
+#            the latest candidate and any degradation as data.
 #            Effort ladder is low|medium|high (no max tier, so the adapter maps
 #            xhigh/max down to high, mirroring codex's missing max). Read+shell+web via a STRICT `--tools`
 #            allowlist (read_file,list_dir,grep,run_terminal_command,
@@ -67,10 +76,10 @@
 #            (neutral Claude settings, only auth.json linked) — grok pre-approves
 #            every listed tool whatever the mode, so the jail's write model is
 #            the boundary. Readiness is model-aware: auth (non-empty
-#            ~/.grok/auth.json — there is no status command) AND at least one
-#            SCHEMA-VERIFIED canonical model listed by `grok models` (not one
-#            fixed id — the model is discovered); an unprobeable list degrades to
-#            trusting auth rather than dropping the backend. The CLI rejects an unlisted -m id at launch
+#            ~/.grok/auth.json — there is no status command) AND a model the
+#            selection above can actually run; an unreadable catalog falls back
+#            to a LAST-KNOWN measured model, named as such, or reports not-ready
+#            with the reason. The CLI rejects an unlisted -m id at launch
 #            ("unknown model id") and drops/renames models between releases
 #            (0.2.101 removed grok-composer-2.5-fast), so an auth-only check
 #            would advertise a model the CLI no longer offers. The probe
@@ -148,46 +157,39 @@ KIMI_BIN="${SWARM_KIMI_BIN:-kimi}"
 # so a stock review is the three-family codex + grok + Claude ensemble and Kimi
 # only enters when the operator asks for the fourth family that run.
 KIMI_OPT_IN="${SWARM_KIMI:-0}"
-# The FALLBACK used wherever discovery cannot run — no model list, offline, an
-# unparseable listing. Deliberately the OLDEST still-verified id, not the newest:
-# this value is only ever reached when we could not read what the CLI offers, and
-# guessing high there is the expensive direction. An older CLI that ships
-# grok-4.5 but not grok-4.6 would be handed an unknown model id, reject every
-# call, and lose the whole grok family for the run — the exact silent-family-loss
-# this plugin keeps fighting. Guessing low costs at most a slightly older model
-# on a host we could not probe. Raise it only when the low end of
-# GROK_SCHEMA_VERIFIED is retired.
-GROK_DEFAULT_MODEL="grok-4.5"
-
-# --- canonical grok model discovery -------------------------------------------
+# --- canonical grok model selection ----------------------------------------------
 #
-# Ported from the cc-harness-agents helper in ~/dotfiles (which tracks the same
-# provider), with ONE substituted gate: that helper withholds an upgrade until a
-# model's context window is known, because its proxy catalog carries no
-# context_length. The adapter does not care about the window — it cares that the
-# model ENFORCES `--json-schema`, because the whole ensemble is built on schema
-# JSON. A model that merely accepts the flag and returns `structuredOutput: null`
-# fails LATE, after burning a full review.
+# "grok" means the NEWEST canonical model the installed CLI offers — resolved per
+# run, never a hard-coded id. Two independent questions decide it:
 #
-# GROK_CANONICAL_RE — anchored, accepts ONLY bare version ids. A provider catalog
-# mixes canonical releases with variants that are not drop-in substitutes for a
-# review: dated snapshots, reasoning/non-reasoning splits, multi-agent, build,
-# composer and image/video ids. Against the live xAI catalog this accepts
-# grok-4.3/4.5/4.6 and rejects grok-3-mini, grok-4.20-0309-reasoning,
-# grok-4.20-multi-agent-0309, grok-build-0.1, grok-composer-2.5-fast and the
-# grok-imagine-* family. Major >= 4 is deliberate: grok-3* is a generation this
-# adapter never used, so a catalog that regresses to it cannot pull us backwards.
-GROK_CANONICAL_RE='^grok-([4-9]|[1-9][0-9]+)(\.[0-9]+)?$'
-
-# GROK_SCHEMA_VERIFIED — the hard gate. A discovered model is only SELECTED when
-# its schema enforcement has been confirmed by hand against the real CLI. The
-# model list says nothing about it, and guessing is what this table exists to
-# prevent: an unverified newer model is REPORTED (stderr), never silently chosen,
-# so adopting it is a one-line edit here after a check, not an accident.
-# Verified 2026-08-16 against grok CLI 1.0.3 — both return an envelope whose
-# `.structuredOutput` carries the schema's `findings` array:
-GROK_SCHEMA_VERIFIED="grok-4.5
-grok-4.6"
+#   1. WHICH id is the newest canonical one?  lib-grok-latest.sh — exactly
+#      `grok-(4|5).<minor>`, integer ordering (5.0 > 4.20 > 4.9). It ships
+#      byte-identical in the work-system plugin, so `/kickoff --grok` and a review
+#      agree on "latest" without either plugin requiring the other.
+#   2. Does that model ENFORCE `--json-schema`?  grok-compat.py — one bounded,
+#      tool-less, synthetic probe, cached per (model, CLI version, probe
+#      contract). The whole ensemble is built on schema JSON, and a model that
+#      merely accepts the flag and returns `structuredOutput: null` fails LATE,
+#      after burning a full review. This used to be a hand-edited allowlist
+#      (GROK_SCHEMA_VERIFIED), which made every Grok release a code change; the
+#      gate is unchanged in strength, it is just measured instead of typed.
+#
+# There is deliberately NO default model id any more. The old pin (grok-4.5) was
+# reached exactly when the catalog could not be read — a silent, ever-older
+# guess. The only fallback now is a LAST-KNOWN model: one this host has already
+# measured as compatible, named as such in the selection data.
+GROK_LATEST_LIB="$SCRIPT_DIR/lib-grok-latest.sh"
+GROK_COMPAT_TOOL="$SCRIPT_DIR/grok-compat.py"
+# shellcheck source=lib-grok-latest.sh
+. "$GROK_LATEST_LIB" 2>/dev/null || {
+  echo "agents.sh: cannot source $GROK_LATEST_LIB (it ships alongside this script)" >&2
+  exit 1
+}
+# How many canonical candidates one selection may PAY to probe, newest first. A
+# catalog is untrusted input and every probe is a metered model call, so an
+# incompatible newest model costs at most one further probe, not a walk down the
+# whole list.
+GROK_MAX_COMPAT_PROBES=2
 # Default HOME so `$HOME` expansions below (auth file, sandbox deny paths) don't
 # abort the whole script under `set -u` when HOME is unset.
 HOME="${HOME:-$(cd ~ 2>/dev/null && pwd || echo /nonexistent)}"
@@ -309,7 +311,7 @@ _write_telemetry() {
   # Never call adapter_timeout() from here: this runs in the EXIT trap, where
   # _resolve_int`s `exit 2` would replace the real status and lose the record.
   # Escape the string fields. They are adapter-controlled today (cluster names,
-  # ids filtered by GROK_CANONICAL_RE), but a `"` or `\` in any of them would
+  # ids vetted by grok_latest_is_canonical / the CLI catalog), but a `"` or `\` in any of them would
   # emit a line the reader silently SKIPS as malformed — telemetry that quietly
   # loses records is worse than none, since it reads as "that voice never ran".
   # DELIBERATELY not `python3 -c json.dumps`, even though the `run` path already
@@ -1404,6 +1406,10 @@ SWARM_MAX_PROBES_PER_RUN=3
 # fetch at most once).
 _grok_models_done=""
 _grok_models=""
+# Why the list is empty, when it is: `unreachable` (the fetch failed — says
+# nothing about models) vs `unparseable` (fetched, no id readable). Kept apart
+# from "a valid catalog with no canonical candidate", which is a third answer.
+_grok_catalog_state=""
 _codex_probe_rc=0
 _probe_degraded() {
   # $1 = backend, $2 = reason. The ONE exit for every "the model check did not
@@ -1628,66 +1634,11 @@ _probe_or_bare() {
 }
 
 
-# The parser as its OWN function, reading the raw listing on stdin. It used to be
-# inlined in the assignment below, which forced both test files to SCRAPE it back
-# out of this file with a regex; the two anchors then differed in strictness, so
-# a reformat could silently disable one whole test file (20+ format regressions)
-# while the other stayed green. Its own function is drivable directly — see
-# test_grok_models.py, which sources this file and pipes fixtures through it.
-grok_parse_models() {
-  awk '
-    # The id must be the FIRST token after the bullet, matched whole, on a short
-    # line. Scanning every field meant a prose bullet — " - grok-4.6 reaches end
-    # of life on 2026-12-01" — yielded grok-4.6 as an offered model; discovery
-    # then selects it (it is schema-verified) and every call dies at launch with
-    # "unknown model id", losing the grok family. The actual rule is below: the
-    # id alone, or the id followed by a BRACKETED annotation. (It was NF<=3 once;
-    # saying so here while the code checks something else is how a reader ends up
-    # debugging the comment.)
-    /^[[:space:]]*[*-][[:space:]]/ {
-      # Accept: bullet, then the id as the FIRST token, then EITHER nothing or a
-      # BRACKETED annotation — "(default)", "[stable]", "{beta}". Surrounding
-      # backticks/quotes and trailing punctuation are stripped off the id.
-      #
-      # This is a deliberate trade-off between two ways to lose the grok family,
-      # and it is not symmetric:
-      #   - harvesting PROSE as a model ("- grok-4.6 reaches end of life on …")
-      #     makes discovery select an id the CLI does not offer; every call then
-      #     dies at launch and nothing says why. SILENT.
-      #   - rejecting an unfamiliar annotation style ("- grok-4.5 Fast reasoning
-      #     model") empties the list, which lands in the documented trust-auth
-      #     degrade: _probe_degraded WARNS on stderr and the pinned fallback is
-      #     used. LOUD, and recoverable by adding the style here.
-      # So when the two cannot be told apart syntactically — and a bare word after
-      # the id cannot be — prefer the loud failure. Bracketed annotations are the
-      # convention every observed listing uses, which is why they are admitted.
-      # The `-` bullet itself must stay accepted: grok 1.0.3 marks only the
-      # default with `*`.
-      # An annotation can also state the model is NOT usable — "[retired]",
-      # "(deprecated)", "- grok-4.6 [coming soon]". The bracket rule alone
-      # admits those, discovery then SELECTS the id (it is canonical and
-      # schema-verified, and the membership guard runs only for an explicit
-      # --model override), and every call dies at launch with "unknown model id":
-      # the silent family loss this parser exists to prevent, caused by the
-      # parser. Reading the annotation is the only way to tell an offered model
-      # from a listed-but-withdrawn one, so a withdrawal vocabulary is checked
-      # here. An unknown wording still falls through to the loud degrade.
-      low = tolower($0)
-      if (low ~ /(retired|deprecated|unavailable|not available|sunset|end of life|end-of-life|coming soon|disabled|removed)/) next
-      if (NF >= 2 && (NF == 2 || $3 ~ /^[(\[{]/)) {
-        tok = $2
-        # NOTE: no apostrophe may appear anywhere in this awk program (comments
-        # included) — the whole program is wrapped in awk with single quotes, so
-        # one would end the shell quoting and silently corrupt the parser. It did:
-        # three fixtures went red and the live probe reported "output format may
-        # have changed".
-        gsub(/[`"]/, "", tok)
-        sub(/[.,;:]+$/, "", tok)
-        if (tok ~ /^grok-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*$/) print tok
-      }
-    }
-'
-}
+# The parser lives in lib-grok-latest.sh (shared with work-system) as
+# grok_latest_parse; its rules and the reasons for them are documented there.
+# This name stays because test_grok_models.py drives the SHIPPED function by it —
+# never a re-typed copy, never a regex scrape of this file.
+grok_parse_models() { grok_latest_parse; }
 
 # Kimi readiness has two independently bounded capability checks: ACP support
 # (the only argv-safe prompt transport) and the offered model catalog. Both are
@@ -1828,11 +1779,10 @@ grok_model_fetch() {
   # `_probe_or_bare`, and no coreutils special case: with
   # the polling watchdog the call is bounded on every host, so skipping it there
   # is no longer the cautious choice — it is the dangerous one. Skipping left the
-  # model list EMPTY, which reads as the trust-auth degrade: readiness passes,
-  # grok_select_model falls back to GROK_DEFAULT_MODEL, and if the CLI has
-  # withdrawn that id every gated cluster dies at launch with "unknown model" —
-  # the whole grok family gone, where one clean not-ready would have been the
-  # honest answer. The reason the skip existed (`ready`/`list` must never hang)
+  # model list EMPTY, and an empty list used to mean "trust auth, run a pinned
+  # default" — if the CLI had withdrawn that id every gated cluster died at
+  # launch with "unknown model", the whole grok family gone, where one clean
+  # not-ready would have been the honest answer. The reason the skip existed (`ready`/`list` must never hang)
   # is now satisfied by the bound itself.
   raw="$(_probe_or_bare grok models)" || rc=$?
   # Check rc BEFORE looking at the output, and discard whatever arrived: a probe
@@ -1852,6 +1802,7 @@ grok_model_fetch() {
     elif (( rc == 126 )); then _probe_degraded grok "\`grok models\` could not be bounded (no scratch file) — refused rather than run uncapped"
     else _probe_degraded grok "\`grok models\` failed (rc=$rc)"
     fi
+    _grok_catalog_state="unreachable"
     return 0
   fi
   # One model id PER BULLET LINE: the id is the FIRST grok-shaped token after the
@@ -1876,6 +1827,7 @@ grok_model_fetch() {
   # The rules themselves live in grok_parse_models, not here.
   _grok_models="$(printf '%s\n' "$raw" | grok_parse_models)"
   if [[ -z "$_grok_models" ]]; then
+    _grok_catalog_state="unparseable"
     _probe_degraded grok "\`grok models\` returned no model ids — output format may have changed"
   fi
 }
@@ -1891,123 +1843,167 @@ _line_in_list() {
   esac
 }
 
-_grok_schema_verified() { _line_in_list "$1" "$GROK_SCHEMA_VERIFIED"; }
+_grok_canonical_desc() {
+  # Canonical ids on offer, NEWEST FIRST, one per line. Ordering is
+  # grok_latest_pick applied repeatedly — the one comparison rule, not a second
+  # sort that could disagree with it.
+  local rest="$_grok_models" best
+  while :; do
+    best="$(printf '%s\n' "$rest" | grok_latest_pick)"
+    [[ -n "$best" ]] || break
+    printf '%s\n' "$best"
+    rest="$(printf '%s\n' "$rest" | grep -vxF -- "$best" || true)"
+  done
+}
 
-_grok_version_newer() {
-  # Is $1 strictly newer than $2? Both are canonical ids sharing the `grok-`
-  # prefix, which is all GROK_CANONICAL_RE lets through.
+_grok_compat() {
+  # THE seam to grok-compat.py: $1 = check|ensure|known, $2 = model (not for
+  # `known`). Prints the tool's key=value lines, returns its exit code — 0
+  # compatible, 1 incompatible, 3 no verdict, 2 refused. Tests redefine this
+  # function; nothing else in this file runs the tool.
   #
-  # COMPONENT-WISE and numeric, so grok-4.20 is newer than grok-4.6 — read as a
-  # decimal fraction it would be older, but the provider means "the 20th minor
-  # release", and the live catalog already ships 4.20-derived ids.
-  local a="${1##*-}" b="${2##*-}"
-  local a_major="${a%%.*}" b_major="${b%%.*}"
-  local a_minor="0" b_minor="0"
-  case "$a" in *.*) a_minor="${a#*.}" ;; esac
-  case "$b" in *.*) b_minor="${b#*.}" ;; esac
-  # A non-numeric component would make `-gt` a hard `set -e` failure rather than
-  # a false, so refuse the comparison — the caller reads that as "not newer" and
-  # keeps what it had.
-  case "$a_major$a_minor$b_major$b_minor" in *[!0-9]*) return 1 ;; esac
-  # Digits alone are not enough: "08"/"09" are digit-only yet invalid octal, and
-  # the comparisons below would abort the whole adapter under `set -e` ("value
-  # too great for base") instead of answering "not newer". Force decimal.
-  a_major=$((10#$a_major)); a_minor=$((10#$a_minor))
-  b_major=$((10#$b_major)); b_minor=$((10#$b_minor))
-  if [[ "$a_major" -ne "$b_major" ]]; then
-    [[ "$a_major" -gt "$b_major" ]]
-    return
+  # SWARM_GROK_CLI_VERSION is pinned onto every workflow voice by the review's
+  # prep step, so the run path keys the cache WITHOUT a `grok --version` call:
+  # that would be a fourth pre-timer probe the margin is not budgeted for.
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'compat=unknown\nreason=python3 is unavailable to run the compatibility check\n'
+    return 3
   fi
-  [[ "$a_minor" -gt "$b_minor" ]]
+  local mode="$1" args=()
+  [[ "$mode" != "known" ]] && args+=(--model "$2")
+  [[ -n "${SWARM_GROK_CLI_VERSION:-}" ]] && args+=(--cli-version "$SWARM_GROK_CLI_VERSION")
+  python3 "$GROK_COMPAT_TOOL" "$mode" ${args[@]+"${args[@]}"} 2>&1
 }
 
-_grok_highest_canonical() {
-  # Highest listed id accepted by GROK_CANONICAL_RE, or "" if none is.
-  # $1 = "verified" restricts the scan to schema-verified models.
-  #
-  # NOT memoized, deliberately. Every call site invokes this as `$(...)`, so any
-  # global it set would die with that subshell — the memo added in 0.10.6 never
-  # reached a second caller and only looked like an optimization. A function that
-  # PRINTS its result cannot also cache into a global; splitting it into a void
-  # setter plus a getter would buy a few forks over an already-memoized in-memory
-  # list, which is not worth a second calling convention in this file.
-  local mode="${1:-any}" best="" id
-  while IFS= read -r id; do
-    [[ -n "$id" ]] || continue
-    [[ "$id" =~ $GROK_CANONICAL_RE ]] || continue
-    if [[ "$mode" == "verified" ]] && ! _grok_schema_verified "$id"; then continue; fi
-    if [[ -z "$best" ]] || _grok_version_newer "$id" "$best"; then best="$id"; fi
-  done <<<"$_grok_models"
-  printf '%s' "$best"
+_grok_compat_mode() {
+  # `ensure` may PAY for one synthetic probe; `check` only reads the cache. The
+  # workflow pins SWARM_GROK_PROBE=0 on every voice: the selection was probed
+  # ONCE by the prep step, and N cluster processes must never each buy their own.
+  if [[ "${SWARM_GROK_PROBE:-1}" == "0" ]]; then echo check; else echo ensure; fi
 }
 
+_kv() { printf '%s\n' "$2" | sed -n "s/^$1=//p" | head -n 1; }
+
+# Selection RESULT — data, not prose. Read after grok_select_model:
+#   GROK_SELECTED_MODEL   the concrete id to run, or "" when none may run
+#   GROK_LATEST_CANDIDATE newest canonical id the catalog offers ("" = unknown)
+#   GROK_SELECT_SOURCE    latest | older-compatible | last-known | pinned | none
+#   GROK_SELECT_DEGRADED  why the selection is not simply "the latest" ("" = it is)
+#   GROK_CATALOG          ok | no-candidate | unparseable | unreachable
+#   GROK_COMPAT_SOURCE    cache | probe | none   (how compatibility was established)
 GROK_SELECTED_MODEL=""
-GROK_SELECT_NOTE=""
+GROK_LATEST_CANDIDATE=""
+GROK_SELECT_SOURCE="none"
+GROK_SELECT_DEGRADED=""
+GROK_CATALOG=""
+GROK_COMPAT_SOURCE="none"
+_grok_select_done=""
 grok_select_model() {
-  # Resolve the model to run: an explicit --model wins, else the newest
-  # schema-verified canonical id the CLI lists, else the pin. Sets
-  # GROK_SELECTED_MODEL and, when the user should know something,
-  # GROK_SELECT_NOTE. Memoized via GROK_SELECTED_MODEL — grok_model_fetch is a
-  # network call.
-  local override="${1:-}"
-  [[ -n "$GROK_SELECTED_MODEL" ]] && return 0
-  if [[ -n "$override" ]]; then
-    # An override bypasses DISCOVERY but NOT the schema gate: running an
-    # unverified model is the "fails late with structuredOutput: null after
-    # burning a full review" case the gate exists to prevent.
-    GROK_SELECTED_MODEL="$override"
-    return 0
-  fi
+  # $1 = an explicit pin ("" = dynamic "latest"). Memoized: discovery is a
+  # network call and compatibility may be a paid one.
+  local pin="${1:-}"
+  [[ -n "$_grok_select_done" ]] && return 0
+  _grok_select_done=1
+
   grok_model_fetch
-  if [[ -z "$_grok_models" ]]; then
-    # No usable list (offline, no timeout binary, format changed). Keep the pin
-    # rather than fail: grok_model_fetch already reported the degrade, and
-    # dropping grok entirely is worse than running the known-good model.
-    GROK_SELECTED_MODEL="$GROK_DEFAULT_MODEL"
+  if [[ -n "$_grok_models" ]]; then
+    GROK_LATEST_CANDIDATE="$(printf '%s\n' "$_grok_models" | grok_latest_pick)"
+    if [[ -n "$GROK_LATEST_CANDIDATE" ]]; then GROK_CATALOG="ok"; else GROK_CATALOG="no-candidate"; fi
+  else
+    GROK_CATALOG="${_grok_catalog_state:-unreachable}"
+  fi
+
+  local mode out rc
+  mode="$(_grok_compat_mode)"
+
+  if [[ -n "$pin" ]]; then
+    # A deliberate pin is NEVER reinterpreted as "latest" — it runs, or nothing
+    # does. It bypasses discovery, not the two facts that decide whether a call
+    # can work: the CLI must offer it (when we could read the catalog at all) and
+    # it must enforce the schema.
+    GROK_SELECT_SOURCE="pinned"
+    if [[ -n "$_grok_models" ]] && ! _line_in_list "$pin" "$_grok_models"; then
+      GROK_SELECT_DEGRADED="pinned model '$pin' is not offered by this CLI (see: grok models)"
+      return 0
+    fi
+    rc=0; out="$(_grok_compat "$mode" "$pin")" || rc=$?
+    GROK_COMPAT_SOURCE="$(_kv source "$out")"
+    if (( rc == 0 )); then
+      GROK_SELECTED_MODEL="$pin"
+      if [[ -n "$GROK_LATEST_CANDIDATE" && "$GROK_LATEST_CANDIDATE" != "$pin" ]]; then
+        GROK_SELECT_DEGRADED="pinned to $pin by request; the catalog's latest canonical model is $GROK_LATEST_CANDIDATE"
+      fi
+    else
+      GROK_SELECT_DEGRADED="pinned model '$pin': $(_grok_compat_reason "$rc" "$out")"
+    fi
     return 0
   fi
-  local top verified
-  top="$(_grok_highest_canonical)"
-  verified="$(_grok_highest_canonical verified)"
-  if [[ -z "$verified" ]]; then
-    # The CLI lists canonical models but none we have verified. Keep the pin and
-    # say so — run_grok's own preflight decides whether that is fatal.
-    GROK_SELECTED_MODEL="$GROK_DEFAULT_MODEL"
-    [[ -n "$top" ]] && GROK_SELECT_NOTE="grok lists $top but no schema-verified model — keeping $GROK_DEFAULT_MODEL"
-    return 0
-  fi
-  GROK_SELECTED_MODEL="$verified"
-  # A newer canonical model exists that we have NOT verified: report it, never
-  # select it. This is the upgrade prompt — confirm schema enforcement by hand,
-  # then add one line to GROK_SCHEMA_VERIFIED.
-  if [[ -n "$top" && "$top" != "$verified" ]] && _grok_version_newer "$top" "$verified"; then
-    GROK_SELECT_NOTE="grok offers a newer model ($top) that is not schema-verified — using $verified; verify --json-schema on $top, then add it to GROK_SCHEMA_VERIFIED"
-  fi
+
+  case "$GROK_CATALOG" in
+    ok)
+      local cand tried=0 skipped=""
+      while IFS= read -r cand; do
+        [[ -n "$cand" ]] || continue
+        (( tried >= GROK_MAX_COMPAT_PROBES )) && break
+        tried=$(( tried + 1 ))
+        rc=0; out="$(_grok_compat "$mode" "$cand")" || rc=$?
+        if (( rc == 0 )); then
+          GROK_SELECTED_MODEL="$cand"
+          GROK_COMPAT_SOURCE="$(_kv source "$out")"
+          if [[ -z "$skipped" ]]; then GROK_SELECT_SOURCE="latest"
+          else
+            GROK_SELECT_SOURCE="older-compatible"
+            GROK_SELECT_DEGRADED="${skipped} — using $cand"
+          fi
+          return 0
+        fi
+        skipped="${skipped:+$skipped; }$cand: $(_grok_compat_reason "$rc" "$out")"
+      done < <(_grok_canonical_desc)
+      GROK_SELECT_DEGRADED="no offered canonical model could be established as schema-compatible ($skipped)"
+      ;;
+    no-candidate)
+      GROK_SELECT_DEGRADED="this grok CLI offers no canonical grok-4.x/5.x model (offered: $(printf '%s' "$_grok_models" | tr '\n' ' ')) — pass --model to pin one deliberately"
+      ;;
+    *)
+      # The catalog could not be read, which says NOTHING about what is offered.
+      # The only honest fallback is a model THIS host already measured — never a
+      # baked-in id that ages silently. It is named as last-known in the data.
+      local known
+      rc=0; out="$(_grok_compat known)" || rc=$?
+      known="$(printf '%s\n' "$out" | grok_latest_pick)"
+      if (( rc == 0 )) && [[ -n "$known" ]]; then
+        GROK_SELECTED_MODEL="$known"
+        GROK_SELECT_SOURCE="last-known"
+        GROK_COMPAT_SOURCE="cache"
+        GROK_SELECT_DEGRADED="the model catalog is $GROK_CATALOG — using the last-known compatible model $known (not confirmed as still offered or as the latest)"
+      else
+        GROK_SELECT_DEGRADED="the model catalog is $GROK_CATALOG and this host has no last-known compatible model — cannot select a grok model"
+      fi
+      ;;
+  esac
   return 0
 }
 
+_grok_compat_reason() {
+  # One line for a non-zero _grok_compat result. $1 = rc, $2 = its output.
+  local reason; reason="$(_kv reason "$2")"
+  case "$1" in
+    1) echo "structured output is NOT enforced (${reason:-no detail})" ;;
+    3) echo "compatibility not established (${reason:-no detail})" ;;
+    *) echo "compatibility check refused (${reason:-$(printf '%s' "$2" | head -n 1)})" ;;
+  esac
+}
+
 grok_model_offered() {
-  # Three-state, collapsed to an exit code: 0 = the CLI offers a schema-verified
-  # canonical model, 1 = it lists models but none we can use (an honest "gone"),
-  # 0 = the list is empty / unparseable / not probed (probe unusable — offline,
-  # no timeout binary, or a future CLI renaming the subcommand). The empty case
-  # deliberately trusts auth instead of failing closed: silently dropping grok
-  # from every fan-out is worse than letting run_grok surface its explicit
-  # "unknown model id" error.
-  #
-  # Since discovery this asks "is ANY verified model on offer?", not "is THE
-  # pinned id on offer?" — the pin is a floor, and readiness must agree with what
-  # grok_select_model would actually run, or the probe rejects a CLI the review
-  # would have used (exactly how the 1.0.3 marker change dropped grok entirely).
+  # Readiness == "grok_select_model yields a model", by construction: the two
+  # used to be separate predicates, and the 1.0.3 marker change showed what that
+  # costs (readiness rejected a CLI the review would have used). $1 = an explicit
+  # pin, so `run --model X` is judged on X and not on the dynamic choice.
   # The --prompt-file capability is a property of the INSTALLED CLI, so it
-  # belongs to readiness rather than to each run: probed here, a CLI without it
-  # is reported not-ready once and never enters externalVoices. Probed only
-  # inside run_grok (as it was), `list --json` advertised grok as live and every
-  # gated cluster then failed identically with the same upgrade message.
+  # belongs to readiness rather than to each run.
   _grok_has_prompt_file || return 1
-  grok_model_fetch
-  [[ -z "$_grok_models" ]] && return 0
-  [[ -n "$(_grok_highest_canonical verified)" ]]
+  grok_select_model "${1:-}"
+  [[ -n "$GROK_SELECTED_MODEL" ]]
 }
 
 ready_check() {
@@ -2052,7 +2048,7 @@ ready_check() {
     # Model-aware: auth alone would advertise grok even when the CLI no longer
     # offers any model the adapter can drive (grok drops/renames models
     # between releases — 0.2.101 removed grok-composer-2.5-fast).
-    grok)   [[ -s "$GROK_AUTH_FILE" ]] && grok_model_offered && _scratch_dir_ok ;;
+    grok)   [[ -s "$GROK_AUTH_FILE" ]] && grok_model_offered "$requested_model" && _scratch_dir_ok ;;
     # ACP is the only out-of-band transport in kimi-code (0.32.0+; 0.41.0 verified). The default
     # model is pinned for deterministic ensemble behavior and must be offered.
     # The jail is part of Kimi's READINESS, not a rule the skill re-derives in
@@ -2100,23 +2096,16 @@ ready_hint() {
       if [[ ! -s "$GROK_AUTH_FILE" ]]; then
         echo "run: grok login"
       else
-        # TWO different failures reach here, with OPPOSITE remedies. Since
-        # discovery, readiness fails when no SCHEMA-VERIFIED model is on offer —
-        # which happens both when the CLI is too old (no canonical model at all)
-        # and when it is NEWER than this adapter knows (canonical models listed,
-        # none verified). Telling the second user to "update the grok CLI" sends
-        # them to update an already-current install, and never names the actual
-        # one-line fix.
         if ! _grok_has_prompt_file; then
           echo "this grok CLI has no --prompt-file — the adapter passes the prompt out-of-band so a large diff cannot hit the argv limit; update the grok CLI"
           return
         fi
-        local _top; _top="$(_grok_highest_canonical)"
-        if [[ -n "$_top" ]]; then
-          echo "grok lists $_top but no schema-verified model — verify --json-schema on it, then add it to GROK_SCHEMA_VERIFIED in agents.sh"
-        else
-          echo "this grok CLI offers no canonical model (see: grok models) — update the grok CLI"
-        fi
+        # The selection already knows WHY it produced nothing (catalog state,
+        # which candidates were tried, what the probe said) — relay that instead
+        # of guessing a remedy: "update the CLI" was wrong for a CLI NEWER than
+        # the adapter, and that mistake is what this data exists to end.
+        grok_select_model "$requested_model"
+        echo "${GROK_SELECT_DEGRADED:-no grok model could be selected}"
       fi
       ;;
     kimi)
@@ -2236,6 +2225,46 @@ subcmd_jail() {
   # stderr, so this is the visible channel for that warning. Runs from the same
   # cwd as the review, so its repo root matches the run's.
   if _read_web_safe codex; then echo "jail=yes"; else echo "jail=no"; fi
+}
+
+subcmd_grok_model() {
+  # The per-run selection as DATA. The review's prep step calls this ONCE, then
+  # freezes `selected` onto every grok voice (--model) together with
+  # `cli_version` (SWARM_GROK_CLI_VERSION) and SWARM_GROK_PROBE=0 — so no voice
+  # re-selects, re-probes or re-asks the CLI for its version, and a resumed run
+  # keeps the model it started with.
+  local pin=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --model) [[ $# -ge 2 ]] || { echo "Missing value for --model" >&2; exit 2; }
+               pin="$2"; shift 2 ;;
+      *) echo "Unknown flag: $1" >&2; exit 2 ;;
+    esac
+  done
+  _probe_setup_lenient
+  # Resolve the CLI version ONCE here and hand it to every compat call through
+  # the same variable the workflow pins, so prep and voices key the cache alike.
+  if [[ -z "${SWARM_GROK_CLI_VERSION:-}" ]]; then
+    local ver=""
+    ver="$(available_version grok 2>/dev/null | grep -Eo '[0-9]+(\.[0-9]+){1,3}' | head -n 1)" || true
+    [[ -n "$ver" ]] && export SWARM_GROK_CLI_VERSION="$ver"
+  fi
+  if ! backend_installed grok; then
+    GROK_SELECT_DEGRADED="grok is not installed"
+  elif [[ ! -s "$GROK_AUTH_FILE" ]]; then
+    GROK_SELECT_DEGRADED="grok is not logged in (run: grok login)"
+  else
+    grok_select_model "$pin"
+  fi
+  echo "selected=$GROK_SELECTED_MODEL"
+  echo "requested=${pin:-latest}"
+  echo "latest_candidate=$GROK_LATEST_CANDIDATE"
+  echo "source=$GROK_SELECT_SOURCE"
+  echo "catalog=$GROK_CATALOG"
+  echo "compat_source=$GROK_COMPAT_SOURCE"
+  echo "cli_version=${SWARM_GROK_CLI_VERSION:-unknown}"
+  echo "degraded=$(printf '%s' "$GROK_SELECT_DEGRADED" | tr '\n\r' '  ')"
+  [[ -n "$GROK_SELECTED_MODEL" ]]
 }
 
 swarm_max_prompt_bytes() {
@@ -2748,40 +2777,26 @@ run_grok() {
   # higher adapter tiers down so a stale caller degrades instead of erroring,
   # mirroring codex's max→xhigh mapping.
   case "$effort" in xhigh|max) effort="high" ;; esac
-  # Discovery resolves the model; the pin is only the fallback inside it.
+  # "$model" empty = dynamic "latest"; non-empty = a deliberate pin (the workflow
+  # passes the id its prep step FROZE for this run, so every voice of one review
+  # runs the same model even if a newer one appears mid-run).
   grok_select_model "$model"
   local grok_model="$GROK_SELECTED_MODEL"
   # Effective values, same reason as run_codex.
   TELEMETRY_EFFORT="$effort"; TELEMETRY_MODEL="$grok_model"
 
-  # Preflight-reject any model whose schema enforcement is unverified. The gate
-  # is now the VERIFIED TABLE rather than one hard-coded id: a model that merely
-  # accepts --json-schema and returns structuredOutput:null fails late, after
-  # burning a full review, so reject up front with a usage error.
-  # An explicit override is schema-gated below, but that says nothing about
-  # whether the INSTALLED CLI offers the id: readiness would pass on the
-  # discovered model while every call dies at launch with "unknown model id".
-  # Check it against the list we already fetched (memoized — no extra call);
-  # skip silently when the list is unavailable, since that is the documented
-  # trust-auth degrade rather than evidence of absence.
-  if [[ -n "$model" ]]; then
-    grok_model_fetch
-    if [[ -n "$_grok_models" ]]; then
-      _line_in_list "$grok_model" "$_grok_models" \
-        || { echo "grok model '$grok_model' is not offered by this CLI (see: grok models)" >&2; exit 2; }
-    fi
-  fi
-  if ! _grok_schema_verified "$grok_model"; then
-    echo "grok model '$grok_model' is not schema-verified — the adapter requires enforced --json-schema output. Verified: $(printf '%s' "$GROK_SCHEMA_VERIFIED" | tr '\n' ' ')" >&2
+  # No model, no call. The selection refuses a pin the CLI does not offer and any
+  # model whose --json-schema enforcement is not established: one that merely
+  # accepts the flag and returns structuredOutput:null fails LATE, after burning
+  # a full review, so reject up front with a usage error and the reason.
+  if [[ -z "$grok_model" ]]; then
+    echo "grok: no model to run — $GROK_SELECT_DEGRADED" >&2
     exit 2
   fi
-  # Surface a discovery note (a newer unverified model on offer, or no verified
-  # model at all) exactly once, on stderr. The transport discards adapter stderr,
-  # so this is a local-run aid — the upgrade prompt lives here, not in the report.
-  if [[ -n "$GROK_SELECT_NOTE" ]]; then
-    echo "note: $GROK_SELECT_NOTE" >&2
-    GROK_SELECT_NOTE=""
-  fi
+  # Say what runs and why, once, on stderr. The transport discards adapter
+  # stderr, so this is a local-run aid — the review report gets the same facts
+  # as data from `grok-model` via the prep step.
+  echo "note: grok model $grok_model ($GROK_SELECT_SOURCE; compatibility from ${GROK_COMPAT_SOURCE:-none})${GROK_SELECT_DEGRADED:+ — $GROK_SELECT_DEGRADED}" >&2
 
   _grok_has_prompt_file \
     || { echo "grok CLI has no --prompt-file (present on 0.2.112) — the adapter passes the prompt out-of-band so a large diff cannot hit the argv limit; upgrade the grok CLI" >&2; exit 2; }
@@ -3390,6 +3405,7 @@ main() {
     available)     subcmd_available "$@" ;;
     ready)         subcmd_ready "$@" ;;
     jail)          subcmd_jail ;;
+    grok-model)    subcmd_grok_model "$@" ;;
     config)        subcmd_config ;;
     run)           subcmd_run "$@" ;;
     -h|--help)     print_usage; exit 0 ;;

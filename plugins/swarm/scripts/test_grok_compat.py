@@ -232,6 +232,32 @@ check("malformed CLI version refused", rc == 2 and not e.probes())
 rc, kv, _ = e.run("ensure", model="grok-4.7-build-fast")
 check("an explicit variant pin can still be measured", rc == 0 and kv.get("model") == "grok-4.7-build-fast")
 
+# --- last-known: only VALID passes for THIS CLI version ------------------------------
+k = Env()
+k.run("ensure", model="grok-4.6"); k.run("ensure", model="grok-4.7")
+k.run("ensure", model="grok-4.8", fake="null"); k.run("ensure", model="grok-4.9", fake="rc1")
+k.run("ensure", model="grok-5.0", version="0.9.0")
+n = len(k.probes())
+def known(env, version="1.0.40"):
+    p = subprocess.run([sys.executable, str(TOOL), "known", "--cli-version", version],
+                       capture_output=True, text=True,
+                       env=dict(os.environ, SWARM_GROK_COMPAT_DIR=str(env.cache)))
+    return p.returncode, sorted(p.stdout.split())
+check("known: passes only — not the failed, inconclusive or other-CLI-version records",
+      known(k) == (0, ["grok-4.6", "grok-4.7"]))
+check("known never probes", len(k.probes()) == n)
+src = [p for p in k.records() if p.name.startswith("grok-4.7--")][0]
+forged = k.cache / ("grok-9.9--" + src.name.split("--", 1)[1])
+d = json.loads(src.read_text()); d["model"] = "grok-9.9"
+forged.write_text(json.dumps(d)); forged.chmod(0o600)
+check("known: a record filed under a name its own key does not hash to is ignored",
+      "grok-9.9" not in known(k)[1])
+for p in k.records():
+    d = json.loads(p.read_text()); d["checked_at"] -= 15 * 86400
+    p.write_text(json.dumps(d)); p.chmod(0o600)
+check("known: expired passes are not last-known", known(k) == (0, []))
+check("known on an empty store → nothing, exit 0", known(Env()) == (0, []))
+
 # --- no duplicate probes under fan-out -------------------------------------------------
 c = Env()
 env = dict(os.environ, SWARM_GROK_COMPAT_DIR=str(c.cache), FAKE_CALLS=str(c.calls),

@@ -18,6 +18,9 @@ measurement:
 Usage:
   grok-compat.py check  --model ID [--cli-version V]   cache only, never probes
   grok-compat.py ensure --model ID [--cli-version V]   cache, else probe once
+  grok-compat.py known  [--cli-version V]              list every model with a
+                                                       valid cached PASS, one id
+                                                       per line (never probes)
 
 Output is `key=value` lines on stdout (compat, source, reason, model,
 cli_version, contract, actual_model, checked_at). Exit codes:
@@ -259,6 +262,34 @@ def probe(model, grok_bin, timeout):
         shutil.rmtree(work, ignore_errors=True)
 
 
+def known_models(directory, cli_version, now):
+    """Model ids with a VALID cached pass for this CLI version, unordered.
+
+    The caller picks among them; ordering models is lib-grok-latest.sh's job and
+    is deliberately not re-implemented here. Every record goes through the same
+    read_record validation as a lookup, and must sit at the path its own
+    (model, version) hashes to — a record copied under another name is ignored.
+    """
+    found = []
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return found
+    for name in names:
+        if not name.endswith(".json") or "--" not in name:
+            continue
+        model = name.rsplit("--", 1)[0]
+        if len(model) > MAX_ID_LEN or not MODEL_RE.fullmatch(model):
+            continue
+        path = record_path(directory, model, cli_version)
+        if os.path.basename(path) != name:
+            continue
+        rec, _ = read_record(path, model, cli_version, now)
+        if rec and rec["compat"] == "ok":
+            found.append(model)
+    return found
+
+
 def lock(directory, path, wait):
     """Exclusive per-record lock, bounded. Returns the fd, or None on timeout."""
     fd = os.open(path + ".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -288,14 +319,18 @@ def emit(rec, source, extra_reason=None):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="grok-compat.py", description=__doc__.split("\n\n")[0])
-    ap.add_argument("mode", choices=("check", "ensure"))
-    ap.add_argument("--model", required=True)
+    ap.add_argument("mode", choices=("check", "ensure", "known"))
+    ap.add_argument("--model", default="")
     ap.add_argument("--cli-version", default="")
     ap.add_argument("--grok-bin", default=os.environ.get("SWARM_GROK_BIN", "grok"))
     ap.add_argument("--timeout", type=int, default=90)
     args = ap.parse_args(argv)
 
-    if len(args.model) > MAX_ID_LEN or not MODEL_RE.fullmatch(args.model):
+    if args.mode == "known":
+        if args.model:
+            print("grok-compat: `known` takes no --model", file=sys.stderr)
+            return 2
+    elif len(args.model) > MAX_ID_LEN or not MODEL_RE.fullmatch(args.model):
         print(f"grok-compat: refusing malformed model id {one_line(args.model, 80)!r}", file=sys.stderr)
         return 2
     if not 5 <= args.timeout <= 300:
@@ -312,6 +347,10 @@ def main(argv=None):
     except (UnsafeCache, OSError) as exc:
         print(f"grok-compat: unsafe cache directory — {exc}", file=sys.stderr)
         return 2
+    if args.mode == "known":
+        for model in known_models(directory, cli_version, int(time.time())):
+            print(model)
+        return 0
     path = record_path(directory, args.model, cli_version)
     base = {"schema": RECORD_SCHEMA, "contract": CONTRACT, "model": args.model,
             "cli_version": cli_version}

@@ -154,55 +154,46 @@ def _q(text):
     return "'" + text.replace("'", "'\\''") + "'"
 
 
-PIN = run_bash('printf "%s" "$GROK_DEFAULT_MODEL"').stdout.strip()
+FAKE_COMPAT = r"""
+_grok_compat() {
+  # Hermetic stand-in for grok-compat.py: verdicts come from the environment and
+  # every call is logged, so "how many probes would have been paid" is asserted.
+  echo "$1 ${2:-}" >>"$COMPAT_LOG"
+  if [[ "$1" == "known" ]]; then printf '%s\n' ${COMPAT_KNOWN:-}; return 0; fi
+  case " ${COMPAT_OK:-} " in *" $2 "*) printf 'compat=ok\nsource=%s\n' "${COMPAT_SRC:-cache}"; return 0 ;; esac
+  case " ${COMPAT_FAIL:-} " in *" $2 "*) printf 'compat=failed\nsource=probe\nreason=structuredOutput is null\n'; return 1 ;; esac
+  printf 'compat=unknown\nsource=none\nreason=probe timed out\n'; return 3
+}
+"""
 
 
 def newer(a, b):
-    r = run_bash(f'_grok_version_newer {a} {b} && echo yes || echo no')
+    r = run_bash(f'grok_latest_newer {a} {b} && echo yes || echo no')
     return r.stdout.strip() == "yes"
 
 
 # --- version ordering is COMPONENT-WISE, not decimal --------------------------
-# This is the subtle one: read as a fraction, 4.20 < 4.6. The provider means the
-# 20th minor release, and its catalog already ships 4.20-derived ids — so a
-# decimal comparison would pin the ensemble to an older model forever.
+# The rule itself is pinned in test_grok_latest.py; these confirm the ADAPTER is
+# wired to it (a sourcing failure would otherwise leave every check vacuous).
 check("4.20 is newer than 4.6 (component-wise, not decimal)", newer("grok-4.20", "grok-4.6"))
-check("4.6 is newer than 4.5", newer("grok-4.6", "grok-4.5"))
-check("5 is newer than 4.20 (major wins)", newer("grok-5", "grok-4.20"))
-check("4.5 is NOT newer than 4.6", not newer("grok-4.5", "grok-4.6"))
-check("a model is not newer than itself", not newer("grok-4.6", "grok-4.6"))
-check("bare major compares against a minor", newer("grok-5", "grok-4.6"))
-# A non-numeric component must read as "not newer" rather than crash the adapter
-# under `set -e` mid-review.
+check("5.0 is newer than 4.20 (major wins)", newer("grok-5.0", "grok-4.20"))
 check("garbage version does not abort", not newer("grok-4.x", "grok-4.6"))
 
-# --- the canonical filter: only bare version ids ------------------------------
 LIVE_CATALOG = "\n".join([
-    "grok-4.6", "grok-4.5", "grok-4.3",
+    "grok-4.7", "grok-4.7-build-fast", "grok-4.6", "grok-4.5", "grok-4.3",
     "grok-3-mini", "grok-3-mini-fast",
     "grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning",
     "grok-4.20-multi-agent-0309",
     "grok-build-0.1", "grok-composer-2.5-fast",
     "grok-imagine-image", "grok-imagine-video-1.5-preview",
 ])
-r = run_bash('_grok_highest_canonical', models=LIVE_CATALOG)
-check("live catalog: the highest canonical id wins", r.stdout.strip() == "grok-4.6")
-
-for rejected in ("grok-3-mini", "grok-4.20-0309-reasoning", "grok-4.20-multi-agent-0309",
-                 "grok-build-0.1", "grok-composer-2.5-fast", "grok-imagine-image"):
-    rr = run_bash(f'if [[ {_q(rejected)} =~ $GROK_CANONICAL_RE ]]; then echo match; else echo no; fi')
-    check(f"filter rejects {rejected}", rr.stdout.strip() == "no")
-for accepted in ("grok-4.3", "grok-4.5", "grok-4.6", "grok-5", "grok-4.20"):
-    rr = run_bash(f'if [[ {_q(accepted)} =~ $GROK_CANONICAL_RE ]]; then echo match; else echo no; fi')
-    check(f"filter accepts {accepted}", rr.stdout.strip() == "match")
-
-# A catalog that only regresses to grok-3 must not pull the adapter backwards.
-r = run_bash('_grok_highest_canonical', models="grok-3-mini\ngrok-3-mini-fast")
-check("a grok-3-only catalog yields no canonical model", r.stdout.strip() == "")
+r = run_bash('_grok_canonical_desc', models=LIVE_CATALOG)
+check("candidates are the canonical ids only, newest first",
+      r.stdout.split() == ["grok-4.7", "grok-4.6", "grok-4.5", "grok-4.3"])
 
 # A prose bullet mentioning a model id must NOT be harvested as an offered model:
-# discovery would select it (it is schema-verified), and every call would then die
-# at launch with "unknown model id" — the whole grok family gone, silently.
+# discovery would select it, and every call would then die at launch with
+# "unknown model id" — the whole grok family gone, silently.
 PROSE_LIST = """Available models:
   * grok-4.5 (default)
   - grok-4.6 reaches end of life on 2026-12-01
@@ -210,9 +201,6 @@ PROSE_LIST = """Available models:
 check("a prose bullet is not parsed as an offered model",
       parse(PROSE_LIST) == ["grok-4.5"])
 
-# Bracketed annotations are the convention real listings use; a future format
-# adding one must not empty the catalog (which would drop grok to the pinned
-# fallback), and a backticked id must still be read.
 ANNOTATED = """Available models:
   * grok-4.6 [stable]
   - `grok-4.5` (legacy)
@@ -220,77 +208,132 @@ ANNOTATED = """Available models:
 check("bracketed annotations and backticked ids still parse",
       sorted(parse(ANNOTATED)) == ["grok-4.5", "grok-4.6"])
 
-# --- the schema gate: verified selects, unverified only REPORTS ---------------
-def select(models, override=""):
-    r = run_bash(f'grok_select_model {_q(override)}',
-           'printf "%s|%s" "$GROK_SELECTED_MODEL" "$GROK_SELECT_NOTE"',
-           models=models)
-    model, _, note = r.stdout.partition("|")
-    return model, note
+# --- selection: latest canonical + MEASURED compatibility ----------------------
+import tempfile
+_LOGDIR = tempfile.mkdtemp(prefix="grok-models-test-")
+_n = [0]
 
 
-sel, note = select(LIVE_CATALOG)
-check("selects the newest VERIFIED model", sel == "grok-4.6")
-check("nothing to report when the newest is verified", note == "")
+def select(models, pin="", state="", **compat):
+    """Returns (fields dict, list of compat calls)."""
+    _n[0] += 1
+    log = os.path.join(_LOGDIR, f"compat-{_n[0]}.log")
+    open(log, "w").close()
+    env = {"COMPAT_LOG": log}
+    env.update({f"COMPAT_{k.upper()}": v for k, v in compat.items()})
+    r = run_bash(FAKE_COMPAT, f'_grok_catalog_state={_q(state)}',
+                 f'grok_select_model {_q(pin)}',
+                 'printf "sel=%s\nlatest=%s\nsrc=%s\ncat=%s\ncsrc=%s\ndeg=%s\n" '
+                 '"$GROK_SELECTED_MODEL" "$GROK_LATEST_CANDIDATE" "$GROK_SELECT_SOURCE" '
+                 '"$GROK_CATALOG" "$GROK_COMPAT_SOURCE" "$GROK_SELECT_DEGRADED"',
+                 models=models, env=env)
+    f = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
+    return f, open(log).read().split("\n")[:-1]
 
-# The upgrade prompt: a newer canonical model appears that nobody has verified.
-# It must be NAMED but never selected — silently adopting it is what burns a
-# review on structuredOutput:null.
-sel, note = select("grok-7\n" + LIVE_CATALOG)
-check("an unverified newer model is NOT selected", sel == "grok-4.6")
-check("an unverified newer model IS reported", "grok-7" in note)
 
-# Only older verified models on offer → take the newest of those, no note.
-sel, note = select("grok-4.5\ngrok-4.3")
-check("falls back to the newest verified model on offer", sel == "grok-4.5")
-check("no note when nothing newer exists", note == "")
+f, calls = select(LIVE_CATALOG, ok="grok-4.7 grok-4.6 grok-4.5")
+check("4.7 adoption: the newest canonical model is selected", f["sel"] == "grok-4.7")
+check("…as source=latest with nothing degraded", f["src"] == "latest" and f["deg"] == "")
+check("…after exactly ONE compat lookup (no walk down the list)", calls == ["ensure grok-4.7"])
 
-# Canonical models exist but none verified → keep the pin and say so, rather than
-# run something unproven.
-sel, note = select("grok-9\ngrok-8")
-check("no verified model → keeps the pin", sel == PIN)
-check("no verified model → reports why", "no schema-verified model" in note)
+f, _ = select("grok-4.7\ngrok-4.8\ngrok-5.0\ngrok-5.1-preview\ngrok-6.0", ok="grok-5.0")
+check("a later 5.x is adopted with no code edit", f["sel"] == "grok-5.0" and f["latest"] == "grok-5.0")
 
-# An empty/unusable list must keep the pin: dropping grok entirely is worse than
-# running the known-good model (grok_model_fetch already reported the degrade).
-sel, note = select("")
-check("empty model list keeps the pin", sel == PIN)
+f, calls = select(LIVE_CATALOG, ok="grok-4.6", fail="grok-4.7")
+check("incompatible latest → explicit older-compatible fallback",
+      f["sel"] == "grok-4.6" and f["src"] == "older-compatible")
+check("…the latest candidate is still REPORTED, and the reason names it",
+      f["latest"] == "grok-4.7" and "grok-4.7" in f["deg"] and "NOT enforced" in f["deg"]
+      and "using grok-4.6" in f["deg"])
 
-# An explicit override wins over discovery — but the run_grok preflight still
-# gates it on the verified table (asserted live elsewhere).
-sel, _ = select(LIVE_CATALOG, override="grok-4.5")
-check("explicit override beats discovery", sel == "grok-4.5")
+f, calls = select(LIVE_CATALOG, ok="grok-4.3")
+check("paid probing is BOUNDED: at most two candidates, then none selected",
+      f["sel"] == "" and f["src"] == "none" and calls == ["ensure grok-4.7", "ensure grok-4.6"])
+check("…and an inconclusive probe is reported as not established, not as a failure of the model",
+      "not established" in f["deg"] and "timed out" in f["deg"])
+
+f, calls = select("grok-4.7-build-fast\ngrok-3-mini\ngrok-6.0", ok="grok-4.7-build-fast")
+check("valid catalog, no canonical candidate → nothing selected, no probe, no last-known guess",
+      f["sel"] == "" and f["cat"] == "no-candidate" and calls == [])
+check("…and the reason lists what IS offered", "grok-4.7-build-fast" in f["deg"])
+
+for state in ("unreachable", "unparseable"):
+    f, calls = select("", state=state, known="grok-4.6 grok-4.7 grok-4.7-build-fast")
+    check(f"{state} catalog → LAST-KNOWN measured model, labelled as such",
+          f["sel"] == "grok-4.7" and f["src"] == "last-known" and f["cat"] == state
+          and "last-known" in f["deg"] and calls == ["known "])
+    f, _ = select("", state=state)
+    check(f"{state} catalog and no last-known → nothing selected (no silent default id)",
+          f["sel"] == "" and "no last-known" in f["deg"])
+check("unreachable and no-candidate are DISTINCT states",
+      select("", state="unreachable")[0]["cat"] != select("grok-3-mini")[0]["cat"])
+
+# --- an explicit pin is never reinterpreted ----------------------------------------
+f, calls = select(LIVE_CATALOG, pin="grok-4.5", ok="grok-4.7 grok-4.5")
+check("explicit pin beats discovery", f["sel"] == "grok-4.5" and f["src"] == "pinned")
+check("…only the PIN is checked, and the newer latest is reported alongside",
+      calls == ["ensure grok-4.5"] and f["latest"] == "grok-4.7" and "grok-4.7" in f["deg"])
+f, _ = select(LIVE_CATALOG, pin="grok-4.7-build-fast", ok="grok-4.7-build-fast")
+check("a variant may be pinned deliberately", f["sel"] == "grok-4.7-build-fast")
+f, calls = select(LIVE_CATALOG, pin="grok-4.4", ok="grok-4.4 grok-4.7")
+check("a pin the CLI does not offer → nothing runs (NOT silently the latest), no probe spent",
+      f["sel"] == "" and "not offered" in f["deg"] and calls == [])
+f, _ = select(LIVE_CATALOG, pin="grok-4.5", fail="grok-4.5", ok="grok-4.7")
+check("an incompatible pin → nothing runs (NOT silently the latest)",
+      f["sel"] == "" and f["src"] == "pinned" and "NOT enforced" in f["deg"])
+f, _ = select("", state="unreachable", pin="grok-4.5", ok="grok-4.5")
+check("a pin still runs when the catalog is unreadable (absence of evidence)", f["sel"] == "grok-4.5")
+
+# --- voices never pay: SWARM_GROK_PROBE=0 reads the cache only ------------------------
+_n[0] += 1
+_log = os.path.join(_LOGDIR, "voice.log"); open(_log, "w").close()
+r = run_bash(FAKE_COMPAT, 'grok_select_model grok-4.7', 'grok_select_model grok-4.7',
+             'printf "%s" "$GROK_SELECTED_MODEL"', models=LIVE_CATALOG,
+             env={"COMPAT_LOG": _log, "COMPAT_OK": "grok-4.7", "SWARM_GROK_PROBE": "0"})
+check("a workflow voice uses `check` (never probes) and the selection is memoized",
+      r.stdout == "grok-4.7" and open(_log).read() == "check grok-4.7\n")
 
 # --- readiness must agree with what would actually RUN ------------------------
-# The 1.0.3 regression: readiness said "grok-4.5 not offered" for a CLI that
-# offered it, and grok vanished from every review. Readiness now asks whether ANY
-# verified model is on offer, which is exactly what grok_select_model resolves.
-r = run_bash('grok_model_offered && echo ready || echo not-ready', models=LIVE_CATALOG)
-check("readiness: verified model on offer → ready", r.stdout.strip() == "ready")
-r = run_bash('grok_model_offered && echo ready || echo not-ready', models="grok-9\ngrok-3-mini")
-check("readiness: no verified model → not ready", r.stdout.strip() == "not-ready")
-r = run_bash('grok_model_offered && echo ready || echo not-ready', models="")
-check("readiness: unusable list trusts auth (ready)", r.stdout.strip() == "ready")
+def ready(models, pin="", **compat):
+    env = {"COMPAT_LOG": os.devnull}
+    env.update({f"COMPAT_{k.upper()}": v for k, v in compat.items()})
+    r = run_bash(FAKE_COMPAT, f'grok_model_offered {_q(pin)} && echo ready || echo not-ready',
+                 models=models, env=env)
+    return r.stdout.strip()
 
-# The pin itself must be verified, or the fallback path selects a model that
-# run_grok then refuses — a self-inflicted outage on every degraded run.
-r = run_bash('_grok_schema_verified "$GROK_DEFAULT_MODEL" && echo yes || echo no')
-check("the pinned fallback model is itself schema-verified", r.stdout.strip() == "yes")
 
-# THE PIN MUST BE THE OLDEST VERIFIED ID, not the newest. It is reached ONLY when
-# discovery could not read the model list, i.e. exactly when we know least about
-# the host — and a CLI too old to offer the newest id would then be handed an
-# unknown model, reject every call, and lose the whole grok family for the run.
-# Guessing low costs a slightly older model; guessing high costs the backend.
-# (Regression: 0.9.2 briefly raised the pin to the newest verified id.)
-r = run_bash('printf "%s" "$GROK_SCHEMA_VERIFIED"')
-verified_ids = [x for x in r.stdout.split() if x]
-check("GROK_SCHEMA_VERIFIED is non-empty", bool(verified_ids))
-oldest = verified_ids[0]
-for cand in verified_ids[1:]:
-    if not newer(cand, oldest):
-        oldest = cand
-check(f"the fallback pin is the OLDEST verified id (expected {oldest})", PIN == oldest)
+check("readiness: a selectable model → ready", ready(LIVE_CATALOG, ok="grok-4.7") == "ready")
+check("readiness: nothing compatible → not ready", ready(LIVE_CATALOG) == "not-ready")
+check("readiness: no canonical model → not ready", ready("grok-6.0\ngrok-3-mini", ok="grok-6.0") == "not-ready")
+check("readiness judges the PIN when one is given",
+      ready(LIVE_CATALOG, pin="grok-4.5", ok="grok-4.7") == "not-ready")
+
+# --- the retired allowlist must stay retired ---------------------------------------------
+_src = ADAPTER.read_text()
+for gone in ("GROK_SCHEMA_VERIFIED=", "GROK_DEFAULT_MODEL=", "GROK_CANONICAL_RE="):
+    check(f"adapter no longer defines {gone.rstrip('=')} (no per-version allowlist, no baked-in id)",
+          gone not in _src)
+import re as _re
+_ids = set(_re.findall(r"^[^#\n]*\b(grok-[0-9]+\.[0-9]+)\b", _src, _re.M))
+check(f"no concrete grok version id in adapter CODE (found {sorted(_ids)})", not _ids)
+
+# --- grok-model: the selection as data ---------------------------------------------------
+r = run_bash(FAKE_COMPAT, 'backend_installed() { return 0; }', 'available_version() { echo "grok 1.0.40 (x)"; }',
+             f'GROK_AUTH_FILE={_q(str(ADAPTER))}', 'subcmd_grok_model; echo "rc=$?"', models=LIVE_CATALOG,
+             env={"COMPAT_LOG": os.devnull, "COMPAT_OK": "grok-4.6", "COMPAT_FAIL": "grok-4.7",
+                  "COMPAT_SRC": "probe"})
+kv = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
+check("grok-model reports selected / latest candidate / source / provenance as data",
+      kv.get("selected") == "grok-4.6" and kv.get("latest_candidate") == "grok-4.7"
+      and kv.get("source") == "older-compatible" and kv.get("compat_source") == "probe"
+      and kv.get("requested") == "latest" and kv.get("catalog") == "ok"
+      and kv.get("cli_version") == "1.0.40" and "grok-4.7" in kv.get("degraded", "") and kv.get("rc") == "0")
+r = run_bash(FAKE_COMPAT, 'backend_installed() { return 0; }', 'available_version() { echo "grok 1.0.40"; }',
+             f'GROK_AUTH_FILE={_q(str(ADAPTER))}', 'subcmd_grok_model || echo "rc=$?"', models=LIVE_CATALOG,
+             env={"COMPAT_LOG": os.devnull})
+kv = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
+check("grok-model: nothing selectable → selected empty, exit 1, reason present",
+      kv.get("selected") == "" and kv.get("rc") == "1" and kv.get("degraded"))
 
 
 # One verdict for the whole file. It has to be the LAST statement: an earlier
