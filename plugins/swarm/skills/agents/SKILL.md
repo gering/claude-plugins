@@ -49,7 +49,7 @@ user_invocable: true
   review is the three-family ensemble and Kimi joins on request.
 - **`grok` Ready is a heuristic** — it means a non-empty `~/.grok/auth.json`
   exists, that the CLI offers `--prompt-file` (the out-of-band prompt transport),
-  **and** that `grok models` still lists a schema-verified model, NOT that the
+  **and** that a grok model can be selected (see below), NOT that the
   token is valid/unexpired (codex, by contrast, runs a real `codex login
   status`, bounded — and since that probe IS the auth question and reaches the
   same network the review needs, a probe that hits the wall is reported
@@ -59,13 +59,13 @@ user_invocable: true
   be invoked". The hint names which case it was).
   So grok can show Ready yet fail at review time
   on a stale token; treat it as "credentials present" and let the run surface a
-  real auth error. A not-ready hint naming the model list is NOT an auth problem,
-  and it has **three different remedies** — read which one the hint states:
-  the CLI has no `--prompt-file` (too old → update it), it offers no canonical
-  model at all (also too old → update it), or it offers canonical models that are
-  not schema-verified (usually NEWER than this adapter knows → verify
-  `--json-schema` on the named id and add it to `GROK_SCHEMA_VERIFIED`). Never relay it as "update the CLI" by default; that
-  sends the second user to update an already-current install. The model probe
-  always runs (the adapter bounds it with its own watchdog where coreutils is
-  missing); it degrades to auth-only, with a warning on stderr, only when the
-  list comes back empty or unreadable.
+  real auth error. A not-ready hint about the MODEL is NOT an auth problem — relay
+  it verbatim, it names the actual cause (no `--prompt-file`, no canonical model
+  on offer, a catalog that could not be read, or a model whose `--json-schema`
+  enforcement could not be established). Never default to "update the CLI".
+- **`Ready` does not say WHICH grok model runs.** "grok" is a policy — the newest
+  canonical `grok-4.x/5.x` the CLI offers whose structured output was measured
+  by a cached synthetic probe. When the user asks which model that is, run
+  `bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" grok-model` and report
+  `selected`, `latest_candidate`, `source` and — if non-empty — `degraded`
+  verbatim. Only `source=latest` means the latest model is in use.

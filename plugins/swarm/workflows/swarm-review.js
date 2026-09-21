@@ -849,9 +849,40 @@ const wantVoices = Array.isArray(INPUT.externalVoices) ? INPUT.externalVoices : 
 // SWARM_KIMI=1, and `env` carries that opt-in onto the transport command —
 // the transport subagent's environment is not ours to rely on, and a voice in
 // externalVoices IS the opt-in (the skill only lists Kimi when it was asked for).
+// THE RUN'S GROK MODEL, FROZEN. "grok" is a dynamic policy (newest compatible
+// canonical model), so something has to turn it into ONE concrete id per run —
+// otherwise each cluster process re-selects on its own and a model released
+// mid-review splits the grok family across two models. The skill's prep step
+// asks `agents.sh grok-model` once and hands the answer over as ONE token
+// (args.grok, same single-token reasoning as args.config). Every grok voice then
+// gets that id as an explicit --model, plus SWARM_GROK_PROBE=0 (voices read the
+// compatibility cache, they never buy a probe) and the CLI version the cache is
+// keyed by (so no voice spends a pre-timer `grok --version`). A resumed run
+// re-sends the same token, hence the same model — not whatever is newest by then.
+// Each field is charset-checked before it reaches a shell line; a token that
+// does not validate freezes nothing and says so, rather than injecting.
+const GROK_RUN = (() => {
+  const kv = {}
+  for (const part of String(INPUT.grok || '').split(';')) {
+    const i = part.indexOf('=')
+    if (i > 0) kv[part.slice(0, i).trim()] = part.slice(i + 1).trim()
+  }
+  const okId = (v) => typeof v === 'string' && v.length <= 64 && /^grok-[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$/.test(v)
+  const model = okId(kv.selected) ? kv.selected : ''
+  return {
+    model,
+    latest: okId(kv.latest_candidate) ? kv.latest_candidate : '',
+    source: /^(latest|older-compatible|last-known|pinned)$/.test(kv.source || '') ? kv.source : (model ? 'unknown' : 'none'),
+    cliVersion: /^[0-9]+(?:\.[0-9]+){1,3}$/.test(kv.cli_version || '') ? kv.cli_version : '',
+  }
+})()
+const GROK_FROZEN_ENV = GROK_RUN.model
+  ? `SWARM_GROK_PROBE=0 ${GROK_RUN.cliVersion ? `SWARM_GROK_CLI_VERSION=${GROK_RUN.cliVersion} ` : ''}`
+  : ''
+const GROK_FROZEN_FLAG = GROK_RUN.model ? ` --model ${shQuote(GROK_RUN.model)}` : ''
 const EXTERNAL_BACKENDS = [
   { backend: 'codex', flags: MAX ? '--effort xhigh' : '--effort medium' },
-  { backend: 'grok', flags: MAX ? '--effort medium' : '--effort low' },
+  { backend: 'grok', flags: (MAX ? '--effort medium' : '--effort low') + GROK_FROZEN_FLAG, env: GROK_FROZEN_ENV },
   { backend: 'kimi', flags: MAX ? '--effort high' : '--effort low', clusters: ['breakage', 'threat'], env: 'SWARM_KIMI=1 ' },
 ]
 // Units a backend actually runs: all of them, or (with `clusters`) those whose
@@ -908,6 +939,11 @@ const externalVoiceSpecs = liveExternals
       // are safe. TMPDIR is attacker-influencable on a shared host.
       (TELEMETRY ? ` --unit ${shQuote(u.name)} --telemetry ${shQuote(TELEMETRY)}` : ''),
   })))
+if (liveBackends.includes('grok')) {
+  log(GROK_RUN.model
+    ? `grok model for this run: ${GROK_RUN.model} (${GROK_RUN.source}${GROK_RUN.latest && GROK_RUN.latest !== GROK_RUN.model ? `; latest on offer: ${GROK_RUN.latest}` : ''}) — frozen onto every grok voice`
+    : 'grok model NOT frozen for this run (no valid args.grok) — each grok voice resolves it itself from the shared compatibility cache')
+}
 if (externalVoiceSpecs.length) {
   log(`External fan-out: ${externalVoiceSpecs.length} call(s) — ` +
       liveExternals.map((b) => `${b.backend}×${unitsForBackend(b, externalUnits).length}`).join(' + ') +
@@ -1529,6 +1565,10 @@ return {
     voices: voices.length,
     voicesReturned,
     agents: Object.values(agents),
+    // The concrete grok model this run was frozen to and where it came from
+    // (null when grok did not run). `source !== 'latest'` is a degradation the
+    // presenter must show: "grok reviewed" does not mean "the latest grok did".
+    grokModel: liveBackends.includes('grok') ? GROK_RUN : null,
     // Backends that actually entered the workflow with at least one surviving
     // voice — the pr-post footer names exactly these; the skill passes the list
     // through verbatim instead of re-deriving it from `agents` in prose.
