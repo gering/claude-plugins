@@ -42,7 +42,7 @@
       "name": "insights",
       "source": "./plugins/insights",
       "description": "Private, local task and plugin insight reports for Claude Code. /insights:report records observations mid-task or at any point: project, models, evidenced plugin versions, friction and improvement suggestions, with honest unknowns.",
-      "version": "0.1.1"
+      "version": "0.1.2"
     }
   ]
 }

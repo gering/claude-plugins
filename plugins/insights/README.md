@@ -7,8 +7,8 @@ spotting repeated friction and practices worth keeping across projects. Workers
 aren't ranked, and nothing orchestrates tasks.
 
 One skill (`/insights:report`) and one script (`scripts/insights.py`, Python 3.8+
-stdlib) make up the plugin. Later producers (worker/Manager handoffs, `/close`)
-reuse the same script and contract instead of adding their own storage.
+stdlib) make up the plugin. work-system's `handoff` and `/close` producers reuse
+the same script and contract instead of adding their own storage.
 
 ## `/insights:report [free text]`
 

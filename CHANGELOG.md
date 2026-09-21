@@ -637,6 +637,9 @@ Fixes from a full `/swarm:review` of this branch (23 findings, 3 model families,
 
 ## insights
 
+### 0.1.2 — 2026-09-21
+- README: the opening paragraph still called work-system's `handoff` and `/close` producers "later producers". They shipped in 0.1.1; the Scope section was updated then and this line was missed. Documentation only.
+
 ### 0.1.1 — 2026-09-20
 - Document that the lifecycle producers have shipped: the report contract, this changelog and the knowledge entry no longer describe worker/Manager/close reporting as future work. No change to the schema, the store, or any existing command.
 
