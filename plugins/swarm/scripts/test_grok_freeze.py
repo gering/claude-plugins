@@ -141,6 +141,8 @@ if frag:
                   not arglog.exists() and "GROK_RUN=selected=;" in r.stdout)
 check("skill: the report layout renders the run's grok model and a dropped grok",
       "balance.grokModel.model" in SKILL and "balance.grokDropped" in SKILL)
+check("skill: prep's `list` never pays a probe (cache-only readiness)",
+      'SWARM_GROK_PROBE=0 bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json' in SKILL)
 check("skill: no `${VAR:+--flag …}` argument splicing in the prep fragment",
       not re.search(r"grok-model\s+\$\{", SKILL))
 check("skill: the token is passed as args.grok", 'grok: "<GROK_RUN>"' in SKILL)

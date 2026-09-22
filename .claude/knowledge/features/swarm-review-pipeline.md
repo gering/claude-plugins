@@ -266,9 +266,10 @@ the >600 s runtime ceiling is `async-poll-external-voices`.
   the delimiter); the workflow only collision-checks it against the returned
   findings and extends it deterministically (`nonce-1`, `-2`…) on collision.
 
-- **`args.claude: false`** runs an **external-only control** (codex + grok + kimi — the
-  grok model is discovered at run time, never a pinned id,
-  no Claude finder lenses, no gate; merge/verify still in-session).
+- **`args.claude: false`** runs an **external-only control** (codex + grok + kimi —
+  no Claude finder lenses, no gate; merge/verify still in-session). The grok
+  model is selected ONCE per run by the prep step (`agents.sh grok-model`) and
+  frozen onto every grok voice as `--model` (0.12.0); see [[swarm-backend-adapter]].
   Proven useful: a control run found real bugs the with-Claude run missed (an
   `aws_secret_access_key` scrub-list drift, `git diff` omitting untracked files)
   — the "different models catch different defects" premise, live.

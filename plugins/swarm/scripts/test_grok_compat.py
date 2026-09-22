@@ -32,11 +32,28 @@ args = sys.argv[1:]
 if args == ["--version"]:
     print("grok %s%s (deadbeef) [stable]" % (os.environ.get("FAKE_VPREFIX", ""), os.environ.get("FAKE_VERSION", "1.0.40"))); sys.exit(0)
 with open(os.environ["FAKE_CALLS"], "a") as fh:
-    fh.write(json.dumps({"argv": args, "cwd": os.getcwd(), "ls": sorted(os.listdir("."))}) + "\n")
+    home = os.environ.get("HOME", ""); ghome = os.environ.get("GROK_HOME", "")
+    link = os.path.join(ghome, "auth.json")
+    settings = os.path.join(home, ".claude", "settings.json")
+    fh.write(json.dumps({"argv": args, "cwd": os.getcwd(), "ls": sorted(os.listdir(".")),
+                         "home": home, "grok_home": ghome,
+                         "settings": open(settings).read() if os.path.exists(settings) else None,
+                         "auth_link": os.readlink(link) if os.path.islink(link) else None}) + "\n")
+if os.environ.get("FAKE_ROTATE"):
+    link = os.path.join(os.environ["GROK_HOME"], "auth.json")
+    os.unlink(link)
+    with open(link, "w") as a:
+        a.write('{"access_token":"rotated"}')
 mode = os.environ.get("FAKE_MODE", "ok")
 time.sleep(float(os.environ.get("FAKE_SLEEP", "0")))
 served = os.environ.get("FAKE_SERVED") or (args[args.index("-m") + 1] + "-build")
 env = {"text": "x", "modelUsage": {served: {"modelCalls": 1}}}
+if os.environ.get("FAKE_NO_USAGE") == "absent":
+    del env["modelUsage"]
+elif os.environ.get("FAKE_NO_USAGE") == "empty":
+    env["modelUsage"] = {}
+elif os.environ.get("FAKE_MANY_USAGE"):
+    env["modelUsage"] = {"grok-4.7-build-%04d" % i: {} for i in range(400)}
 if mode == "ok":
     env["structuredOutput"] = {"probe": "@TOKEN@", "sum": 7}
 elif mode == "null":
@@ -159,11 +176,73 @@ check("...and its pass is re-measured after minutes, not 14 days", kv.get("sourc
 # A symlink planted at the lock path must not read as "this model fails the schema".
 l = Env(); l.run("check")
 import hashlib
-key = hashlib.sha256("grok-4.7\0001.0.40\000grok-schema-probe/v1".encode()).hexdigest()[:16]
+import re as _re
+CONTRACT = _re.search(r'^CONTRACT = "([^"]+)"', TOOL.read_text(), _re.M).group(1)
+key = hashlib.sha256(f"grok-4.7\0" f"1.0.40\0{CONTRACT}".encode()).hexdigest()[:16]
 (l.cache / f"grok-4.7--{key}.json.lock").symlink_to(l.root / "elsewhere")
 rc, kv, _ = l.run("ensure")
 check("unusable lock -> unknown / exit 3 (never exit 1), and no probe is run",
       rc == 3 and kv.get("compat") == "unknown" and "lock" in kv.get("reason", "") and not l.probes())
+
+# --- the served model must be NAMED by the envelope --------------------------------
+for how in ("absent", "empty"):
+    s = Env()
+    rc, kv, _ = s.run("ensure", FAKE_NO_USAGE=how)
+    check(f"modelUsage {how}: no evidence which model served it -> unknown, not cached as ok",
+          rc == 3 and "modelUsage" in kv.get("reason", ""))
+s = Env()
+rc, kv, _ = s.run("ensure", FAKE_MANY_USAGE="1")
+check("a huge modelUsage cannot produce a record that voices later reject as oversized",
+      rc == 0 and len(kv.get("actual_model", "")) <= 256)
+rc, kv, _ = s.run("check")
+check("...the record written by prep is readable by a voice", rc == 0 and kv.get("source") == "cache")
+
+# --- the probe runs from an ISOLATED home -------------------------------------------
+i = Env()
+auth = i.root / "host-auth.json"
+auth.write_text('{"access_token":"host"}')
+rc, kv, _ = i.run("ensure", GROK_AUTH_FILE=str(auth))
+call = i.probes()[0]
+check("probe HOME is not the operator's", call["home"] and call["home"] != os.path.expanduser("~")
+      and "swarm-grok-probe-home-" in call["home"])
+check("probe GROK_HOME lives inside the ephemeral HOME", call["grok_home"] == os.path.join(call["home"], "grok"))
+check("probe HOME carries NEUTRAL settings (no hooks, no rules)",
+      json.loads(call["settings"]) == {"permissions": {"allow": [], "deny": []}})
+check("only the host auth file is linked in", call["auth_link"] == str(auth))
+check("the ephemeral HOME is removed afterwards", not pathlib.Path(call["home"]).exists())
+i2 = Env()
+auth2 = i2.root / "host-auth.json"
+auth2.write_text('{"access_token":"host"}')
+i2.run("ensure", GROK_AUTH_FILE=str(auth2), FAKE_ROTATE="1")
+check("a token grok rotated during the probe is copied back to the host",
+      json.loads(auth2.read_text())["access_token"] == "rotated")
+
+# --- one version parser --------------------------------------------------------------
+vp = subprocess.run([sys.executable, str(TOOL), "version", "--grok-bin", str(t.grok)],
+                    capture_output=True, text=True, env=dict(os.environ, FAKE_VPREFIX="v", FAKE_CALLS=str(t.calls)))
+check("`version` mode prints the parsed CLI version (the adapter's single source)",
+      vp.returncode == 0 and vp.stdout.strip() == "1.0.40")
+
+# --- a crash of the tool is never a verdict about the model ---------------------------
+import importlib.util
+spec = importlib.util.spec_from_file_location("grok_compat", TOOL)
+gc = importlib.util.module_from_spec(spec); spec.loader.exec_module(gc)
+c = Env()
+os.environ["SWARM_GROK_COMPAT_DIR"] = str(c.cache)
+def _boom(*a, **k):
+    raise OSError(28, "No space left on device")
+import io, contextlib
+_real_mkdtemp = gc.tempfile.mkdtemp   # the same module object the harness uses — restore it
+gc.tempfile.mkdtemp = _boom
+buf = io.StringIO()
+try:
+    with contextlib.redirect_stdout(buf):
+        crc = gc.run(["ensure", "--model", "grok-4.7", "--cli-version", "1.0.40", "--grok-bin", str(c.grok)])
+finally:
+    gc.tempfile.mkdtemp = _real_mkdtemp
+    del os.environ["SWARM_GROK_COMPAT_DIR"]
+check("an unexpected exception exits 3 (unknown), never 1 (= 'not enforced')",
+      crc == 3 and "compat=unknown" in buf.getvalue())
 
 # --- definite failures: exit 0 from grok is NOT proof ----------------------------
 for fake, needle in [("null", "null"), ("prose", "enum"), ("extra", "exact keys"), ("strsum", "integer")]:
@@ -182,9 +261,9 @@ for fake in ("rc1", "garbage", "error"):
     check(f"{fake}: unknown, exit 3", rc == 3 and kv.get("compat") == "unknown")
 u = Env()
 rc, kv, _ = u.run("ensure", fake="error")
-check("CLI error text is flattened to one line (no injected newline/key)",
-      "\n" not in kv.get("reason", "") and set(kv) <= {"compat", "source", "reason", "model",
-                                                        "cli_version", "contract", "checked_at"})
+check("provider error text is WITHHELD, never relayed (no injection channel into the session)",
+      "IGNORE" not in kv.get("reason", "") and "withheld" in kv.get("reason", "")
+      and set(kv) <= {"compat", "source", "reason", "model", "cli_version", "contract", "checked_at"})
 h = Env()
 t0 = time.time()
 rc, kv, _ = h.run("ensure", fake="hang", extra=("--timeout", "5"))

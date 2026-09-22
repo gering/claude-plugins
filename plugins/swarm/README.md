@@ -208,7 +208,8 @@ offers that enforces structured output.** No release needs a code edit.
   so `/kickoff --grok` agrees without either plugin requiring the other.
 - **Compatible** is measured, not listed: `scripts/grok-compat.py` makes one
   bounded, synthetic call — no repository data, no tools, no web, an empty temp
-  cwd; the prompt asks for a plain sentence, so a schema-shaped
+  cwd, and an isolated HOME (neutral settings, only `auth.json` linked — the
+  operator's hooks, plugins and global rules never load); the prompt asks for a plain sentence, so a schema-shaped
   `structuredOutput` can only come from enforcement. The verdict is cached per
   (model, CLI version, probe contract) under `~/.cache/gering-swarm/grok-compat/`
   (0700/0600, atomic writes, every record re-validated on read, non-private

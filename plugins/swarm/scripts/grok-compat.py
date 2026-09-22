@@ -18,6 +18,9 @@ measurement:
 Usage:
   grok-compat.py check  --model ID [--cli-version V]   cache only, never probes
   grok-compat.py ensure --model ID [--cli-version V]   cache, else probe once
+  grok-compat.py version                               print the grok CLI version
+                                                       (the ONE parser; agents.sh
+                                                       keys the cache with it)
   grok-compat.py known  [--cli-version V]              list every model with a
                                                        valid cached PASS, one id
                                                        per line (never probes)
@@ -48,8 +51,10 @@ import time
 
 # Bump when the prompt, schema, argv or acceptance rule changes: old verdicts
 # answered a different question and must not be reused.
-CONTRACT = "grok-schema-probe/v1"
+CONTRACT = "grok-schema-probe/v2"   # v2: isolated HOME; served model must be named
 RECORD_SCHEMA = "swarm.grok-compat/v1"
+
+NEUTRAL_SETTINGS = '{"permissions":{"allow":[],"deny":[]}}\n'
 
 PROBE_TOKEN = "swarm-grok-schema-probe-v1"
 PROBE_PROMPT = "What is 3 plus 4? Answer in one plain English sentence.\n"
@@ -68,6 +73,7 @@ MODEL_RE = re.compile(r"^grok-[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$")
 VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+){1,3}$")
 MAX_ID_LEN = 64
 MAX_RECORD_BYTES = 4096
+MAX_ACTUAL_LEN = 256
 MAX_STDOUT_BYTES = 262144
 
 # How long a verdict stands. A pass is re-measured occasionally because the
@@ -195,14 +201,14 @@ def one_line(text, limit=200):
     return re.sub(r"[^\x20-\x7e]+", " ", str(text)).strip()[:limit]
 
 
-def run_bounded(argv, timeout, cwd=None):
+def run_bounded(argv, timeout, cwd=None, env=None):
     """Run argv in its own process group; kill the GROUP at the deadline.
 
     Returns (rc, stdout_bytes); rc None = the bound fired. stderr is discarded:
     it is untrusted CLI text and nothing here may echo it.
     """
     try:
-        proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL, start_new_session=True)
     except OSError as exc:
         return exc, b""
@@ -259,13 +265,22 @@ def judge(rc, out, model=""):
     if not isinstance(doc, dict):
         return "unknown", "grok returned a non-object envelope", ""
     if doc.get("type") == "error":
-        return "unknown", "grok reported an error: " + one_line(doc.get("message", "unknown"), 120), ""
+        # The provider's message is WITHHELD, like every other backend's stderr:
+        # this reason is shown to the operator's session verbatim, and a string
+        # the provider controls must not become text a model reads there.
+        return "unknown", "grok returned an error envelope (message withheld; run the probe by hand to see it)", ""
     usage = doc.get("modelUsage")
-    actual = ",".join(sorted(one_line(k, MAX_ID_LEN) for k in usage)) if isinstance(usage, dict) else ""
-    # The served id may carry a suffix (grok-4.7 is served as grok-4.7-build), but
-    # it must BE the requested model. A CLI that quietly fell back to its default
-    # would otherwise get that default's verdict cached under the new id.
-    if model and isinstance(usage, dict) and usage and not any(served_by(str(k), model) for k in usage):
+    # Bounded: this lands in a record capped at MAX_RECORD_BYTES, and a record
+    # that is written but then rejected as oversized on read would pass prep and
+    # fail every voice.
+    actual = ",".join(sorted(one_line(k, MAX_ID_LEN) for k in usage))[:MAX_ACTUAL_LEN] if isinstance(usage, dict) else ""
+    # The served id may carry a build tag (grok-4.7 is served as grok-4.7-build),
+    # but it must BE the requested model — and the envelope has to SAY which
+    # model served it. Without that, a CLI that falls back to its default would
+    # get the default's verdict cached under the new id for 14 days.
+    if model and not (isinstance(usage, dict) and usage):
+        return "unknown", "the envelope does not name the model that served the call (no modelUsage)", ""
+    if model and not any(served_by(str(k), model) for k in usage):
         return "unknown", f"the call was served by {actual}, not by {model}", actual
     # From here the call COMPLETED, so a bad shape is a definite answer about the
     # model, not about the environment. A successful exit alone proves nothing.
@@ -281,9 +296,54 @@ def judge(rc, out, model=""):
     return "ok", "enforced structured output observed", actual
 
 
+def host_auth_file():
+    return os.environ.get("GROK_AUTH_FILE") or os.path.join(os.path.expanduser("~"), ".grok", "auth.json")
+
+
+def isolated_home():
+    """An ephemeral HOME/GROK_HOME for the probe, mirroring agents.sh's
+    _grok_prepare_runtime (the reference — keep the two in step).
+
+    grok loads ~/.claude/settings*.json (rules AND hooks — it ran the operator's
+    SessionStart hook), ~/.claude/plugins and the global Claude.md from $HOME,
+    and its plugin registry/MCP credentials from $GROK_HOME. A probe that
+    inherits those runs the operator's hooks outside any jail and measures a
+    model steered by their global instructions. So: a NEUTRAL settings file
+    (a merely missing one makes grok's permission engine ask, which a headless
+    turn answers by cancelling), and only auth.json (+ lock) linked back, so a
+    token refresh lands on the host file. Returns (home, env) or raises OSError.
+    """
+    home = tempfile.mkdtemp(prefix="swarm-grok-probe-home-")
+    os.makedirs(os.path.join(home, ".claude"))
+    os.makedirs(os.path.join(home, "grok"))
+    with open(os.path.join(home, ".claude", "settings.json"), "w", encoding="utf-8") as fh:
+        fh.write(NEUTRAL_SETTINGS)
+    auth = host_auth_file()
+    if os.path.isfile(auth) and os.path.getsize(auth) > 0:
+        os.symlink(auth, os.path.join(home, "grok", "auth.json"))
+        if os.path.exists(auth + ".lock"):
+            os.symlink(auth + ".lock", os.path.join(home, "grok", "auth.json.lock"))
+    env = dict(os.environ, HOME=home, GROK_HOME=os.path.join(home, "grok"))
+    return home, env
+
+
+def return_rotated_auth(home):
+    """A refresh that writes a temp file and renames it over the link replaces the
+    link with a regular file. Copy that rotated token back before the ephemeral
+    HOME is deleted, or the operator is logged out next run (same as run_grok)."""
+    linked = os.path.join(home, "grok", "auth.json")
+    if os.path.isfile(linked) and not os.path.islink(linked):
+        try:
+            shutil.copy2(linked, host_auth_file())
+        except OSError:
+            pass
+
+
 def probe(model, grok_bin, timeout):
     work = tempfile.mkdtemp(prefix="swarm-grok-probe-")
+    home = None
     try:
+        home, env = isolated_home()
         prompt = os.path.join(work, "prompt.txt")
         with open(prompt, "w", encoding="utf-8") as fh:
             fh.write(PROBE_PROMPT)
@@ -291,8 +351,11 @@ def probe(model, grok_bin, timeout):
                 "--max-turns", "1", "--cwd", work,
                 "--json-schema", json.dumps(PROBE_SCHEMA, separators=(",", ":")),
                 "--prompt-file", prompt]
-        return judge(*run_bounded(argv, timeout, cwd=work), model=model)
+        return judge(*run_bounded(argv, timeout, cwd=work, env=env), model=model)
     finally:
+        if home:
+            return_rotated_auth(home)
+            shutil.rmtree(home, ignore_errors=True)
         shutil.rmtree(work, ignore_errors=True)
 
 
@@ -353,13 +416,16 @@ def emit(rec, source, extra_reason=None):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="grok-compat.py", description=__doc__.split("\n\n")[0])
-    ap.add_argument("mode", choices=("check", "ensure", "known"))
+    ap.add_argument("mode", choices=("check", "ensure", "known", "version"))
     ap.add_argument("--model", default="")
     ap.add_argument("--cli-version", default="")
     ap.add_argument("--grok-bin", default=os.environ.get("SWARM_GROK_BIN", "grok"))
     ap.add_argument("--timeout", type=int, default=90)
     args = ap.parse_args(argv)
 
+    if args.mode == "version":
+        print(detect_cli_version(args.grok_bin))
+        return 0
     if args.mode == "known":
         if args.model:
             print("grok-compat: `known` takes no --model", file=sys.stderr)
@@ -425,5 +491,20 @@ def main(argv=None):
         os.close(fd)
 
 
+def run(argv=None):
+    """main() behind a catch-all. An uncaught exception exits 1, and exit 1 MEANS
+    "this model does not enforce the schema" to the adapter — a full TMPDIR or a
+    bad --grok-bin would demote the newest model over a fault of the host."""
+    try:
+        return main(argv)
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001 — the point is to catch everything
+        print("compat=unknown")
+        print("source=none")
+        print(f"reason=the compatibility check itself failed ({type(exc).__name__})")
+        return 3
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run())

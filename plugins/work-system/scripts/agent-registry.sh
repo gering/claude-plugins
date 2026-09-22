@@ -795,7 +795,7 @@ entry_status() {
       if ! command -v grok >/dev/null 2>&1; then note="not installed"
       elif [ ! -s "$GROK_AUTH_FILE" ]; then note="run: grok login"
       else
-        local _raw _gline grc=0
+        local _raw _gline _parsed _in_raw grc=0
         _raw="$(grok_models_raw)" || grc=$?   # exit code = fetch status
         if [ "$grc" -ne 0 ]; then
           # unreachable/timed out — inconclusive, not a drop. Trust auth so a
@@ -804,30 +804,48 @@ entry_status() {
         elif [ -z "$_raw" ]; then
           # succeeded but produced nothing — inconclusive too, not "model gone".
           avail=yes; note="grok models empty — availability assumed"
-        elif ! grep -qF -- "$model" <<<"$_raw"; then
-          note="model not offered by this grok CLI (see: grok models)"
-        elif [ -z "$(printf '%s\n' "$_raw" | grok_latest_parse)" ]; then
-          # The id appears, but in a listing the parser cannot read (format
-          # drift). Keep the drift-tolerant substring answer — and SAY it is an
-          # assumption, like the unreachable/empty arms do.
-          avail=yes; note="grok models unreadable — availability assumed (id appears in the output)"
-        elif printf '%s\n' "$_raw" | grok_latest_parse | grep -qxF -- "$model"; then
-          # Exact id, not substring: grok-4.7 is not "offered" because
-          # grok-4.7-build-fast is.
-          avail=yes
-        elif _gline="$(grep -E "^[[:space:]]*[*-][[:space:]]+[\`\"]?$(printf '%s' "$model" | sed 's/[.]/[.]/g')[\`\"]?[.,;:]*([[:space:]]|\$)" <<<"$_raw" | head -n 1)" && [ -n "$_gline" ]; then
-          # On its own bullet, but the parser dropped the line. WHY it dropped it
-          # decides: "deprecated/retired/sunset" still runs — that filter only
-          # protects the AUTOMATIC choice, so a deliberate pin is honoured and
-          # told what it is pinned to. "coming soon/unavailable/disabled/removed"
-          # says the CLI will REJECT `-m`, so honouring the pin would hand the
-          # user a worker tab that dies at launch.
-          if printf '%s' "$_gline" | grep -qiE 'coming soon|unavailable|not available|disabled|removed'; then
-            note="listed by this grok CLI as not usable yet/any more (coming soon/unavailable/…) — see: grok models"
+        else
+          # Parse ONCE, and never test membership through a pipe into `grep -q`:
+          # this script runs under pipefail, and an early-exiting `grep -q`
+          # can SIGPIPE its writer and turn a HIT into a miss. A newline-fenced
+          # `case` against the captured list has no pipe at all.
+          _parsed="$(printf '%s\n' "$_raw" | grok_latest_parse)"
+          _gline="$(grep -m 1 -E "^[[:space:]]*[*-][[:space:]]+[\`\"]?$(printf '%s' "$model" | sed 's/[.]/[.]/g')[\`\"]?[.,;:]*([[:space:]]|\$)" <<<"$_raw" || true)"
+          case $'\n'"$_raw"$'\n' in *"$model"*) _in_raw=1 ;; *) _in_raw="" ;; esac
+          if [ -z "$_in_raw" ]; then
+            note="model not offered by this grok CLI (see: grok models)"
+          elif [ -z "$_parsed" ]; then
+            # The id appears, but in a listing the parser cannot read (format
+            # drift). Keep the drift-tolerant substring answer — and SAY it is
+            # an assumption, like the unreachable/empty arms do.
+            avail=yes; note="grok models unreadable — availability assumed (id appears in the output)"
           else
-            avail=yes; note="listed by this grok CLI with withdrawal wording (deprecated/retired/…) — pin honoured"
+            case $'\n'"$_parsed"$'\n' in
+              *$'\n'"$model"$'\n'*)
+                # Exact id, not substring: grok-4.7 is not "offered" because
+                # grok-4.7-build-fast is.
+                avail=yes ;;
+              *)
+                if [ -z "$_gline" ]; then
+                  note="model not offered by this grok CLI (see: grok models)"
+                else
+                  # On its own bullet, but the parser dropped the line. WHY
+                  # decides: "deprecated/retired/sunset" still runs — that
+                  # filter only guards the AUTOMATIC choice, so a deliberate
+                  # pin is honoured and told what it is. "coming soon/
+                  # unavailable/disabled/removed" says the CLI will REJECT
+                  # `-m`, so honouring it would open a tab that dies at launch.
+                  case "$(printf '%s' "$_gline" | tr '[:upper:]' '[:lower:]')" in
+                    *"coming soon"*|*unavailable*|*"not available"*|*disabled*|*removed*)
+                      note="listed by this grok CLI as not usable yet/any more (coming soon/unavailable/…) — see: grok models" ;;
+                    *)
+                      avail=yes; note="listed by this grok CLI with withdrawal wording (deprecated/retired/…) — pin honoured" ;;
+                  esac
+                fi
+                ;;
+            esac
           fi
-        else note="model not offered by this grok CLI (see: grok models)"; fi
+        fi
       fi
       ;;
     kimi)

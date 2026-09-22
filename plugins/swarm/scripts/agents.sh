@@ -82,9 +82,10 @@
 #            with the reason. The CLI rejects an unlisted -m id at launch
 #            ("unknown model id") and drops/renames models between releases
 #            (0.2.101 removed grok-composer-2.5-fast), so an auth-only check
-#            would advertise a model the CLI no longer offers. The probe
-#            degrades to auth-only — with a warning, never silently — when the
-#            list comes back empty or unparseable. It always RUNS: the adapter
+#            would advertise a model the CLI no longer offers. An empty or
+#            unparseable list is a WARNED degrade (never silent), and — unlike
+#            before 0.12.0 — it does not fall back to auth: only a last-known
+#            measured model or an explicit pin can run. It always RUNS: the adapter
 #            bounds it with its own watchdog where coreutils is missing. Its
 #            bound is SWARM_PROBE_TIMEOUT (10s, ceiling 20s), not SWARM_TIMEOUT
 #            (a review-length cap).
@@ -1884,7 +1885,11 @@ _grok_compat() {
     return 3
   fi
   local mode="$1" args=()
-  [[ "$mode" != "known" ]] && args+=(--model "$2" --timeout "$GROK_COMPAT_TIMEOUT")
+  case "$mode" in
+    version) python3 "$GROK_COMPAT_TOOL" version 2>/dev/null; return ;;
+    known)   ;;
+    *)       args+=(--model "$2" --timeout "$GROK_COMPAT_TIMEOUT") ;;
+  esac
   [[ -n "${SWARM_GROK_CLI_VERSION:-}" ]] && args+=(--cli-version "$SWARM_GROK_CLI_VERSION")
   python3 "$GROK_COMPAT_TOOL" "$mode" ${args[@]+"${args[@]}"} 2>&1
 }
@@ -2289,8 +2294,11 @@ subcmd_grok_model() {
   # the same variable the workflow pins, so prep and voices key the cache alike.
   if [[ -z "${SWARM_GROK_CLI_VERSION:-}" ]]; then
     local ver=""
-    ver="$(available_version grok 2>/dev/null | grep -Eo '[0-9]+(\.[0-9]+){1,3}' | head -n 1)" || true
-    [[ -n "$ver" ]] && export SWARM_GROK_CLI_VERSION="$ver"
+    # grok-compat.py's own parser, not a second one here: two parsers were two
+    # cache keys (a `v1.0.13` banner read as 0.13 on one side), i.e. a miss and
+    # a second paid probe right after the prep step.
+    ver="$(_grok_compat version)" || true
+    case "$ver" in ""|unknown|*[!0-9.]*) ;; *) export SWARM_GROK_CLI_VERSION="$ver" ;; esac
   fi
   if ! backend_installed grok; then
     GROK_SELECT_DEGRADED="grok is not installed"

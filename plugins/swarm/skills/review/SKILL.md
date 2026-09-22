@@ -432,7 +432,10 @@ fi
 _gk() { printf '%s\n' "$GROK_KV" | sed -n "s/^$1=//p" | head -n 1 | tr -cd 'A-Za-z0-9._-'; }
 echo "GROK_RUN=selected=$(_gk selected);latest_candidate=$(_gk latest_candidate);source=$(_gk source);catalog=$(_gk catalog);cli_version=$(_gk cli_version)"
 echo "GROK_DEGRADED=$(printf '%s\n' "$GROK_KV" | sed -n 's/^degraded=//p' | head -n 1)"
-echo "LIVE_JSON=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json | tr -d '\n')"
+# SWARM_GROK_PROBE=0: `list` reads the verdicts grok-model just cached and never
+# pays for a probe itself — on an oversize diff grok-model was skipped, and
+# readiness in `ensure` mode would have bought the probes anyway.
+echo "LIVE_JSON=$(SWARM_GROK_PROBE=0 bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json | tr -d '\n')"
 ```
 
 - `SWARM_PR_ERR=…` (only on the `--pr` path) → surface the message (it carries the

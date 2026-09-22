@@ -160,6 +160,7 @@ _grok_compat() {
   # every call is logged, so "how many probes would have been paid" is asserted.
   echo "$1 ${2:-}" >>"$COMPAT_LOG"
   if [[ "$1" == "known" ]]; then printf '%s\n' ${COMPAT_KNOWN:-}; return 0; fi
+  if [[ "$1" == "version" ]]; then printf '%s\n' "${COMPAT_VERSION:-1.0.40}"; return 0; fi
   # COMPAT_CACHED = verdicts already in the cache (free); anything else costs a
   # probe under `ensure` and has no verdict under `check`.
   local src=probe

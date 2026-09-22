@@ -437,9 +437,21 @@ backend rc null.
     now EXECUTES the prep fragment under bash, zsh and sh instead of grepping it.
   - The paid-probe budget must count `source=probe` only: counting lookups let
     two *cached* failures hide an older model already known to be fine.
-  - Two version parsers = two cache keys: a `\b`-anchored regex reads
-    `grok v1.0.13` as `0.13` while `grep -Eo` reads `1.0.13`. Keep them
-    equivalent (test-pinned).
+  - Two version parsers = two cache keys: a `\b`-anchored regex read
+    `grok v1.0.13` as `0.13` while `grep -Eo` read `1.0.13`. Fixed by having
+    ONE (`grok-compat.py version`), not by keeping two equivalent.
+  - **The probe runs from an isolated HOME** (neutral `.claude/settings.json`,
+    only `auth.json` linked, rotated token copied back) — the same isolation
+    as a review call. From the operator's HOME grok ran their SessionStart
+    hook outside any jail and measured a model steered by their global rules.
+    Changing the probe's environment or acceptance rule bumps `CONTRACT`
+    (v2): old verdicts answered a different question.
+  - **Review runs can COMMIT into the worktree.** A `/swarm:review --fix`
+    workflow left three commits of its own (one Haiku-attributed) that broke
+    three test files; the run then reported those regressions as its three
+    CRITICAL findings, and the verifier "refuted" three real findings because
+    a stray commit had just patched them. Always diff `git log` against the
+    pushed head after a review run, before judging or pushing anything.
   - Readiness == "selection yields a model", by construction. Two separate
     predicates is what let the 1.0.3 marker change drop grok from every review.
   - **Test trap:** `test_sandbox_deny.py` ran `run_grok` with only the help
@@ -496,15 +508,15 @@ backend rc null.
   - **Match without a pipe to `grep -q`**: an early-exiting `grep -q` can
     SIGPIPE the writer, and under `set -o pipefail` a *hit* would then report
     failure. Newline-fence the list and use a `case` substring match.
-  - **An empty model list must NOT fail closed.** Offline, a timeout, or a
-    future CLI renaming the subcommand would otherwise silently drop grok from
-    every fan-out. Empty/unparseable → trust auth and let `run_grok` surface the
-    explicit error; a non-empty list offering no schema-verified canonical id →
-    an honest "not ready" plus a hint that names WHICH of the three causes it is
-    (no `--prompt-file`, no canonical model, or canonical-but-unverified). The
-    rule was once "does it offer the pinned grok-4.5"; discovery replaced that
-    with "any verified id on offer", or a CLI newer than the adapter would be
-    rejected for offering only ids this file has not seen yet.
+  - **An empty model list is a degrade, not a verdict** — but since 0.12.0 it
+    no longer trusts auth. Before, empty/unparseable meant "run the pinned
+    default"; that id aged silently and died at launch once withdrawn. Now an
+    unreadable catalog runs only a LAST-KNOWN model this host measured, or an
+    explicit pin, and is otherwise not-ready with the reason; a readable
+    catalog without a compatible canonical id is an honest not-ready too. The
+    three states stay distinct in the data (`unreachable` · `unparseable` ·
+    `no-candidate`). (History: the rule was once "does it offer the pinned
+    grok-4.5", then "any schema-verified id on offer".)
   - **A probe added to a local path must not make it hang — and must not lie
     when it can't run.** `ready`/`list` were purely local (stat the auth file)
     before this; the probe puts a network call in every `/swarm:agents` and
@@ -512,8 +524,9 @@ backend rc null.
     the reasoning that an unbounded call was worse — 0.10.10 removed that: with
     the watchdog it is bounded on every host, and skipping had become the
     dangerous branch, because an empty list reads as trust-auth, so readiness
-    passed and discovery fell back to `GROK_DEFAULT_MODEL` — an id the CLI may
-    have withdrawn, killing every cluster at launch. Whatever the degrade, it
+    passed and discovery fell back to the then-pinned default (`GROK_DEFAULT_MODEL`,
+    removed in 0.12.0) — an id the CLI may have withdrawn, killing every
+    cluster at launch. Whatever the degrade, it
     **warns on stderr**: a silent one makes the documented model-aware guarantee
     false at runtime, the same bug class the composer removal exists to fix.
   - **Route every degrade through ONE audible exit.** This one spot was fixed
@@ -534,7 +547,7 @@ backend rc null.
         clean exit is an answer; anything else is a degrade.
       - "The probe answered honestly" (model genuinely gone → `not ready` +
         update-the-CLI hint) must stay distinguishable from "the probe never
-        answered" (→ trust auth + warning).
+        answered" (→ warning + last-known/pin only, since 0.12.0).
     The meta-lesson (the one that actually ended the loop): **a fix that keeps
     coming back is a shape problem, not a patch problem.** Rounds 1–4 patched a
     probe that had a security jail bolted on; round 5 deleted the jail instead,
