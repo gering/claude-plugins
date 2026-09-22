@@ -958,7 +958,9 @@ const CODEX_RUN = (() => {
   return {
     model,
     family: /^(astra|sol|terra|luna|custom)$/.test(kv.family || '') ? kv.family : '',
-    requested: PROFILE.externals.codex.model || `family:${PROFILE.externals.codex.family}`,
+    // What prep was actually asked for — an operator's SWARM_CODEX_MODEL pin
+    // wins there, so the profile alone cannot say it.
+    requested: /^family:(astra|sol|terra|luna)$/.test(kv.requested || '') || okId(kv.requested) ? kv.requested : '',
     latest: okId(kv.latest_candidate) ? kv.latest_candidate : '',
     source: /^(catalog-latest|older-compatible|fallback|pinned)$/.test(kv.source || '') ? kv.source : (model ? 'unknown' : 'none'),
     catalog: /^(complete|unavailable|malformed)$/.test(kv.catalog || '') ? kv.catalog : 'unknown',

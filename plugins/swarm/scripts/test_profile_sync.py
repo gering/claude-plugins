@@ -75,7 +75,7 @@ GROK_TOKEN = ("selected=grok-4.7;latest_candidate=grok-4.7;source=latest;"
               "catalog=ok;cli_version=1.0.40")
 # Same for codex: the prep step's frozen family resolution.
 CODEX_MODEL = "gpt-6-sol"
-CODEX_TOKEN = ("selected=gpt-6-sol;family=sol;source=catalog-latest;"
+CODEX_TOKEN = ("selected=gpt-6-sol;requested=family:sol;family=sol;source=catalog-latest;"
                "latest_candidate=gpt-6-sol;catalog=complete;effort=medium")
 
 

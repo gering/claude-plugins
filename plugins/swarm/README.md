@@ -242,11 +242,13 @@ Backends:
 Codex's `model/list` is an **advisory picker catalog**, not proof of generation
 access: it can return cached/bundled models and omit custom aliases. A missing,
 unavailable or malformed catalog therefore produces an audible auth-only
-readiness hint, including on `ready:true` rows; it never substitutes a model or
-rejects a valid custom alias solely for being absent. A catalog hit still needs
-an actual-load check. The probe is non-generative but the CLI may refresh its
-own auth/cache. Direct adapter callers retain `CODEX_DEFAULT_MODEL` as a
-fallback; workflow callers always pass their selected Codex model explicitly.
+readiness hint, including on `ready:true` rows; it never substitutes a pinned
+model or rejects a valid custom alias solely for being absent (a *family* falls
+back visibly, see Codex model selection). A catalog hit still needs an
+actual-load check. The probe is non-generative but the CLI may refresh its own
+auth/cache. A bare `run codex` resolves `SWARM_CODEX_MODEL`, else the default
+family, before its clock starts; workflow callers always pass the run's frozen
+model explicitly.
 
 Tool policy defaults to `true` / 8 for direct adapter calls. Positive budgets
 are 1–1000; `--tools false` is Kimi-only and requires budget 0 (implicit when no

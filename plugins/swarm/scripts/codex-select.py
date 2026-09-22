@@ -68,7 +68,7 @@ def parse_catalog(text: str) -> list[dict]:
     models = data.get("models")
     if not isinstance(models, list):
         raise ValueError("invalid model list")
-    rows = []
+    merged: dict[str, dict] = {}
     for row in models:
         if not isinstance(row, dict):
             raise ValueError("invalid model entry")
@@ -79,8 +79,16 @@ def parse_catalog(text: str) -> list[dict]:
         names = None
         if isinstance(efforts, list):
             names = {e.get("reasoningEffort") for e in efforts if isinstance(e, dict)}
-        rows.append({"model": name, "hidden": row.get("hidden") is True, "efforts": names})
-    return rows
+        # Several picker presets (distinct ids) may share one model slug: they
+        # are ONE model for -m. Union the efforts (unknown if any is unknown);
+        # hidden only if every preset is.
+        seen = merged.get(name)
+        if seen is None:
+            merged[name] = {"model": name, "hidden": row.get("hidden") is True, "efforts": names}
+        else:
+            seen["hidden"] = seen["hidden"] and row.get("hidden") is True
+            seen["efforts"] = None if seen["efforts"] is None or names is None else seen["efforts"] | names
+    return list(merged.values())
 
 
 def _effort_state(row: dict | None, effort: str | None) -> str:
@@ -115,14 +123,17 @@ def select(family: str, pin: str | None, effort: str | None,
                       degraded=f"catalog {catalog}: {family} not resolved; using fallback {FLOOR[family]}, not verified latest")
         return result
     members = sorted(
-        (family_version(r["model"])[1], r) for r in rows
-        if not r["hidden"] and (family_version(r["model"]) or ("",))[0] == family
+        ((family_version(r["model"])[1], r) for r in rows
+         if not r["hidden"] and (family_version(r["model"]) or ("",))[0] == family),
+        key=lambda member: member[0],
     )
     if not members:
         result.update(selected=FLOOR[family], source="fallback",
                       listed="yes" if FLOOR[family] in by_name else "no",
                       effort_supported=_effort_state(by_name.get(FLOOR[family]), effort),
                       degraded=f"catalog lists no {family} model; using fallback {FLOOR[family]}")
+        if result["effort_supported"] == "no":
+            result["degraded"] += f" (catalog does not list effort {effort} for it)"
         return result
     newest = members[-1][1]
     result["latest_candidate"] = newest["model"]

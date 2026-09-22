@@ -468,12 +468,18 @@ echo "GROK_DEGRADED=$(printf '%s\n' "$GROK_KV" | sed -n 's/^degraded=//p' | head
 # for the same zsh reason as grok above. Same oversize skip.
 CODEX_KV=""
 if [ "$PROMPT_BYTES" -le "$OVERSIZE_THRESHOLD" ]; then
-  CODEX_KV="$(SWARM_CODEX_MODEL="${SWARM_CODEX_MODEL:-$(_cp model)}" bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" codex-model --family "$(_cp family)" --effort "$(_cp effort)" 2>/dev/null)" || true   # exit 1 = nothing selected; CODEX_DEGRADED says why
+  CODEX_KV="$(SWARM_CODEX_MODEL="${SWARM_CODEX_MODEL:-$(_cp model)}" bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" codex-model --family "$(_cp family)" --effort "$(_cp effort)" 2>"$TMPD/codex-model.err")" || CODEX_KV="$CODEX_KV
+rc=$?"   # exit 1 = nothing selected; 2 = refused input (e.g. a malformed SWARM_CODEX_MODEL)
 fi
 _ck() { printf '%s\n' "$CODEX_KV" | sed -n "s/^$1=//p" | head -n 1 | tr -cd 'A-Za-z0-9._:/+-'; }
 CODEX_MODEL="$(_ck selected)"
-echo "CODEX_RUN=selected=$CODEX_MODEL;family=$(_ck family);source=$(_ck source);latest_candidate=$(_ck latest_candidate);catalog=$(_ck catalog);effort=$(_cp effort)"
-echo "CODEX_DEGRADED=$(printf '%s\n' "$CODEX_KV" | sed -n 's/^degraded=//p' | head -n 1)"
+echo "CODEX_RUN=selected=$CODEX_MODEL;requested=$(_ck requested);family=$(_ck family);source=$(_ck source);latest_candidate=$(_ck latest_candidate);catalog=$(_ck catalog);effort=$(_cp effort)"
+# Never an empty reason for a dropped codex: fall back to the helper's own stderr.
+CODEX_DEGRADED="$(printf '%s\n' "$CODEX_KV" | sed -n 's/^degraded=//p' | head -n 1)"
+if [ -z "$CODEX_MODEL" ] && [ -z "$CODEX_DEGRADED" ] && [ -n "$CODEX_KV" ]; then
+  CODEX_DEGRADED="codex-model failed ($(_ck rc | sed 's/^/rc=/')): $(head -n 1 "$TMPD/codex-model.err" 2>/dev/null | tr -d '\r')"
+fi
+echo "CODEX_DEGRADED=$CODEX_DEGRADED"
 # SWARM_GROK_PROBE=0: `list` reads the verdicts grok-model just cached and never
 # pays for a probe itself — on an oversize diff grok-model was skipped, and
 # readiness in `ensure` mode would have bought the probes anyway. Codex

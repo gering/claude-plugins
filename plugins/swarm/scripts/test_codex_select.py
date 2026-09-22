@@ -117,6 +117,22 @@ class SelectionTests(unittest.TestCase):
         # No effort requested: support is unknown, never invented.
         self.assertEqual(self.pick(OBSERVED, "sol", effort=None)["effort_supported"], "unknown")
 
+    def test_presets_sharing_a_model_slug_are_one_model(self):
+        a = row("gpt-6-sol", efforts=("medium",)); a["id"] = "preset-a"
+        b = row("gpt-6-sol", efforts=("low",), hidden=True); b["id"] = "preset-b"
+        catalog = envelope(a, b, row("gpt-5.6-sol"))
+        self.assertEqual(self.pick(catalog, "sol", effort="low")["selected"], "gpt-6-sol")
+        pinned = self.pick(catalog, "sol", effort="low", pin="gpt-6-sol")
+        self.assertEqual(pinned["effort_supported"], "yes")
+        rc, out = run_select(catalog, "--family", "sol", "--effort", "medium")
+        self.assertEqual((rc, out["selected"]), (0, "gpt-6-sol"))
+
+    def test_floor_without_the_effort_says_so(self):
+        rows = [{"model": "gpt-5.6-terra", "hidden": True, "efforts": {"low"}}]
+        result = cs.select("terra", None, "high", rows, "complete")
+        self.assertEqual((result["source"], result["effort_supported"]), ("fallback", "no"))
+        self.assertIn("does not list effort high", result["degraded"])
+
     def test_missing_effort_metadata_is_unknown_not_permission(self):
         rows = [{"model": "gpt-6-sol", "hidden": False, "efforts": None}]
         result = cs.select("sol", None, "medium", rows, "complete")
@@ -206,6 +222,9 @@ class AdapterTests(unittest.TestCase):
         proc = adapter('codex_model_offered gpt-9-sol; echo "hint=$_codex_model_hint"', OBSERVED)
         self.assertIn("gpt-9-sol: model availability unverified", self.kv(proc.stdout)["hint"])
         self.assertIn("auth-only readiness", self.kv(proc.stdout)["hint"])
+        proc = adapter('codex_model_offered ""; echo "sel=$(_kv selected "$CODEX_SEL")"', OBSERVED,
+                       env={"SWARM_CODEX_MODEL": "gpt-5.6-sol"})
+        self.assertEqual(self.kv(proc.stdout)["sel"], "gpt-5.6-sol")
         proc = adapter('codex_model_offered ""; echo "hint=$_codex_model_hint"', "", rc=124)
         self.assertIn("catalog unavailable", self.kv(proc.stdout)["hint"])
 
@@ -223,7 +242,7 @@ class HandoffTests(unittest.TestCase):
         return [c for c in output["calls"] if c["opts"]["label"].startswith("codex:")]
 
     def test_one_model_across_voices_labels_and_resume(self):
-        token = ("selected=gpt-5.6-terra;family=terra;source=catalog-latest;"
+        token = ("selected=gpt-5.6-terra;requested=family:terra;family=terra;source=catalog-latest;"
                  "latest_candidate=gpt-5.6-terra;catalog=complete;effort=medium")
         first, resumed = run_workflows([{"args": args(profile=name, codex=token, claude=False,
                                                        externalVoices=["codex"])} for name in ("max", "max")])
@@ -234,6 +253,7 @@ class HandoffTests(unittest.TestCase):
             balance = output["result"]["balance"]
             self.assertEqual(balance["codexModel"]["model"], "gpt-5.6-terra")
             self.assertEqual(balance["codexModel"]["family"], "terra")
+            self.assertEqual(balance["codexModel"]["requested"], "family:terra")
             agents = {a["backend"]: a for a in balance["agents"]}
             self.assertEqual(agents["codex"]["model"], "gpt-5.6-terra")
             self.assertTrue(any("codex model for this run: gpt-5.6-terra" in line for line in output["logs"]))
@@ -247,6 +267,19 @@ class HandoffTests(unittest.TestCase):
             self.assertTrue(output["result"]["balance"]["codexDropped"])
             self.assertIsNone(output["result"]["balance"]["codexModel"])
             self.assertTrue(any("codex DROPPED" in line for line in output["logs"]))
+
+    def test_operator_pin_is_reported_as_requested(self):
+        token = ("selected=gpt-5.5;requested=gpt-5.5;family=custom;source=pinned;"
+                 "latest_candidate=;catalog=complete;effort=medium")
+        output = run_workflows([{"args": args(codex=token, externalVoices=["codex"])}])[0]
+        self.assertEqual(output["result"]["balance"]["codexModel"]["requested"], "gpt-5.5")
+        self.assertTrue(any("gpt-5.5 (gpt-5.5; pinned" in line for line in output["logs"]))
+
+    def test_prep_never_drops_codex_without_a_reason(self):
+        skill = (PLUGIN / "skills/review/SKILL.md").read_text(encoding="utf-8")
+        self.assertIn('2>"$TMPD/codex-model.err"', skill)
+        self.assertIn('CODEX_DEGRADED="codex-model failed', skill)
+        self.assertIn("requested=$(_ck requested)", skill)
 
     def test_degraded_source_is_carried_not_upgraded(self):
         token = CODEX_TOKEN.replace("source=catalog-latest", "source=fallback").replace("catalog=complete", "catalog=unavailable")

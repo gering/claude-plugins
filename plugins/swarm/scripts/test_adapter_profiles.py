@@ -227,6 +227,8 @@ run_grok() { cp "$1" "$CAPTURE"; }
     def test_tool_policy_defaults_follow_backend_mode(self):
         stubs = r'''
 require_usable() { return 0; }
+# A bare `run codex` resolves its model before readiness; not under test here.
+codex_select() { CODEX_SEL="selected=gpt-6-sol"; }
 run_codex() { cp "$1" "$CAPTURE"; }
 run_grok() { cp "$1" "$CAPTURE"; }
 run_kimi() { printf '%s %s\n' "$5" "$6" > "$CAPTURE"; }

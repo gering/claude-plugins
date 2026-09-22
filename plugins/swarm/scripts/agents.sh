@@ -2120,10 +2120,11 @@ _codex_skip_advisory_catalog=0
 _codex_on_run_path() { _codex_skip_advisory_catalog=1; }
 
 codex_model_offered() {
-  # $1 = the concrete model the run will use; empty = the default family's pick.
+  # $1 = the concrete model the run will use; empty = the operator's
+  # SWARM_CODEX_MODEL pin, else the default family's pick.
   _codex_model_hint=""
   (( _codex_skip_advisory_catalog )) && return 0
-  codex_select "$CODEX_DEFAULT_FAMILY" "${1:-}" "" || true
+  codex_select "$CODEX_DEFAULT_FAMILY" "${1:-${SWARM_CODEX_MODEL:-}}" "" || true
   local model degraded catalog
   model="$(_kv selected "$CODEX_SEL")"; degraded="$(_kv degraded "$CODEX_SEL")"
   catalog="$(_kv catalog "$CODEX_SEL")"
@@ -2756,6 +2757,19 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
   # Both resolved above, in THIS shell — so the wall recorded in telemetry is the
   # wall that will actually apply, not a value assigned inside a subshell.
   _set_enforced_wall
+  # A bare `run codex` (no --model) resolves HERE, before readiness and before
+  # the clock: SWARM_CODEX_MODEL as an exact pin, else the default family's pick
+  # from the SAME selector prep uses. The review workflow always passes the
+  # run's frozen --model, so its voices never reach this branch.
+  if [[ "$backend" == codex && -z "$model" ]]; then
+    local codex_effort="$effort"
+    [[ "$codex_effort" == max ]] && codex_effort=xhigh
+    [[ -z "${SWARM_CODEX_MODEL:-}" ]] || validate_model "$SWARM_CODEX_MODEL"
+    codex_select "$CODEX_DEFAULT_FAMILY" "${SWARM_CODEX_MODEL:-}" "$codex_effort" || true
+    model="$(_kv selected "$CODEX_SEL")"
+    [[ -n "$model" ]] || { echo "codex: no model selectable — $(_kv degraded "$CODEX_SEL")" >&2; exit 1; }
+    [[ -z "$(_kv degraded "$CODEX_SEL")" ]] || echo "codex: $(_kv degraded "$CODEX_SEL")" >&2
+  fi
   _codex_on_run_path
   require_usable "$backend" "$model"
   require_python3
@@ -2789,14 +2803,6 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
 run_codex() {
   local prompt_path="$1" effort="$2" model="$3" schema="$4"
   [[ "$effort" == "max" ]] && effort="xhigh"
-  # No --model: the default family's pick, from the SAME selector prep uses
-  # (the review workflow always passes the run's frozen --model instead).
-  if [[ -z "$model" ]]; then
-    codex_select "$CODEX_DEFAULT_FAMILY" "" "$effort" || true
-    model="$(_kv selected "$CODEX_SEL")"
-    [[ -n "$model" ]] || { echo "codex: no model selectable — $(_kv degraded "$CODEX_SEL")" >&2; exit 1; }
-    [[ -z "$(_kv degraded "$CODEX_SEL")" ]] || echo "codex: $(_kv degraded "$CODEX_SEL")" >&2
-  fi
   # Record the EFFECTIVE effort/model (after the ladder mapping and the default
   # fill-in), not what the caller asked for — the point of the number is what
   # the backend actually ran.
