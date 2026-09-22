@@ -206,6 +206,7 @@ external CLIs directly:
 
 ```
 agents.sh list [--json] [--codex-model M] # probe selected model → table / JSON
+agents.sh codex-model [--family F] [--model M] [--effort E]  # one run's codex model as key=value
 agents.sh available <backend> # installed? prints version
 agents.sh ready <backend> [--model M] # usable? hints include model uncertainty
 agents.sh config              # resolved numeric config (caps, timeouts,
@@ -234,7 +235,7 @@ Backends:
 | Backend | Role | Mechanics |
 |---------|------|-----------|
 | `claude` | probe-only | reviews run in-session via the Agent tool |
-| `codex` | external reviewer | `codex exec -s danger-full-access --ignore-user-config --ignore-rules -C <repo> -c tools.web_search=true --output-schema` under the OS jail (its own seatbelt cannot nest inside it; `-s read-only` is kept only on a jail-less host), profile-selected Sol (`low`/`medium`) or Astra (`medium`), prompt on stdin (`-- -`); shell + file-read + web; auth via `codex login status`, selected-model catalog check via bounded `codex-models.py` |
+| `codex` | external reviewer | `codex exec -s danger-full-access --ignore-user-config --ignore-rules -C <repo> -c tools.web_search=true --output-schema` under the OS jail (its own seatbelt cannot nest inside it; `-s read-only` is kept only on a jail-less host), profile-selected family — newest listed Sol (`low`/`medium`) or Astra (`medium`), resolved once per run by `codex-select.py` — prompt on stdin (`-- -`); shell + file-read + web; auth via `codex login status`, selected-model catalog check via bounded `codex-models.py` |
 | `grok` | external reviewer | headless `--prompt-file` with inline `--json-schema`; the model is **selected per run** — the newest canonical `grok-4.x/5.x` the CLI offers whose `--json-schema` enforcement was *measured* (see [Grok model selection](#grok-model-selection)), never a hand-maintained version list and never a silent upgrade to an unmeasured model. Strict `--tools` allowlist (`read_file,list_dir,grep,run_terminal_command,web_search,web_fetch`) + `--permission-mode dontAsk` + `--deny` prefix rules (egress/destructive verbs) + `--cwd <repo>`, run from an ephemeral HOME/GROK_HOME with only `auth.json` linked — the OS jail's inverted write model makes the shell read-only in effect. Readiness is model-aware: auth, `--prompt-file` support, **and** a selectable model. `ready` answers usable/not-usable plus a hint — it does **not** say which model runs; `agents.sh grok-model` does, and the review freezes that id onto every grok voice (it also appears in each call's telemetry line). |
 | `kimi` | external reviewer | ACP v1 over stdio (`kimi acp`), pinned to `kimi-code/k3-256k`; the complete prompt is an ACP content block, not argv. Isolated HOME/KIMI_CODE_HOME that links the host's `credentials/`+`oauth/` (links, not a copy — Moonshot rotates refresh tokens, so a refresh must land on the host file) and carries a filtered config projection. The client advertises no FS/terminal capability and approves only allowlisted read-only shell commands once and rejects every other permission request (defense-in-depth); repository immutability is OS-enforced. Invalid output or policy/protocol drift is a visible backend error, never an empty review. Requires auth, ACP, the pinned model, and a working OS jail. |
 
@@ -293,6 +294,25 @@ offers that enforces structured output.** No release needs a code edit.
   The adapter reads the variable itself, so `list`, `ready`, `grok-model` and
   `run` all judge the same request. A pin is never reinterpreted as "latest": it
   must be well-formed, offered and pass the same probe, or nothing runs.
+
+### Codex model selection
+
+- **Families, not versions.** Profiles name a capability family (Fable→Astra,
+  Opus→Sol, Sonnet→Terra, Haiku→Luna). `codex-select.py` picks, per family, the
+  newest visible `gpt-<major>[.<minor>]-<family>` the native CLI's `model/list`
+  lists and whose listed efforts include the profile's (`6.10 > 6.9`; a bare
+  major is `.0`). Dated, preview, fast, spark or other suffixed IDs never
+  qualify. Families never borrow from each other, so generations can mix (e.g.
+  Sol on GPT-6 while Terra is still on 5.6). A new release needs no edit.
+- **One model per run**, frozen like Grok's: `agents.sh codex-model` runs once in
+  prep; every codex voice gets that id as `--model`; resume/loop reuse it. No
+  valid selection → codex voices are dropped and reported.
+- **Advisory, never proof.** The catalog call is non-generative and may be
+  served from Codex's own cache; `source=catalog-latest` means "newest listed",
+  not "exists and works". An unusable catalog or a family with no listed member
+  falls back to that family's floor as `source=fallback`, with the reason.
+- **Pin deliberately** with `SWARM_CODEX_MODEL=<id>` (or `run codex --model
+  <id>`). Pins stay exact; an unlisted pin runs with an audible warning.
 
 The prompt always reaches a backend **out-of-band** — never as an argv word — so
 the diff is bounded by model context rather than `exec`'s `MAX_ARG_STRLEN`:

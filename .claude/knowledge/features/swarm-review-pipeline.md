@@ -3,7 +3,7 @@ title: "Swarm Review Pipeline (/swarm:review)"
 createdAt: 2026-07-08
 updatedAt: 2026-09-20
 createdFrom: "PR #24"
-updatedFrom: "branch: task/add-swarm-review-profiles"
+updatedFrom: "branch: task/auto-select-latest-codex-families"
 pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
@@ -271,7 +271,10 @@ the >600 s runtime ceiling is `async-poll-external-voices`.
 - **`args.claude: false`** runs an **external-only control** (codex + grok + kimi —
   no Claude finder lenses, no gate; merge/verify still in-session). The grok
   model is selected ONCE per run by the prep step (`agents.sh grok-model`) and
-  frozen onto every grok voice as `--model` (0.12.0); see [[swarm-backend-adapter]].
+  frozen onto every grok voice as `--model` (0.12.0); codex's profile family is
+  resolved the same way (`agents.sh codex-model` → `args.codex`, 0.14.0), and a
+  resume or `--loop` round re-sends the FIRST prep's tokens so a mid-run release
+  cannot split one review across generations; see [[swarm-backend-adapter]].
   Proven useful: a control run found real bugs the with-Claude run missed (an
   `aws_secret_access_key` scrub-list drift, `git diff` omitting untracked files)
   — the "different models catch different defects" premise, live.
