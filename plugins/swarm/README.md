@@ -45,6 +45,8 @@ presets).
 
 The single `PROFILES` map in `workflows/swarm-review.js` owns the settings.
 The prep step reads that same staged map before checking model readiness.
+Codex rows name a capability family (Fable→Astra, Opus→Sol, Sonnet→Terra,
+Haiku→Luna), resolved once per run to the newest listed model of that family.
 Unknown/malformed workflow profile inputs select `default`, never a costlier
 profile; direct workflow callers use `profile`, not the retired `max` boolean.
 
@@ -54,7 +56,7 @@ profile; direct workflow callers use `profile`, not the retired `max` boolean.
 | Finders / verify | session model / medium | session model / medium | session model / xhigh |
 | Merge | session model / medium | session model / medium | session model / medium |
 | Transport wrappers | haiku / low | haiku / low | haiku / low |
-| Codex | gpt-5.6-sol / low | gpt-5.6-sol / medium | gpt-6-astra / medium |
+| Codex | newest Sol / low | newest Sol / medium | newest Astra / medium |
 | Grok | discovered / low | discovered / medium | discovered / medium |
 | Kimi (opt-in) | kimi-code/k3-256k / low | kimi-code/k3-256k / low | kimi-code/k3-256k / high |
 | Fan-out unit | cluster | cluster | lens |

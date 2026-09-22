@@ -73,13 +73,17 @@ def run_workflows(cases):
 GROK_MODEL = "grok-4.7"
 GROK_TOKEN = ("selected=grok-4.7;latest_candidate=grok-4.7;source=latest;"
               "catalog=ok;cli_version=1.0.40")
+# Same for codex: the prep step's frozen family resolution.
+CODEX_MODEL = "gpt-6-sol"
+CODEX_TOKEN = ("selected=gpt-6-sol;family=sol;source=catalog-latest;"
+               "latest_candidate=gpt-6-sol;catalog=complete;effort=medium")
 
 
 def args(**overrides):
-    return dict(adapter="/fixture adapter/'$(not-executed).sh", diffFile="/fixture/diff",
-                externalPromptFile="/fixture prompt/'$(not-executed)",
-                telemetryFile="/fixture telemetry/'$(not-executed)",
-                findingNonce="0123456789abcdef", grok=GROK_TOKEN, **overrides)
+    return {**dict(adapter="/fixture adapter/'$(not-executed).sh", diffFile="/fixture/diff",
+                   externalPromptFile="/fixture prompt/'$(not-executed)",
+                   telemetryFile="/fixture telemetry/'$(not-executed)",
+                   findingNonce="0123456789abcdef", grok=GROK_TOKEN, codex=CODEX_TOKEN), **overrides}
 
 
 def command(call):
@@ -116,7 +120,8 @@ class ProfileTests(unittest.TestCase):
                 for key in path.split("."):
                     actual = actual[key]
                 if isinstance(actual, dict):
-                    fields = ("model", "effort") if path.startswith("stages.") else ("model", "effort", "tools", "toolBudget")
+                    first = "family" if path == "externals.codex" else "model"
+                    fields = ("model", "effort") if path.startswith("stages.") else (first, "effort", "tools", "toolBudget")
                     actual = [actual[key] for key in fields]
                 self.assertEqual(values[index], actual, f"{name}/{path}")
 
@@ -167,7 +172,7 @@ class ProfileTests(unittest.TestCase):
                     self.assertEqual(len(result["backendErrors"]), lost)
                     agents = {a["backend"]: a for a in balance["agents"]}
                     self.assertEqual(agents["claude"]["model"], "session")
-                    self.assertEqual(agents["codex"]["model"], PROFILES[name]["externals"]["codex"]["model"])
+                    self.assertEqual(agents["codex"]["model"], CODEX_MODEL)
                     self.assertEqual(sum(a["failedVoices"] for a in agents.values()), lost)
                     self.assertEqual(bool(balance["coverageNotes"]), bool(lost))
                     if lost:
@@ -191,7 +196,7 @@ class ProfileTests(unittest.TestCase):
             self.assertIn("Review profile: default", output["logs"])
             for call in output["calls"]:
                 if call["opts"]["label"].startswith("codex:"):
-                    self.assertEqual(flag(command(call), "--model"), PROFILES["default"]["externals"]["codex"]["model"])
+                    self.assertEqual(flag(command(call), "--model"), CODEX_MODEL)
 
     def test_external_policies_quoting_checksum_and_opt_in(self):
         cases = [{"args": args(profile=name, claude=False, externalVoices=["codex", "grok", "kimi"])} for name in NAMES]
@@ -210,7 +215,7 @@ class ProfileTests(unittest.TestCase):
                 # A null profile model means "not pinned by the profile". For grok
                 # the run's frozen id fills it, so every voice still gets ONE
                 # explicit --model; only a truly unpinned backend omits the flag.
-                expected = GROK_MODEL if backend == "grok" else spec["model"]
+                expected = {"grok": GROK_MODEL, "codex": CODEX_MODEL}.get(backend, spec["model"])
                 if expected is None:
                     self.assertNotIn("--model", argv)
                 else:
@@ -252,8 +257,8 @@ class ProfileTests(unittest.TestCase):
 
     def test_model_id_grammar_agrees_across_layers(self):
         # One model id crosses four validators: the staged-map accessor, the
-        # workflow's externalFlags, the adapter's --model check and its Codex
-        # catalog parser. They drifted apart once ('+' allowed only in the
+        # workflow's externalFlags and codex run token, the adapter's --model
+        # check and the Codex catalog/pin parser (codex-select.py). They drifted apart once ('+' allowed only in the
         # adapter), so an id could pass one layer and be refused by the next.
         import profiles
         adapter = (HERE / "agents.sh").read_text(encoding="utf-8")
@@ -261,7 +266,9 @@ class ProfileTests(unittest.TestCase):
             "profiles.py": profiles.MODEL.pattern.removesuffix(r"\Z"),
             "workflow": re.search(r"/\^(\[A-Za-z0-9\]\[[^\]]*\]\*)\$/\.test\(b\.model\)", SOURCE).group(1),
             "adapter validate_model": re.search(r'validate_model\(\) \{\n\s*\[\[ "\$1" =~ \^(\S+)\$ \]\]', adapter).group(1),
-            "adapter catalog": re.search(r're\.fullmatch\(r"(\[A-Za-z0-9\]\[[^"]*)", name\)', adapter).group(1),
+            "codex catalog/pin": re.search(r'MODEL_ID = re\.compile\(r"(\[A-Za-z0-9\]\[[^"]*)\\Z"\)',
+                                           (HERE / "codex-select.py").read_text(encoding="utf-8")).group(1),
+            "codex run token": re.search(r"/\^(\[A-Za-z0-9\]\[[^\]]*\]\*)\$/\.test\(v\)", SOURCE).group(1),
         }
         samples = ["gpt-6-astra", "gpt-5.6-sol", "kimi-code/k3-256k", "grok-4.7", "a+b", "x.y:z_1",
                    "-x", "+x", "a b", "a$b", "a;b", "a`b", "a'b", "a|b", ""]
@@ -295,7 +302,7 @@ class ProfileTests(unittest.TestCase):
             "Finders / verify": lambda p: pair(p["stages"]["finder"], "session model"),
             "Merge": lambda p: pair(p["stages"]["merge"], "session model"),
             "Transport wrappers": lambda p: pair(p["stages"]["transport"], "session model"),
-            "Codex": lambda p: pair(p["externals"]["codex"], "default"),
+            "Codex": lambda p: (p["externals"]["codex"]["model"] or f"newest {p['externals']['codex']['family'].capitalize()}") + f" / {p['externals']['codex']['effort']}",
             "Grok": lambda p: pair(p["externals"]["grok"], "discovered"),
             "Kimi (opt-in)": lambda p: pair(p["externals"]["kimi"], "default"),
             "Fan-out unit": lambda p: p["unit"],
@@ -313,14 +320,14 @@ class ProfileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             staged = Path(tmp) / "staged.js"
             data = copy.deepcopy(PROFILES)
-            data["max"]["externals"]["codex"]["model"] = "fixture-selected-model"
+            data["max"]["externals"]["codex"]["model"] = "fixture-pinned-model"
             def write(value):
                 staged.write_text(BEGIN + "const PROFILES = " + json.dumps(value) + "\n" + END, encoding="utf-8")
             write(data)
-            proc = subprocess.run([sys.executable, str(HERE / "profiles.py"), "--workflow", str(staged), "--profile", "max", "--codex-model"], capture_output=True, text=True)
+            proc = subprocess.run([sys.executable, str(HERE / "profiles.py"), "--workflow", str(staged), "--profile", "max", "--codex-policy"], capture_output=True, text=True)
             self.assertEqual(proc.returncode, 0, proc.stderr)
-            self.assertEqual(proc.stdout.strip(), "fixture-selected-model")
-            mutations = [("model", "$(touch nope)"), ("model", None), ("effort", "max"), ("tools", False), ("toolBudget", True), ("toolBudget", -1), ("toolBudget", 0)]
+            self.assertEqual(proc.stdout, "family=astra\nmodel=fixture-pinned-model\neffort=medium\n")
+            mutations = [("model", "$(touch nope)"), ("family", "lunar"), ("family", None), ("family", "gpt-6-sol"), ("effort", "max"), ("tools", False), ("toolBudget", True), ("toolBudget", -1), ("toolBudget", 0)]
             for key, value in mutations:
                 changed = copy.deepcopy(data)
                 changed["max"]["externals"]["codex"][key] = value
@@ -351,7 +358,6 @@ class ProfileTests(unittest.TestCase):
                                       capture_output=True, text=True, timeout=10)
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertIn(f"PROFILE={name}\n", proc.stdout)
-                self.assertIn(f"CODEX_MODEL={PROFILES[name]['externals']['codex']['model']}\n", proc.stdout)
                 staged = list(Path(tmp).glob(".swarm-workflow.*/swarm-review.js"))
                 self.assertEqual(len(staged), 1)
                 self.assertEqual(load_profiles(staged[0]), PROFILES)
@@ -368,9 +374,14 @@ class ProfileTests(unittest.TestCase):
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertTrue(proc.stdout.startswith(token), proc.stdout)
                 self.assertEqual(list(Path(tmp).iterdir()), [])
-        self.assertIn('--workflow "$WORKFLOW" --profile "$PROFILE" --codex-model', prep)
+        self.assertIn('--workflow "$WORKFLOW" --profile "$PROFILE" --codex-policy', prep)
         self.assertIn('list --json --codex-model "$CODEX_MODEL"', prep)
-        self.assertLess(prep.index('scripts/profiles.py'), prep.index('list --json --codex-model'))
+        # One resolution, before readiness and before the run token is echoed.
+        self.assertEqual(prep.count("agents.sh\" codex-model"), 1)
+        self.assertLess(prep.index('scripts/profiles.py'), prep.index('agents.sh" codex-model'))
+        self.assertLess(prep.index('agents.sh" codex-model'), prep.index('echo "CODEX_RUN='))
+        self.assertLess(prep.index('echo "CODEX_RUN='), prep.index('list --json --codex-model'))
+        self.assertIn('codex: "<CODEX_RUN>"', skill)
         self.assertNotIn("gpt-", prep, "no second shell model table")
         self.assertIn('profile: "<PROFILE>"', skill)
         self.assertNotIn("max: true", skill)

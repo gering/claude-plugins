@@ -17,6 +17,13 @@
 #                         Exit 0 = a model was selected, 1 = none (see degraded).
 #                         `ready`/`list` say grok is usable; only THIS says which
 #                         model runs and whether it is the latest.
+#   codex-model [--family F] [--model <id>] [--effort E]  Select the codex
+#                         model for ONE run: newest listed gpt-<N>[.<M>]-<F>
+#                         (F = astra|sol|terra|luna) via codex-select.py, or an
+#                         exact pin (--model / SWARM_CODEX_MODEL). key=value:
+#                         selected, requested, family, source, latest_candidate,
+#                         catalog, listed, effort_supported, degraded, effort.
+#                         One non-generative model/list probe; exit 1 = none.
 #   config                Print the RESOLVED numeric config (max_prompt_bytes,
 #                         cap_headroom, oversize_threshold, timeout_seconds,
 #                         probe_timeout_seconds, probe_budget_seconds). Callers
@@ -150,7 +157,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_SCHEMA="$SCRIPT_DIR/schema/finding.schema.json"
 KIMI_ACP_CLIENT="$SCRIPT_DIR/kimi-acp.py"
-CODEX_DEFAULT_MODEL="gpt-5.6-sol"
+# Family for a bare `ready`/`list`/`run codex` with no model: the default
+# profile's (test_profile_sync guards the match). Prep passes its own family.
+CODEX_DEFAULT_FAMILY="sol"
 KIMI_DEFAULT_MODEL="kimi-code/k3-256k"
 KIMI_BIN="${SWARM_KIMI_BIN:-kimi}"
 # Kimi is OPT-IN (SWARM_KIMI=1; `/swarm:review --kimi` exports it for one run):
@@ -2072,43 +2081,34 @@ grok_model_offered() {
 
 # Codex's catalog is advisory: model/list may use a bundled/cache fallback and
 # the CLI accepts custom aliases not listed there. Absence is NOT a rejection.
-# Check the selected model without generating a turn, and make uncertainty
-# visible in both stderr and list's hint (including ready=true rows).
+# ONE catalog read per process (memoized), ONE selector (codex-select.py) for
+# every caller — prep's `codex-model`, readiness and a bare `run codex` — so no
+# two of them can resolve different models. Uncertainty stays visible in both
+# stderr and list's hint (including ready=true rows).
 _codex_models_done=""
-_codex_models=""
-_codex_catalog_reason=""
+_codex_catalog_raw=""
+_codex_catalog_rc=0
 _codex_model_hint=""
+CODEX_SEL=""
 _codex_load_models() {
   [[ -n "$_codex_models_done" ]] && return 0
   _codex_models_done=1
   _probe_setup_lenient
-  local raw="" rc=0
-  raw="$(_probe_or_bare python3 "$SCRIPT_DIR/codex-models.py" --timeout "$_probe_timeout" 2>/dev/null)" || rc=$?
-  if (( rc != 0 )); then
-    _codex_catalog_reason="catalog unavailable (rc=$rc)"
-    return 0
-  fi
-  # Never use partial output from a failed probe. This parser also rejects
-  # malformed/incomplete success envelopes rather than treating them as empty.
-  _codex_models="$(printf '%s' "$raw" | python3 -c '
-import json, re, sys
-try:
-    data = json.load(sys.stdin)
-    if not isinstance(data, dict) or data.get("complete") is not True:
-        raise ValueError("incomplete catalog")
-    models = data["models"]
-    if not isinstance(models, list):
-        raise ValueError("invalid model list")
-    names = set()
-    for row in models:
-        name = row.get("model") if isinstance(row, dict) else None
-        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/+\-]*", name):
-            raise ValueError("invalid model ID")
-        names.add(name)
-    print("\n".join(sorted(names)))
-except (ValueError, KeyError, TypeError):
-    sys.exit(1)
-')" || _codex_catalog_reason="catalog malformed or incomplete"
+  # Never use partial output from a failed probe: codex-select.py gets the rc
+  # and ignores stdin unless it is 0.
+  _codex_catalog_raw="$(_probe_or_bare python3 "$SCRIPT_DIR/codex-models.py" --timeout "$_probe_timeout" 2>/dev/null)" \
+    || _codex_catalog_rc=$?
+}
+
+codex_select() {
+  # $1 = family, $2 = exact pin (may be empty), $3 = effort (may be empty).
+  # Sets CODEX_SEL to the selector's key=value lines; returns its exit status.
+  _codex_load_models   # first: the rc below is only known after the probe
+  local args=(--family "$1" --catalog-rc "$_codex_catalog_rc") rc=0
+  [[ -n "${2:-}" ]] && args+=(--pin "$2")
+  [[ -n "${3:-}" ]] && args+=(--effort "$3")
+  CODEX_SEL="$(printf '%s' "$_codex_catalog_raw" | python3 "$SCRIPT_DIR/codex-select.py" "${args[@]}")" || rc=$?
+  return "$rc"
 }
 
 # Set by `run`. The catalog answer is advisory and can never change the verdict
@@ -2120,22 +2120,23 @@ _codex_skip_advisory_catalog=0
 _codex_on_run_path() { _codex_skip_advisory_catalog=1; }
 
 codex_model_offered() {
-  local model="${1:-$CODEX_DEFAULT_MODEL}"
+  # $1 = the concrete model the run will use; empty = the default family's pick.
   _codex_model_hint=""
   (( _codex_skip_advisory_catalog )) && return 0
-  _codex_load_models
-  if [[ -z "$_codex_catalog_reason" ]] && _line_in_list "$model" "$_codex_models"; then
+  codex_select "$CODEX_DEFAULT_FAMILY" "${1:-}" "" || true
+  local model degraded catalog
+  model="$(_kv selected "$CODEX_SEL")"; degraded="$(_kv degraded "$CODEX_SEL")"
+  catalog="$(_kv catalog "$CODEX_SEL")"
+  if [[ "$(_kv listed "$CODEX_SEL")" == yes && -z "$degraded" ]]; then
     return 0
   fi
-  _codex_model_hint="$model: model availability unverified — ${_codex_catalog_reason:-not in the advisory catalog; custom aliases may still work}; auth-only readiness"
-  if [[ -n "$_codex_catalog_reason" ]]; then
+  _codex_model_hint="${model:-codex}: model availability unverified — ${degraded:-not in the advisory catalog}; auth-only readiness"
+  if [[ "$catalog" != complete ]]; then
     # The check genuinely did not happen: say so through the shared degrade.
     _probe_degraded codex "$_codex_model_hint"
   else
-    # The catalog WAS read and simply does not list the model. Routing this
-    # through _probe_degraded printed "the selected-model check did not run",
-    # which sent the operator looking for a broken probe. It is advisory either
-    # way: the catalog is not authoritative, so absence never blocks the run.
+    # The catalog WAS read and simply does not list the model (or the family
+    # fell back). Advisory either way: absence never blocks the run.
     echo "warning: codex $_codex_model_hint" >&2
   fi
   return 0
@@ -2179,7 +2180,7 @@ ready_check() {
       _codex_probe_rc="$codex_rc"
       (( codex_rc == 0 )) || return "$codex_rc"
       _scratch_dir_ok || return 1
-      codex_model_offered "${requested_model:-$CODEX_DEFAULT_MODEL}"
+      codex_model_offered "$requested_model"
       ;;
     # Model-aware: auth alone would advertise grok even when the CLI no longer
     # offers any model the adapter can drive (grok drops/renames models
@@ -2351,7 +2352,7 @@ subcmd_list() {
       --json) json=1; shift ;;
       --codex-model)
         [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
-        validate_model "$2"
+        [[ -z "$2" ]] || validate_model "$2"   # empty = the default family's pick
         codex_model="$2"; shift 2 ;;
       *) echo "Unknown flag: $1" >&2; exit 2 ;;
     esac
@@ -2434,6 +2435,32 @@ subcmd_grok_model() {
   echo "cli_version=${SWARM_GROK_CLI_VERSION:-unknown}"
   echo "degraded=$(printf '%s' "$GROK_SELECT_DEGRADED" | tr '\n\r' '  ')"
   [[ -n "$GROK_SELECTED_MODEL" ]]
+}
+
+subcmd_codex_model() {
+  # The per-run Codex selection as DATA, like grok-model. The review's prep step
+  # calls this ONCE and freezes `selected` onto every codex voice (--model), so
+  # no voice re-resolves and a resumed run keeps its model. Pin precedence:
+  # --model, then SWARM_CODEX_MODEL; either is exact and never reinterpreted.
+  local family="$CODEX_DEFAULT_FAMILY" pin="${SWARM_CODEX_MODEL:-}" effort="" rc=0
+  while [[ $# -gt 0 ]]; do
+    [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+    case "$1" in
+      --family) family="$2" ;;
+      --model)  pin="$2" ;;
+      --effort) effort="$2" ;;
+      *) echo "Unknown flag: $1" >&2; exit 2 ;;
+    esac
+    shift 2
+  done
+  case "$family" in astra|sol|terra|luna) ;; *) echo "Invalid codex family: $family" >&2; exit 2 ;; esac
+  case "$effort" in ""|low|medium|high|xhigh) ;; *) echo "Invalid codex effort: $effort" >&2; exit 2 ;; esac
+  [[ -z "$pin" ]] || validate_model "$pin"
+  require_python3
+  codex_select "$family" "$pin" "$effort" || rc=$?
+  printf '%s\n' "$CODEX_SEL"
+  echo "effort=$effort"
+  return "$rc"
 }
 
 swarm_max_prompt_bytes() {
@@ -2762,10 +2789,18 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
 run_codex() {
   local prompt_path="$1" effort="$2" model="$3" schema="$4"
   [[ "$effort" == "max" ]] && effort="xhigh"
+  # No --model: the default family's pick, from the SAME selector prep uses
+  # (the review workflow always passes the run's frozen --model instead).
+  if [[ -z "$model" ]]; then
+    codex_select "$CODEX_DEFAULT_FAMILY" "" "$effort" || true
+    model="$(_kv selected "$CODEX_SEL")"
+    [[ -n "$model" ]] || { echo "codex: no model selectable — $(_kv degraded "$CODEX_SEL")" >&2; exit 1; }
+    [[ -z "$(_kv degraded "$CODEX_SEL")" ]] || echo "codex: $(_kv degraded "$CODEX_SEL")" >&2
+  fi
   # Record the EFFECTIVE effort/model (after the ladder mapping and the default
   # fill-in), not what the caller asked for — the point of the number is what
   # the backend actually ran.
-  TELEMETRY_EFFORT="$effort"; TELEMETRY_MODEL="${model:-$CODEX_DEFAULT_MODEL}"
+  TELEMETRY_EFFORT="$effort"; TELEMETRY_MODEL="$model"
 
   TMP_OUT="$(mktemp)"
 
@@ -2773,7 +2808,7 @@ run_codex() {
   # deterministic regardless of the user's global ~/.codex/config.toml default.
   # Array (not unquoted ${model:+…}) so a model name with whitespace is one
   # argv word, matching the effort_args idiom in run_grok.
-  local model_args=(-m "${model:-$CODEX_DEFAULT_MODEL}")
+  local model_args=(-m "$model")
 
   # Scope the working root to the repo so exploration reads project files (not
   # an ambient cwd). `-C` is a working root — do NOT use `--add-dir` (writable).
@@ -3666,6 +3701,7 @@ main() {
     ready)         subcmd_ready "$@" ;;
     jail)          subcmd_jail ;;
     grok-model)    subcmd_grok_model "$@" ;;
+    codex-model)   subcmd_codex_model "$@" ;;
     config)        subcmd_config ;;
     run)           subcmd_run "$@" ;;
     -h|--help)     print_usage; exit 0 ;;
