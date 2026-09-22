@@ -108,7 +108,7 @@ shows a picker and offers to save your choice as the default:
 > /kickoff add-dark-mode             # the project default (or picker if none set)
 > /kickoff add-dark-mode --opus      # claude on opus
 > /kickoff add-dark-mode --sol       # codex on gpt-5.6-sol
-> /kickoff add-dark-mode --grok      # grok-4.5
+> /kickoff add-dark-mode --grok      # newest canonical grok-4.x/5.x on offer
 > /kickoff add-dark-mode --kimi      # kimi-code on k3-256k
 > /kickoff add-dark-mode --pick      # force the interactive picker
 ```
@@ -187,7 +187,7 @@ flag picks another:
 | `--pick` | the interactive picker, even when a default is set (unavailable agents are marked, not hidden) |
 | `--fable` / `--opus` | claude on fable / opus |
 | `--codex` / `--sol` | codex on gpt-5.6-terra / gpt-5.6-sol |
-| `--grok` | grok-4.5 |
+| `--grok` | grok — newest canonical `grok-4.x/5.x` the CLI offers, resolved at launch and announced (`grok:latest`). Pin a version with `--agent grok:<id>`, e.g. `grok:grok-4.6`; a pin is never reinterpreted as latest |
 | `--kimi` | kimi-code on k3-256k (launches in two phases — see below) |
 | `--agent <cli[:model]>` | any registry entry, e.g. `--agent claude:sonnet` or `--agent codex` |
 | `--agent cc-harness:<id>` | foreign model *inside* the CC harness (only when `cc-harness-agents` is on PATH) |

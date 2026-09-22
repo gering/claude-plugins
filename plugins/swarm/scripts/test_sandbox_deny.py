@@ -465,6 +465,12 @@ class TestFailClosedDegrade(unittest.TestCase):
                 # being installed (CI has none). The probe's own behaviour is not
                 # what this test covers.
                 "_grok_has_prompt_file() { return 0; }",
+                # Stub model selection too. Unstubbed it ran the host's real
+                # `grok models` AND the compatibility probe — a metered model
+                # call from a unit test on a logged-in laptop, and "no model to
+                # run" (empty argv) on CI, which has no grok at all.
+                "_grok_models_done=1; _grok_models=grok-4.7",
+                "_grok_compat() { printf 'compat=ok\\nsource=cache\\n'; }",
                 "_assert_prompt_readable_in_jail() { return 0; }",
                 _RECORD_SANDBOXED,
                 # The subshell owns the exit → it owns the EXIT trap (else the

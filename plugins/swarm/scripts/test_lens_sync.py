@@ -605,7 +605,10 @@ check(f"adapter: no comment inside a line continuation ({_cont})", not _cont)
 # corrupts the parser. That failure is quiet at the shell level (`bash -n` stays
 # happy) and shows up only as "output format may have changed", i.e. as a lost
 # grok family. It has now happened twice while editing this very block.
-_awk = re.search(r"grok_parse_models\(\) \{\n  awk '\n(.*?)\n'\n\}", sh, re.S)
+# The parser moved to lib-grok-latest.sh (shared with work-system); the quoting
+# trap moved with it, so the pin follows the code rather than going vacuous.
+_grok_lib = (HERE / "lib-grok-latest.sh").read_text()
+_awk = re.search(r"grok_latest_parse\(\) \{\n(?:  #[^\n]*\n)*  awk '\n(.*?)\n'\n\}", _grok_lib, re.S)
 check("adapter: the models awk program is delimited", _awk)
 check("adapter: no apostrophe inside the awk program",
       bool(_awk) and "'" not in _awk.group(1))

@@ -1,0 +1,510 @@
+#!/usr/bin/env python3
+"""grok-compat.py — does this Grok model ENFORCE --json-schema? Probe once, cache.
+
+The swarm adapter is built on schema JSON. A model that merely accepts
+`--json-schema` and returns `structuredOutput: null` fails LATE, after a full
+review was paid for. That used to be guarded by a hand-maintained allowlist,
+which made every new Grok release a code edit. This replaces the list with a
+measurement:
+
+  * one tiny SYNTHETIC call — no repo data, no tools, no web, an empty temp cwd.
+    The prompt asks for a plain-English sentence and never mentions JSON, so a
+    schema-shaped answer can only come from enforcement, not from cooperation;
+  * the verdict is cached per (model, grok CLI version, probe contract version),
+    privately and atomically, and every cached record is re-validated on read;
+  * a lock makes concurrent callers (one adapter process per review cluster)
+    share ONE probe instead of each paying for their own.
+
+Usage:
+  grok-compat.py check  --model ID [--cli-version V]   cache only, never probes
+  grok-compat.py ensure --model ID [--cli-version V]   cache, else probe once
+  grok-compat.py version                               print the grok CLI version
+                                                       (the ONE parser; agents.sh
+                                                       keys the cache with it)
+  grok-compat.py known  [--cli-version V]              list every model with a
+                                                       valid cached PASS, one id
+                                                       per line (never probes)
+
+Output is `key=value` lines on stdout (compat, source, reason, model,
+cli_version, contract, actual_model, checked_at). Exit codes:
+  0  compatible            — enforced structured output was observed
+  1  incompatible          — the call completed and the output was NOT enforced
+  3  unknown               — no verdict: not cached (check), or the probe could
+                             not run/finish (timeout, launch failure, CLI error)
+  2  usage / unsafe cache directory
+A caller must treat 3 as "not established", never as success.
+"""
+import argparse
+import errno
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+# Bump when the prompt, schema, argv or acceptance rule changes: old verdicts
+# answered a different question and must not be reused.
+CONTRACT = "grok-schema-probe/v2"   # v2: isolated HOME; served model must be named
+RECORD_SCHEMA = "swarm.grok-compat/v1"
+
+NEUTRAL_SETTINGS = '{"permissions":{"allow":[],"deny":[]}}\n'
+
+PROBE_TOKEN = "swarm-grok-schema-probe-v1"
+PROBE_PROMPT = "What is 3 plus 4? Answer in one plain English sentence.\n"
+PROBE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "probe": {"type": "string", "enum": [PROBE_TOKEN]},
+        "sum": {"type": "integer"},
+    },
+    "required": ["probe", "sum"],
+    "additionalProperties": False,
+}
+
+# Any id the CLI could plausibly take as `-m` — explicit pins may be variants.
+MODEL_RE = re.compile(r"^grok-[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$")
+VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+){1,3}$")
+MAX_ID_LEN = 64
+MAX_RECORD_BYTES = 4096
+MAX_ACTUAL_LEN = 256
+MAX_STDOUT_BYTES = 262144
+
+# How long a verdict stands. A pass is re-measured occasionally because the
+# weights behind an id can change server-side; a definite fail is retried daily
+# (providers fix this); an inconclusive probe is held just long enough that the
+# sibling cluster processes of ONE review do not each re-pay for it.
+TTL = {"ok": 14 * 86400, "failed": 86400, "unknown": 600}
+# A CLI whose version cannot be read gives the key nothing to tell two builds
+# apart, so no verdict about it may outlive one review.
+TTL_UNVERSIONED = 600
+# `ensure` re-measures a pass this long BEFORE it expires. A review freezes the
+# model `ensure` returned and its voices then only `check`: without the margin a
+# pass read at 13d23h59m would expire between the prep step and the first voice.
+REFRESH_MARGIN = 86400
+CLOCK_SKEW = 120
+
+EXIT = {"ok": 0, "failed": 1, "unknown": 3}
+
+
+class UnsafeCache(Exception):
+    pass
+
+
+def cache_dir():
+    override = os.environ.get("SWARM_GROK_COMPAT_DIR")
+    if override:
+        return override
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.join(base, "gering-swarm", "grok-compat")
+
+
+def ensure_private_dir(path):
+    """Create the store 0700, or REFUSE a pre-existing one that is not private.
+
+    Refuse, never chmod: a directory someone else can write is already a place
+    where a verdict may have been planted, and tightening the mode afterwards
+    would launder whatever is in it.
+    """
+    try:
+        os.makedirs(path, mode=0o700)
+    except FileExistsError:
+        pass
+    st = os.lstat(path)
+    if not stat.S_ISDIR(st.st_mode):
+        raise UnsafeCache(f"{path} is not a directory (or is a symlink)")
+    if st.st_uid != os.getuid():
+        raise UnsafeCache(f"{path} is not owned by the current user")
+    if st.st_mode & 0o077:
+        raise UnsafeCache(f"{path} is accessible to group/other (mode {st.st_mode & 0o777:o})")
+
+
+def record_path(directory, model, cli_version):
+    key = hashlib.sha256(f"{model}\0{cli_version}\0{CONTRACT}".encode()).hexdigest()[:16]
+    return os.path.join(directory, f"{model}--{key}.json")
+
+
+def read_record(path, model, cli_version, now, margin=0):
+    """Return (record, None) for a usable verdict, else (None, why-not)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        if exc.errno == errno.ENOENT:
+            return None, "not cached"
+        return None, f"cache record unreadable ({errno.errorcode.get(exc.errno, exc.errno)})"
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None, "cache record is not a regular file"
+        if st.st_uid != os.getuid() or st.st_mode & 0o077:
+            return None, "cache record is not private to the current user"
+        if st.st_size > MAX_RECORD_BYTES:
+            return None, "cache record is oversized"
+        raw = os.read(fd, MAX_RECORD_BYTES + 1)
+    finally:
+        os.close(fd)
+    try:
+        rec = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None, "cache record is not valid JSON"
+    if not isinstance(rec, dict):
+        return None, "cache record is not an object"
+    want = {"schema": RECORD_SCHEMA, "contract": CONTRACT, "model": model, "cli_version": cli_version}
+    for k, v in want.items():
+        if rec.get(k) != v:
+            return None, f"cache record does not match this {k}"
+    if rec.get("compat") not in TTL:
+        return None, "cache record has an unknown verdict"
+    checked = rec.get("checked_at")
+    if isinstance(checked, bool) or not isinstance(checked, int):
+        return None, "cache record has no valid timestamp"
+    if checked > now + CLOCK_SKEW:
+        return None, "cache record is dated in the future"
+    ttl = TTL[rec["compat"]]
+    if rec["compat"] == "ok":
+        ttl -= margin
+    if cli_version == "unknown":
+        ttl = min(ttl, TTL_UNVERSIONED)
+    if now - checked > ttl:
+        return None, "cache record expired"
+    for k in ("reason", "actual_model"):
+        if not isinstance(rec.get(k, ""), str):
+            return None, f"cache record has a malformed {k}"
+    return rec, None
+
+
+def write_record(path, rec):
+    directory = os.path.dirname(path)
+    fd, tmp = tempfile.mkstemp(prefix=".tmp-", dir=directory)  # 0600, O_EXCL
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(rec, fh, sort_keys=True)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def one_line(text, limit=200):
+    return re.sub(r"[^\x20-\x7e]+", " ", str(text)).strip()[:limit]
+
+
+def run_bounded(argv, timeout, cwd=None, env=None):
+    """Run argv in its own process group; kill the GROUP at the deadline.
+
+    Returns (rc, stdout_bytes); rc None = the bound fired. stderr is discarded:
+    it is untrusted CLI text and nothing here may echo it.
+    """
+    try:
+        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError as exc:
+        return exc, b""
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+        return proc.returncode, out[:MAX_STDOUT_BYTES]
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        proc.communicate()
+        return None, b""
+
+
+def detect_cli_version(grok_bin):
+    rc, out = run_bounded([grok_bin, "--version"], 10)
+    if rc == 0:
+        # Leftmost dotted number, NOT \b-anchored: "grok v1.0.13" has no word
+        # boundary before the 1, and a \b regex keyed the cache as "0.13" while
+        # the adapter's grep keyed it as "1.0.13" — a miss, and a second paid probe.
+        m = re.search(r"(?<![0-9.])([0-9]+(?:\.[0-9]+){1,3})", out.decode("utf-8", "replace"))
+        if m:
+            return m.group(1)
+    return "unknown"
+
+
+def served_by(served, model):
+    """Is `served` the requested model — itself, or itself plus a build tag?
+
+    grok-4.7 is served as grok-4.7-build. A bare prefix test would also accept
+    grok-4.70-build for grok-4.7 and grok-4.7-build for a pin `grok-4`, caching
+    one model's verdict under another's id; so the character after the id must
+    start a tag (`-` then a non-digit), never continue the version.
+    """
+    if served == model:
+        return True
+    rest = served[len(model):]
+    return served.startswith(model) and len(rest) >= 2 and rest[0] == "-" and not rest[1].isdigit()
+
+
+def judge(rc, out, model=""):
+    """(compat, reason, actual_model) from one finished probe call."""
+    if isinstance(rc, OSError):
+        return "unknown", f"grok could not be launched ({errno.errorcode.get(rc.errno, rc.errno)})", ""
+    if rc is None:
+        return "unknown", "probe timed out", ""
+    if rc != 0:
+        return "unknown", f"grok exited {rc} (auth, network, denied, or the model id was rejected)", ""
+    try:
+        doc = json.loads(out.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return "unknown", "grok returned no JSON envelope", ""
+    if not isinstance(doc, dict):
+        return "unknown", "grok returned a non-object envelope", ""
+    if doc.get("type") == "error":
+        # The provider's message is WITHHELD, like every other backend's stderr:
+        # this reason is shown to the operator's session verbatim, and a string
+        # the provider controls must not become text a model reads there.
+        return "unknown", "grok returned an error envelope (message withheld; run the probe by hand to see it)", ""
+    usage = doc.get("modelUsage")
+    # Bounded: this lands in a record capped at MAX_RECORD_BYTES, and a record
+    # that is written but then rejected as oversized on read would pass prep and
+    # fail every voice.
+    actual = ",".join(sorted(one_line(k, MAX_ID_LEN) for k in usage))[:MAX_ACTUAL_LEN] if isinstance(usage, dict) else ""
+    # The served id may carry a build tag (grok-4.7 is served as grok-4.7-build),
+    # but it must BE the requested model — and the envelope has to SAY which
+    # model served it. Without that, a CLI that falls back to its default would
+    # get the default's verdict cached under the new id for 14 days.
+    if model and not (isinstance(usage, dict) and usage):
+        return "unknown", "the envelope does not name the model that served the call (no modelUsage)", ""
+    if model and not any(served_by(str(k), model) for k in usage):
+        return "unknown", f"the call was served by {actual}, not by {model}", actual
+    # From here the call COMPLETED, so a bad shape is a definite answer about the
+    # model, not about the environment. A successful exit alone proves nothing.
+    so = doc.get("structuredOutput")
+    if so is None:
+        return "failed", "call succeeded but structuredOutput is null — the schema was not enforced", actual
+    if not isinstance(so, dict) or set(so) != {"probe", "sum"}:
+        return "failed", "structuredOutput does not have the schema's exact keys", actual
+    if so["probe"] != PROBE_TOKEN:
+        return "failed", "structuredOutput ignored the schema's enum constraint", actual
+    if isinstance(so["sum"], bool) or not isinstance(so["sum"], int):
+        return "failed", "structuredOutput ignored the schema's integer constraint", actual
+    return "ok", "enforced structured output observed", actual
+
+
+def host_auth_file():
+    return os.environ.get("GROK_AUTH_FILE") or os.path.join(os.path.expanduser("~"), ".grok", "auth.json")
+
+
+def isolated_home():
+    """An ephemeral HOME/GROK_HOME for the probe, mirroring agents.sh's
+    _grok_prepare_runtime (the reference — keep the two in step).
+
+    grok loads ~/.claude/settings*.json (rules AND hooks — it ran the operator's
+    SessionStart hook), ~/.claude/plugins and the global Claude.md from $HOME,
+    and its plugin registry/MCP credentials from $GROK_HOME. A probe that
+    inherits those runs the operator's hooks outside any jail and measures a
+    model steered by their global instructions. So: a NEUTRAL settings file
+    (a merely missing one makes grok's permission engine ask, which a headless
+    turn answers by cancelling), and only auth.json (+ lock) linked back, so a
+    token refresh lands on the host file. Returns (home, env) or raises OSError.
+    """
+    home = tempfile.mkdtemp(prefix="swarm-grok-probe-home-")
+    os.makedirs(os.path.join(home, ".claude"))
+    os.makedirs(os.path.join(home, "grok"))
+    with open(os.path.join(home, ".claude", "settings.json"), "w", encoding="utf-8") as fh:
+        fh.write(NEUTRAL_SETTINGS)
+    auth = host_auth_file()
+    if os.path.isfile(auth) and os.path.getsize(auth) > 0:
+        os.symlink(auth, os.path.join(home, "grok", "auth.json"))
+        if os.path.exists(auth + ".lock"):
+            os.symlink(auth + ".lock", os.path.join(home, "grok", "auth.json.lock"))
+    env = dict(os.environ, HOME=home, GROK_HOME=os.path.join(home, "grok"))
+    return home, env
+
+
+def return_rotated_auth(home):
+    """A refresh that writes a temp file and renames it over the link replaces the
+    link with a regular file. Copy that rotated token back before the ephemeral
+    HOME is deleted, or the operator is logged out next run (same as run_grok)."""
+    linked = os.path.join(home, "grok", "auth.json")
+    if os.path.isfile(linked) and not os.path.islink(linked):
+        try:
+            shutil.copy2(linked, host_auth_file())
+        except OSError:
+            pass
+
+
+def probe(model, grok_bin, timeout):
+    work = tempfile.mkdtemp(prefix="swarm-grok-probe-")
+    home = None
+    try:
+        home, env = isolated_home()
+        prompt = os.path.join(work, "prompt.txt")
+        with open(prompt, "w", encoding="utf-8") as fh:
+            fh.write(PROBE_PROMPT)
+        argv = [grok_bin, "-m", model, "--effort", "low", "--tools", "", "--disable-web-search",
+                "--max-turns", "1", "--cwd", work,
+                "--json-schema", json.dumps(PROBE_SCHEMA, separators=(",", ":")),
+                "--prompt-file", prompt]
+        return judge(*run_bounded(argv, timeout, cwd=work, env=env), model=model)
+    finally:
+        if home:
+            return_rotated_auth(home)
+            shutil.rmtree(home, ignore_errors=True)
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def known_models(directory, cli_version, now):
+    """Model ids with a VALID cached pass for this CLI version, unordered.
+
+    The caller picks among them; ordering models is lib-grok-latest.sh's job and
+    is deliberately not re-implemented here. Every record goes through the same
+    read_record validation as a lookup, and must sit at the path its own
+    (model, version) hashes to — a record copied under another name is ignored.
+    """
+    found = []
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return found
+    for name in names:
+        if not name.endswith(".json") or "--" not in name:
+            continue
+        model = name.rsplit("--", 1)[0]
+        if len(model) > MAX_ID_LEN or not MODEL_RE.fullmatch(model):
+            continue
+        path = record_path(directory, model, cli_version)
+        if os.path.basename(path) != name:
+            continue
+        rec, _ = read_record(path, model, cli_version, now)
+        if rec and rec["compat"] == "ok":
+            found.append(model)
+    return found
+
+
+def lock(directory, path, wait):
+    """Exclusive per-record lock, bounded. Returns the fd, or None on timeout."""
+    fd = os.open(path + ".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except OSError:
+            if time.monotonic() >= deadline:
+                os.close(fd)
+                return None
+            time.sleep(0.2)
+
+
+def emit(rec, source, extra_reason=None):
+    fields = dict(rec)
+    fields["source"] = source
+    if extra_reason:
+        fields["cache_note"] = extra_reason
+    for k in ("compat", "source", "reason", "model", "cli_version", "contract",
+              "actual_model", "checked_at", "cache_note"):
+        if fields.get(k) not in (None, ""):
+            print(f"{k}={one_line(fields[k])}")
+    return EXIT[fields["compat"]]
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="grok-compat.py", description=__doc__.split("\n\n")[0])
+    ap.add_argument("mode", choices=("check", "ensure", "known", "version"))
+    ap.add_argument("--model", default="")
+    ap.add_argument("--cli-version", default="")
+    ap.add_argument("--grok-bin", default=os.environ.get("SWARM_GROK_BIN", "grok"))
+    ap.add_argument("--timeout", type=int, default=90)
+    args = ap.parse_args(argv)
+
+    if args.mode == "version":
+        print(detect_cli_version(args.grok_bin))
+        return 0
+    if args.mode == "known":
+        if args.model:
+            print("grok-compat: `known` takes no --model", file=sys.stderr)
+            return 2
+    elif len(args.model) > MAX_ID_LEN or not MODEL_RE.fullmatch(args.model):
+        print(f"grok-compat: refusing malformed model id {one_line(args.model, 80)!r}", file=sys.stderr)
+        return 2
+    if not 5 <= args.timeout <= 300:
+        print("grok-compat: --timeout must be 5..300 seconds", file=sys.stderr)
+        return 2
+    cli_version = args.cli_version or detect_cli_version(args.grok_bin)
+    if cli_version != "unknown" and not VERSION_RE.fullmatch(cli_version):
+        print(f"grok-compat: refusing malformed CLI version {one_line(cli_version, 40)!r}", file=sys.stderr)
+        return 2
+
+    directory = cache_dir()
+    try:
+        ensure_private_dir(directory)
+    except (UnsafeCache, OSError) as exc:
+        print(f"grok-compat: unsafe cache directory — {exc}", file=sys.stderr)
+        return 2
+    if args.mode == "known":
+        for model in known_models(directory, cli_version, int(time.time())):
+            print(model)
+        return 0
+    path = record_path(directory, args.model, cli_version)
+    base = {"schema": RECORD_SCHEMA, "contract": CONTRACT, "model": args.model,
+            "cli_version": cli_version}
+
+    margin = REFRESH_MARGIN if args.mode == "ensure" else 0
+    rec, why = read_record(path, args.model, cli_version, int(time.time()), margin)
+    if rec:
+        return emit(rec, "cache")
+    if args.mode == "check":
+        return emit(dict(base, compat="unknown", reason=why), "none")
+
+    try:
+        fd = lock(directory, path, args.timeout + 15)
+    except OSError as exc:
+        # e.g. a symlink planted at the lock path (O_NOFOLLOW -> ELOOP). An
+        # uncaught error would exit 1, which callers read as "this MODEL does not
+        # enforce the schema" — a verdict about a probe that never ran.
+        return emit(dict(base, compat="unknown",
+                         reason=f"the probe lock could not be taken ({errno.errorcode.get(exc.errno, exc.errno)})"), "none")
+    if fd is None:
+        return emit(dict(base, compat="unknown",
+                         reason="another probe for this model did not finish in time"), "none")
+    try:
+        # Someone else may have probed while we waited — that is the point.
+        rec, _ = read_record(path, args.model, cli_version, int(time.time()), margin)
+        if rec:
+            return emit(rec, "cache")
+        compat, reason, actual = probe(args.model, args.grok_bin, args.timeout)
+        rec = dict(base, compat=compat, reason=reason, actual_model=actual,
+                   checked_at=int(time.time()))
+        try:
+            write_record(path, rec)
+            note = None if why == "not cached" else f"replaced: {why}"
+        except OSError as exc:
+            note = f"verdict could not be cached ({errno.errorcode.get(exc.errno, exc.errno)})"
+        return emit(rec, "probe", note)
+    finally:
+        os.close(fd)
+
+
+def run(argv=None):
+    """main() behind a catch-all. An uncaught exception exits 1, and exit 1 MEANS
+    "this model does not enforce the schema" to the adapter — a full TMPDIR or a
+    bad --grok-bin would demote the newest model over a fault of the host."""
+    try:
+        return main(argv)
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001 — the point is to catch everything
+        print("compat=unknown")
+        print("source=none")
+        print(f"reason=the compatibility check itself failed ({type(exc).__name__})")
+        return 3
+
+
+if __name__ == "__main__":
+    sys.exit(run())

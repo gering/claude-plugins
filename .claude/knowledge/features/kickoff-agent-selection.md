@@ -1,10 +1,10 @@
 ---
 title: "Kickoff Agent Selection: registry, per-repo default, honest degradation"
 createdAt: 2026-07-17
-updatedAt: 2026-08-16
+updatedAt: 2026-09-21
 createdFrom: "session: 2026-07-17 (task/kickoff-agent-selection)"
-updatedFrom: "session: 2026-08-16 (task/offer-cc-harness-agents-at-kickoff, rebased onto 1.11.1)"
-pluginVersion: 1.12.0
+updatedFrom: "session: 2026-09-21 (task/auto-select-latest-grok)"
+pluginVersion: 1.9.0
 prime: false
 ---
 
@@ -181,9 +181,42 @@ checks the model is in `grok models`, not just auth. The probe is **always
 bounded** (timeout → gtimeout → a self-contained background-killer watchdog with
 fds detached so the command substitution doesn't block) so `list`/the picker
 never hangs. A failed *or* empty-but-successful (reformatted) `grok models` is
-**inconclusive → trust auth (available)**, not "model gone" — a network hiccup
+**inconclusive → trust auth (available)** *for an explicit pin* (since 1.16.0 the
+dynamic `latest` cannot be named then and is unavailable — see below), not "model gone" — a network hiccup
 or format drift must not disable the backend. codex/claude stay auth-only (no
 clean model-list command). See [[swarm-backend-adapter]] for the sibling probe.
+
+## grok's model is a dynamic token, not a version (1.16.0)
+The registry row is `--grok|grok|latest|…`: `--grok`, `grok` and `grok:latest`
+resolve at call time to the newest **canonical** id in `grok models` — exactly
+`grok-(4|5).<minor>`, integer-ordered (`5.0 > 4.20 > 4.9`). A hard-coded
+`grok-4.5` had silently become two releases stale; every Grok release was a
+code edit nobody made. Decisions worth keeping:
+
+- **Intent and selection are separate fields.** `name=grok:latest` is what a
+  project default stores (so it keeps tracking releases); `model=` and the argv
+  carry the concrete id, frozen at resolve. `model_requested/model_source/
+  model_latest/model_catalog` exist so `/kickoff` can *announce* the choice —
+  `available=yes` never meant "the latest".
+- **A pin is a pin.** `grok:<id>` (charset-vetted, synthesized from the grok
+  row so other fields stay single-sourced) is never reinterpreted as latest,
+  in either direction; an old stored `grok:grok-4.5` default keeps meaning 4.5.
+- **No fallback version.** `unreachable` (fetch failed — says nothing about
+  models), `unparseable` and `no-candidate` (valid catalog, nothing canonical)
+  are distinct states; in all three "latest" cannot be NAMED, so the entry is
+  unavailable with the reason + pin hint. The trust-auth degrade survives only
+  for pins, where there is an id to trust. `grok -m latest` is never emitted —
+  a consumer ignoring exit 3 must not be able to launch it.
+- **One algorithm, two homes.** `lib-grok-latest.sh` is byte-identical in
+  work-system and swarm, pinned by `test_grok_latest.py` in both (the check
+  skips when only one plugin is installed). Sharing by copy is what keeps the
+  plugins independent; sharing by *test* is what keeps the copies from drifting.
+- Availability matches the **exact parsed id** once the listing parses — the old
+  substring match called `grok-4.7` offered because `grok-4.7-build-fast` was.
+- The listing is fetched once per process into globals that subshells inherit
+  (`grok_models_load`, called directly — never in `$( )`).
+- A test that copies the script set into a temp dir must copy the library too;
+  a sourced sibling is a hard dependency (exit 1), by design.
 
 ## kimi: the launch shape a CLI's flags can force on you
 kimi (added 1.11.0, `--kimi` → `kimi:kimi-code/k3-256k`) is the first worker whose

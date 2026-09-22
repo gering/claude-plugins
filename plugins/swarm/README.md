@@ -192,8 +192,50 @@ Backends:
 |---------|------|-----------|
 | `claude` | probe-only | reviews run in-session via the Agent tool |
 | `codex` | external reviewer | `codex exec -s danger-full-access --ignore-user-config --ignore-rules -C <repo> -c tools.web_search=true --output-schema` under the OS jail (its own seatbelt cannot nest inside it; `-s read-only` is kept only on a jail-less host), model `gpt-5.6-sol`, `medium` by default / `xhigh` under `--max`, prompt on stdin (`-- -`); shell + file-read + web; auth via `codex login status` |
-| `grok` | external reviewer | headless `--prompt-file` with inline `--json-schema`; the model is **discovered** — the newest canonical id whose schema enforcement is verified (the current set lives in `GROK_SCHEMA_VERIFIED` in `agents.sh`), never a silent upgrade to an unverified one. Strict `--tools` allowlist (`read_file,list_dir,grep,run_terminal_command,web_search,web_fetch`) + `--permission-mode dontAsk` + `--deny` prefix rules (egress/destructive verbs) + `--cwd <repo>`, run from an ephemeral HOME/GROK_HOME with only `auth.json` linked — the OS jail's inverted write model makes the shell read-only in effect. Readiness is model-aware: auth, `--prompt-file` support, **and** a verified model on offer in `grok models`. `ready` answers usable/not-usable plus a hint; the concrete id is selected at `run` time and appears in that call's telemetry line. |
+| `grok` | external reviewer | headless `--prompt-file` with inline `--json-schema`; the model is **selected per run** — the newest canonical `grok-4.x/5.x` the CLI offers whose `--json-schema` enforcement was *measured* (see [Grok model selection](#grok-model-selection)), never a hand-maintained version list and never a silent upgrade to an unmeasured model. Strict `--tools` allowlist (`read_file,list_dir,grep,run_terminal_command,web_search,web_fetch`) + `--permission-mode dontAsk` + `--deny` prefix rules (egress/destructive verbs) + `--cwd <repo>`, run from an ephemeral HOME/GROK_HOME with only `auth.json` linked — the OS jail's inverted write model makes the shell read-only in effect. Readiness is model-aware: auth, `--prompt-file` support, **and** a selectable model. `ready` answers usable/not-usable plus a hint — it does **not** say which model runs; `agents.sh grok-model` does, and the review freezes that id onto every grok voice (it also appears in each call's telemetry line). |
 | `kimi` | external reviewer | ACP v1 over stdio (`kimi acp`), pinned to `kimi-code/k3-256k`; the complete prompt is an ACP content block, not argv. Isolated HOME/KIMI_CODE_HOME that links the host's `credentials/`+`oauth/` (links, not a copy — Moonshot rotates refresh tokens, so a refresh must land on the host file) and carries a filtered config projection. The client advertises no FS/terminal capability and approves only allowlisted read-only shell commands once and rejects every other permission request (defense-in-depth); repository immutability is OS-enforced. Invalid output or policy/protocol drift is a visible backend error, never an empty review. Requires auth, ACP, the pinned model, and a working OS jail. |
+
+### Grok model selection
+
+"grok" is a policy, not a version: **the newest canonical model the installed CLI
+offers that enforces structured output.** No release needs a code edit.
+
+- **Canonical** means exactly `grok-(4|5).<minor>`, compared as integers
+  (`5.0 > 4.20 > 4.9`). Bare majors, patch versions, and every suffixed variant
+  (`-build-fast`, `-reasoning`, dated, preview, composer, imagine), plus majors 3
+  and 6+, are never chosen automatically. The rule lives in
+  `scripts/lib-grok-latest.sh`, shipped byte-identically in the work-system plugin
+  so `/kickoff --grok` agrees without either plugin requiring the other.
+- **Compatible** is measured, not listed: `scripts/grok-compat.py` makes one
+  bounded, synthetic call — no repository data, no tools, no web, an empty temp
+  cwd, and an isolated HOME (neutral settings, only `auth.json` linked — the
+  operator's hooks, plugins and global rules never load); the prompt asks for a plain sentence, so a schema-shaped
+  `structuredOutput` can only come from enforcement. The verdict is cached per
+  (model, CLI version, probe contract) under `~/.cache/gering-swarm/grok-compat/`
+  (0700/0600, atomic writes, every record re-validated on read, non-private
+  stores refused). Passes stand 14 days (the review's prep re-measures in the
+  last day, so a frozen run cannot expire mid-review), failures 1 day,
+  inconclusive probes 10 minutes. One probe is bounded to 45 s, and a verdict
+  only counts when the call was actually served by the requested model. A lock makes concurrent processes share one probe; review voices
+  never probe at all.
+- **One model per run.** The review's prep step calls `agents.sh grok-model`
+  once and the workflow pins that id as `--model` on every grok voice; a resumed
+  or looped run keeps it. If no model could be fixed for the run, the workflow
+  **drops the grok voices and reports it** — it never lets them pick for
+  themselves (that is how a failed pin would become "latest").
+- **Degradation is explicit.** `grok-model` prints `selected`,
+  `latest_candidate`, `source` (`latest` · `older-compatible` · `last-known` ·
+  `pinned` · `none`), `catalog` (`ok` · `no-candidate` · `unparseable` ·
+  `unreachable`) and `degraded` (the reason). If the newest model fails the
+  probe, at most one further *paid* probe is spent (cached verdicts are free and
+  are consulted for up to six candidates); the fallback is named as such. If the
+  catalog cannot be read, only a *last-known* model this host already measured is
+  used — there is no baked-in default id. Otherwise grok is reported not-ready
+  with the reason.
+- **Pin deliberately** with `SWARM_GROK_MODEL=<id>` (or `run grok --model <id>`).
+  The adapter reads the variable itself, so `list`, `ready`, `grok-model` and
+  `run` all judge the same request. A pin is never reinterpreted as "latest": it
+  must be well-formed, offered and pass the same probe, or nothing runs.
 
 The prompt always reaches a backend **out-of-band** — never as an argv word — so
 the diff is bounded by model context rather than `exec`'s `MAX_ARG_STRLEN`:

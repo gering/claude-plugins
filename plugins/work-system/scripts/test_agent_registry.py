@@ -220,7 +220,8 @@ check("codex bootstrap mentions TASK.md", "TASK.md" in r["argv"][3])
 check("codex supports commit,pr only", r.get("supports") == "commit,pr")
 
 r = kv(e.run("resolve", "--grok").stdout)
-check("--grok -> grok:grok-4.5", r.get("name") == "grok:grok-4.5")
+check("--grok -> name keeps the dynamic intent (grok:latest)", r.get("name") == "grok:latest")
+check("--grok -> model is the concrete id", r.get("model") == "grok-4.5")
 check("grok argv shape", r["argv"][:3] == ["grok", "-m", "grok-4.5"])
 
 # --- kimi: the two-phase seed+continue launch argv ------------------------- #
@@ -374,7 +375,7 @@ by = {row["name"]: row for row in rows}
 check("claude always available", by["claude:fable"]["available"] is True)
 check("codex unauthed -> unavailable", by["codex:gpt-5.6-sol"]["available"] is False)
 check("codex note is login hint", "codex login" in by["codex:gpt-5.6-sol"]["note"])
-check("grok no auth -> unavailable", by["grok:grok-4.5"]["available"] is False)
+check("grok no auth -> unavailable", by["grok:latest"]["available"] is False)
 
 res = e.run("resolve", "--sol")
 check("resolve unavailable -> exit 3", res.returncode == 3)
@@ -384,43 +385,159 @@ check("resolve unavailable available=no", rr.get("available") == "no")
 e.close()
 
 # --- grok model-level availability (gated on `grok models`) ---------------- #
-# grok authed + `grok models` lists grok-4.5 -> available.
-e = Env(grok_models=("grok-4.5",))
-by = {r["name"]: r for r in json.loads(e.run("list", "--json").stdout)}
-check("grok-4.5 listed -> available", by["grok:grok-4.5"]["available"] is True)
-check("resolve --grok available -> exit 0", e.run("resolve", "--grok").returncode == 0)
+# `--grok` / `grok` / `grok:latest` are DYNAMIC: the newest canonical
+# grok-4.x/5.x the CLI lists, resolved per call. The ordering rule itself is
+# pinned in test_grok_latest.py; these pin that the registry is wired to it and
+# reports the truth about what it chose.
+def grok_resolve(e, sel="--grok"):
+    p = e.run("resolve", sel)
+    return p.returncode, kv(p.stdout)
+
+
+e = Env(grok_models=("grok-4.7", "grok-4.7-build-fast", "grok-4.6", "grok-4.5"))
+rc, r = grok_resolve(e)
+check("4.7 adoption: --grok resolves to the newest canonical id", rc == 0 and r.get("model") == "grok-4.7")
+check("...frozen into the argv", r["argv"][:3] == ["grok", "-m", "grok-4.7"])
+check("...with provenance as data", r.get("model_requested") == "latest" and r.get("model_source") == "latest"
+      and r.get("model_latest") == "grok-4.7" and r.get("model_catalog") == "ok")
+check("bare cli and grok:latest are the same dynamic selector",
+      grok_resolve(e, "grok")[1].get("model") == "grok-4.7"
+      and grok_resolve(e, "grok:latest")[1].get("model") == "grok-4.7")
+by = {x["name"]: x for x in json.loads(e.run("list", "--json").stdout)}
+check("list: NAME is grok:latest, MODEL is what it resolves to now",
+      by["grok:latest"]["model"] == "grok-4.7" and by["grok:latest"]["available"] is True)
 e.close()
 
-# grok authed but the model is NOT in `grok models` (a model dropped/renamed
-# between releases) -> unavailable at probe time, so the launch is refused
-# cleanly instead of erroring at runtime with "unknown model id". Data-driven,
-# not a hardcoded drop.
-e = Env(grok_models=("grok-9.9-imaginary",))
-by = {r["name"]: r for r in json.loads(e.run("list", "--json").stdout)}
-check("grok-4.5 not listed -> unavailable", by["grok:grok-4.5"]["available"] is False)
-check("unlisted-model note mentions the model list",
-      "grok models" in by["grok:grok-4.5"]["note"])
-check("resolve --grok unavailable -> exit 3", e.run("resolve", "--grok").returncode == 3)
+e = Env(grok_models=("grok-4.9", "grok-4.20", "grok-5.0", "grok-5.1-preview", "grok-6.0", "grok-5"))
+check("a later release is adopted with no code edit, ordered numerically",
+      grok_resolve(e)[1].get("model") == "grok-5.0")
 e.close()
 
-# grok authed but `grok models` fetch FAILS (unreachable/offline/timed out) ->
-# inconclusive, not a drop: trust auth so a network hiccup can't wrongly block a
-# launch. (A global flag can't carry this out of the command-substitution
-# subshell, so the fetch status must ride the function's exit code.)
+# An explicit pin is a pin: never reinterpreted as latest, in either direction.
+e = Env(grok_models=("grok-4.7", "grok-4.6", "grok-4.7-build-fast"))
+rc, r = grok_resolve(e, "grok:grok-4.6")
+check("pin resolves to itself, not to latest",
+      rc == 0 and r.get("name") == "grok:grok-4.6" and r.get("model") == "grok-4.6"
+      and r["argv"][:3] == ["grok", "-m", "grok-4.6"])
+check("pin reports itself as pinned AND names the newer latest",
+      r.get("model_source") == "pinned" and r.get("model_latest") == "grok-4.7")
+rc, r = grok_resolve(e, "grok:grok-4.7-build-fast")
+check("a variant may be pinned deliberately", rc == 0 and r.get("model") == "grok-4.7-build-fast")
+rc, r = grok_resolve(e, "grok:grok-4.5")
+check("a pin the CLI does not offer -> exit 3, NOT silently latest",
+      rc == 3 and r.get("model") == "grok-4.5" and "grok models" in r.get("note", ""))
+p = e.run("default", "set", "grok:grok-4.6")
+check("a pin can be stored as the project default", p.returncode == 0
+      and e.run("default", "get").stdout.strip() == "grok:grok-4.6")
+p = e.run("default", "set", "grok:latest")
+check("the dynamic name can be stored as the project default", p.returncode == 0
+      and e.run("default", "get").stdout.strip() == "grok:latest")
+for bad in ("grok:grok-4.6;id", "grok:grok-$(id)", "grok:grok-4.6 -x", "grok:gpt-5"):
+    check(f"malformed pin is an unknown selector: {bad!r}", e.run("resolve", bad).returncode == 2)
+e.close()
+
+# exact id, not substring: only the VARIANT is offered.
+e = Env(grok_models=("grok-4.7-build-fast", "grok-4.6"))
+rc, r = grok_resolve(e, "grok:grok-4.7")
+check("grok-4.7 is not 'offered' just because grok-4.7-build-fast is", rc == 3)
+check("...and latest skips the variant", grok_resolve(e)[1].get("model") == "grok-4.6")
+e.close()
+
+# A VALID catalog with no canonical candidate -> unavailable, with that reason.
+e = Env(grok_models=("grok-9.9-imaginary", "grok-3-mini"))
+rc, r = grok_resolve(e)
+check("no canonical model -> exit 3, model stays `latest`", rc == 3 and r.get("model") == "latest")
+check("...catalog=no-candidate and the note says so + how to pin",
+      r.get("model_catalog") == "no-candidate" and "canonical" in r.get("note", "")
+      and "grok:<id>" in r.get("note", ""))
+check("...and NO argv is emitted (`grok -m latest` must never be launchable)", not r.get("argv"))
+by = {x["name"]: x for x in json.loads(e.run("list", "--json").stdout)}
+check("list: unresolved latest is unavailable", by["grok:latest"]["available"] is False)
+e.close()
+
+# FAILED discovery is a different answer from "no candidate": it says nothing
+# about models. A dynamic selector cannot name a model then (no baked-in id to
+# fall back to), while an explicit PIN still trusts auth, as before.
 e = Env(grok_models=(), grok_models_ok=False)
-by = {r["name"]: r for r in json.loads(e.run("list", "--json").stdout)}
-check("grok models unreachable -> assumed available", by["grok:grok-4.5"]["available"] is True)
-check("unreachable note is soft", "unreachable" in by["grok:grok-4.5"]["note"])
-check("resolve --grok available when fetch fails", e.run("resolve", "--grok").returncode == 0)
+rc, r = grok_resolve(e)
+check("unreachable catalog -> latest cannot be named -> exit 3", rc == 3 and not r.get("argv"))
+check("...catalog=unreachable (distinct from no-candidate), note offers the pin",
+      r.get("model_catalog") == "unreachable" and "unreachable" in r.get("note", "")
+      and "grok:<id>" in r.get("note", ""))
+rc, r = grok_resolve(e, "grok:grok-4.6")
+check("unreachable catalog + explicit pin -> availability assumed (a network hiccup must not block)",
+      rc == 0 and "unreachable" in r.get("note", "") and r["argv"][:3] == ["grok", "-m", "grok-4.6"])
 e.close()
 
-# grok `models` SUCCEEDS (exit 0) but the parser extracts nothing (a reformatted
-# listing that dropped the `*` bullet) -> inconclusive, NOT "model gone": trust
-# auth so a format-drift release doesn't silently disable the whole grok backend.
+# Fetched fine but unreadable (format drift) -> same split, third state.
 e = Env(grok_models=(), grok_models_ok=True)
-by = {r["name"]: r for r in json.loads(e.run("list", "--json").stdout)}
-check("grok models empty-but-ok -> assumed available", by["grok:grok-4.5"]["available"] is True)
-check("empty note is soft", "assumed" in by["grok:grok-4.5"]["note"])
+rc, r = grok_resolve(e)
+check("unparseable catalog -> exit 3 with catalog=unparseable",
+      rc == 3 and r.get("model_catalog") == "unparseable")
+check("unparseable catalog + pin -> assumed available", grok_resolve(e, "grok:grok-4.6")[0] == 0)
+e.close()
+
+def raw_grok(e, listing):
+    """Replace the grok stub with one printing `listing` verbatim and counting calls."""
+    stub = e.harness_bin.parent / "grok"
+    e.grok_calls = e.harness_bin.parent.parent / "grok_calls"
+    (e.harness_bin.parent.parent / "grok_listing").write_text(listing)
+    stub.write_text('#!/bin/sh\nif [ "$1" = "models" ]; then echo x >>"%s"; cat "%s"; fi\nexit 0\n'
+                    % (e.grok_calls, e.harness_bin.parent.parent / "grok_listing"))
+    stub.chmod(0o755)
+
+
+def grok_call_count(e):
+    n = len(e.grok_calls.read_text().split()) if e.grok_calls.exists() else 0
+    if e.grok_calls.exists():
+        e.grok_calls.unlink()
+    return n
+
+
+# A model the CLI lists WITH withdrawal wording: never auto-selected, but a
+# deliberate pin is honoured (deprecated is not "rejected by -m") and says so.
+e = Env()
+raw_grok(e, "Available models:\n  * grok-4.7 (default)\n  - grok-4.8 (deprecated)\n  - grok-4.6 [sunset 2026-12]\n"
+            "  - grok-5.1 (coming soon)\n  - grok-4.2 [unavailable]\n")
+check("withdrawn wording: latest skips it", grok_resolve(e)[1].get("model") == "grok-4.7")
+rc, r = grok_resolve(e, "grok:grok-4.6")
+check("withdrawn wording: an explicit pin still launches, with a note",
+      rc == 0 and "withdrawal" in r.get("note", "") and r["argv"][:3] == ["grok", "-m", "grok-4.6"])
+for nope in ("grok:grok-5.1", "grok:grok-4.2"):
+    rc, r = grok_resolve(e, nope)
+    check(f"{nope}: listed as NOT usable (coming soon/unavailable) -> refused, with that reason",
+          rc == 3 and "not usable" in r.get("note", ""))
+check("...but a pin that is on NO bullet is still refused", grok_resolve(e, "grok:grok-4.5")[0] == 3)
+check("...and a substring of a listed id is not a bullet match", grok_resolve(e, "grok:grok-4")[0] == 3)
+
+# One `grok models` call per invocation, whatever the path.
+grok_call_count(e)
+grok_resolve(e)
+check("resolve --grok fetches the listing exactly once", grok_call_count(e) == 1)
+grok_resolve(e, "grok:grok-4.7")
+check("resolve <pin> fetches the listing exactly once", grok_call_count(e) == 1)
+e.run("list", "--tsv")
+check("list fetches the listing exactly once", grok_call_count(e) == 1)
+e.close()
+
+# NON-empty but unparseable (format drift: no bullets). The pin keeps the
+# drift-tolerant substring answer — labelled as an assumption — and an id that
+# appears nowhere is still refused.
+e = Env()
+raw_grok(e, "models: grok-4.7, grok-4.5\n")
+rc, r = grok_resolve(e, "grok:grok-4.5")
+check("unreadable listing containing the pin -> assumed available, and SAYS assumed",
+      rc == 0 and "assumed" in r.get("note", "") and r.get("model_catalog") == "unparseable")
+check("unreadable listing NOT containing the pin -> exit 3", grok_resolve(e, "grok:grok-4.4")[0] == 3)
+check("unreadable listing -> latest cannot be named", grok_resolve(e)[0] == 3)
+check("an empty pin id is not a selector", e.run("resolve", "grok:grok-").returncode == 2)
+check("...nor storable as a default", e.run("default", "set", "grok:grok-").returncode == 2)
+e.close()
+
+e = Env(grok_authed=False)
+rc, r = grok_resolve(e)
+check("not logged in -> the auth note wins, catalog not probed",
+      rc == 3 and "grok login" in r.get("note", "") and r.get("model_catalog") == "not-probed")
 e.close()
 
 # --- kimi model-level availability (same contract as grok) ----------------- #
@@ -894,7 +1011,7 @@ check("claude gets the skill, not the bootstrap prompt",
 import shutil
 spacey = Path(tempfile.mkdtemp()) / "My Projects" / "scripts"
 spacey.mkdir(parents=True)
-for f in ("agent-registry.sh", "lib-bounded.sh"):
+for f in ("agent-registry.sh", "lib-bounded.sh", "lib-grok-latest.sh"):
     src = HERE / f
     if src.exists():
         shutil.copy(src, spacey / f)

@@ -414,7 +414,28 @@ if [ -n "${SWARM_TIMEOUT:-}" ]; then
 fi
 echo "SWARM_CFG_LINE=$SWARM_CFG_LINE"
 echo "JAIL=$JAIL"
-echo "LIVE_JSON=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json | tr -d '\n')"
+# The grok model for THIS run, selected ONCE, before `list` (whose grok readiness
+# then hits the compatibility cache this call filled — at most one or two bounded
+# synthetic probes are ever paid, here, never per voice). SWARM_GROK_MODEL is the
+# operator's deliberate pin; unset means "newest compatible canonical model". The
+# ADAPTER reads that variable itself — it is deliberately not passed as an
+# argument: `${VAR:+--model "$VAR"}` is one word under zsh (no word splitting),
+# which turned a pin into "Unknown flag", an empty token, and a run on "latest".
+# Only charset-safe fields go into the token; the free-text reason is echoed
+# separately for the announcement and never reaches a command line.
+# Skipped when the diff is oversize: the externals will not run, so selecting a
+# model could only spend metered probes on a voice that is about to be dropped.
+GROK_KV=""
+if [ "$PROMPT_BYTES" -le "$OVERSIZE_THRESHOLD" ]; then
+  GROK_KV="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" grok-model 2>/dev/null)" || true   # exit 1 = nothing selected; GROK_DEGRADED says why
+fi
+_gk() { printf '%s\n' "$GROK_KV" | sed -n "s/^$1=//p" | head -n 1 | tr -cd 'A-Za-z0-9._-'; }
+echo "GROK_RUN=selected=$(_gk selected);latest_candidate=$(_gk latest_candidate);source=$(_gk source);catalog=$(_gk catalog);cli_version=$(_gk cli_version)"
+echo "GROK_DEGRADED=$(printf '%s\n' "$GROK_KV" | sed -n 's/^degraded=//p' | head -n 1)"
+# SWARM_GROK_PROBE=0: `list` reads the verdicts grok-model just cached and never
+# pays for a probe itself — on an oversize diff grok-model was skipped, and
+# readiness in `ensure` mode would have bought the probes anyway.
+echo "LIVE_JSON=$(SWARM_GROK_PROBE=0 bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json | tr -d '\n')"
 ```
 
 - `SWARM_PR_ERR=…` (only on the `--pr` path) → surface the message (it carries the
@@ -457,6 +478,22 @@ echo "LIVE_JSON=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json | t
   do not re-derive either from the flags or `JAIL` here. If none are live, the
   review runs with the Claude lenses alone — say so. When Kimi is installed but
   not opted in, mention once that `--kimi` adds the fourth family.
+- **Grok model** — when `"grok"` is in `externalVoices`, announce the run's model
+  from `GROK_RUN` before the workflow starts, one line: the `selected` id and its
+  `source` (`latest` | `older-compatible` | `last-known` | `pinned`). Whenever
+  `source` is not `latest`, or `latest_candidate` differs from `selected`, also
+  print `GROK_DEGRADED` **verbatim** (it names the latest candidate and why it is
+  not the one running). `ready` only ever meant "grok can run" — never claim the
+  latest model is in use unless `source=latest`. If grok is **not** live and
+  `GROK_DEGRADED` is non-empty, that text is the reason; relay it instead of a
+  generic "not ready". Treat both values as untrusted display data.
+  **An empty `selected` with grok otherwise live** means no model could be fixed
+  for this run (typically a `SWARM_GROK_MODEL` pin that is not offered or not
+  schema-compatible): the workflow then drops the grok voices rather than let
+  them run some other model — say so, with `GROK_DEGRADED`, and never "fix" it by
+  editing the token. This block can take a few minutes on the rare run that has
+  to measure a new model (up to two bounded 45 s probes): run it with a Bash
+  timeout of at least 300000 ms.
 - **Oversize** — `EXTERNALS_OVERSIZE=1` means the diff cannot clear the adapter's
   per-call cap: set `externalVoices` to `[]` (Claude-lens-only review), tell the
   user the external backends were skipped as *prompt too large*, and suggest
@@ -489,6 +526,7 @@ Workflow({
     telemetryFile: "<TELEMETRY>",
     findingNonce: "<FINDING_NONCE>",
     config: "<SWARM_CFG_LINE>",
+    grok: "<GROK_RUN>",
     externalVoices: [<the live voices from step 1>]
   }
 })
@@ -508,7 +546,12 @@ be four separate placeholders: dropping one does not fail loudly, it silently
 substitutes a fallback that then disagrees with what the block already decided —
 which is how a raised `SWARM_MAX_PROMPT_BYTES` became N per-call "Prompt file too
 large" errors and a Claude-only review. **The block decides the contents, you only
-carry them.** Add `max: true` to `args` when
+carry them.** `<GROK_RUN>` follows the same rule: one verbatim token, which the
+workflow turns into an explicit `--model` on every grok voice, so the whole run
+uses ONE concrete model. **A run keeps its model:** on a Workflow resume
+(`resumeFromRunId`) and in `--loop` rounds ≥ 2, pass the `GROK_RUN` token of the
+run's FIRST prep block, not a newer one — a model released mid-run must not split
+one review across two models (if grok is no longer live, drop the voice as usual). Add `max: true` to `args` when
 `--max` was given (step 1 stripped it) — the deepest-effort profile. Add
 `claude: false` to `args`
 for an **external-only control run** (codex + grok + kimi when live, no Claude finder
@@ -601,6 +644,7 @@ Then the balance block (ALWAYS, this shape), from `balance`:
 Bilanz:  <total> Findings (🔴<c> 🟡<w> ⚪<m> · <design> Design) · Konsens <consensus> · Solo <solo> · REFUTED <refuted> · Verdict ✅<a> 🟨<p> ❌<d>
 Agents:  <model> <findings> · …   (from balance.agents; EVERY backend is multi-voice — one call per gated cluster, per lens under --max. Render each backend's voice count so the topology is honest, e.g. `opus×5 7 · gpt×5 3 · grok×5 5 · kimi×5 4`; claude runs in-session, codex/grok/kimi through the adapter. When `failedVoices > 0`, append `(<failedVoices> ohne Ergebnis)` to THAT backend — `grok×5 0` alone reads as "reviewed, found nothing", which is exactly the sentence three silent runs printed while most of their calls were being denied.)
 Lenses:  <gate.run joined>  —  gated-out: <gate.skip lenses>
+Grok:    <balance.grokModel.model> (<balance.grokModel.source>)   (ONLY when balance.grokModel is non-null. When `source` is not `latest`, or `latest` differs from `model`, append ` — latest on offer: <balance.grokModel.latest>`; "grok×5" alone never says WHICH model reviewed, and a fallback/pinned model must not read as the newest. When `balance.grokDropped` is true print instead: `Grok:    nicht gelaufen — kein Modell festlegbar`; the coverage note carries the reason.)
 ```
 
 Then, when present:

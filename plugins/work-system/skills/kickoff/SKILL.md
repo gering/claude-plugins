@@ -42,7 +42,7 @@ and `add-dark-mode` is the task. Every other selector is valueless. An optional
 | `--pick` | the interactive picker (even when a default is set) |
 | `--fable` / `--opus` | claude on fable / opus |
 | `--codex` / `--sol` | codex on gpt-5.6-terra / gpt-5.6-sol |
-| `--grok` | grok-4.5 |
+| `--grok` | grok — the **newest canonical `grok-4.x/5.x`** the CLI offers (resolved at launch); pin with `--agent grok:<id>` |
 | `--kimi` | kimi-code on k3-256k (two-phase launch — see step 14b) |
 | `--agent <cli[:model]>` | any registry entry, e.g. `--agent claude:sonnet` or `--agent codex` |
 | `--agent cc-harness:<id>` | foreign model *inside* the CC harness (only when `cc-harness-agents` is on PATH; e.g. `cc-harness:grok`) |
@@ -141,6 +141,15 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
         gateway)." This is a visibility line, **not** a prompt: a committed
         default from a cloned repo shouldn't silently route your code off-Claude,
         but it also shouldn't block. Claude defaults launch with no such line.
+    - **Whenever the resolved worker is `grok:…`**, say WHICH model runs — the
+      selector is dynamic, so "grok" alone is not an answer. Read
+      `bash "$REG" resolve "$SELECTOR"` and put `model=` plus `model_source=` in
+      the announce line: "grok → **grok-4.7** (latest canonical model on offer)"
+      or "grok → **grok-4.6** (pinned; latest on offer is `model_latest=`)". If it
+      exits 3 with `model=latest`, the newest model could not be NAMED: relay
+      `note=` verbatim (it distinguishes an unreachable catalog from one without
+      a canonical model and offers the pin `--agent grok:<id>`). Never substitute
+      a version yourself, and never describe `available=yes` as "the latest".
     - **Whenever the resolved worker is `kimi:…`** — default, flag or picker alike —
       the announce line must ALSO say it runs **unattended**: e.g. "kimi starts
       working on TASK.md immediately, without tool-approval prompts." kimi is the
@@ -195,7 +204,10 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
          resolves to.** (claude's first row is `fable`, so "claude — fable (also:
          opus, sonnet)"; labelling a non-default model and then resolving via the
          bare CLI silently launches a different one.) If the user wants a named
-         alternate, set `SELECTOR` to the full `cli:model` instead.
+         alternate, set `SELECTOR` to that row's **field 1 (`name`)** instead — never
+         assemble `cli:model` from fields 2+3: for grok, field 3 is the id `latest`
+         resolved to *right now*, so `grok:<field 3>` would silently PIN it (and a
+         saved default would stop tracking releases). The selector is `grok:latest`.
       3. **Order the CLIs by this fixed rule** — with 4 shipped CLIs and a reserved
          aggregate slot the set does not fit, so *which* CLI drops out must not be
          improvisation that differs run to run:
@@ -444,7 +456,7 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     Worktree created and launched in herdr!
 
     Tab:      <LABEL>   (workspace <HERDR_WORKSPACE_ID>, opened in the background)
-    Agent:    <cli:model>
+    Agent:    <name= line>  (grok: add "→ <model=> (<model_source=>)" from step 12 — `grok:latest` alone does not say what runs)
     Location: .claude/worktrees/<task-name>
     Branch:   task/<task-name>
 
@@ -471,7 +483,7 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
 
     Location: .claude/worktrees/<task-name>
     Branch:   task/<task-name>
-    Agent:    <cli:model from the `name=` line>
+    Agent:    <the `name=` line; for grok add "→ <model=> (<model_source=>)">
     Task file: TASK.md (copied into the worktree)
     Mandate:   MANDATE.md — <preset>, gate <terminal_gate>, <n> review round(s).
                Edit it by hand to widen or narrow the lane.
