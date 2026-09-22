@@ -1045,18 +1045,19 @@ subcmd_resolve() {
   # and any later manual relaunch of this record run the same model, whatever is
   # released meanwhile. The provenance lines let the skill ANNOUNCE what was
   # chosen and why, instead of implying "available" means "the latest".
-  local name="$cli:$model" grok_unresolved=""
+  # Resolved here, PRINTED only after the status producer has completed below:
+  # a provenance line on stdout ahead of a failed status would be exactly the
+  # partial record this function refuses to publish.
+  local name="$cli:$model" grok_unresolved="" grok_requested="" grok_source=""
   if [ "$cli" = grok ]; then
     grok_resolve_latest
-    printf 'model_requested=%s\n' "$model"
+    grok_requested="$model"
     if [ "$model" = "$GROK_DYNAMIC" ]; then
-      printf 'model_source=latest\n'
+      grok_source=latest
       if [ -n "$GROK_CONCRETE" ]; then model="$GROK_CONCRETE"; else grok_unresolved=1; fi
     else
-      printf 'model_source=pinned\n'
+      grok_source=pinned
     fi
-    printf 'model_latest=%s\n' "$GROK_CONCRETE"
-    printf 'model_catalog=%s\n' "$GROK_CATALOG"
   fi
 
   # A line is not producer completion: process substitution can exit later and
@@ -1074,6 +1075,10 @@ subcmd_resolve() {
     avail=no; note="$GROK_WHY"
   fi
 
+  if [ -n "$grok_source" ]; then
+    printf 'model_requested=%s\nmodel_source=%s\nmodel_latest=%s\nmodel_catalog=%s\n' \
+      "$grok_requested" "$grok_source" "$GROK_CONCRETE" "$GROK_CATALOG"
+  fi
   emit_record "$name" "$cli" "$model" "$avail" "$supports" \
     "$mode" "$kind" "$note" "$model" "$session"
 }

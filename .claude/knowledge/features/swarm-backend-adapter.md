@@ -515,6 +515,11 @@ backend rc null.
   remain not-ready; do not confuse this model-uncertainty fallback with the
   intentionally strict auth-probe behavior below. The CLI may refresh its own
   auth/cache even though the probe generates no review.
+  Because the answer can never change the verdict, only `ready`/`list` probe
+  it (where its hint is shown); `run` skips it via a void setter, since each
+  voice otherwise paid an app-server start for nothing. And "the check did not
+  run" is reserved for an UNREADABLE catalog — a model absent from a catalog
+  that was read gets its own advisory line, or the operator hunts a broken probe.
   Evidence and live-validation status live in
   `plugins/swarm/docs/profile-measurements.md`.
 - **Model-aware readiness beats an auth-only check** (swarm 0.4.3). grok drops

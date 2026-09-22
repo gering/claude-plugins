@@ -60,6 +60,22 @@ harness_on_path() { return 1; }
                 self.assertEqual(result.returncode, 41, result.stderr)
                 self.assertEqual(result.stdout, "")
 
+    def test_failed_status_after_grok_resolution_publishes_nothing(self):
+        # grok resolves its concrete model BEFORE the status producer runs, and
+        # it reports provenance lines. Printed eagerly, those lines reached stdout
+        # ahead of a failed status: a partial record under a non-zero exit.
+        resolver = ("grok_resolve_latest() { GROK_CONCRETE=grok-4.7; GROK_CATALOG=ok; GROK_WHY=; }\n")
+        failing = resolver + "entry_status() { printf 'yes\\tlooks-ready\\n'; return 41; }\n"
+        result = self.run_shell(failing + "subcmd_resolve --grok\n")
+        self.assertEqual(result.returncode, 41, result.stderr)
+        self.assertEqual(result.stdout, "")
+        # ...and on success the provenance still arrives, with the record.
+        result = self.run_shell(resolver + "subcmd_resolve --grok --session example\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for line in ("model_requested=latest\n", "model_source=latest\n",
+                     "model_latest=grok-4.7\n", "model_catalog=ok\n", "available=yes\n"):
+            self.assertIn(line, result.stdout)
+
     def test_failed_row_producers_cannot_publish_partial_records(self):
         cases = (
             ("registry_rows() { printf '%s\\n' '--kimi|kimi|kimi-code/k3-256k|resume|pane-run|kimi'; return 42; }\n",

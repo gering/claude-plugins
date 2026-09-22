@@ -250,6 +250,65 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual(flag(argv, "--tools"), str(externals[backend]["tools"]).lower())
             self.assertEqual(flag(argv, "--lens-instr-sum"), checksum(instruction))
 
+    def test_model_id_grammar_agrees_across_layers(self):
+        # One model id crosses four validators: the staged-map accessor, the
+        # workflow's externalFlags, the adapter's --model check and its Codex
+        # catalog parser. They drifted apart once ('+' allowed only in the
+        # adapter), so an id could pass one layer and be refused by the next.
+        import profiles
+        adapter = (HERE / "agents.sh").read_text(encoding="utf-8")
+        found = {
+            "profiles.py": profiles.MODEL.pattern.removesuffix(r"\Z"),
+            "workflow": re.search(r"/\^(\[A-Za-z0-9\]\[[^\]]*\]\*)\$/\.test\(b\.model\)", SOURCE).group(1),
+            "adapter validate_model": re.search(r'validate_model\(\) \{\n\s*\[\[ "\$1" =~ \^(\S+)\$ \]\]', adapter).group(1),
+            "adapter catalog": re.search(r're\.fullmatch\(r"(\[A-Za-z0-9\]\[[^"]*)", name\)', adapter).group(1),
+        }
+        samples = ["gpt-6-astra", "gpt-5.6-sol", "kimi-code/k3-256k", "grok-4.7", "a+b", "x.y:z_1",
+                   "-x", "+x", "a b", "a$b", "a;b", "a`b", "a'b", "a|b", ""]
+        verdicts = {name: [bool(re.fullmatch(pattern, sample)) for sample in samples]
+                    for name, pattern in found.items()}
+        reference = verdicts["profiles.py"]
+        for name, verdict in verdicts.items():
+            self.assertEqual(verdict, reference, f"{name} disagrees with profiles.py on {samples}")
+        self.assertTrue(all(reference[:6]) and not any(reference[6:]))
+
+    def test_readme_matrix_matches_profiles(self):
+        # The README restates the matrix for readers; nothing else pinned it, so
+        # a profile edit could leave the user-facing table silently wrong.
+        text = (PLUGIN / "README.md").read_text(encoding="utf-8")
+        section = text.split("## Review profiles", 1)[1]
+        lines = section.splitlines()
+        start = next(i for i, line in enumerate(lines) if line.startswith("| Setting |"))
+        table = []
+        for line in lines[start + 2:]:
+            if not line.startswith("|"):
+                break
+            table.append(line)
+        rows = {}
+        for line in table:
+            label, *cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            rows[label] = cells
+        def pair(spec, null_label):
+            return f"{spec['model'] if spec['model'] is not None else null_label} / {spec['effort']}"
+        expect = {
+            "Gate": lambda p: pair(p["stages"]["gate"], "session model"),
+            "Finders / verify": lambda p: pair(p["stages"]["finder"], "session model"),
+            "Merge": lambda p: pair(p["stages"]["merge"], "session model"),
+            "Transport wrappers": lambda p: pair(p["stages"]["transport"], "session model"),
+            "Codex": lambda p: pair(p["externals"]["codex"], "default"),
+            "Grok": lambda p: pair(p["externals"]["grok"], "discovered"),
+            "Kimi (opt-in)": lambda p: pair(p["externals"]["kimi"], "default"),
+            "Fan-out unit": lambda p: p["unit"],
+            "Kimi tools / budget": lambda p: f"{str(p['externals']['kimi']['tools']).lower()} / {p['externals']['kimi']['toolBudget']}",
+        }
+        self.assertEqual(set(rows), set(expect))
+        for index, name in enumerate(NAMES):
+            profile = PROFILES[name]
+            self.assertEqual(profile["stages"]["finder"], profile["stages"]["verify"],
+                             "README folds finders and verify into one row")
+            for label, render in expect.items():
+                self.assertEqual(rows[label][index], render(profile), f"README {label} / {name}")
+
     def test_staged_accessor_and_fail_closed_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
             staged = Path(tmp) / "staged.js"

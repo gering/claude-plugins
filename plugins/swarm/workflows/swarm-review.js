@@ -853,7 +853,7 @@ const lensInstr = (u) =>
 // The exact scope instruction feeds BOTH argv and its checksum. The adapter
 // appends the backend tool contract from the explicit policy flags below.
 const externalFlags = (b) => {
-  if (b.model !== null && (typeof b.model !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(b.model))) {
+  if (b.model !== null && (typeof b.model !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:/+-]*$/.test(b.model))) {
     throw new Error(`Invalid ${b.backend} profile model`)
   }
   if (typeof b.tools !== 'boolean' || !Number.isInteger(b.toolBudget) || b.toolBudget < 0 || b.toolBudget > 1000 ||
@@ -1566,7 +1566,8 @@ findings.forEach((c, i) => { c.num = i + 1 })
 // needs a registered workflow to surface — tracked as P4 wiring.
 // Display only model selections we actually passed. Inherited session models
 // and discovered Grok models have no concrete id here; telemetry has the latter.
-const MODEL_LABEL = { claude: PROFILE.stages.finder.model || 'session', codex: PROFILE.externals.codex.model, grok: PROFILE.externals.grok.model || 'grok', kimi: PROFILE.externals.kimi.model }
+// grok's profile model is null by design; the concrete id is the run's frozen one.
+const MODEL_LABEL = { claude: PROFILE.stages.finder.model || 'session', codex: PROFILE.externals.codex.model, grok: GROK_RUN.model || 'grok', kimi: PROFILE.externals.kimi.model }
 const agents = {}
 for (const v of voices) {
   const a = agents[v.backend] || (agents[v.backend] = { backend: v.backend, model: MODEL_LABEL[v.backend] || v.backend, voices: 0, failedVoices: 0, findings: 0, ok: true })

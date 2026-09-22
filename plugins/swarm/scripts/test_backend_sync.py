@@ -135,6 +135,15 @@ check("workflow registers grok from the profile map", "backend: 'grok', ...PROFI
 for profile, effort in (("quick", "low"), ("default", "medium"), ("max", "medium")):
     check(f"grok {profile} profile effort", PROFILES[profile]["externals"]["grok"]["effort"] == effort)
 
+# A lone `read … < <(producer)` returns after the first line while the producer
+# may still be running; its late SIGCHLD can interrupt a later Bash 3.2 printf
+# with EINTR and truncate a record (work-system's registry lost launches to it,
+# and the Kimi metrics reader repeated it). Capture with `$(…)` instead. Loops
+# that read to EOF (`done < <(…)`) are a different shape and not matched here.
+_single_reads = [line.strip() for line in ADAPTER.splitlines()
+                 if re.match(r"\s*read\b[^#]*<\s*<\(", line)]
+check(f"adapter: no single-line `read < <(producer)` ({_single_reads})", not _single_reads)
+
 if FAILS:
     print("backend-sync tests FAILED:")
     for failure in FAILS:

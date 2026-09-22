@@ -346,14 +346,18 @@ the diff out of the script, above). Claude applies edits between rounds.
   smaller contracts alone do not establish token/quota savings.
 
 - **Per-backend cluster allowlist** (`EXTERNAL_BACKENDS[].clusters`, 0.11.0): Kimi
-  reviews only `breakage` + `threat` on both profiles. Moonshot meters a 5-hour
+  reviews only `breakage` + `threat` in every profile. Moonshot meters a 5-hour
   AND a 7-day quota; a five-cluster review (5 × ~370 KiB prompts plus tool loops)
   hit the 5-hour limit mid-run and the 7-day one after two runs (2026-09-07), so
   the fourth family is spent where it changes verdicts (correctness/removed-
   behavior, security/adversarial) and reach/design/consistency keep three
-  families. Under `--max` the filter goes by lens membership. The appended Kimi
-  contract also carries a tool budget (≤ 8 calls) so agentic loops stop
-  re-reading what the diff already shows. Effort is at the k3 floor (`low`).
+  families. Under `--max` the filter goes by lens membership. Its tool policy and
+  effort come from the profile map (0.13.0), not one fixed contract: `--quick`
+  is diff-only (`tools:false`, budget 0 — the prohibition is stated at the TOP
+  of the prompt too, before the shared "you MAY read" line, and the ACP client
+  discards any session that uses a tool); default and `--max` allow tools with
+  an advisory budget of 8 calls. Effort is the k3 floor (`low`) for quick and
+  default, `high` under `--max`.
   Even so a historical two-cluster run drained the 5-hour window. Tool-loop
   context amplification was the working explanation, not a measured billing
   multiplier; ACP bytes/call counts cannot establish caching or quota usage.

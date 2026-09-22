@@ -17,7 +17,7 @@ EFFORTS = {
     "grok": {"low", "medium", "high"},
     "kimi": {"low", "high", "max"},
 }
-MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*\Z")
+MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]*\Z")
 
 
 def profile_name(value: object) -> str:

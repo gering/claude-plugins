@@ -252,6 +252,11 @@ TELEMETRY_BYTES=""
 # the adapter's exit code — otherwise a timeout (124) and a plain failure both
 # reach the trap as exit 1 and the one distinction worth logging is lost.
 TELEMETRY_RC=""
+# Observed tool calls (Kimi only). Set here, not merely where Kimi fills them:
+# an unset global would let an inherited environment variable of the same name
+# reach the raw JSON below on every codex/grok record. null = not observed.
+TELEMETRY_TOOL_CALLS=null
+TELEMETRY_TOOL_CALLS_COMPLETE=false
 
 _json_escape() {
   # Minimal JSON string escaping: backslash first (or it would double-escape the
@@ -334,9 +339,14 @@ _write_telemetry() {
   local _b _u _e _m
   _b="$(_json_escape "$TELEMETRY_BACKEND")"; _u="$(_json_escape "$TELEMETRY_UNIT")"
   _e="$(_json_escape "$TELEMETRY_EFFORT")";  _m="$(_json_escape "$TELEMETRY_MODEL")"
+  # These two are written unquoted as JSON literals, so only the exact shapes
+  # the metrics reader produces may pass; anything else is "not observed".
+  local _tc="$TELEMETRY_TOOL_CALLS" _tcc="$TELEMETRY_TOOL_CALLS_COMPLETE"
+  [[ "$_tc" =~ ^(null|[0-9]{1,16})$ ]] || _tc=null
+  [[ "$_tcc" == true ]] || _tcc=false
   printf '{"backend":"%s","unit":"%s","effort":"%s","model":"%s","prompt_bytes":%s,"tool_calls":%s,"tool_calls_complete":%s,"seconds":%s,"timeout_seconds":%s,"backend_rc":%s,"adapter_rc":%s,"timed_out":%s}\n' \
     "$_b" "$_u" "$_e" "$_m" \
-    "$(( ${TELEMETRY_BYTES:-0} + 0 ))" "${TELEMETRY_TOOL_CALLS:-null}" "${TELEMETRY_TOOL_CALLS_COMPLETE:-false}" \
+    "$(( ${TELEMETRY_BYTES:-0} + 0 ))" "$_tc" "$_tcc" \
     "$secs" "$(( ${_enforced_wall:-0} + 0 ))" "${TELEMETRY_RC:-null}" "${adapter_rc:-null}" \
     "$( _is_timeout_rc "${TELEMETRY_RC:-0}" && echo true || echo false )" \
     >> "$TELEMETRY_FILE" 2>/dev/null || true
@@ -1404,7 +1414,8 @@ probe_timeout() {
 # call starts. Every one is memoized per process, so this is the worst case for
 # the heaviest backend (grok or kimi): grok (`models`, `--help`, sandbox smoke
 # test); kimi (`acp --help`, `provider list --json`, same sandbox test).
-# Codex also needs three (`login status`, model catalog, the same sandbox test).
+# Codex needs two on `run` (`login status`, the same sandbox test); its model
+# catalog is advisory and only probed by `ready`/`list`, never per voice.
 # `--version` is NOT among them: the `run` gate asks `command -v`, and the probe
 # that prints a version string only runs where that string is shown.
 # CHANGE THIS WHENEVER A PRE-TIMER PROBE IS ADDED. The workflow reads the derived
@@ -2100,15 +2111,33 @@ except (ValueError, KeyError, TypeError):
 ')" || _codex_catalog_reason="catalog malformed or incomplete"
 }
 
+# Set by `run`. The catalog answer is advisory and can never change the verdict
+# (codex_model_offered always returns 0), so on the run path it only bought an
+# app-server start per voice — up to eleven under --max — on the probe budget.
+# `ready`/`list` still probe it, which is where its hint is actually shown.
+_codex_skip_advisory_catalog=0
+# A void setter, so `run` (which prints) never assigns the global itself.
+_codex_on_run_path() { _codex_skip_advisory_catalog=1; }
+
 codex_model_offered() {
   local model="${1:-$CODEX_DEFAULT_MODEL}"
   _codex_model_hint=""
+  (( _codex_skip_advisory_catalog )) && return 0
   _codex_load_models
   if [[ -z "$_codex_catalog_reason" ]] && _line_in_list "$model" "$_codex_models"; then
     return 0
   fi
   _codex_model_hint="$model: model availability unverified — ${_codex_catalog_reason:-not in the advisory catalog; custom aliases may still work}; auth-only readiness"
-  _probe_degraded codex "$_codex_model_hint"
+  if [[ -n "$_codex_catalog_reason" ]]; then
+    # The check genuinely did not happen: say so through the shared degrade.
+    _probe_degraded codex "$_codex_model_hint"
+  else
+    # The catalog WAS read and simply does not list the model. Routing this
+    # through _probe_degraded printed "the selected-model check did not run",
+    # which sent the operator looking for a broken probe. It is advisory either
+    # way: the catalog is not authoritative, so absence never blocks the run.
+    echo "warning: codex $_codex_model_hint" >&2
+  fi
   return 0
 }
 
@@ -2459,6 +2488,15 @@ subcmd_config() {
   echo "expiry_slop_seconds=$TIMEOUT_EXPIRY_SLOP"
 }
 
+# Diff-only Kimi (--tools false) must hear the prohibition BEFORE the shared
+# prompt's capability line ("subject to the stricter policy at the top of this
+# prompt, you MAY read project files"). Its full contract is appended after the
+# diff, so without this the top held no policy at all and the first thing Kimi
+# read was a permission — one read, and the ACP client aborts the session.
+_kimi_tools_disabled_banner() {
+  printf 'TOOLS: DISABLED for this review. Review ONLY the supplied diff: do not read files, list directories, run commands or browse — any tool call ends the session unreviewed. This overrides any later line that says you MAY read files.\n\n'
+}
+
 _tool_budget_contract() {
   printf 'TOOL BUDGET: use at most %s tool calls, only to confirm suspected out-of-diff issues. The diff is already supplied; do not reread it wholesale. This is advisory, not permission to exceed the read-only policy.\n\n' "$1"
 }
@@ -2650,7 +2688,7 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
       exit 2
     fi
   fi
-  if [[ -n "$lens_instr" || "$backend" != kimi ]]; then
+  if [[ -n "$lens_instr" || "$backend" != kimi || "$tools" != true ]]; then
     # Assemble instruction+diff into a NEW file rather than concatenating
     # strings: the whole point of the transport rework is that the diff never
     # enters a shell variable. Writing into a fresh file (not appending in
@@ -2659,13 +2697,19 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
     # the sibling calls running concurrently.
     _prompt_scratch "$prompt_path" \
       || { echo "Could not create a temp file for the assembled prompt" >&2; exit 2; }
-    { printf '%s\n\n' "$lens_instr" &&
-      { [[ "$backend" == kimi ]] || _tool_budget_contract "$tool_budget"; } &&
+    # No lens instruction (a direct adapter call) → no empty leading lines;
+    # codex/grok still take this branch so the tool budget is always prepended.
+    { { [[ -z "$lens_instr" ]] || printf '%s\n\n' "$lens_instr"; } &&
+      { if [[ "$backend" == kimi ]]; then
+          [[ "$tools" == true ]] || _kimi_tools_disabled_banner
+        else
+          _tool_budget_contract "$tool_budget"
+        fi; } &&
       cat "$prompt_path"; } > "$TMP_PROMPT" \
       || { echo "Could not assemble the lens instruction and prompt" >&2; exit 2; }
     [[ -n "$_PROMPT_SCRATCH_PREVIOUS" ]] && rm -f "$_PROMPT_SCRATCH_PREVIOUS"
     prompt_path="$TMP_PROMPT"
-    _prompt_bytes_checked "$prompt_path" "$max_bytes" "Prompt too large with lens instruction"
+    _prompt_bytes_checked "$prompt_path" "$max_bytes" "Prompt too large with the prepended review instructions"
     nbytes="$_PROMPT_BYTES"
   fi
 
@@ -2685,6 +2729,7 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
   # Both resolved above, in THIS shell — so the wall recorded in telemetry is the
   # wall that will actually apply, not a value assigned inside a subshell.
   _set_enforced_wall
+  _codex_on_run_path
   require_usable "$backend" "$model"
   require_python3
 
@@ -3535,8 +3580,13 @@ run_kimi() {
       --deny-path "$SWARM_HOST_HOME/.kimi-code" >"$TMP_OUT" 2>"$TMP_KIMI_HOME/client.err" || rc=$?
   # Read scalar observations before cleanup removes the isolated runtime. Missing
   # or malformed metrics are unknown, never a fabricated zero-tool review.
+  # Captured synchronously, never via `read < <(...)`: a process-substitution
+  # producer can exit after `read` returns, and its late SIGCHLD can interrupt a
+  # later Bash 3.2 printf with EINTR — truncating the telemetry line or the
+  # findings output (the registry lost records to exactly this).
+  local kimi_metrics
   TELEMETRY_TOOL_CALLS=null; TELEMETRY_TOOL_CALLS_COMPLETE=false
-  read -r TELEMETRY_TOOL_CALLS TELEMETRY_TOOL_CALLS_COMPLETE < <(python3 - "$TMP_KIMI_HOME/metrics.json" <<'PY'
+  kimi_metrics="$(python3 - "$TMP_KIMI_HOME/metrics.json" <<'PY'
 import json
 import sys
 try:
@@ -3548,7 +3598,8 @@ try:
 except (OSError, ValueError, AttributeError):
     print("null false")
 PY
-  ) || true
+  )" || kimi_metrics="null false"
+  read -r TELEMETRY_TOOL_CALLS TELEMETRY_TOOL_CALLS_COMPLETE <<<"$kimi_metrics"
   # The client's one-line diagnosis (scrubbed) — without it every 11/12/13
   # read "rejected by the gate" and the operator had to re-run the python
   # client by hand to learn that the model was not offered, the quota was

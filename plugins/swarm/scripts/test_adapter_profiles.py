@@ -328,5 +328,55 @@ run_kimi() { printf '%s %s\n' "$5" "$6" > "$CAPTURE"; }
         self.assertLess(len(result.stdout.splitlines()[-1]), len(original))
 
 
+    def test_quick_kimi_hears_the_prohibition_before_the_supplied_prompt(self):
+        # The shared prompt says "you MAY read project files"; diff-only Kimi's
+        # full contract comes after the diff, so the top must carry the ban.
+        result = self.kimi_run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = self.capture.read_text()
+        self.assertLess(text.index("TOOLS: DISABLED"), text.index("SUPPLIED DIFF"))
+        result = self.kimi_run(tools="true", budget="8")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("TOOLS: DISABLED", self.capture.read_text())
+
+    def test_loaded_catalog_absence_is_not_reported_as_a_skipped_check(self):
+        result = self.shell("main ready codex --model picker-id", CATALOG_STUBS)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("unverified", result.stderr)
+        self.assertNotIn("did not run", result.stderr)
+        # A catalog that could NOT be read is still the genuine degrade.
+        result = self.shell("main ready codex --model picker-id", CATALOG_STUBS,
+                            env={"CATALOG_RC": "124"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("did not run", result.stderr)
+
+    def test_run_path_never_probes_the_advisory_catalog(self):
+        result = self.shell(
+            '_codex_on_run_path; codex_model_offered picker-id; codex_model_offered custom/x; '
+            'printf "hint=%s\\n" "$_codex_model_hint"', CATALOG_STUBS)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "hint=")
+        self.assertFalse(self.probes.exists(), "the run path started a catalog probe")
+
+    def test_inherited_tool_telemetry_cannot_forge_json(self):
+        forged = {"TELEMETRY_TOOL_CALLS": '0,"x":1', "TELEMETRY_TOOL_CALLS_COMPLETE": 'true,"y":2'}
+        write = ('TELEMETRY_FILE=' + quote(self.telemetry) + '; TELEMETRY_START=$(date +%s); '
+                 'TELEMETRY_BACKEND=codex; _write_telemetry 0')
+        # Inherited from the environment: the adapter's own init must win.
+        result = self.shell(write, env=forged)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Assigned after sourcing (a buggy reader): the writer must still refuse it.
+        result = self.shell('TELEMETRY_TOOL_CALLS=\'1,"x":1\'; '
+                            'TELEMETRY_TOOL_CALLS_COMPLETE=\'true,"y":2\'; ' + write)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        records = [json.loads(line) for line in self.telemetry.read_text().splitlines()]
+        # The adapter's EXIT trap writes its own record per shell too: check all.
+        self.assertGreaterEqual(len(records), 2)
+        for record in records:
+            self.assertIsNone(record["tool_calls"])
+            self.assertIs(record["tool_calls_complete"], False)
+            self.assertNotIn("x", record)
+            self.assertNotIn("y", record)
+
 if __name__ == "__main__":
     unittest.main()
