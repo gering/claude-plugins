@@ -476,6 +476,10 @@ if mb and hr:
         program = "\n".join(helpers) + "\n" + r'''
 const PROFILES = JSON.parse(process.argv[1]);
 let PROFILE;
+// The registry reads the run's frozen grok model; this test measures prompt
+// headroom per profile/backend, so any well-formed id stands in for it.
+const GROK_RUN = {model: 'grok-4.7'};
+const GROK_FROZEN_ENV = '';
 const rows = [];
 for (const [name, profile] of Object.entries(PROFILES)) {
   PROFILE = profile;

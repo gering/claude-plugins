@@ -68,11 +68,18 @@ def run_workflows(cases):
     return json.loads(result.stdout)
 
 
+# grok is DROPPED without a valid run token (a failed pin must never become
+# "latest"), so every fixture that expects grok voices has to carry one.
+GROK_MODEL = "grok-4.7"
+GROK_TOKEN = ("selected=grok-4.7;latest_candidate=grok-4.7;source=latest;"
+              "catalog=ok;cli_version=1.0.40")
+
+
 def args(**overrides):
     return dict(adapter="/fixture adapter/'$(not-executed).sh", diffFile="/fixture/diff",
                 externalPromptFile="/fixture prompt/'$(not-executed)",
                 telemetryFile="/fixture telemetry/'$(not-executed)",
-                findingNonce="0123456789abcdef", **overrides)
+                findingNonce="0123456789abcdef", grok=GROK_TOKEN, **overrides)
 
 
 def command(call):
@@ -200,10 +207,14 @@ class ProfileTests(unittest.TestCase):
                 units[backend].append(unit)
                 spec = PROFILES[name]["externals"][backend]
                 argv = command(call)
-                if spec["model"] is None:
+                # A null profile model means "not pinned by the profile". For grok
+                # the run's frozen id fills it, so every voice still gets ONE
+                # explicit --model; only a truly unpinned backend omits the flag.
+                expected = GROK_MODEL if backend == "grok" else spec["model"]
+                if expected is None:
                     self.assertNotIn("--model", argv)
                 else:
-                    self.assertEqual(flag(argv, "--model"), spec["model"])
+                    self.assertEqual(flag(argv, "--model"), expected)
                 self.assertEqual(flag(argv, "--effort"), spec["effort"])
                 self.assertEqual(flag(argv, "--tools"), str(spec["tools"]).lower())
                 self.assertEqual(flag(argv, "--tool-budget"), str(spec["toolBudget"]))

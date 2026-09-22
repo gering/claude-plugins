@@ -21,7 +21,10 @@ class CompletionTests(unittest.TestCase):
         # behavior is replaced except the explicitly stubbed data producers.
         self.assertTrue(source.endswith('main "$@"\n'))
         self.registry.write_text(source.removesuffix('main "$@"\n'))
-        (root / "lib-bounded.sh").write_text((HERE / "lib-bounded.sh").read_text())
+        # Every sibling library the registry sources must travel with it, or the
+        # copy dies on its own source guard and every case fails as exit 1.
+        for lib in ("lib-bounded.sh", "lib-grok-latest.sh"):
+            (root / lib).write_text((HERE / lib).read_text())
         self.env = dict(os.environ)
         self.env["HOME"] = str(root)
         self.env["GIT_CONFIG_GLOBAL"] = os.devnull

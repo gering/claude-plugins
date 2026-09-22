@@ -932,7 +932,6 @@ const GROK_RUN = (() => {
 const GROK_FROZEN_ENV = GROK_RUN.model
   ? `SWARM_GROK_PROBE=0 ${GROK_RUN.cliVersion ? `SWARM_GROK_CLI_VERSION=${GROK_RUN.cliVersion} ` : ''}`
   : ''
-const GROK_FROZEN_FLAG = GROK_RUN.model ? ` --model ${shQuote(GROK_RUN.model)}` : ''
 // FAIL CLOSED: grok was asked for but no concrete model came with it (no token,
 // a token that does not validate, or a selection that produced nothing — e.g. a
 // pin that is not offered). Running the voices anyway would let each of them
