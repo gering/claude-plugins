@@ -471,12 +471,14 @@ class TestFailClosedDegrade(unittest.TestCase):
                 # run" (empty argv) on CI, which has no grok at all.
                 "_grok_models_done=1; _grok_models=grok-4.7",
                 "_grok_compat() { printf 'compat=ok\\nsource=cache\\n'; }",
+                "_probe_or_bare() { return 98; }",
                 "_assert_prompt_readable_in_jail() { return 0; }",
                 _RECORD_SANDBOXED,
                 # The subshell owns the exit → it owns the EXIT trap (else the
                 # ephemeral kimi HOME set inside it is never removed).
                 f'( trap cleanup EXIT; run_{backend} "{pf.name}" high "" "{SCHEMA}" ) >/dev/null 2>&1 || true',
                 env_extra={"ARGV": tf.name, "KIMI_CREDENTIALS_FILE": cred.name,
+                           "KIMI_CONFIG_FILE": os.path.join(os.path.dirname(cred.name), "no-config.toml"),
                            "GROK_AUTH_FILE": grok_auth},
             )
             self.assertEqual(r.returncode, 0, f"harness failed: {r.stderr!r}")
@@ -516,6 +518,8 @@ class TestFailClosedDegrade(unittest.TestCase):
         argv = self._argv("kimi", jail=True)
         self.assertIn("/kimi-acp.py", argv, f"jailed Kimi must use ACP; argv:\n{argv}")
         self.assertIn("--effort\nhigh", argv, f"effective ACP effort missing; argv:\n{argv}")
+        self.assertIn("--tools\ntrue", argv, f"default tool policy missing; argv:\n{argv}")
+        self.assertIn("--metrics-file\n", argv, f"metrics sidecar missing; argv:\n{argv}")
 
     def test_kimi_sigkill_is_reported_as_timeout(self):
         with tempfile.NamedTemporaryFile("w", suffix=".prompt") as pf, \

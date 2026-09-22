@@ -176,6 +176,11 @@ archived markdown reaching `main` unreviewed.
 
 ## Worker agent selection
 
+The registry waits for each record/status producer to finish before emitting a
+selection. This avoids partial records from late child-process signals on
+macOS Bash 3.2. Unexpected resolution failures retain their exit code and
+diagnostic; the launcher never uses partial argv from a failed registry.
+
 `/kickoff` doesn't hardcode Claude as the worktree worker. Each agent is a
 CLI × model, with availability probed by a script (`scripts/agent-registry.sh`,
 the single source of truth). With no flag it launches the repo's **default**; a

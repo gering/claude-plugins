@@ -567,14 +567,15 @@ harness_rows() {
 # returns 1. Matching the FIRST field of an already-canonical row is what makes
 # "listed" and "resolvable" the same predicate by construction.
 harness_lookup() {
-  local want="$1" full line name
+  local want="$1" full line name rows
   full="$HARNESS_NS:${want#"$HARNESS_NS":}"
+  rows="$(harness_rows)" || return $?
   while IFS= read -r line; do
     name="${line%%$'\t'*}"
     [ "$name" = "$full" ] || continue
     printf '%s\n' "$line"
     return 0
-  done < <(harness_rows)
+  done <<<"$rows"
   return 1
 }
 
@@ -590,7 +591,8 @@ harness_lookup() {
 # resolve a mangled row while `--codex` still worked — a bug that reads as
 # agent-specific when it is really reader-specific).
 find_row() {
-  local how="$1" want="$2" flag cli model supports mode kind
+  local how="$1" want="$2" flag cli model supports mode kind rows
+  rows="$(registry_rows)" || return $?
   while IFS='|' read -r flag cli model supports mode kind; do
     [ -n "$cli" ] || continue
     case "$how" in
@@ -601,7 +603,7 @@ find_row() {
     esac
     printf '%s|%s|%s|%s|%s|%s\n' "$flag" "$cli" "$model" "$supports" "$mode" "$kind"
     return 0
-  done < <(registry_rows)
+  done <<<"$rows"
   return 1
 }
 
@@ -1005,7 +1007,7 @@ subcmd_resolve() {
     "$HARNESS_NS":*)
       local hline bare
       # harness_split, not `IFS=$'\t' read` — see row_for_name.
-      if ! IFS= read -r hline < <(harness_lookup "$selector"); then
+      if ! hline="$(harness_lookup "$selector")"; then
         # Arm-specific hint only; the shared line is emitted once by the caller
         # below, so the two paths cannot drift into different wording.
         if harness_on_path; then
@@ -1043,22 +1045,28 @@ subcmd_resolve() {
   # and any later manual relaunch of this record run the same model, whatever is
   # released meanwhile. The provenance lines let the skill ANNOUNCE what was
   # chosen and why, instead of implying "available" means "the latest".
-  local name="$cli:$model" grok_unresolved=""
+  # Resolved here, PRINTED only after the status producer has completed below:
+  # a provenance line on stdout ahead of a failed status would be exactly the
+  # partial record this function refuses to publish.
+  local name="$cli:$model" grok_unresolved="" grok_requested="" grok_source=""
   if [ "$cli" = grok ]; then
     grok_resolve_latest
-    printf 'model_requested=%s\n' "$model"
+    grok_requested="$model"
     if [ "$model" = "$GROK_DYNAMIC" ]; then
-      printf 'model_source=latest\n'
+      grok_source=latest
       if [ -n "$GROK_CONCRETE" ]; then model="$GROK_CONCRETE"; else grok_unresolved=1; fi
     else
-      printf 'model_source=pinned\n'
+      grok_source=pinned
     fi
-    printf 'model_latest=%s\n' "$GROK_CONCRETE"
-    printf 'model_catalog=%s\n' "$GROK_CATALOG"
   fi
 
-  local avail note
-  IFS=$'\t' read -r avail note < <(entry_status "$cli" "$model")
+  # A line is not producer completion: process substitution can exit later and
+  # deliver SIGCHLD while emit_record writes. Bash 3.2 may then abort printf
+  # with EINTR, leaving a partial record. Wait for completion and its status
+  # before emitting anything; never retry a possibly partial write.
+  local avail note status
+  status="$(entry_status "$cli" "$model")" || return $?
+  IFS=$'\t' read -r avail note <<<"$status"
 
   # `latest` could not be named although grok is installed and logged in: that
   # is NOT available, whatever the generic probe assumed (it trusts auth when the
@@ -1067,6 +1075,10 @@ subcmd_resolve() {
     avail=no; note="$GROK_WHY"
   fi
 
+  if [ -n "$grok_source" ]; then
+    printf 'model_requested=%s\nmodel_source=%s\nmodel_latest=%s\nmodel_catalog=%s\n' \
+      "$grok_requested" "$grok_source" "$GROK_CONCRETE" "$GROK_CATALOG"
+  fi
   emit_record "$name" "$cli" "$model" "$avail" "$supports" \
     "$mode" "$kind" "$note" "$model" "$session"
 }
@@ -1086,8 +1098,9 @@ subcmd_list() {
   esac
 
   # Build rows: name cli model available note (TAB-separated internally).
-  local rows="" flag cli model supports mode kind avail note
+  local rows="" flag cli model supports mode kind avail note status native_rows
   local name
+  native_rows="$(registry_rows)" || return $?
   while IFS='|' read -r flag cli model supports mode kind; do
     [ -n "$cli" ] || continue
     # Same concretization as `resolve`: NAME keeps the dynamic intent, MODEL shows
@@ -1097,12 +1110,13 @@ subcmd_list() {
       grok_resolve_latest
       [ -n "$GROK_CONCRETE" ] && model="$GROK_CONCRETE"
     fi
-    IFS=$'\t' read -r avail note < <(entry_status "$cli" "$model")
+    status="$(entry_status "$cli" "$model")" || return $?
+    IFS=$'\t' read -r avail note <<<"$status"
     if [ "$model" = "$GROK_DYNAMIC" ] && [ "$cli" = grok ] && [ "$GROK_CATALOG" != "not-probed" ]; then
       avail=no; note="$GROK_WHY"
     fi
     rows+="$name	$cli	$model	$avail	$note"$'\n'
-  done < <(registry_rows)
+  done <<<"$native_rows"
   # Append harness rows when the helper is present and healthy. A missing helper,
   # exit 3 (no token), or a timed-out list is a silent no-op — one `command -v` is
   # the only cost of the absent case.

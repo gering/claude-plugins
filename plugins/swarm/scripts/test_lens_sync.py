@@ -27,6 +27,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from profiles import load_profiles
+
 HERE = Path(__file__).parent
 PLUGIN = HERE.parent
 WORKFLOW = PLUGIN / "workflows" / "swarm-review.js"
@@ -175,14 +177,14 @@ check("adapter: --lens-instr flag present", "--lens-instr)" in sh)
 # green after the actual flag was dropped from the command.
 check(
     "workflow: passes --lens-instr into the transport command",
-    re.search(r"--lens-instr \$\{shQuote\([A-Za-z_]+\(u\)\)\}", js),
+    "--lens-instr ${shQuote(instruction)}" in js and "const instruction = lensInstr(u)" in js,
 )
 # The integrity check is only worth anything if the declared length travels with
 # the text — and it must be DERIVED from the same expression, never a literal.
 check("adapter: --lens-instr-sum flag present", "--lens-instr-sum)" in sh)
 check(
     "workflow: declares --lens-instr-sum from the built instruction",
-    re.search(r"--lens-instr-sum \$\{utf8Checksum\([A-Za-z_]+\(u\)\)\}", js),
+    "--lens-instr-sum ${utf8Checksum(instruction)}" in js,
 )
 # The checksum only guards anything if the adapter REFUSES an instruction that
 # arrives without one — otherwise dropping a flag silently voids the check.
@@ -452,55 +454,71 @@ if mb and hr:
     max_bytes = int(mb.group(1))
     headroom = int(hr.group(1))
     check("headroom leaves a usable cap", headroom < max_bytes)
-    # Largest instruction the workflow can build. The FIXED prose is DERIVED from
-    # the source (the literal chunks of lensInstr()/unitBrief()'s template
-    # strings, with every ${...} expression removed) rather than copied here — a
-    # Python copy of the template would go stale the moment someone adds a
-    # sentence to unitBrief(), and this check would then bound the wrong string
-    # while reporting green. Only the interpolated parts are modelled below.
-    briefs = {}
-    for m in re.finditer(r"^  (?:'([a-z-]+)'|([a-z]+)): '(.*)',$", bm.group(1) if bm else "", re.M):
-        briefs[m.group(1) or m.group(2)] = m.group(3)
-    check("LENS_BRIEF values parsed", set(briefs) == set(cluster_lenses))
-
-    def literal_len(fn_src):
-        """Bytes of fixed prose in a JS template-literal body (drops ${...})."""
-        return sum(
-            len(re.sub(r"\$\{[^}]*\}", "", chunk).encode("utf-8"))
-            for chunk in re.findall(r"`([^`]*)`", fn_src)
+    # Execute the real formatters/unit helpers, not a Python estimate of JS prose.
+    # Profile-specific tool contracts are appended by the adapter, so measure those
+    # too for every backend/profile (including diff-only Kimi and per-lens max).
+    helpers = []
+    for name, pattern in (
+        ("LENS_CLUSTERS", r"const LENS_CLUSTERS = \{.*?\n\}"),
+        ("LENS_BRIEF", r"const LENS_BRIEF = \{.*?\n\}"),
+        ("unitsFor", r"const unitsFor = .*?(?=\nconst finderUnits)"),
+        ("unitsForBackend", r"const unitsForBackend = .*?\n\}"),
+        ("unitBrief", r"const unitBrief = .*?(?=\n(?:const |//))"),
+        ("lensInstr", r"const lensInstr = .*?(?=\n// Compile each voice)"),
+    ):
+        helper = re.search(pattern, js, re.S)
+        check(f"workflow: {name} source found for exact headroom", helper)
+        if helper:
+            helpers.append(helper.group(0))
+    registry = re.search(r"const EXTERNAL_BACKENDS = \[.*?\n\]", js, re.S)
+    check("workflow: backend registry found for exact headroom", registry)
+    if len(helpers) == 6 and registry and shutil.which("node"):
+        program = "\n".join(helpers) + "\n" + r'''
+const PROFILES = JSON.parse(process.argv[1]);
+let PROFILE;
+// The registry reads the run's frozen grok model; this test measures prompt
+// headroom per profile/backend, so any well-formed id stands in for it.
+const GROK_RUN = {model: 'grok-4.7'};
+const GROK_FROZEN_ENV = '';
+const rows = [];
+for (const [name, profile] of Object.entries(PROFILES)) {
+  PROFILE = profile;
+''' + registry.group(0) + r'''
+  const units = unitsFor(Object.values(LENS_CLUSTERS).flat());
+  for (const backend of EXTERNAL_BACKENDS) {
+    const texts = unitsForBackend(backend, units).map(lensInstr);
+    rows.push({name, backend:backend.backend, tools:backend.tools, budget:backend.toolBudget,
+      bytes:Math.max(...texts.map(text=>Buffer.byteLength(text, 'utf8')))});
+  }
+}
+console.log(JSON.stringify(rows));
+'''
+        result = subprocess.run(["node", "-e", program, json.dumps(load_profiles(WORKFLOW))],
+                                capture_output=True, text=True, timeout=10)
+        check(f"workflow: exact headroom helpers execute ({result.stderr})", result.returncode == 0)
+        rows = json.loads(result.stdout) if result.returncode == 0 else []
+        check("workflow: headroom covers all nine profile/backend pairs", len(rows) == 9)
+        schema = HERE / "schema" / "finding.schema.json"
+        for row in rows:
+            shell = ('source "$1"; _kimi_output_contract "$2" "$3" "$4"' if row["backend"] == "kimi"
+                     else 'source "$1"; _tool_budget_contract "$4"')
+            contract = subprocess.run(
+                ["bash", "-c", shell, "bash", str(ADAPTER), str(schema),
+                 str(row["tools"]).lower(), str(row["budget"])], capture_output=True, timeout=10,
+            )
+            check(f"adapter: {row['name']}/{row['backend']} contract renders", contract.returncode == 0)
+            # Adapter inserts newlines between the scope and the fenced prompt.
+            required = row["bytes"] + len(contract.stdout) + 2
+            check(f"headroom covers {row['name']}/{row['backend']} ({required} <= {headroom} B)",
+                  contract.returncode == 0 and required <= headroom)
+        missing_contract = subprocess.run(
+            ["bash", "-c", 'source "$1"; _kimi_output_contract "$2"',
+             "bash", str(ADAPTER), str(schema.with_name("missing.schema.json"))],
+            capture_output=True, timeout=10,
         )
-
-    ub = re.search(r"const unitBrief = \(u, \{ inline \}\) =>(.*?)\nconst ", js, re.S)
-    li = re.search(r"const lensInstr = \(u\) =>(.*?)\n(?:const|// )", js, re.S)
-    check("workflow: unitBrief() found", ub)
-    check("workflow: lensInstr() found", li)
-    fixed = literal_len(ub.group(1) if ub else "") + literal_len(li.group(1) if li else "")
-    worst = 0
-    for lenses in clusters.values():
-        # inline form: "<lens>: <brief>" joined by "; ", plus the '"[lens] "'
-        # tag list joined by " / " — the two ${...} expansions that scale.
-        body = len("; ".join(f"{l}: {briefs.get(l, '')}" for l in lenses).encode("utf-8"))
-        tags = len(" / ".join(f'"[{l}] "' for l in lenses).encode("utf-8"))
-        worst = max(worst, fixed + body + tags)
-    schema = HERE / "schema" / "finding.schema.json"
-    contract = subprocess.run(
-        ["bash", "-c", 'source "$1"; _kimi_output_contract "$2"',
-         "bash", str(ADAPTER), str(schema)],
-        capture_output=True, timeout=10,
-    )
-    check("adapter: Kimi output contract renders", contract.returncode == 0)
-    missing_contract = subprocess.run(
-        ["bash", "-c", 'source "$1"; _kimi_output_contract "$2"',
-         "bash", str(ADAPTER), str(schema.with_name("missing.schema.json"))],
-        capture_output=True, timeout=10,
-    )
-    check("adapter: Kimi output contract fails when schema cannot be read", missing_contract.returncode != 0)
-    kimi_contract_bytes = len(contract.stdout) if contract.returncode == 0 else headroom + 1
-    required = worst + kimi_contract_bytes
-    check(
-        f"oversize headroom ({headroom} B) covers lens instruction + Kimi schema contract (<= {required} B)",
-        headroom >= required,
-    )
+        check("adapter: Kimi output contract fails when schema cannot be read", missing_contract.returncode != 0)
+    else:
+        check("workflow: exact headroom requires all helpers and node", False)
 
 # METHODOLOGICAL_LENSES: the verify-gating list of lenses that assert repo-wide
 # facts — everything in the FACT-ASSERTING clusters except the diff-local topical
@@ -670,12 +688,14 @@ check(f"adapter: no function both prints and caches into a global ({_bad_memo})"
       not _bad_memo)
 
 check("adapter: SWARM_MAX_PROBES_PER_RUN is declared", _declared)
-check(f"adapter: pre-timer probe call sites still number 8 (got {_probe_sites}) — "
+check(f"adapter: pre-timer probe call sites still number 9 (got {_probe_sites}) — "
       f"if you added one, re-derive SWARM_MAX_PROBES_PER_RUN "
       f"(currently {_declared.group(1) if _declared else '?'}, the worst case for a "
       f"single backend) and update this pin",
-      _probe_sites == 8)
-check("adapter: the declared worst case covers grok/kimi's three run-path probes",
+      _probe_sites == 9)
+check("adapter: Codex catalog is one bounded helper call",
+      re.search(r'_probe_or_bare python3 "\$SCRIPT_DIR/codex-models\.py" --timeout "\$_probe_timeout"', sh))
+check("adapter: the declared worst case covers auth/catalog/jail and grok/kimi probes",
       bool(_declared) and int(_declared.group(1)) >= 3)
 
 check("adapter: the --help capability probe is memoized",

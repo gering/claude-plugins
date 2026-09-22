@@ -42,17 +42,17 @@ def freeze(token, voices=("codex", "grok")):
     js = (f"const INPUT = {json.dumps({'grok': token} if token is not None else {})}\n"
           f"const wantVoices = {json.dumps(list(voices))}\n"
           + q.group(0) + m.group(0)
-          + "console.log(JSON.stringify({run: GROK_RUN, env: GROK_FROZEN_ENV, flag: GROK_FROZEN_FLAG, dropped: GROK_DROPPED}))\n")
+          + "console.log(JSON.stringify({run: GROK_RUN, env: GROK_FROZEN_ENV, dropped: GROK_DROPPED}))\n")
     r = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         FAILS.append(f"node failed for {token!r}: {r.stderr[:200]}")
-        return {"run": {}, "env": "", "flag": "", "dropped": None}
+        return {"run": {}, "env": "", "dropped": None}
     return json.loads(r.stdout)
 
 
 GOOD = "selected=grok-4.7;latest_candidate=grok-4.7;source=latest;catalog=ok;cli_version=1.0.40"
 f = freeze(GOOD)
-check("the selected id becomes an explicit --model on every grok voice", f["flag"] == " --model 'grok-4.7'")
+check("the selected id is the one frozen for the run", f["run"]["model"] == "grok-4.7")
 check("voices never probe and get the CLI version the cache is keyed by",
       f["env"] == "SWARM_GROK_PROBE=0 SWARM_GROK_CLI_VERSION=1.0.40 ")
 check("provenance is carried as data", f["run"] == {"model": "grok-4.7", "latest": "grok-4.7",
@@ -65,7 +65,7 @@ check("a degraded selection keeps BOTH ids apart (selected vs latest)",
 
 f = freeze("selected=grok-4.7;source=latest;cli_version=unknown")
 check("unknown CLI version → still frozen, just no version pin",
-      f["flag"] == " --model 'grok-4.7'" and f["env"] == "SWARM_GROK_PROBE=0 ")
+      f["run"]["model"] == "grok-4.7" and f["env"] == "SWARM_GROK_PROBE=0 ")
 
 for label, token in [("absent", None), ("empty", ""), ("no selection", "selected=;source=none;catalog=unreachable"),
                      ("not a grok id", "selected=gpt-5;source=latest"),
@@ -75,7 +75,7 @@ for label, token in [("absent", None), ("empty", ""), ("no selection", "selected
                      ("overlong", "selected=grok-" + "a" * 80 + ";source=latest")]:
     f = freeze(token)
     check(f"{label}: nothing is frozen and nothing reaches the command line",
-          f["flag"] == "" and f["env"] == "" and f["run"].get("model") == "")
+          f["env"] == "" and f["run"].get("model") == "")
     check(f"{label}: grok is DROPPED, never run unfrozen (a failed pin must not become latest)",
           f["dropped"] is True)
 check("a valid token does not drop grok", freeze(GOOD)["dropped"] is False)
@@ -90,9 +90,15 @@ f = freeze("selected=grok-4.7;source=totally-latest")
 check("an unknown source is not echoed as if it were a known one", f["run"]["source"] == "unknown")
 
 # --- the two ends of the hand-over must name the same things ---------------------------
-check("workflow: the frozen flag/env are applied to the grok backend",
-      "GROK_FROZEN_FLAG, env: GROK_FROZEN_ENV" in SOURCE)
+# The run's model rides the profile spread, so externalFlags emits ONE
+# shell-quoted --model per grok voice; the frozen env travels beside it.
+check("workflow: the run's model and frozen env are applied to the grok backend",
+      "...PROFILE.externals.grok, model: GROK_RUN.model || null, env: GROK_FROZEN_ENV" in SOURCE)
 check("workflow: the run's grok model is returned as data", "grokModel:" in SOURCE)
+# The quoting that GROK_FROZEN_FLAG used to guarantee now lives in externalFlags,
+# which is the single place a profile model reaches a command line.
+check("workflow: externalFlags shell-quotes the model it emits",
+      "`--model ${shQuote(b.model)} `" in SOURCE)
 check("skill: prep selects once via `agents.sh grok-model`, BEFORE `list`",
       0 < SKILL.find("agents.sh\" grok-model") < SKILL.find("agents.sh\" list --json"))
 for field in ("selected", "latest_candidate", "source", "cli_version"):
@@ -129,7 +135,7 @@ if frag:
             check(f"{shell}: the pin arrives in the token",
                   out.get("GROK_RUN", "").startswith("selected=grok-4.5;latest_candidate=grok-4.7;source=pinned"))
             check(f"{shell}: the token round-trips through the workflow parser",
-                  freeze(out.get("GROK_RUN", ""))["flag"] == " --model 'grok-4.5'")
+                  freeze(out.get("GROK_RUN", ""))["run"]["model"] == "grok-4.5")
             check(f"{shell}: the free-text reason is printed, never executed",
                   "$(id)" in out.get("GROK_DEGRADED", "") and "uid=" not in r.stdout)
             # Oversize: the externals will be skipped, so nothing may be selected (or paid for).

@@ -8,6 +8,7 @@ miss. Both are asserted here.
 import atexit
 import importlib.util
 import itertools
+import json
 import pathlib
 import subprocess
 import sys
@@ -164,6 +165,28 @@ check("the record's model is rendered", "grok-4.6" in r.stdout)
 check("a non-positive --timeout-seconds is a usage error",
       run([write([REC_FAST]), "--timeout-seconds", "0"]).returncode == 2
       and run([write([REC_FAST]), "--timeout-seconds", "-600"]).returncode == 2)
+
+# --- tool-attempt measurements ----------------------------------------------
+legacy = json.loads(REC_FAST)
+legacy_line = tr.render([legacy], 600)[0]
+for count in (0, 1, 8):
+    measured = dict(legacy, backend="kimi", tool_calls=count, tool_calls_complete=True)
+    r = run([write([json.dumps(measured)])])
+    check(f"available count {count} is rendered", f"{count} tools" in r.stdout)
+    check(f"complete count {count} is not labeled partial", "partial" not in r.stdout)
+    check("observed tool counts do not claim tokens or billing",
+          "token" not in r.stdout.lower() and "bill" not in r.stdout.lower())
+
+partial = dict(legacy, tool_calls=3, tool_calls_complete=False, backend_rc=13, adapter_rc=1)
+r = run([write([json.dumps(partial)])])
+check("partial failed-call count stays visible", "3 tools (partial)" in r.stdout)
+check("partial metrics do not hide failure", "failed (rc=13)" in r.stdout)
+check("count without completeness remains compatible",
+      "2 tools" in tr.render([dict(legacy, tool_calls=2)], 600)[0])
+for value in (None, -1, True, False, 1.5, "3", [], {}):
+    check(f"missing or invalid count {value!r} never becomes zero",
+          tr.render([dict(legacy, tool_calls=value)], 600)[0] == legacy_line)
+check("legacy records with no count keep their existing rendering", "tools" not in legacy_line)
 
 # --- usage ------------------------------------------------------------------
 check("no args is a usage error", run([]).returncode == 2)

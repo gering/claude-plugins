@@ -20,21 +20,14 @@ findings + design suggestions, presents one ranked report, and — with `--fix` 
 
 ## Commands
 
-- `/swarm:review [ref | --staged | pathspec] [--fix | --loop[=N]] [--max] [--kimi]` —
-  review a diff with the full ensemble. Defaults to the branch delta vs the
-  default branch (including uncommitted work). `--fix` applies the agreed
-  findings once; `--loop[=N]` re-reviews after each fix round until it converges
-  (cap default `10`); `--max` runs the deepest-effort profile (codex
-  `xhigh`, Claude finders + verifier `xhigh`, grok `low` → `medium`, Kimi
-  `low` → `high`, and **every** voice — Claude, codex, grok, kimi — fanning
-  out per **lens** instead of per cluster; kimi stays on its breakage + threat
-  lenses on both profiles, being quota-metered) — slower, more
-  thorough, costs up to `3 × 11` external calls, composes with
-  `--fix`/`--loop`. `--kimi` opts Kimi in for the run (the fourth family):
-  Moonshot meters its CLI on 5-hour and 7-day quotas, and one two-cluster
-  review drained the entry plan's 5-hour window — every ACP tool round-trip
-  re-sends the whole ~370 KiB cluster prompt — so a stock review is the
-  three-family ensemble. `export SWARM_KIMI=1` opts in permanently.
+- `/swarm:review [ref | --staged | pathspec] [--fix | --loop[=N]] [--quick | --max] [--kimi]` —
+  review the branch delta vs the default branch, including uncommitted work.
+  `--fix` applies agreed findings once; `--loop[=N]` re-reviews after fixes
+  (default cap `10`). Profiles change execution settings, not provider choice;
+  `--quick` and `--max` are mutually exclusive. Both compose with fix/loop.
+  `--kimi` opts in the metered fourth family, restricted to breakage + threat
+  (two cluster calls, or four lens calls under `--max`). Even `--max` does not
+  opt it in. `export SWARM_KIMI=1` is an explicit persistent opt-in.
 - `/swarm:review --pr [<number>]` — run the same ensemble against a **GitHub
   PR's diff** (`gh pr diff`; bare `--pr` resolves the current branch's PR) and,
   after a single confirmation, post the output-gated result as a PR comment via
@@ -47,6 +40,53 @@ findings + design suggestions, presents one ranked report, and — with `--fix` 
 
 Planned: `/swarm:adversarial`, `/swarm:style`, `/swarm:security` (thin lens
 presets).
+
+## Review profiles
+
+The single `PROFILES` map in `workflows/swarm-review.js` owns the settings.
+The prep step reads that same staged map before checking model readiness.
+Unknown/malformed workflow profile inputs select `default`, never a costlier
+profile; direct workflow callers use `profile`, not the retired `max` boolean.
+
+| Setting | `--quick` | default | `--max` |
+|---|---|---|---|
+| Gate | haiku / medium | haiku / medium | haiku / medium |
+| Finders / verify | session model / medium | session model / medium | session model / xhigh |
+| Merge | session model / medium | session model / medium | session model / medium |
+| Transport wrappers | haiku / low | haiku / low | haiku / low |
+| Codex | gpt-5.6-sol / low | gpt-5.6-sol / medium | gpt-6-astra / medium |
+| Grok | discovered / low | discovered / medium | discovered / medium |
+| Kimi (opt-in) | kimi-code/k3-256k / low | kimi-code/k3-256k / low | kimi-code/k3-256k / high |
+| Fan-out unit | cluster | cluster | lens |
+| Kimi tools / budget | false / 0 | true / 8 | true / 8 |
+
+Quick preserves default's lens set and cluster topology, not identical review
+capabilities: opted-in Kimi reviews only the supplied diff. The ACP client
+rejects any observed tool use, including permission-free reads. This is
+**session rejection, not proof that no server-side tool already executed**;
+the OS jail remains required. All positive tool budgets start at eight advisory
+calls per voice in every profile. They are prompt guidance, not hard cutoffs;
+no `--max-turns` truncation can turn an unfinished review into a clean result.
+
+**Grok runtime is unchanged here.** The synchronous wrapper still has the Bash
+tool's hard 600-second window; the adapter deadline is smaller by its probe and
+cleanup margin. Raising `SWARM_TIMEOUT` cannot cross that ceiling. Longer
+execution belongs to the async transport work, not a lower-effort workaround.
+
+Grok runs at `medium` from the default profile up, by explicit request for more
+reasoning depth. It is a **deliberate trade against that ceiling**: the one
+recorded four-family run timed grok's `breakage` voice out at `medium` on a
+~290 KiB cluster prompt, which costs the voice entirely rather than degrading
+it. `--quick` keeps `low` so the cheap profile stays the fast one. Until the
+async transport lands, prefer `--quick` when grok times out.
+
+**Validation status:** hermetic tests exercise the profiles and policies.
+Sol/low, Sol/medium and Astra/medium passed live adapter smoke checks. All six
+Kimi comparison calls passed; both diff-only reviews reported zero observed
+tools. Prompts were smaller, but diff-only was slower in this sample and the
+compact tools-enabled contract elicited more tools than baseline. No token/quota
+savings are claimed. See [measurement notes](docs/profile-measurements.md) for
+observations, reproducible inputs and measurement limits.
 
 ## The pipeline (`/swarm:review`)
 
@@ -163,9 +203,9 @@ All deterministic backend logic lives in one script; skills never call the
 external CLIs directly:
 
 ```
-agents.sh list [--json]       # probe all backends → status table / JSON
+agents.sh list [--json] [--codex-model M] # probe selected model → table / JSON
 agents.sh available <backend> # installed? prints version
-agents.sh ready <backend>     # authenticated? hint on stderr if not
+agents.sh ready <backend> [--model M] # usable? hints include model uncertainty
 agents.sh config              # resolved numeric config (caps, timeouts,
                               # probe budget) — the ONE parser; the review
                               # skill reads these instead of re-deriving them
@@ -173,6 +213,7 @@ agents.sh jail                # jail=yes|no — will read+web be granted? (worki
                               # OS sandbox AND a resolvable repo root)
 agents.sh run <backend> [--prompt-file f] [--lens-instr s --lens-instr-sum hex]
                         [--effort E] [--model M] [--schema f]
+                        [--tools true|false] [--tool-budget N]
                         [--telemetry f --unit name]
                               # lens prompt in → findings JSON out
                               # --lens-instr: the gated cluster's lens briefs,
@@ -191,9 +232,23 @@ Backends:
 | Backend | Role | Mechanics |
 |---------|------|-----------|
 | `claude` | probe-only | reviews run in-session via the Agent tool |
-| `codex` | external reviewer | `codex exec -s danger-full-access --ignore-user-config --ignore-rules -C <repo> -c tools.web_search=true --output-schema` under the OS jail (its own seatbelt cannot nest inside it; `-s read-only` is kept only on a jail-less host), model `gpt-5.6-sol`, `medium` by default / `xhigh` under `--max`, prompt on stdin (`-- -`); shell + file-read + web; auth via `codex login status` |
+| `codex` | external reviewer | `codex exec -s danger-full-access --ignore-user-config --ignore-rules -C <repo> -c tools.web_search=true --output-schema` under the OS jail (its own seatbelt cannot nest inside it; `-s read-only` is kept only on a jail-less host), profile-selected Sol (`low`/`medium`) or Astra (`medium`), prompt on stdin (`-- -`); shell + file-read + web; auth via `codex login status`, selected-model catalog check via bounded `codex-models.py` |
 | `grok` | external reviewer | headless `--prompt-file` with inline `--json-schema`; the model is **selected per run** — the newest canonical `grok-4.x/5.x` the CLI offers whose `--json-schema` enforcement was *measured* (see [Grok model selection](#grok-model-selection)), never a hand-maintained version list and never a silent upgrade to an unmeasured model. Strict `--tools` allowlist (`read_file,list_dir,grep,run_terminal_command,web_search,web_fetch`) + `--permission-mode dontAsk` + `--deny` prefix rules (egress/destructive verbs) + `--cwd <repo>`, run from an ephemeral HOME/GROK_HOME with only `auth.json` linked — the OS jail's inverted write model makes the shell read-only in effect. Readiness is model-aware: auth, `--prompt-file` support, **and** a selectable model. `ready` answers usable/not-usable plus a hint — it does **not** say which model runs; `agents.sh grok-model` does, and the review freezes that id onto every grok voice (it also appears in each call's telemetry line). |
 | `kimi` | external reviewer | ACP v1 over stdio (`kimi acp`), pinned to `kimi-code/k3-256k`; the complete prompt is an ACP content block, not argv. Isolated HOME/KIMI_CODE_HOME that links the host's `credentials/`+`oauth/` (links, not a copy — Moonshot rotates refresh tokens, so a refresh must land on the host file) and carries a filtered config projection. The client advertises no FS/terminal capability and approves only allowlisted read-only shell commands once and rejects every other permission request (defense-in-depth); repository immutability is OS-enforced. Invalid output or policy/protocol drift is a visible backend error, never an empty review. Requires auth, ACP, the pinned model, and a working OS jail. |
+
+Codex's `model/list` is an **advisory picker catalog**, not proof of generation
+access: it can return cached/bundled models and omit custom aliases. A missing,
+unavailable or malformed catalog therefore produces an audible auth-only
+readiness hint, including on `ready:true` rows; it never substitutes a model or
+rejects a valid custom alias solely for being absent. A catalog hit still needs
+an actual-load check. The probe is non-generative but the CLI may refresh its
+own auth/cache. Direct adapter callers retain `CODEX_DEFAULT_MODEL` as a
+fallback; workflow callers always pass their selected Codex model explicitly.
+
+Tool policy defaults to `true` / 8 for direct adapter calls. Positive budgets
+are 1–1000; `--tools false` is Kimi-only and requires budget 0 (implicit when no
+budget is supplied). Kimi's compact prompt schema preserves validation rules;
+the original caller schema remains the local validation authority.
 
 ### Grok model selection
 
@@ -244,8 +299,8 @@ block for Kimi. `SWARM_MAX_PROMPT_BYTES` (default 512 KiB) is that sanity cap;
 above it `/swarm:review` cleanly skips the externals instead of letting each
 call fail. Kimi receives the schema as a high-priority output contract in that
 prompt, then the adapter validates its final JSON locally. There is no retry:
-an invalid response fails closed immediately rather than multiplying up to
-5 default or 11 `--max` calls.
+an invalid response fails closed immediately rather than multiplying Kimi's
+two cluster calls or four `--max` lens calls.
 `SWARM_PROBE_TIMEOUT` (default 10 s) bounds the short readiness probes and is
 capped at 20 s — the review's timeout margin is derived from it, so a larger
 value would eat the wall it is meant to protect; `run` and `config` refuse
@@ -253,6 +308,10 @@ anything above the ceiling rather than normalizing it.
 
 Each external call is timed (`--telemetry <file> --unit <name>`), including
 Kimi's effective ACP model/thinking level and adapter-side schema rejection.
+Kimi also records distinct observed `tool_calls` and `tool_calls_complete`;
+missing observations stay null and incomplete streams are marked partial.
+`prompt_bytes` measures the final assembled prompt including the schema contract.
+These are not billed tokens or provider quota measurements.
 The report flags any voice that spent most of the wall **that call actually ran under** —
 recorded per record, not assumed from `SWARM_TIMEOUT`, which is overridable and
 which the workflow shrinks by its probe margin. A call that *survives* near the

@@ -5,9 +5,9 @@
 # swarm skills never talk to an external CLI directly.
 #
 # Subcommands:
-#   list [--json]         Probe all backends -> human table or JSON array
+#   list [--json] [--codex-model M]  Probe backends + selected model -> table/JSON
 #   available <backend>   Exit 0 if the CLI is installed; prints its version
-#   ready <backend>       Exit 0 if authenticated/usable; hint on stderr if not
+#   ready <backend> [--model M]  Exit 0 if usable; hints include model uncertainty
 #   jail                  Print jail=yes|no (working OS sandbox wrapper?)
 #   grok-model [--model <id>]  Select the grok model for ONE run and print it as
 #                         key=value data: selected, latest_candidate, source
@@ -33,10 +33,13 @@
 #                           means it was altered in transport -> hard error.
 #       --effort <level>    low|medium|high|xhigh|max (default: xhigh)
 #       --model <name>      Backend model override
+#       --tools <bool>      true (default); false: Kimi diff-only session gate
+#       --tool-budget <N>   Advisory calls, 1..1000 (default 8); false requires 0
 #       --schema <file>     JSON schema to enforce (default: bundled finding.schema.json)
 #       --telemetry <file>  Append one JSON line per call (backend, unit, effort,
-#                           model, prompt_bytes, seconds, timeout_seconds,
-#                           backend_rc, adapter_rc, timed_out). Written on EVERY
+#                           model, prompt_bytes, tool_calls, tool_calls_complete,
+#                           seconds, timeout_seconds, backend_rc, adapter_rc,
+#                           timed_out). Tool counts may be null. Written on EVERY
 #                           exit path, so a timeout is recorded too.
 #       --unit <name>       Cluster/lens label recorded in the telemetry line
 #
@@ -249,6 +252,11 @@ TELEMETRY_BYTES=""
 # the adapter's exit code — otherwise a timeout (124) and a plain failure both
 # reach the trap as exit 1 and the one distinction worth logging is lost.
 TELEMETRY_RC=""
+# Observed tool calls (Kimi only). Set here, not merely where Kimi fills them:
+# an unset global would let an inherited environment variable of the same name
+# reach the raw JSON below on every codex/grok record. null = not observed.
+TELEMETRY_TOOL_CALLS=null
+TELEMETRY_TOOL_CALLS_COMPLETE=false
 
 _json_escape() {
   # Minimal JSON string escaping: backslash first (or it would double-escape the
@@ -331,9 +339,15 @@ _write_telemetry() {
   local _b _u _e _m
   _b="$(_json_escape "$TELEMETRY_BACKEND")"; _u="$(_json_escape "$TELEMETRY_UNIT")"
   _e="$(_json_escape "$TELEMETRY_EFFORT")";  _m="$(_json_escape "$TELEMETRY_MODEL")"
-  printf '{"backend":"%s","unit":"%s","effort":"%s","model":"%s","prompt_bytes":%s,"seconds":%s,"timeout_seconds":%s,"backend_rc":%s,"adapter_rc":%s,"timed_out":%s}\n' \
+  # These two are written unquoted as JSON literals, so only the exact shapes
+  # the metrics reader produces may pass; anything else is "not observed".
+  local _tc="$TELEMETRY_TOOL_CALLS" _tcc="$TELEMETRY_TOOL_CALLS_COMPLETE"
+  [[ "$_tc" =~ ^(null|[0-9]{1,16})$ ]] || _tc=null
+  [[ "$_tcc" == true ]] || _tcc=false
+  printf '{"backend":"%s","unit":"%s","effort":"%s","model":"%s","prompt_bytes":%s,"tool_calls":%s,"tool_calls_complete":%s,"seconds":%s,"timeout_seconds":%s,"backend_rc":%s,"adapter_rc":%s,"timed_out":%s}\n' \
     "$_b" "$_u" "$_e" "$_m" \
-    "$(( ${TELEMETRY_BYTES:-0} + 0 ))" "$secs" "$(( ${_enforced_wall:-0} + 0 ))" "${TELEMETRY_RC:-null}" "${adapter_rc:-null}" \
+    "$(( ${TELEMETRY_BYTES:-0} + 0 ))" "$_tc" "$_tcc" \
+    "$secs" "$(( ${_enforced_wall:-0} + 0 ))" "${TELEMETRY_RC:-null}" "${adapter_rc:-null}" \
     "$( _is_timeout_rc "${TELEMETRY_RC:-0}" && echo true || echo false )" \
     >> "$TELEMETRY_FILE" 2>/dev/null || true
   return 0
@@ -1400,7 +1414,8 @@ probe_timeout() {
 # call starts. Every one is memoized per process, so this is the worst case for
 # the heaviest backend (grok or kimi): grok (`models`, `--help`, sandbox smoke
 # test); kimi (`acp --help`, `provider list --json`, same sandbox test).
-# Codex needs two (`login status`, the same sandbox test).
+# Codex needs two on `run` (`login status`, the same sandbox test); its model
+# catalog is advisory and only probed by `ready`/`list`, never per voice.
 # `--version` is NOT among them: the `run` gate asks `command -v`, and the probe
 # that prints a version string only runs where that string is shown.
 # CHANGE THIS WHENEVER A PRE-TIMER PROBE IS ADDED. The workflow reads the derived
@@ -1435,6 +1450,7 @@ _probe_degraded() {
     return 0
   fi
   local fallback="authenticated install" what="the ACP/model check"
+  if [[ "$1" == "codex" ]]; then what="the selected-model check"; fi
   echo "warning: $1 model probe unavailable ($2) — readiness falls back to $fallback; $what did not run" >&2
 }
 # Which timeout wrapper exists, resolved once. Availability is a property of the
@@ -2054,6 +2070,77 @@ grok_model_offered() {
   [[ -n "$GROK_SELECTED_MODEL" ]]
 }
 
+# Codex's catalog is advisory: model/list may use a bundled/cache fallback and
+# the CLI accepts custom aliases not listed there. Absence is NOT a rejection.
+# Check the selected model without generating a turn, and make uncertainty
+# visible in both stderr and list's hint (including ready=true rows).
+_codex_models_done=""
+_codex_models=""
+_codex_catalog_reason=""
+_codex_model_hint=""
+_codex_load_models() {
+  [[ -n "$_codex_models_done" ]] && return 0
+  _codex_models_done=1
+  _probe_setup_lenient
+  local raw="" rc=0
+  raw="$(_probe_or_bare python3 "$SCRIPT_DIR/codex-models.py" --timeout "$_probe_timeout" 2>/dev/null)" || rc=$?
+  if (( rc != 0 )); then
+    _codex_catalog_reason="catalog unavailable (rc=$rc)"
+    return 0
+  fi
+  # Never use partial output from a failed probe. This parser also rejects
+  # malformed/incomplete success envelopes rather than treating them as empty.
+  _codex_models="$(printf '%s' "$raw" | python3 -c '
+import json, re, sys
+try:
+    data = json.load(sys.stdin)
+    if not isinstance(data, dict) or data.get("complete") is not True:
+        raise ValueError("incomplete catalog")
+    models = data["models"]
+    if not isinstance(models, list):
+        raise ValueError("invalid model list")
+    names = set()
+    for row in models:
+        name = row.get("model") if isinstance(row, dict) else None
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/+\-]*", name):
+            raise ValueError("invalid model ID")
+        names.add(name)
+    print("\n".join(sorted(names)))
+except (ValueError, KeyError, TypeError):
+    sys.exit(1)
+')" || _codex_catalog_reason="catalog malformed or incomplete"
+}
+
+# Set by `run`. The catalog answer is advisory and can never change the verdict
+# (codex_model_offered always returns 0), so on the run path it only bought an
+# app-server start per voice — up to eleven under --max — on the probe budget.
+# `ready`/`list` still probe it, which is where its hint is actually shown.
+_codex_skip_advisory_catalog=0
+# A void setter, so `run` (which prints) never assigns the global itself.
+_codex_on_run_path() { _codex_skip_advisory_catalog=1; }
+
+codex_model_offered() {
+  local model="${1:-$CODEX_DEFAULT_MODEL}"
+  _codex_model_hint=""
+  (( _codex_skip_advisory_catalog )) && return 0
+  _codex_load_models
+  if [[ -z "$_codex_catalog_reason" ]] && _line_in_list "$model" "$_codex_models"; then
+    return 0
+  fi
+  _codex_model_hint="$model: model availability unverified — ${_codex_catalog_reason:-not in the advisory catalog; custom aliases may still work}; auth-only readiness"
+  if [[ -n "$_codex_catalog_reason" ]]; then
+    # The check genuinely did not happen: say so through the shared degrade.
+    _probe_degraded codex "$_codex_model_hint"
+  else
+    # The catalog WAS read and simply does not list the model. Routing this
+    # through _probe_degraded printed "the selected-model check did not run",
+    # which sent the operator looking for a broken probe. It is advisory either
+    # way: the catalog is not authoritative, so absence never blocks the run.
+    echo "warning: codex $_codex_model_hint" >&2
+  fi
+  return 0
+}
+
 ready_check() {
   local backend="$1" requested_model="${2:-}"
   case "$backend" in
@@ -2090,8 +2177,9 @@ ready_check() {
       # probe hit the wall" or "the adapter could not bound it", and the rc is
       # the only thing that knows.
       _codex_probe_rc="$codex_rc"
-      (( codex_rc == 0 )) && ! _scratch_dir_ok && return 1
-      return "$codex_rc"
+      (( codex_rc == 0 )) || return "$codex_rc"
+      _scratch_dir_ok || return 1
+      codex_model_offered "${requested_model:-$CODEX_DEFAULT_MODEL}"
       ;;
     # Model-aware: auth alone would advertise grok even when the CLI no longer
     # offers any model the adapter can drive (grok drops/renames models
@@ -2209,12 +2297,24 @@ require_usable() {
   fi
 }
 
+validate_model() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]] \
+    || { echo "Invalid model ID: $1" >&2; exit 2; }
+}
+
 subcmd_ready() {
   _probe_setup_lenient
-  local backend="${1:-}"
+  local backend="${1:-}" model=""
   [[ -z "$backend" ]] && usage
+  shift
   validate_backend "$backend"
-  require_usable "$backend"
+  while [[ $# -gt 0 ]]; do
+    [[ "$1" == --model && $# -ge 2 ]] \
+      || { echo "Expected --model <id>" >&2; exit 2; }
+    validate_model "$2"
+    model="$2"; shift 2
+  done
+  require_usable "$backend" "$model"
   echo "ready"
 }
 
@@ -2222,13 +2322,19 @@ print_rows() {
   # One TSV row per backend: backend, available, version, ready, hint.
   # $1 fills empty fields — the human table needs a placeholder because BSD
   # column collapses adjacent tabs, shifting later columns left.
-  local placeholder="${1:-}"
-  local b ver avail rdy hint
+  local placeholder="${1:-}" codex_model="${2:-}"
+  local b ver avail rdy hint model
   for b in claude codex grok kimi; do
-    ver="" avail=no rdy=no hint=""
+    ver="" avail=no rdy=no hint="" model=""
+    [[ "$b" == codex ]] && model="$codex_model"
     if ver="$(available_version "$b")"; then
       avail=yes
-      if ready_check "$b"; then rdy=yes; else hint="$(ready_hint "$b")"; fi
+      if ready_check "$b" "$model"; then
+        rdy=yes
+        [[ "$b" == codex ]] && hint="$_codex_model_hint"
+      else
+        hint="$(ready_hint "$b" "$model")"
+      fi
     else
       hint="not installed"
     fi
@@ -2239,10 +2345,20 @@ print_rows() {
 
 subcmd_list() {
   _probe_setup_lenient
-  case "${1:-}" in
-    --json)
-      require_python3
-      print_rows | python3 -c '
+  local json=0 codex_model=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) json=1; shift ;;
+      --codex-model)
+        [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+        validate_model "$2"
+        codex_model="$2"; shift 2 ;;
+      *) echo "Unknown flag: $1" >&2; exit 2 ;;
+    esac
+  done
+  if [[ "$json" == 1 ]]; then
+    require_python3
+    print_rows "" "$codex_model" | python3 -c '
 import json, sys
 rows = []
 for line in sys.stdin:
@@ -2252,16 +2368,10 @@ for line in sys.stdin:
 json.dump(rows, sys.stdout, indent=2)
 print()
 '
-      ;;
-    "")
-      { printf 'BACKEND\tAVAILABLE\tVERSION\tREADY\tHINT\n'; print_rows "-"; } \
-        | column_or_cat
-      ;;
-    *)
-      echo "Unknown flag: $1" >&2
-      exit 2
-      ;;
-  esac
+  else
+    { printf 'BACKEND\tAVAILABLE\tVERSION\tREADY\tHINT\n'; print_rows "-" "$codex_model"; } \
+      | column_or_cat
+  fi
 }
 
 subcmd_jail() {
@@ -2378,6 +2488,19 @@ subcmd_config() {
   echo "expiry_slop_seconds=$TIMEOUT_EXPIRY_SLOP"
 }
 
+# Diff-only Kimi (--tools false) must hear the prohibition BEFORE the shared
+# prompt's capability line ("subject to the stricter policy at the top of this
+# prompt, you MAY read project files"). Its full contract is appended after the
+# diff, so without this the top held no policy at all and the first thing Kimi
+# read was a permission — one read, and the ACP client aborts the session.
+_kimi_tools_disabled_banner() {
+  printf 'TOOLS: DISABLED for this review. Review ONLY the supplied diff: do not read files, list directories, run commands or browse — any tool call ends the session unreviewed. This overrides any later line that says you MAY read files.\n\n'
+}
+
+_tool_budget_contract() {
+  printf 'TOOL BUDGET: use at most %s tool calls, only to confirm suspected out-of-diff issues. The diff is already supplied; do not reread it wholesale. This is advisory, not permission to exceed the read-only policy.\n\n' "$1"
+}
+
 subcmd_run() {
   local backend="${1:-}"
   [[ -z "$backend" ]] && usage
@@ -2393,6 +2516,7 @@ subcmd_run() {
   fi
 
   local prompt_file="" lens_instr="" lens_instr_set=0 lens_instr_sum="" effort="xhigh" model="" schema="$DEFAULT_SCHEMA"
+  local tools=true tool_budget=""
   while [[ $# -gt 0 ]]; do
     [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
     case "$1" in
@@ -2400,7 +2524,11 @@ subcmd_run() {
       --lens-instr)  lens_instr="$2";  lens_instr_set=1; shift 2 ;;
       --lens-instr-sum) lens_instr_sum="$2"; shift 2 ;;
       --effort)      effort="$2"; shift 2 ;;
-      --model)       model="$2";       shift 2 ;;
+      --model)       validate_model "$2"; model="$2"; shift 2 ;;
+      --tools)       tools="$2"; shift 2 ;;
+      --tool-budget)
+        [[ "$2" =~ ^[0-9]+$ ]] || { echo "Invalid --tool-budget: expected an integer" >&2; exit 2; }
+        tool_budget="$2"; shift 2 ;;
       --schema)      schema="$2";      shift 2 ;;
       --telemetry)
         TELEMETRY_FILE="$2"
@@ -2422,6 +2550,20 @@ subcmd_run() {
     low|medium|high|xhigh|max) ;;
     *) echo "Invalid effort: $effort (low|medium|high|xhigh|max)" >&2; exit 2 ;;
   esac
+  case "$tools" in
+    true|false) ;;
+    *) echo "Invalid --tools: $tools (true|false)" >&2; exit 2 ;;
+  esac
+  if [[ "$tools" == false ]]; then
+    [[ "$backend" == kimi ]] || { echo "--tools false is supported only for kimi" >&2; exit 2; }
+    tool_budget="${tool_budget:-0}"
+  else
+    tool_budget="${tool_budget:-8}"
+  fi
+  tool_budget="$(_resolve_int --tool-budget "$tool_budget" 8 0 1000)" || exit $?
+  if { [[ "$tools" == false ]] && (( tool_budget != 0 )); } || { [[ "$tools" == true ]] && (( tool_budget == 0 )); }; then
+    echo "Contradictory tool policy: false requires budget 0; true requires a positive budget" >&2; exit 2
+  fi
   [[ -f "$schema" ]] || { echo "Schema not found: $schema" >&2; exit 2; }
 
   # PROMPT TRANSPORT: the prompt NEVER travels on argv. It used to, which made
@@ -2546,7 +2688,7 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
       exit 2
     fi
   fi
-  if [[ -n "$lens_instr" ]]; then
+  if [[ -n "$lens_instr" || "$backend" != kimi || "$tools" != true ]]; then
     # Assemble instruction+diff into a NEW file rather than concatenating
     # strings: the whole point of the transport rework is that the diff never
     # enters a shell variable. Writing into a fresh file (not appending in
@@ -2555,11 +2697,19 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
     # the sibling calls running concurrently.
     _prompt_scratch "$prompt_path" \
       || { echo "Could not create a temp file for the assembled prompt" >&2; exit 2; }
-    { printf '%s\n\n' "$lens_instr" && cat "$prompt_path"; } > "$TMP_PROMPT" \
+    # No lens instruction (a direct adapter call) → no empty leading lines;
+    # codex/grok still take this branch so the tool budget is always prepended.
+    { { [[ -z "$lens_instr" ]] || printf '%s\n\n' "$lens_instr"; } &&
+      { if [[ "$backend" == kimi ]]; then
+          [[ "$tools" == true ]] || _kimi_tools_disabled_banner
+        else
+          _tool_budget_contract "$tool_budget"
+        fi; } &&
+      cat "$prompt_path"; } > "$TMP_PROMPT" \
       || { echo "Could not assemble the lens instruction and prompt" >&2; exit 2; }
     [[ -n "$_PROMPT_SCRATCH_PREVIOUS" ]] && rm -f "$_PROMPT_SCRATCH_PREVIOUS"
     prompt_path="$TMP_PROMPT"
-    _prompt_bytes_checked "$prompt_path" "$max_bytes" "Prompt too large with lens instruction"
+    _prompt_bytes_checked "$prompt_path" "$max_bytes" "Prompt too large with the prepended review instructions"
     nbytes="$_PROMPT_BYTES"
   fi
 
@@ -2579,6 +2729,7 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
   # Both resolved above, in THIS shell — so the wall recorded in telemetry is the
   # wall that will actually apply, not a value assigned inside a subshell.
   _set_enforced_wall
+  _codex_on_run_path
   require_usable "$backend" "$model"
   require_python3
 
@@ -2604,7 +2755,7 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
   case "$backend" in
     codex) run_codex "$prompt_path" "$effort" "$model" "$schema" ;;
     grok)  run_grok  "$prompt_path" "$effort" "$model" "$schema" ;;
-    kimi)  run_kimi  "$prompt_path" "$effort" "$model" "$schema" ;;
+    kimi)  run_kimi  "$prompt_path" "$effort" "$model" "$schema" "$tools" "$tool_budget" ;;
   esac
 }
 
@@ -2962,18 +3113,44 @@ print()
 }
 
 _kimi_output_contract() {
-  # Kimi has no schema-enforcement flag. Put the exact schema in its PROMPT so
-  # obedience has the best chance of succeeding, then independently validate the
-  # answer in kimi-acp.py. The contract follows the fenced diff: lensInstr remains
-  # the first text in the prompt, preserving the workflow's scope invariant.
-  local schema="$1"
-  # kimi-acp.py vets every shell command against a read-only allowlist and
-  # aborts the session on anything else. Tell the model the rules up front, or
-  # it burns its turn (or the whole voice) on a command the gate will kill.
-  printf '\n\nTOOLS: read-only session. You may read/search files, fetch the web, and run READ-ONLY shell commands: git log/show/blame/diff/status/ls-files/grep, grep/rg, find (no -exec), ls, cat, head, tail, wc, sort, uniq, cut, tr, diff, stat — pipes between them are fine. NO writes, NO redirection (>), NO command chaining (; && ||), NO $(...), NO other programs (sed, awk, xargs, python, bash...). A disallowed command aborts the whole review. TOOL BUDGET: the diff is already inlined above — use at most 8 tool calls in total, only to confirm a suspected out-of-diff defect; never re-read files the diff already shows.\n' &&
-  printf '\nOUTPUT CONTRACT (HIGH PRIORITY): Return ONLY one JSON object matching this JSON Schema. No markdown fence, preface, explanation, or trailing text. Empty findings is valid.\n' &&
-    cat "$schema" &&
-    printf '\nThe response must be exactly the schema object and nothing else.\n'
+  # Compact only schema annotations, never instance properties or validation
+  # rules. The original caller schema remains the local validator's authority.
+  local schema="$1" tools="${2:-true}" tool_budget="${3:-8}"
+  if [[ "$tools" == false ]]; then
+    printf '\n\nTOOLS: disabled. Review only the supplied diff. No file reads, shell, web or other tool calls; any observed tool use aborts this review. Do not invent unseen context. TOOL BUDGET: 0.\n' || return 1
+  else
+    printf '\n\nTOOLS: read-only. File read/search and public web research; shell only git log/show/blame/diff/status/ls-files/grep, grep/rg, find (no -exec), ls, cat, head, tail, wc, sort, uniq, cut, tr, diff, stat and pipes. No writes, redirects, chaining, substitutions or other programs; disallowed execution aborts. TOOL BUDGET: at most %s calls, only to confirm suspected out-of-diff issues; do not reread the supplied diff.\n' "$tool_budget" || return 1
+  fi
+  printf '\nOUTPUT (HIGH PRIORITY): Return only one JSON object matching this schema, no markdown or other text. Empty findings is valid.\n' &&
+    python3 - "$schema" <<'PY'
+import json
+import sys
+
+maps = {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas", "dependencies"}
+children = {"additionalProperties", "unevaluatedProperties", "propertyNames", "items", "additionalItems", "unevaluatedItems", "contains", "not", "if", "then", "else", "contentSchema"}
+arrays = {"allOf", "anyOf", "oneOf", "prefixItems"}
+
+def compact(schema):
+    if not isinstance(schema, dict):
+        return schema
+    out = {}
+    for key, value in schema.items():
+        if key in {"description", "title", "$comment", "examples"}:
+            continue
+        if key in maps and isinstance(value, dict):
+            value = {name: compact(child) for name, child in value.items()}
+        elif key in arrays or (key == "items" and isinstance(value, list)):
+            if isinstance(value, list):
+                value = [compact(child) for child in value]
+        elif key in children:
+            value = compact(value)
+        out[key] = value
+    return out
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    json.dump(compact(json.load(stream)), sys.stdout, ensure_ascii=False, separators=(",", ":"))
+print()
+PY
 }
 
 _dir_under_protected_root() { [[ "$(_protected_root_relation "$1")" == under ]]; }
@@ -3323,7 +3500,7 @@ PY
 }
 
 run_kimi() {
-  local prompt_path="$1" effort="$2" model="$3" schema="$4"
+  local prompt_path="$1" effort="$2" model="$3" schema="$4" tools="${5:-true}" tool_budget="${6:-8}"
 
   # kimi-code 0.32.0 exposes low|high|max through ACP session config even though
   # the top-level CLI has no --effort flag. Map missing intermediate tiers DOWN,
@@ -3348,7 +3525,7 @@ run_kimi() {
     || { echo "Could not create a temp file for the Kimi schema prompt" >&2; exit 2; }
   # `&&`, not `;`: with `;` the group's status was the contract printf's 0 and
   # a failed cat (the input already unlinked — see _prompt_scratch) went unseen.
-  { cat "$prompt_path" && _kimi_output_contract "$schema"; } >"$TMP_PROMPT" \
+  { cat "$prompt_path" && _kimi_output_contract "$schema" "$tools" "$tool_budget"; } >"$TMP_PROMPT" \
     || { echo "Could not assemble the Kimi schema prompt" >&2; exit 2; }
   [[ -n "$_PROMPT_SCRATCH_PREVIOUS" ]] && rm -f "$_PROMPT_SCRATCH_PREVIOUS"
   prompt_path="$TMP_PROMPT"
@@ -3396,9 +3573,33 @@ run_kimi() {
       --cwd "$repo" \
       --model "$kimi_model" \
       --effort "$effort" \
+      --tools "$tools" \
       --kimi-bin "$KIMI_BIN" \
+      --metrics-file "$TMP_KIMI_HOME/metrics.json" \
       --deny-path "$TMP_KIMI_HOME" \
       --deny-path "$SWARM_HOST_HOME/.kimi-code" >"$TMP_OUT" 2>"$TMP_KIMI_HOME/client.err" || rc=$?
+  # Read scalar observations before cleanup removes the isolated runtime. Missing
+  # or malformed metrics are unknown, never a fabricated zero-tool review.
+  # Captured synchronously, never via `read < <(...)`: a process-substitution
+  # producer can exit after `read` returns, and its late SIGCHLD can interrupt a
+  # later Bash 3.2 printf with EINTR — truncating the telemetry line or the
+  # findings output (the registry lost records to exactly this).
+  local kimi_metrics
+  TELEMETRY_TOOL_CALLS=null; TELEMETRY_TOOL_CALLS_COMPLETE=false
+  kimi_metrics="$(python3 - "$TMP_KIMI_HOME/metrics.json" <<'PY'
+import json
+import sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        metrics = json.load(stream)
+    count = metrics.get("tool_calls")
+    valid = type(count) is int and 0 <= count <= 9007199254740991
+    print(count if valid else "null", "true" if valid and metrics.get("complete") is True else "false")
+except (OSError, ValueError, AttributeError):
+    print("null false")
+PY
+  )" || kimi_metrics="null false"
+  read -r TELEMETRY_TOOL_CALLS TELEMETRY_TOOL_CALLS_COMPLETE <<<"$kimi_metrics"
   # The client's one-line diagnosis (scrubbed) — without it every 11/12/13
   # read "rejected by the gate" and the operator had to re-run the python
   # client by hand to learn that the model was not offered, the quota was

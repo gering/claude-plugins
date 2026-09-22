@@ -142,9 +142,16 @@ def render(records, timeout_seconds):
         # visible nowhere at all — so "which model actually reviewed this?" had no
         # answer outside the raw jsonl.
         model = rec.get("model") or "?"
+        # Observed distinct tool attempts, NOT model turns or billed tokens.
+        # Old records have no count: preserve their rendering, never imply 0.
+        calls = rec.get("tool_calls")
+        tools = ""
+        if type(calls) is int and calls >= 0:
+            partial = " (partial)" if rec.get("tool_calls_complete") is False else ""
+            tools = f"  {calls} tools{partial}"
         lines.append(
             f"  {label(rec):<28} {secs:>4}s  {effort:<6} {model:<10} "
-            f"{kib:>6.1f} KiB{mark}")
+            f"{kib:>6.1f} KiB{tools}{mark}")
     return lines
 
 

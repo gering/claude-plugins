@@ -1,9 +1,9 @@
 ---
 title: "Swarm Review Pipeline (/swarm:review)"
 createdAt: 2026-07-08
-updatedAt: 2026-09-16
+updatedAt: 2026-09-20
 createdFrom: "PR #24"
-updatedFrom: "fix-swarm-silent-voice-loss"
+updatedFrom: "branch: task/add-swarm-review-profiles"
 pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
@@ -59,9 +59,9 @@ truth** — every voice's fan-out units come from it, Claude and externals alike
   held the cluster open. Cost when kept: one extra call per live backend.
 - **The cluster is the fan-out unit for EVERY voice** since 0.7.0 — Claude
   finders (≤5) *and* codex/grok/kimi (one CLI call per gated cluster each);
-  `--max` splits all of them to one call per lens (≤11 units → ≤33 external
-  calls) — the granularity ladder is `--quick` (future) =
-  one broad pass → default = per-cluster → `--max` = per-lens. The **gate
+  `--max` splits them to one call per lens; Kimi retains its narrower
+  allowlist. `--quick` and default both use clusters, `--max` uses lenses.
+  Quick lowers selected execution costs, not the lens set. The **gate
   stays per-lens** (a fully-pruned cluster spawns no agent for anyone); design lenses are
   first-class in the gate prompt, skipped only when the diff can't pay off.
   **Accepted tradeoff of the cluster default:** per-lens failure isolation is
@@ -143,8 +143,9 @@ truth** — every voice's fan-out units come from it, Claude and externals alike
   whole numeric config as ONE opaque token, `config: "<SWARM_CFG_LINE>"`
   (`k=v;k=v;…`: the prompt cap, the probe bound and budget, the adapter's own
   rails, and `timeout_seconds` only when the user set `SWARM_TIMEOUT`). Two more
-  are conditional: `max: true` for `--max`, `claude: false` for an external-only
-  control run.
+  cover execution selection: explicit `profile: 'quick'|'default'|'max'`,
+  and `claude: false` for an external-only control run. Legacy `max` does not
+  select a costlier profile.
   **Why one token:** these values reach the workflow only by being *transcribed*
   out of SKILL.md prose by the model. As separate placeholders, a dropped one did
   not fail — it substituted a fallback that was then pinned onto every adapter
@@ -180,12 +181,13 @@ Workflow notification's `<failures>` block.
 Three separate fail-open sites had to line up for that, which is why it survived
 so long:
 - `(await parallel([...])).filter(Boolean)` — a denied spawn was dropped *before*
-  any accounting saw it. **Rule: pair results to the planned voice list by INDEX,
-  never by truthiness.** Planned voices are known before fan-out
-  (`claudeVoiceSpecs` + `externalVoiceSpecs`), so a hole at index *i* names
-  exactly which backend+unit was lost. The join also checks identity
-  (`r.backend === p.backend && r.unit === p.unit`) so an order change degrades to
-  "everything lost" — loud — rather than mis-attributing findings.
+  any accounting saw it. **Rule: join results to planned backend/unit identity,
+  never by truthiness or assumed array ordering.** Planned voices are known
+  before fan-out (`claudeVoiceSpecs` + `externalVoiceSpecs`); a missing identity
+  names the lost voice. An earlier index-only join could falsely lose healthy
+  voices when results shifted. The current identity map tolerates reordering
+  and compaction; positions only help describe a missing result, never accept
+  or attribute findings.
 - `ok: r?.ok !== false` — `undefined !== false` is true, so *no result* read as
   *successful voice, 0 findings*. Requires an explicit `ok === true` **plus**
   `Array.isArray(findings)` now. A non-array `findings` is an error, not an empty
@@ -319,36 +321,53 @@ the diff out of the script, above). Claude applies edits between rounds.
 - Loop mechanics mirror pr-flow `/cycle` run locally (no push / no `@claude`
   poll); the `Status` column (🔧/⏭️/🔁) and stable `#` across rounds come from
   the report table contract this entry defines above (P2 reserved them).
-- **`--max` profile** (`INPUT.max` in the workflow): lifts every voice to its
-  ceiling — codex `xhigh` (from `medium`; codex has NO `max` tier, xhigh is its
-  top; the model is the adapter's `gpt-5.6-sol` on both profiles since 0.11.0),
-  Claude finder lenses + verifier `xhigh`, and Kimi `thinking=high` via ACP
-  (from `low`; the k3 ladder is low|high|max with no medium, and `high` ran
-  99–458 s per ~290 KiB cluster, so `max` is not wired to any profile);
-  gate/merge unchanged, and grok `low` → `medium` (`high` blew the 540 s wall
-  on ~190 KiB cluster prompts, `medium` on ~290 KiB ones — 0.11.0 four-family
-  run — so the normal profile runs `low`). Orthogonal to `--fix`/`--loop`,
-  composes with both. The profile's live settings are verified end-to-end
-  (`gpt-5.6-sol`@`xhigh` at wiring time, `@medium` on 2026-09-05; grok re-verified at `--effort high` on
-  0.2.101) — the "no silent fail on a non-existent model/effort" rule.
+- **Profile axis:** `INPUT.profile` selects quick/default/max strictly; malformed
+  or absent inputs select default and legacy `INPUT.max` never escalates cost.
+  The marked JSON-compatible `PROFILES` literal in `swarm-review.js` is the
+  execution source for stage models/effort, external models/tool budgets, and
+  fan-out unit. `scripts/profiles.py` reads that SAME staged script before
+  model-aware prep; no separate shell model map or runtime JS loader is needed.
+  See the sync-tested matrix in `skills/review/SKILL.md` rather than copying its
+  mutable cells here. User-selected model changes do not imply that `--max`
+  means every provider's maximum effort.
+- **Cheap transport, careful decisions:** the gate classifies coverage and gets
+  more effort than the mechanical transport wrappers, which merely run an
+  adapter. Session-model stages omit model overrides; labels must not assert
+  a particular model without execution evidence. `externalVoiceSpecs` retains
+  backend/unit identity and adds execution data for the future runner.
+- **Intensity is not provider consent or runtime:** Quick keeps cluster width;
+  Kimi's quick tier changes capabilities to supplied-diff-only. Kimi stays
+  opt-in even under max. Positive tool budgets are advisory, not truncating
+  turn limits. Neither profiles nor a higher `SWARM_TIMEOUT` crosses the
+  synchronous Bash ceiling; `async-poll-external-voices` must coordinate with
+  runtime-handoff on the one runner. Live validation, permission blocks and
+  measured prompt/tool observations are recorded in
+  `plugins/swarm/docs/profile-measurements.md`. Keep mutable run status there;
+  smaller contracts alone do not establish token/quota savings.
 
 - **Per-backend cluster allowlist** (`EXTERNAL_BACKENDS[].clusters`, 0.11.0): Kimi
-  reviews only `breakage` + `threat` on both profiles. Moonshot meters a 5-hour
+  reviews only `breakage` + `threat` in every profile. Moonshot meters a 5-hour
   AND a 7-day quota; a five-cluster review (5 × ~370 KiB prompts plus tool loops)
   hit the 5-hour limit mid-run and the 7-day one after two runs (2026-09-07), so
   the fourth family is spent where it changes verdicts (correctness/removed-
   behavior, security/adversarial) and reach/design/consistency keep three
-  families. Under `--max` the filter goes by lens membership. The appended Kimi
-  contract also carries a tool budget (≤ 8 calls) so agentic loops stop
-  re-reading what the diff already shows. Effort is at the k3 floor (`low`).
-  Even so a two-cluster run drained the 5-hour window (each ACP tool
-  round-trip re-sends the full context), so **Kimi is opt-in** (`--kimi` →
+  families. Under `--max` the filter goes by lens membership. Its tool policy and
+  effort come from the profile map (0.13.0), not one fixed contract: `--quick`
+  is diff-only (`tools:false`, budget 0 — the prohibition is stated at the TOP
+  of the prompt too, before the shared "you MAY read" line, and the ACP client
+  discards any session that uses a tool); default and `--max` allow tools with
+  an advisory budget of 8 calls. Effort is the k3 floor (`low`) for quick and
+  default, `high` under `--max`.
+  Even so a historical two-cluster run drained the 5-hour window. Tool-loop
+  context amplification was the working explanation, not a measured billing
+  multiplier; ACP bytes/call counts cannot establish caching or quota usage.
+  **Kimi is opt-in** (`--kimi` →
   `SWARM_KIMI=1`, exported by the step-1 block for the readiness probe and
   carried by the workflow onto the transport command via
   `EXTERNAL_BACKENDS[].env`): the stock ensemble is three families, the
   workflow's fallback voices are `codex`+`grok`, and `test_backend_sync.py`
-  pins all three sides. Follow-up: make Kimi token-efficient (smaller prompt,
-  diff-only tier) before it can rejoin by default.
+  pins all three sides. The compact contract and diff-only tier do not
+  re-admit Kimi by default; provider choice remains independent of profiles.
 
 ## `--pr`: review a PR diff and post the result (swarm 0.4.0)
 
