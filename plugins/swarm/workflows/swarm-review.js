@@ -16,6 +16,7 @@ export const meta = {
 // args.externalVoices     which external backends are live (subset of codex, grok, kimi)
 // args.claude             false → external-only control run (no Claude lenses)
 // args.profile            quick | default | max (exact strings; anything else → default)
+// args.codex / args.grok  the run's frozen model selection, one `k=v;…` token each (prep step)
 // Normalize: the runtime may deliver `args` as an object OR a JSON string.
 let INPUT = args
 if (typeof INPUT === 'string') { try { INPUT = JSON.parse(INPUT) } catch { INPUT = {} } }
@@ -293,7 +294,9 @@ if (FINDING_NONCE && !/^[a-f0-9]{16,}$/.test(FINDING_NONCE)) FINDING_NONCE = ''
 const fenceDegraded = !FINDING_NONCE  // no structural fence at merge/verify — surfaced in the return payload
 // Single execution source. Keep this marked block strictly JSON-compatible:
 // profiles.py validates it in the SAME staged script before model-aware readiness.
-// null models mean session inheritance (stages) or adapter discovery (Grok).
+// null models mean session inheritance (stages), adapter discovery (Grok) or
+// the newest listed model of `family` (Codex: astra|sol|terra|luna, resolved once
+// per run by the prep step; a non-null Codex model is an exact pin instead).
 // Positive tool budgets are advisory, not execution deadlines.
 // BEGIN SWARM PROFILES JSON
 const PROFILES = {
@@ -307,7 +310,7 @@ const PROFILES = {
       "verify": { "model": null, "effort": "medium" }
     },
     "externals": {
-      "codex": { "model": "gpt-5.6-sol", "effort": "low", "tools": true, "toolBudget": 8 },
+      "codex": { "model": null, "family": "sol", "effort": "low", "tools": true, "toolBudget": 8 },
       "grok": { "model": null, "effort": "low", "tools": true, "toolBudget": 8 },
       "kimi": { "model": "kimi-code/k3-256k", "effort": "low", "tools": false, "toolBudget": 0 }
     }
@@ -322,7 +325,7 @@ const PROFILES = {
       "verify": { "model": null, "effort": "medium" }
     },
     "externals": {
-      "codex": { "model": "gpt-5.6-sol", "effort": "medium", "tools": true, "toolBudget": 8 },
+      "codex": { "model": null, "family": "sol", "effort": "medium", "tools": true, "toolBudget": 8 },
       "grok": { "model": null, "effort": "medium", "tools": true, "toolBudget": 8 },
       "kimi": { "model": "kimi-code/k3-256k", "effort": "low", "tools": true, "toolBudget": 8 }
     }
@@ -337,7 +340,7 @@ const PROFILES = {
       "verify": { "model": null, "effort": "xhigh" }
     },
     "externals": {
-      "codex": { "model": "gpt-6-astra", "effort": "medium", "tools": true, "toolBudget": 8 },
+      "codex": { "model": null, "family": "astra", "effort": "medium", "tools": true, "toolBudget": 8 },
       "grok": { "model": null, "effort": "medium", "tools": true, "toolBudget": 8 },
       "kimi": { "model": "kimi-code/k3-256k", "effort": "high", "tools": true, "toolBudget": 8 }
     }
@@ -939,8 +942,34 @@ const GROK_FROZEN_ENV = GROK_RUN.model
 // process could buy its own probe, and the run would not be one model. No model,
 // no grok voices — reported, not silent.
 const GROK_DROPPED = wantVoices.includes('grok') && !GROK_RUN.model
+// THE RUN'S CODEX MODEL, FROZEN — the same contract as GROK_RUN. The profile
+// names a FAMILY; `agents.sh codex-model` turns it into one concrete id ONCE in
+// the prep step (newest listed gpt-<N>[.<M>]-<family>, or an exact pin), and
+// every codex voice gets that id as an explicit --model. No token, or one that
+// does not validate, drops codex rather than letting each voice resolve alone.
+const CODEX_RUN = (() => {
+  const kv = {}
+  for (const part of String(INPUT.codex || '').split(';')) {
+    const i = part.indexOf('=')
+    if (i > 0) kv[part.slice(0, i).trim()] = part.slice(i + 1).trim()
+  }
+  const okId = (v) => typeof v === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/+-]*$/.test(v)
+  const model = okId(kv.selected) ? kv.selected : ''
+  return {
+    model,
+    family: /^(astra|sol|terra|luna|custom)$/.test(kv.family || '') ? kv.family : '',
+    // What prep was actually asked for — an operator's SWARM_CODEX_MODEL pin
+    // wins there, so the profile alone cannot say it.
+    requested: /^family:(astra|sol|terra|luna)$/.test(kv.requested || '') || okId(kv.requested) ? kv.requested : '',
+    latest: okId(kv.latest_candidate) ? kv.latest_candidate : '',
+    source: /^(catalog-latest|older-compatible|fallback|pinned)$/.test(kv.source || '') ? kv.source : (model ? 'unknown' : 'none'),
+    catalog: /^(complete|unavailable|malformed)$/.test(kv.catalog || '') ? kv.catalog : 'unknown',
+  }
+})()
+const CODEX_DROPPED = wantVoices.includes('codex') && !CODEX_RUN.model
 const EXTERNAL_BACKENDS = [
-  { backend: 'codex', ...PROFILE.externals.codex },
+  // `family` is policy, not a flag: only the frozen concrete model reaches argv.
+  { backend: 'codex', ...PROFILE.externals.codex, family: undefined, model: CODEX_RUN.model || null },
   // The profile leaves grok's model null (adapter-side discovery). One concrete
   // model is resolved ONCE per run before the specs are built, so it is fed in
   // here: externalFlags then emits an explicit --model for every grok voice and
@@ -965,7 +994,8 @@ const unitsForBackend = (b, units) => {
 // Identical to finderUnits whenever a gate ran — reuse it rather than recompute,
 // so the two sides can never drift apart by construction.
 const externalUnits = runClaude ? finderUnits : unitsFor(CANDIDATE_LENSES)
-const liveExternals = EXTERNAL_BACKENDS.filter((b) => wantVoices.includes(b.backend) && !(b.backend === 'grok' && GROK_DROPPED))
+const liveExternals = EXTERNAL_BACKENDS.filter((b) => wantVoices.includes(b.backend) &&
+  !(b.backend === 'grok' && GROK_DROPPED) && !(b.backend === 'codex' && CODEX_DROPPED))
 const liveBackends = liveExternals.map((b) => b.backend)
 const reviewSources = [...(runClaude ? ['claude'] : []), ...liveBackends].join('/') || 'no live backend'
 const externalVoiceSpecs = liveExternals
@@ -1009,6 +1039,10 @@ const externalVoiceSpecs = liveExternals
       (TELEMETRY ? ` --unit ${shQuote(u.name)} --telemetry ${shQuote(TELEMETRY)}` : ''),
     }
   }))
+if (liveBackends.includes('codex')) {
+  log(`codex model for this run: ${CODEX_RUN.model} (${CODEX_RUN.requested}; ${CODEX_RUN.source}, catalog ${CODEX_RUN.catalog}${CODEX_RUN.latest && CODEX_RUN.latest !== CODEX_RUN.model ? `; newest listed: ${CODEX_RUN.latest}` : ''}) at effort ${PROFILE.externals.codex.effort} — frozen onto every codex voice`)
+}
+if (CODEX_DROPPED) log('codex DROPPED from this run: no concrete model was selected for it (args.codex carries no valid `selected`) — see the prep step\'s CODEX_DEGRADED for the reason')
 if (liveBackends.includes('grok')) {
   log(`grok model for this run: ${GROK_RUN.model} (${GROK_RUN.source}${GROK_RUN.latest && GROK_RUN.latest !== GROK_RUN.model ? `; latest on offer: ${GROK_RUN.latest}` : ''}) — frozen onto every grok voice`)
 }
@@ -1566,8 +1600,9 @@ findings.forEach((c, i) => { c.num = i + 1 })
 // needs a registered workflow to surface — tracked as P4 wiring.
 // Display only model selections we actually passed. Inherited session models
 // and discovered Grok models have no concrete id here; telemetry has the latter.
-// grok's profile model is null by design; the concrete id is the run's frozen one.
-const MODEL_LABEL = { claude: PROFILE.stages.finder.model || 'session', codex: PROFILE.externals.codex.model, grok: GROK_RUN.model || 'grok', kimi: PROFILE.externals.kimi.model }
+// grok's profile model is null by design and codex's names a family; the concrete
+// ids are the run's frozen ones.
+const MODEL_LABEL = { claude: PROFILE.stages.finder.model || 'session', codex: CODEX_RUN.model || 'codex', grok: GROK_RUN.model || 'grok', kimi: PROFILE.externals.kimi.model }
 const agents = {}
 for (const v of voices) {
   const a = agents[v.backend] || (agents[v.backend] = { backend: v.backend, model: MODEL_LABEL[v.backend] || v.backend, voices: 0, failedVoices: 0, findings: 0, ok: true })
@@ -1633,6 +1668,11 @@ return {
     // (null when grok did not run). `source !== 'latest'` is a degradation the
     // presenter must show: "grok reviewed" does not mean "the latest grok did".
     grokModel: liveBackends.includes('grok') ? GROK_RUN : null,
+    // Same for codex: which concrete model the family resolved to, and whether
+    // that was the newest listed one (`source` other than catalog-latest/pinned
+    // is a degradation the presenter must show).
+    codexModel: liveBackends.includes('codex') ? CODEX_RUN : null,
+    codexDropped: CODEX_DROPPED,
     grokDropped: GROK_DROPPED,
     // Backends that actually entered the workflow with at least one surviving
     // voice — the pr-post footer names exactly these; the skill passes the list

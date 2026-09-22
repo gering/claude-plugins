@@ -63,8 +63,11 @@ fix (step 3), but change nothing.
 
 The workflow's marked `PROFILES` map is the execution source; this table is
 sync-tested. Cells are JSON: stages `[model, effort]`, externals
-`[model, effort, tools, toolBudget]`. `null` inherits the session model for stages
-and discovers Grok's model. No model called "session" or "discovered" is sent.
+`[model, effort, tools, toolBudget]`, except Codex, whose first cell is its
+capability **family** (Fable→Astra, Opus→Sol, Sonnet→Terra, Haiku→Luna): the prep
+step resolves it once per run to the newest listed `gpt-<N>[.<M>]-<family>`.
+`null` inherits the session model for stages and discovers Grok's model. No model
+called "session" or "discovered" is sent.
 
 <!-- BEGIN SWARM PROFILE TABLE -->
 | Setting | quick | default | max |
@@ -75,7 +78,7 @@ and discovers Grok's model. No model called "session" or "discovered" is sent.
 | stages.transport | `["haiku","low"]` | `["haiku","low"]` | `["haiku","low"]` |
 | stages.merge | `[null,"medium"]` | `[null,"medium"]` | `[null,"medium"]` |
 | stages.verify | `[null,"medium"]` | `[null,"medium"]` | `[null,"xhigh"]` |
-| externals.codex | `["gpt-5.6-sol","low",true,8]` | `["gpt-5.6-sol","medium",true,8]` | `["gpt-6-astra","medium",true,8]` |
+| externals.codex | `["sol","low",true,8]` | `["sol","medium",true,8]` | `["astra","medium",true,8]` |
 | externals.grok | `[null,"low",true,8]` | `[null,"medium",true,8]` | `[null,"medium",true,8]` |
 | externals.kimi | `["kimi-code/k3-256k","low",false,0]` | `["kimi-code/k3-256k","low",true,8]` | `["kimi-code/k3-256k","high",true,8]` |
 <!-- END SWARM PROFILE TABLE -->
@@ -175,9 +178,10 @@ cp "${CLAUDE_PLUGIN_ROOT}/workflows/swarm-review.js" "$WORKFLOW" \
   || { echo "SWARM_WORKFLOW_UNAVAILABLE=could not stage swarm-review.js"; rm -rf "$TMPD" "$WORKDIR"; exit 1; }
 
 # Read only the validated JSON block from the exact script Workflow will run.
-CODEX_MODEL="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/profiles.py" --workflow "$WORKFLOW" --profile "$PROFILE" --codex-model)" \
+CODEX_POLICY="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/profiles.py" --workflow "$WORKFLOW" --profile "$PROFILE" --codex-policy)" \
   || { echo "SWARM_PROFILE_ERR=could not resolve the staged profile map"; rm -rf "$TMPD" "$WORKDIR"; exit 1; }
-echo "PROFILE=$PROFILE"; echo "CODEX_MODEL=$CODEX_MODEL"
+_cp() { printf '%s\n' "$CODEX_POLICY" | sed -n "s/^$1=//p" | head -n 1; }
+echo "PROFILE=$PROFILE"
 
 # --- Diff source: ONE block, ONE `set -euo pipefail`, dispatched by a flag ----
 # The diff source is a BRANCH here, never a second self-contained script: a
@@ -457,9 +461,29 @@ fi
 _gk() { printf '%s\n' "$GROK_KV" | sed -n "s/^$1=//p" | head -n 1 | tr -cd 'A-Za-z0-9._-'; }
 echo "GROK_RUN=selected=$(_gk selected);latest_candidate=$(_gk latest_candidate);source=$(_gk source);catalog=$(_gk catalog);cli_version=$(_gk cli_version)"
 echo "GROK_DEGRADED=$(printf '%s\n' "$GROK_KV" | sed -n 's/^degraded=//p' | head -n 1)"
+# The codex model for THIS run, resolved ONCE from the profile's family (newest
+# listed model of that family in the NATIVE CLI's model/list — non-generative,
+# no inference) or an exact pin (profile model, else the operator's
+# SWARM_CODEX_MODEL, which wins). Passed as an env prefix, not `${X:+--model …}`,
+# for the same zsh reason as grok above. Same oversize skip.
+CODEX_KV=""
+if [ "$PROMPT_BYTES" -le "$OVERSIZE_THRESHOLD" ]; then
+  CODEX_KV="$(SWARM_CODEX_MODEL="${SWARM_CODEX_MODEL:-$(_cp model)}" bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" codex-model --family "$(_cp family)" --effort "$(_cp effort)" 2>"$TMPD/codex-model.err")" || CODEX_KV="$CODEX_KV
+rc=$?"   # exit 1 = nothing selected; 2 = refused input (e.g. a malformed SWARM_CODEX_MODEL)
+fi
+_ck() { printf '%s\n' "$CODEX_KV" | sed -n "s/^$1=//p" | head -n 1 | tr -cd 'A-Za-z0-9._:/+-'; }
+CODEX_MODEL="$(_ck selected)"
+echo "CODEX_RUN=selected=$CODEX_MODEL;requested=$(_ck requested);family=$(_ck family);source=$(_ck source);latest_candidate=$(_ck latest_candidate);catalog=$(_ck catalog);effort=$(_cp effort)"
+# Never an empty reason for a dropped codex: fall back to the helper's own stderr.
+CODEX_DEGRADED="$(printf '%s\n' "$CODEX_KV" | sed -n 's/^degraded=//p' | head -n 1)"
+if [ -z "$CODEX_MODEL" ] && [ -z "$CODEX_DEGRADED" ] && [ -n "$CODEX_KV" ]; then
+  CODEX_DEGRADED="codex-model failed ($(_ck rc | sed 's/^/rc=/')): $(head -n 1 "$TMPD/codex-model.err" 2>/dev/null | tr -d '\r')"
+fi
+echo "CODEX_DEGRADED=$CODEX_DEGRADED"
 # SWARM_GROK_PROBE=0: `list` reads the verdicts grok-model just cached and never
 # pays for a probe itself — on an oversize diff grok-model was skipped, and
-# readiness in `ensure` mode would have bought the probes anyway.
+# readiness in `ensure` mode would have bought the probes anyway. Codex
+# readiness is judged on the concrete model just selected.
 echo "LIVE_JSON=$(SWARM_GROK_PROBE=0 bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json --codex-model "$CODEX_MODEL" | tr -d '\n')"
 ```
 
@@ -508,6 +532,16 @@ echo "LIVE_JSON=$(SWARM_GROK_PROBE=0 bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.
   nonempty readiness `hint`, **including rows with `ready=true`**: an unverified
   selected Codex model may proceed on auth-only readiness, never silently.
   Do not substitute another model when a catalog check is inconclusive.
+- **Codex model** — when `"codex"` is in `externalVoices`, announce from
+  `CODEX_RUN` one line: requested family (or pin), `selected` id, `source`
+  (`catalog-latest` | `older-compatible` | `fallback` | `pinned`) and effort.
+  `catalog-latest` means "newest the native catalog listed" — never call it the
+  definitive latest, and a listed model is not proof inference works. Whenever
+  `source` is not `catalog-latest`/`pinned`, or `CODEX_DEGRADED` is non-empty,
+  print `CODEX_DEGRADED` **verbatim**. An empty `selected` drops the codex voices
+  (the workflow fails closed rather than let each voice resolve on its own) —
+  say so with `CODEX_DEGRADED`. Families never borrow from each other: a Terra
+  run on 5.6 while Sol runs on 6 is correct, not a fault to fix.
 - **Grok model** — when `"grok"` is in `externalVoices`, announce the run's model
   from `GROK_RUN` before the workflow starts, one line: the `selected` id and its
   `source` (`latest` | `older-compatible` | `last-known` | `pinned`). Whenever
@@ -556,6 +590,7 @@ Workflow({
     telemetryFile: "<TELEMETRY>",
     findingNonce: "<FINDING_NONCE>",
     config: "<SWARM_CFG_LINE>",
+    codex: "<CODEX_RUN>",
     grok: "<GROK_RUN>",
     profile: "<PROFILE>",
     externalVoices: [<the live voices from step 1>]
@@ -577,15 +612,16 @@ be four separate placeholders: dropping one does not fail loudly, it silently
 substitutes a fallback that then disagrees with what the block already decided —
 which is how a raised `SWARM_MAX_PROMPT_BYTES` became N per-call "Prompt file too
 large" errors and a Claude-only review. **The block decides the contents, you only
-carry them.** `<GROK_RUN>` follows the same rule: one verbatim token, which the
-workflow turns into an explicit `--model` on every grok voice, so the whole run
-uses ONE concrete model. **A run keeps its model:** on a Workflow resume
-(`resumeFromRunId`) and in `--loop` rounds ≥ 2, pass the `GROK_RUN` token of the
-run's FIRST prep block, not a newer one — a model released mid-run must not split
-one review across two models (if grok is no longer live, drop the voice as usual).
+carry them.** `<CODEX_RUN>` and `<GROK_RUN>` follow the same rule: one verbatim
+token each, which the workflow turns into an explicit `--model` on every voice of
+that backend, so the whole run uses ONE concrete model per backend. **A run keeps
+its models:** on a Workflow resume (`resumeFromRunId`) and in `--loop` rounds ≥ 2,
+pass the `CODEX_RUN` and `GROK_RUN` tokens of the run's FIRST prep block, not
+newer ones — a model released mid-run must not split one review across two
+models or generations (if a backend is no longer live, drop the voice as usual).
 Copy `profile: "<PROFILE>"` from the prep output on EVERY
 invocation (including default); never pass legacy `max`. Announce the selected
-profile and the resolved Codex model from `CODEX_MODEL`, not a guessed model.
+profile and the resolved Codex model from `CODEX_RUN`, not a guessed model.
 Add `claude: false` to `args`
 for an **external-only control run** (codex + grok + kimi when live, no Claude finder
 lenses — merge/verify still run in-session); default is the full ensemble.
