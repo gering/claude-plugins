@@ -76,7 +76,7 @@ and discovers Grok's model. No model called "session" or "discovered" is sent.
 | stages.merge | `[null,"medium"]` | `[null,"medium"]` | `[null,"medium"]` |
 | stages.verify | `[null,"medium"]` | `[null,"medium"]` | `[null,"xhigh"]` |
 | externals.codex | `["gpt-5.6-sol","low",true,8]` | `["gpt-5.6-sol","medium",true,8]` | `["gpt-6-astra","medium",true,8]` |
-| externals.grok | `[null,"low",true,8]` | `[null,"low",true,8]` | `[null,"medium",true,8]` |
+| externals.grok | `[null,"low",true,8]` | `[null,"medium",true,8]` | `[null,"medium",true,8]` |
 | externals.kimi | `["kimi-code/k3-256k","low",false,0]` | `["kimi-code/k3-256k","low",true,8]` | `["kimi-code/k3-256k","high",true,8]` |
 <!-- END SWARM PROFILE TABLE -->
 

@@ -129,7 +129,10 @@ if _brief:
     check("brief git subcommands are on the policy read list", named_subs <= (subs | listing))
 
 check("workflow registers grok from the profile map", "backend: 'grok', ...PROFILE.externals.grok" in WORKFLOW)
-for profile, effort in (("quick", "low"), ("default", "low"), ("max", "medium")):
+# Grok runs `medium` from default up by explicit request. Quick stays `low`:
+# the recorded four-family run timed grok out at `medium`, and the synchronous
+# 600 s ceiling is unchanged, so the cheap profile must stay the fast one.
+for profile, effort in (("quick", "low"), ("default", "medium"), ("max", "medium")):
     check(f"grok {profile} profile effort", PROFILES[profile]["externals"]["grok"]["effort"] == effort)
 
 if FAILS:

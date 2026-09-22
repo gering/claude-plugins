@@ -323,7 +323,7 @@ const PROFILES = {
     },
     "externals": {
       "codex": { "model": "gpt-5.6-sol", "effort": "medium", "tools": true, "toolBudget": 8 },
-      "grok": { "model": null, "effort": "low", "tools": true, "toolBudget": 8 },
+      "grok": { "model": null, "effort": "medium", "tools": true, "toolBudget": 8 },
       "kimi": { "model": "kimi-code/k3-256k", "effort": "low", "tools": true, "toolBudget": 8 }
     }
   },

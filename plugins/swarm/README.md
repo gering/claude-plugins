@@ -55,7 +55,7 @@ profile; direct workflow callers use `profile`, not the retired `max` boolean.
 | Merge | session model / medium | session model / medium | session model / medium |
 | Transport wrappers | haiku / low | haiku / low | haiku / low |
 | Codex | gpt-5.6-sol / low | gpt-5.6-sol / medium | gpt-6-astra / medium |
-| Grok | discovered / low | discovered / low | discovered / medium |
+| Grok | discovered / low | discovered / medium | discovered / medium |
 | Kimi (opt-in) | kimi-code/k3-256k / low | kimi-code/k3-256k / low | kimi-code/k3-256k / high |
 | Fan-out unit | cluster | cluster | lens |
 | Kimi tools / budget | false / 0 | true / 8 | true / 8 |
@@ -72,6 +72,13 @@ no `--max-turns` truncation can turn an unfinished review into a clean result.
 tool's hard 600-second window; the adapter deadline is smaller by its probe and
 cleanup margin. Raising `SWARM_TIMEOUT` cannot cross that ceiling. Longer
 execution belongs to the async transport work, not a lower-effort workaround.
+
+Grok runs at `medium` from the default profile up, by explicit request for more
+reasoning depth. It is a **deliberate trade against that ceiling**: the one
+recorded four-family run timed grok's `breakage` voice out at `medium` on a
+~290 KiB cluster prompt, which costs the voice entirely rather than degrading
+it. `--quick` keeps `low` so the cheap profile stays the fast one. Until the
+async transport lands, prefer `--quick` when grok times out.
 
 **Validation status:** hermetic tests exercise the profiles and policies.
 Sol/low, Sol/medium and Astra/medium passed live adapter smoke checks. All six
