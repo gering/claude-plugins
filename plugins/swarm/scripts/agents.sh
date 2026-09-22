@@ -2124,7 +2124,13 @@ codex_model_offered() {
   # SWARM_CODEX_MODEL pin, else the default family's pick.
   _codex_model_hint=""
   (( _codex_skip_advisory_catalog )) && return 0
-  codex_select "$CODEX_DEFAULT_FAMILY" "${1:-${SWARM_CODEX_MODEL:-}}" "" || true
+  local pin="${1:-${SWARM_CODEX_MODEL:-}}"
+  if [[ -n "$pin" && ! "$pin" =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]]; then
+    _codex_model_hint="invalid codex model ID in SWARM_CODEX_MODEL — a run will refuse it"
+    echo "warning: codex $_codex_model_hint" >&2
+    return 0
+  fi
+  codex_select "$CODEX_DEFAULT_FAMILY" "$pin" "" || true
   local model degraded catalog
   model="$(_kv selected "$CODEX_SEL")"; degraded="$(_kv degraded "$CODEX_SEL")"
   catalog="$(_kv catalog "$CODEX_SEL")"
@@ -2757,8 +2763,11 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
   # Both resolved above, in THIS shell — so the wall recorded in telemetry is the
   # wall that will actually apply, not a value assigned inside a subshell.
   _set_enforced_wall
-  # A bare `run codex` (no --model) resolves HERE, before readiness and before
-  # the clock: SWARM_CODEX_MODEL as an exact pin, else the default family's pick
+  _codex_on_run_path
+  require_usable "$backend" "$model"
+  require_python3
+  # A bare `run codex` (no --model) resolves HERE — after the install/python3
+  # checks (so their errors come first) and before the clock: SWARM_CODEX_MODEL as an exact pin, else the default family's pick
   # from the SAME selector prep uses. The review workflow always passes the
   # run's frozen --model, so its voices never reach this branch.
   if [[ "$backend" == codex && -z "$model" ]]; then
@@ -2770,9 +2779,6 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
     [[ -n "$model" ]] || { echo "codex: no model selectable — $(_kv degraded "$CODEX_SEL")" >&2; exit 1; }
     [[ -z "$(_kv degraded "$CODEX_SEL")" ]] || echo "codex: $(_kv degraded "$CODEX_SEL")" >&2
   fi
-  _codex_on_run_path
-  require_usable "$backend" "$model"
-  require_python3
 
   # Start the clock as late as possible: readiness probes and validation are
   # adapter overhead, and folding them into the number would misattribute them

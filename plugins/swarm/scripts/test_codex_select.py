@@ -225,6 +225,9 @@ class AdapterTests(unittest.TestCase):
         proc = adapter('codex_model_offered ""; echo "sel=$(_kv selected "$CODEX_SEL")"', OBSERVED,
                        env={"SWARM_CODEX_MODEL": "gpt-5.6-sol"})
         self.assertEqual(self.kv(proc.stdout)["sel"], "gpt-5.6-sol")
+        proc = adapter('codex_model_offered ""; echo "hint=$_codex_model_hint"', OBSERVED,
+                       env={"SWARM_CODEX_MODEL": "gpt 6"})
+        self.assertIn("invalid codex model ID", self.kv(proc.stdout)["hint"])
         proc = adapter('codex_model_offered ""; echo "hint=$_codex_model_hint"', "", rc=124)
         self.assertIn("catalog unavailable", self.kv(proc.stdout)["hint"])
 
