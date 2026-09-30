@@ -122,28 +122,36 @@ def select(family: str, pin: str | None, effort: str | None,
         result.update(selected=FLOOR[family], source="fallback",
                       degraded=f"catalog {catalog}: {family} not resolved; using fallback {FLOOR[family]}, not verified latest")
         return result
-    members = sorted(
-        ((family_version(r["model"])[1], r) for r in rows
-         if not r["hidden"] and (family_version(r["model"]) or ("",))[0] == family),
-        key=lambda member: member[0],
-    )
+    parsed = ((family_version(r["model"]), r) for r in rows if not r["hidden"])
+    members = sorted(((fv[1], r) for fv, r in parsed if fv and fv[0] == family),
+                     key=lambda member: member[0])
     if not members:
         result.update(selected=FLOOR[family], source="fallback",
                       listed="yes" if FLOOR[family] in by_name else "no",
                       effort_supported=_effort_state(by_name.get(FLOOR[family]), effort),
                       degraded=f"catalog lists no {family} model; using fallback {FLOOR[family]}")
         if result["effort_supported"] == "no":
-            result["degraded"] += f" (catalog does not list effort {effort} for it)"
+            # The catalog positively says the floor cannot run this effort: the
+            # same verdict the members path reaches, so nothing is selected.
+            result.update(selected="", source="none",
+                          degraded=f"catalog lists no {family} model, and fallback {FLOOR[family]} does not list effort {effort}")
         return result
     newest = members[-1][1]
     result["latest_candidate"] = newest["model"]
-    for _key, row in reversed(members):
-        state = _effort_state(row, effort)
-        if state != "no":
+    # A model that LISTS the effort beats a newer one whose support is unknown;
+    # unknown metadata is a last resort, never silent permission.
+    for wanted in ("yes", "unknown"):
+        for _key, row in reversed(members):
+            state = _effort_state(row, effort)
+            if state != wanted:
+                continue
             result.update(selected=row["model"], listed="yes", effort_supported=state,
                           source="catalog-latest" if row is newest else "older-compatible")
             if row is not newest:
                 result["degraded"] = f"{newest['model']} does not list effort {effort}; using {row['model']}"
+            if state == "unknown" and effort:
+                result["degraded"] = (result["degraded"] + "; " if result["degraded"] else "") + \
+                    f"{row['model']}: catalog has no effort metadata, {effort} support unknown"
             return result
     result["degraded"] = f"no listed {family} model supports effort {effort}"
     return result

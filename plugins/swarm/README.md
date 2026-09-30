@@ -312,7 +312,9 @@ offers that enforces structured output.** No release needs a code edit.
 - **Advisory, never proof.** The catalog call is non-generative and may be
   served from Codex's own cache; `source=catalog-latest` means "newest listed",
   not "exists and works". An unusable catalog or a family with no listed member
-  falls back to that family's floor as `source=fallback`, with the reason.
+  falls back to that family's floor as `source=fallback`, with the reason —
+  unless the catalog lists the floor without the profile's effort. A model that
+  lists the effort beats a newer one with no effort metadata.
 - **Pin deliberately** with `SWARM_CODEX_MODEL=<id>` (or `run codex --model
   <id>`). Pins stay exact; an unlisted pin runs with an audible warning.
 

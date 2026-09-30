@@ -2124,11 +2124,13 @@ codex_model_offered() {
   # SWARM_CODEX_MODEL pin, else the default family's pick.
   _codex_model_hint=""
   (( _codex_skip_advisory_catalog )) && return 0
-  local pin="${1:-${SWARM_CODEX_MODEL:-}}"
+  local pin="${1:-${SWARM_CODEX_MODEL:-}}" origin="--model"
+  [[ -n "${1:-}" ]] || origin="SWARM_CODEX_MODEL"
   if [[ -n "$pin" && ! "$pin" =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]]; then
-    _codex_model_hint="invalid codex model ID in SWARM_CODEX_MODEL — a run will refuse it"
-    echo "warning: codex $_codex_model_hint" >&2
-    return 0
+    # `run` refuses this id (validate_model), so readiness must not call it
+    # usable: an advisory hint here enabled a backend guaranteed to exit 2.
+    _codex_model_hint="invalid codex model ID in $origin — run refuses it"
+    return 1
   fi
   codex_select "$CODEX_DEFAULT_FAMILY" "$pin" "" || true
   local model degraded catalog
@@ -2228,7 +2230,9 @@ ready_hint() {
       # (not logged in) and a probe that hit the wall (wedged CLI, dead proxy,
       # captive portal). Telling the second user to log in sends them at the
       # wrong thing, so name both and let the message say which is which.
-      if (( ${_codex_probe_rc:-0} == 124 || ${_codex_probe_rc:-0} == 137 )); then
+      if [[ -n "${_codex_model_hint:-}" && ${_codex_probe_rc:-0} -eq 0 ]]; then
+        echo "$_codex_model_hint"
+      elif (( ${_codex_probe_rc:-0} == 124 || ${_codex_probe_rc:-0} == 137 )); then
         echo "\`codex login status\` did not answer within ${_probe_timeout:-10}s — the CLI is wedged or the network is unreachable; if it is only slow, raise SWARM_PROBE_TIMEOUT (max ${SWARM_PROBE_TIMEOUT_MAX}s)"
       elif (( ${_codex_probe_rc:-0} == 126 )); then
         echo "\`codex login status\` could not be run under a bound — either the codex binary cannot be invoked (broken shim, noexec mount, wrong arch) or the adapter could not create a scratch file (check TMPDIR)"

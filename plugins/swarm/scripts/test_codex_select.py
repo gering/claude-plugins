@@ -128,15 +128,26 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual((rc, out["selected"]), (0, "gpt-6-sol"))
 
     def test_floor_without_the_effort_says_so(self):
+        # The catalog positively rules the floor out: same verdict as members.
         rows = [{"model": "gpt-5.6-terra", "hidden": True, "efforts": {"low"}}]
         result = cs.select("terra", None, "high", rows, "complete")
-        self.assertEqual((result["source"], result["effort_supported"]), ("fallback", "no"))
+        self.assertEqual((result["selected"], result["source"], result["effort_supported"]), ("", "none", "no"))
         self.assertIn("does not list effort high", result["degraded"])
+        rc, _ = run_select(json.dumps({"complete": True, "models": [row("gpt-5.6-terra", hidden=True, efforts=("low",))]}),
+                           "--family", "terra", "--effort", "high")
+        self.assertEqual(rc, 1)
 
     def test_missing_effort_metadata_is_unknown_not_permission(self):
         rows = [{"model": "gpt-6-sol", "hidden": False, "efforts": None}]
         result = cs.select("sol", None, "medium", rows, "complete")
         self.assertEqual((result["selected"], result["effort_supported"]), ("gpt-6-sol", "unknown"))
+        self.assertIn("support unknown", result["degraded"])
+        # An older model that LISTS the effort beats a newer unknown one.
+        rows.append({"model": "gpt-7-sol", "hidden": False, "efforts": None})
+        rows.append({"model": "gpt-5.6-sol", "hidden": False, "efforts": {"medium"}})
+        result = cs.select("sol", None, "medium", rows, "complete")
+        self.assertEqual((result["selected"], result["source"], result["latest_candidate"]),
+                         ("gpt-5.6-sol", "older-compatible", "gpt-7-sol"))
 
     def test_pins_stay_exact(self):
         for pin, listed in (("gpt-5.6-sol", "yes"), ("gpt-9-sol", "no"), ("my-alias", "no")):
@@ -225,11 +236,34 @@ class AdapterTests(unittest.TestCase):
         proc = adapter('codex_model_offered ""; echo "sel=$(_kv selected "$CODEX_SEL")"', OBSERVED,
                        env={"SWARM_CODEX_MODEL": "gpt-5.6-sol"})
         self.assertEqual(self.kv(proc.stdout)["sel"], "gpt-5.6-sol")
-        proc = adapter('codex_model_offered ""; echo "hint=$_codex_model_hint"', OBSERVED,
+        # A pin `run` refuses is NOT ready, and the hint names where it came from.
+        proc = adapter('codex_model_offered "" && echo ok=0 || echo ok=$?; echo "hint=$_codex_model_hint"', OBSERVED,
                        env={"SWARM_CODEX_MODEL": "gpt 6"})
-        self.assertIn("invalid codex model ID", self.kv(proc.stdout)["hint"])
+        out = self.kv(proc.stdout)
+        self.assertEqual(out["ok"], "1")
+        self.assertIn("invalid codex model ID in SWARM_CODEX_MODEL", out["hint"])
+        proc = adapter('_codex_probe_rc=0; codex_model_offered "" || true; ready_hint codex', OBSERVED,
+                       env={"SWARM_CODEX_MODEL": "gpt 6", "TMPDIR": tempfile.gettempdir()})
+        self.assertIn("invalid codex model ID", proc.stdout)
         proc = adapter('codex_model_offered ""; echo "hint=$_codex_model_hint"', "", rc=124)
         self.assertIn("catalog unavailable", self.kv(proc.stdout)["hint"])
+
+    def test_family_set_agrees_across_layers(self):
+        import profiles
+        workflow = (PLUGIN / "workflows/swarm-review.js").read_text(encoding="utf-8")
+        adapter_text = ADAPTER.read_text(encoding="utf-8")
+        expected = set(cs.FAMILIES)
+        self.assertEqual(set(profiles.CODEX_FAMILIES), expected)
+        self.assertEqual(set(cs.FLOOR), expected)
+        case = re.search(r'case "\$family" in ([a-z|]+)\)', adapter_text).group(1)
+        self.assertEqual(set(case.split("|")), expected)
+        # Every family alternation in the workflow (run-token checks and the
+        # PROFILES comment alike) must name exactly this set.
+        groups = re.findall(r"\(([a-z]+(?:\|[a-z]+)+)\)", workflow)
+        family_groups = [set(g.split("|")) - {"custom"} for g in groups if "astra" in g]
+        self.assertGreaterEqual(len(family_groups), 2)
+        for names in family_groups:
+            self.assertEqual(names, expected)
 
     def test_default_family_matches_the_default_profile(self):
         profiles = load_profiles(PLUGIN / "workflows/swarm-review.js")
@@ -270,6 +304,8 @@ class HandoffTests(unittest.TestCase):
             self.assertTrue(output["result"]["balance"]["codexDropped"])
             self.assertIsNone(output["result"]["balance"]["codexModel"])
             self.assertTrue(any("codex DROPPED" in line for line in output["logs"]))
+            self.assertTrue(any("codex hat in diesem Lauf NICHT reviewt" in n
+                                for n in output["result"]["balance"]["coverageNotes"]))
 
     def test_operator_pin_is_reported_as_requested(self):
         token = ("selected=gpt-5.5;requested=gpt-5.5;family=custom;source=pinned;"

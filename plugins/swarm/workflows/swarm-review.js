@@ -917,12 +917,18 @@ const wantVoices = Array.isArray(INPUT.externalVoices) ? INPUT.externalVoices : 
 // re-sends the same token, hence the same model — not whatever is newest by then.
 // Each field is charset-checked before it reaches a shell line; a token that
 // does not validate freezes nothing and says so, rather than injecting.
-const GROK_RUN = (() => {
+// The prep step's `k=v;k=v` run tokens (args.grok, args.codex). Keys and values
+// are only split here; each consumer validates its own fields.
+const parseRunToken = (token) => {
   const kv = {}
-  for (const part of String(INPUT.grok || '').split(';')) {
+  for (const part of String(token || '').split(';')) {
     const i = part.indexOf('=')
     if (i > 0) kv[part.slice(0, i).trim()] = part.slice(i + 1).trim()
   }
+  return kv
+}
+const GROK_RUN = (() => {
+  const kv = parseRunToken(INPUT.grok)
   const okId = (v) => typeof v === 'string' && v.length <= 64 && /^grok-[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$/.test(v)
   const model = okId(kv.selected) ? kv.selected : ''
   return {
@@ -948,11 +954,7 @@ const GROK_DROPPED = wantVoices.includes('grok') && !GROK_RUN.model
 // every codex voice gets that id as an explicit --model. No token, or one that
 // does not validate, drops codex rather than letting each voice resolve alone.
 const CODEX_RUN = (() => {
-  const kv = {}
-  for (const part of String(INPUT.codex || '').split(';')) {
-    const i = part.indexOf('=')
-    if (i > 0) kv[part.slice(0, i).trim()] = part.slice(i + 1).trim()
-  }
+  const kv = parseRunToken(INPUT.codex)
   const okId = (v) => typeof v === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/+-]*$/.test(v)
   const model = okId(kv.selected) ? kv.selected : ''
   return {
@@ -1288,6 +1290,7 @@ if (consensusReachable && unitsDegraded.length) {
 // swarm-test-region-end
 // Outside the test region on purpose: it depends on run-level state (GROK_DROPPED),
 // not on the voice results the region is lifted out to be tested against.
+if (CODEX_DROPPED) coverageNotes.push('codex hat in diesem Lauf NICHT reviewt: für den Lauf konnte kein konkretes Codex-Modell festgelegt werden (Grund: CODEX_DEGRADED aus dem Prep-Schritt). Es wurde bewusst kein anderes Modell ersatzweise gestartet.')
 if (GROK_DROPPED) coverageNotes.push('grok hat in diesem Lauf NICHT reviewt: für den Lauf konnte kein konkretes Grok-Modell festgelegt werden (Grund: GROK_DEGRADED aus dem Prep-Schritt). Es wurde bewusst kein anderes Modell ersatzweise gestartet.')
 
 const pool = []
