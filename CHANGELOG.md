@@ -52,6 +52,12 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.18.0 — 2026-10-02
+- Add `scripts/manager.sh`: one deterministic Manager resolver with both addresses (herdr pane + agent session, and the SendMessage name). A live-revalidated kicker record beats the repo-root scan; several root agents fall to a stated leftmost-tab tie-break; anything uncertain is never `unique`.
+- `/kickoff` and `/adopt` record the kicking session in the git-excluded `.ws-kicker`.
+- `/continue` pings the Manager at three milestones (PR opened, review round started, terminal gate reached) via `SendMessage` or a guarded `herdr agent prompt` that never types into a busy Manager or over a user draft.
+- The SendMessage-name sanitizer moves into `herdr-agent.sh` (`$HERDR_NAME_PRELUDE`), shared with `herdr-teardown.sh manager-session`.
+
 ### 1.16.2 — 2026-10-02
 - Raise the review budget recorded by the `standard` and `merge-delegated` mandate presets from 2 to 3 rounds (`draft-only` stays 0). Existing lanes keep the budget already in their `MANDATE.md`.
 

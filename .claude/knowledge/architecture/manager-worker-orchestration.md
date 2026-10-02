@@ -244,6 +244,9 @@ already sees SSH/cloud creds), not hardened for a shared host.
   already exist in [herdr-tab-glyphs](../features/herdr-tab-glyphs.md).
 - The PR cache (`headRef\tstate\treviewDecision`) + sync/`--cached` refresh policy.
 
+Manager addressing (who the Manager is, both addresses, milestone pings) is
+implemented in [manager-address](../features/manager-address.md).
+
 Related: [skill-composition](skill-composition.md),
 [idempotent-scaffolding](idempotent-scaffolding.md),
 [herdr-kickoff-automation](../features/herdr-kickoff-automation.md),

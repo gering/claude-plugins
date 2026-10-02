@@ -179,3 +179,7 @@ cleanly from another process:
 Related: [herdr-kickoff-automation](herdr-kickoff-automation.md), [skill-composition](../architecture/skill-composition.md) (helper-script single
 source of truth). The "never persistent `cd`" footgun the path commands avoid is a
 rule — see `.claude/rules/cwd-safety.md`.
+
+The name-only `manager-session` detector is slated to give way to `manager.sh
+resolve` ([manager-address](manager-address.md)); its name sanitizer already
+lives in the shared `$HERDR_NAME_PRELUDE`.
