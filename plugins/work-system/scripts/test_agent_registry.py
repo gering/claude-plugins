@@ -1003,6 +1003,8 @@ for sel in ("codex", "grok", "kimi"):
     # SHELL-QUOTED, not bare: a checkout under "/Users/me/My Projects/..." handed
     # the worker `bash /Users/me/My`, exit 127, and it could not check at all.
     check(f"{sel}: the path is absolute and quoted", "bash '/" in out)
+    # No /continue for these workers, so the prompt carries the milestone pings.
+    check(f"{sel}: the prompt carries the milestone pings", "manager.sh' prompt --" in out)
 check("claude gets the skill, not the bootstrap prompt",
       "/work-system:continue" in e.run("resolve", "claude").stdout
       and "mandate.sh' allows" not in e.run("resolve", "claude").stdout)

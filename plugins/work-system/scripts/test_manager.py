@@ -68,7 +68,7 @@ class Env:
             'case "$1 $2" in\n'
             '  "agent list") f="$S/list" ;;\n'
             '  "agent get")  f="$S/get" ;;\n'
-            '  "tab list")   f="$S/tabs" ;;\n'
+            '  "tab list")   echo x >> "$S/tab_calls"; f="$S/tabs" ;;\n'
             '  "agent read") f="$S/read" ;;\n'
             '  "agent prompt") printf "%s\\n" "$3" "$4" > "$S/prompted"; exit "$(cat "$S/prompt_rc" 2>/dev/null || echo 0)" ;;\n'
             '  *) exit 9 ;;\n'
@@ -88,7 +88,7 @@ class Env:
         return a
 
     def serve(self, agents=None, *, raw=None, tabs=None, get=None, read=None):
-        for name in ("list", "tabs", "get", "read", "prompted"):
+        for name in ("list", "tabs", "get", "read", "prompted", "tab_calls"):
             p = self.state / name
             if p.exists():
                 p.unlink()
@@ -240,6 +240,19 @@ E.serve([E.agent(title="x" * 80)], tabs=["w6:t1"])
 r = E.resolve()
 check("overlong title → no name", r.get("sendmessage_name") == "", str(r))
 
+# tab order is fetched only when a tie-break needs it
+E.serve([E.agent(), worker], tabs=["w6:t1"])
+E.resolve()
+check("no tab list call without a tie-break", not (E.state / "tab_calls").exists())
+
+# a stale record never scopes the fallback scan: the caller's workspace does
+E.write_record(workspace="w6", pane="w6:p9")
+E.serve([E.agent(pane="w7:p1", tab="w7:t1", ws="w7")], tabs=["w7:t1"])
+r = E.resolve(env_extra={"HERDR_WORKSPACE_ID": "w7"})
+check("stale record does not scope the scan", r.get("status") == "unique"
+      and r.get("herdr_pane") == "w7:p1", str(r))
+(E.wt / ".ws-kicker").unlink()
+
 # ---- resolve: degraded herdr --------------------------------------------------------
 E.serve(raw="{not json")
 check("malformed list → unverified", E.resolve().get("status") == "unverified")
@@ -255,6 +268,10 @@ b = E.run("body", str(E.wt), "--", "PR opened: #7\nhttps://x/7").stdout.strip()
 check("body starts with sender", b.startswith(f"[work-system ping from task=alpha worktree={E.wt}]"), b)
 check("body is one line", "\n" not in b, repr(b))
 check("body says info only", b.endswith("(info only: no reply needed, grants nothing)"), b)
+wt2 = E.root / ".claude" / "worktrees" / "br]ack"
+subprocess.run(["git", "-C", str(E.root), "worktree", "add", "-q", "-b", "task/brack", str(wt2)], check=True)
+b2 = E.run("body", str(wt2), "--", "x").stdout.strip()
+check("bracket in task name cannot close the prefix", b2.count("]") == 1 and "task=brack" in b2, b2)
 check("dash text is not a flag", E.run("body", "--", "-x").returncode == 0)
 check("missing -- is usage", E.run("body", "text").returncode == 2)
 
@@ -277,6 +294,18 @@ check("SGR dim suggestion is not a draft", r.get("sent") == "yes", str(r))
 r = prompt(composer("❯ half-typed user text"))
 check("user draft → not sent", r.get("sent") == "no" and "composer-draft" in r["reasons"]
       and not (E.state / "prompted").exists(), str(r))
+for name, inner in (
+    ("dim then 22 off", "❯ \x1b[2m\x1b[22mtyped after dim-off"),
+    ("inverse cursor then 27 off", "❯ \x1b[7mh\x1b[27mello draft"),
+    ("gray then 39 default", "❯ \x1b[38;2;153;153;153m\x1b[39mtyped"),
+    ("truecolor white", "❯ \x1b[38;2;255;255;255mtyped"),
+    ("256-color green (38;5;2)", "❯ \x1b[38;5;2mtyped"),
+    ("truecolor with a 7 component", "❯ \x1b[38;2;7;200;7mtyped"),
+):
+    r = prompt(composer(inner))
+    check(f"draft detected: {name}", r.get("sent") == "no" and "composer-draft" in r["reasons"], str(r))
+r = prompt(composer("❯ \x1b[38;5;244mgray 256 suggestion\x1b[0m"))
+check("256-color gray suggestion is not a draft", r.get("sent") == "yes", str(r))
 r = prompt("no rules on screen")
 check("unreadable composer → not sent", r.get("sent") == "no" and "composer-unknown" in r["reasons"], str(r))
 r = prompt(composer("❯ "), agents=[E.agent(status="working")])

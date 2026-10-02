@@ -379,8 +379,9 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     because the file is still sitting in the worktree and only the recorder knows
     it grants nothing.
 
-    **13b. Record the kicker** (best-effort, silent, no question) — this session is
-    usually the lane's Manager, so leave its address for the worker:
+    **13b. Record the kicker** — always, **whether or not a mandate was recorded**
+    (best-effort, silent, no question). This session is usually the lane's
+    Manager, so leave its address for the worker:
     ```sh
     bash "${CLAUDE_PLUGIN_ROOT}/scripts/manager.sh" record "<worktree>"
     ```
