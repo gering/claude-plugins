@@ -292,10 +292,10 @@ known = run("actions").stdout.split()
 check("the action vocabulary is published", "open-pr" in known and "merge" in known)
 
 # --- presets carry the choice the user actually made ------------------------
-for preset, gate, may_open_pr, may_merge in [
-    ("standard", "reviewed-pr", True, False),
-    ("draft-only", "pushed-branch", False, False),
-    ("merge-delegated", "merged", True, True),
+for preset, gate, may_open_pr, may_merge, budget in [
+    ("standard", "reviewed-pr", True, False, "3"),
+    ("draft-only", "pushed-branch", False, False, "0"),
+    ("merge-delegated", "merged", True, True, "3"),
 ]:
     p = make_repo()
     r = run("init", str(p), "--preset", preset, "task=t", "authorized_by=user")
@@ -303,6 +303,7 @@ for preset, gate, may_open_pr, may_merge in [
           kv(r.stdout).get("written") == "yes")
     s = kv(run("show", str(p)).stdout)
     check(f"{preset}: terminal_gate is {gate}", s.get("terminal_gate") == gate)
+    check(f"{preset}: review_budget is {budget}", s.get("review_budget") == budget)
     check(f"{preset}: open-pr {'allowed' if may_open_pr else 'refused'}",
           (run("allows", "open-pr", str(p)).returncode == 0) == may_open_pr)
     check(f"{preset}: merge {'allowed' if may_merge else 'refused'}",

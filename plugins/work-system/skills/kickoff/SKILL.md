@@ -289,7 +289,7 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     | **draft-only** | commit and push only; even opening a PR comes back for a decision |
     | **merge-delegated** | as standard, and the worker may merge as well |
 
-    Offer a **review budget** with the same question (the presets record 2 rounds;
+    Offer a **review budget** with the same question (the presets record 3 rounds;
     `draft-only` records 0 because it authorizes no review) — the number of
     review→fix rounds the worker may run before it must come back. It is what stops
     a worker from grinding through an unbounded review loop.

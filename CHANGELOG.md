@@ -52,6 +52,9 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.16.2 — 2026-10-02
+- Raise the review budget recorded by the `standard` and `merge-delegated` mandate presets from 2 to 3 rounds (`draft-only` stays 0). Existing lanes keep the budget already in their `MANDATE.md`.
+
 ### 1.16.1 — 2026-09-22
 - Wait for registry record/status producers to complete and check their exit status before consuming or emitting data. Reading a line from process substitution left a live child whose late `SIGCHLD` could interrupt Bash 3.2 `printf`, truncating the machine-readable record and intermittently preventing worker launches. Checked synchronous capture fixes the lifecycle race without write retries, signal suppression or longer timeouts.
 - Preserve unexpected registry exit codes and stderr in `herdr-launch.sh`; reject partial argv from a failed resolution before any Herdr mutation, rather than reporting only "resolved no argv" or launching a partial record.

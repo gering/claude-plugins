@@ -510,7 +510,7 @@ apply_preset() {
     standard)
       v_allow="commit,push-own-branch,open-pr,local-review,agreed-fixes,rebase-own-branch"
       v_deny="merge,deploy,force-push-shared,destructive"
-      v_terminal_gate="reviewed-pr"; v_review_budget="2" ;;
+      v_terminal_gate="reviewed-pr"; v_review_budget="3" ;;
     draft-only)
       v_allow="commit,push-own-branch"
       v_deny="open-pr,merge,deploy,force-push-shared,destructive"
@@ -518,7 +518,7 @@ apply_preset() {
     merge-delegated)
       v_allow="commit,push-own-branch,open-pr,local-review,agreed-fixes,rebase-own-branch,merge"
       v_deny="deploy,force-push-shared,destructive"
-      v_terminal_gate="merged"; v_review_budget="2" ;;
+      v_terminal_gate="merged"; v_review_budget="3" ;;
     *) die "unknown preset: $1 (known: $PRESETS)" ;;
   esac
 }
