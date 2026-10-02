@@ -95,8 +95,9 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" route --branch "$(git bran
 `--branch` resolves the lane from `git worktree list` itself (§0's rule — no
 wrapper, and no work-system needed). Emits `route=bot|local`, `record=yes|no`,
 `source=`, `why=`, `has_bot=` (the probe's verdict, vocabulary unchanged; empty
-when a `local` pin skipped the probe) and `lane=`, and exits 0. Decided in this
-order:
+when a pin skipped the probe), `lane=` and `lane_source=` (§0: on `cwd`, no
+worktree holds the branch — the setting and memory read are the cwd repo's), and
+exits 0. Decided in this order:
 
 | `source` | when | `route` |
 |---|---|---|
@@ -120,16 +121,18 @@ symlinked or invalid file with a note in `why=`.
 **Memory.** On `record=yes`, `/cycle` passes `--record "<lane=>"` to `poll`, and
 the **script** books a timeout itself — never the caller's recollection, which a
 compaction or an interjection during a ten-minute background poll can lose. It
-does **not** book when the bot acknowledged (`Claude Code is working`) and was
-only slow. It reports `route_recorded=yes|no` on stderr. By hand:
+does **not** book once any Claude comment appeared in the window — a slow bot,
+or one that failed with an error, is still a bot. It reports exactly one
+`route_recorded=yes|no (<reason>)` line on stderr. By hand:
 `claude-review.sh route-record "<lane>" --pr <N>`.
 
 The record lives in the git **common** dir (`<common>/pr-flow/review-route`),
 shared by every worktree and never committed; it is never written into the
 user's settings. It clears itself — the repo switches back to `auto` — when a
 poll sees a finished Claude review, or a networked `route` sees a Claude bot
-comment newer than the record (a late reply, a manual mention, an App installed
-later), `has_bot=yes`, or `route = "github"`. By hand: `claude-review.sh
+comment by the App (`claude[bot]`, the author `poll` reads) newer than the
+record — a late reply, a manual mention, an App installed later; a reply paged
+out of the last 100 comments is not seen, `has_bot=yes`, or `route = "github"`. By hand: `claude-review.sh
 route-clear`. Only `auto` records; evidence is never recorded.
 
 Evidence and memory are **not proof** — `has_bot` stays `unknown`. **Every round

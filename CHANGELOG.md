@@ -261,7 +261,7 @@ entries are grouped per plugin, newest first.
 - New `review.route` setting (`.pr-flow.toml`, `auto` | `github` | `local`, default `auto` = today's try-once). `github` and a probed `has_bot=yes` clear the remembered answer; `claude-review.sh route-clear` does so by hand.
 - Cheap evidence under `auto`: when owners/members/collaborators asked `@claude` repeatedly in the repo's last 100 comments and no bot account ever replied, route local at once — stated as "likely", never recorded, and `has_bot` stays `unknown`.
 - **Switches back by itself:** a networked `route` that sees a Claude bot comment newer than the record (a late reply, a manual mention, an App installed later) clears it, as does a poll that sees a finished review, `has_bot=yes`, or `route = "github"`.
-- `poll --record <lane>` books the timeout in the script (not the caller's memory), and never when the bot acknowledged but was only slow. The poll also recognises a review posted under `github-actions` (workflow token) by its markers.
+- `poll --record <lane>` books the timeout in the script (not the caller's memory), and never once any Claude comment appeared (slow, or failed with an error); it validates `SINCE_ISO`, which it splices into a jq filter.
 - New `claude-review.sh` subcommands `route [--branch <b>] [--offline]`, `route-record`, `route-clear`; `--branch` resolves the lane without work-system. `/cycle`, `/open`, `/check`, `/rebase` branch on `route`; `--offline` (`/check`, `/rebase`) never writes. The consumer split is one table in `docs/REVIEW-ROUTING.md`, and the round report gains a `Route:` status line.
 
 ### 1.4.0 — 2026-09-07

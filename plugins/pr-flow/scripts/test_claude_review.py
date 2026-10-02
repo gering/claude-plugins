@@ -38,6 +38,7 @@ in production by /cycle and /check.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -596,7 +597,7 @@ for fixture, label in ((COMMENT_TRIGGERED, "block mapping"),
 #     review.route=github and route-clear drop it — but --offline never writes;
 #   * evidence is conservative (only mentions the bot would obey) and never
 #     remembered;
-#   * the poll books a timeout itself, and never when the bot acknowledged.
+#   * the poll books a timeout itself, and never once any Claude comment appeared.
 def route(*args, env=None, cwd=None):
     return kv(sh("route", *args, env=env, cwd=cwd).stdout)
 
@@ -674,6 +675,9 @@ check("git status stays clean", sh_git(repo, "status", "--porcelain") == "")
 r = route("--offline", "--branch", "task/x", cwd=repo)
 check("--branch resolves the worktree holding the branch",
       Path(r.get("lane", "")).resolve() == wt.resolve() and r.get("route") == "local")
+check("and says the branch answered", r.get("lane_source") == "branch")
+check("a branch no worktree holds says cwd",
+      route("--offline", "--branch", "nope", cwd=repo).get("lane_source") == "cwd")
 check("--branch without a value is a usage error",
       sh("route", "--branch").returncode == 2)
 
@@ -682,6 +686,7 @@ check("--branch without a value is a usage error",
 r = route(str(repo), "--offline")
 check("review.route = github overrides the memory", r.get("route") == "bot")
 check("but never records", r.get("record") == "no")
+check("and a pin skips the probe", r.get("has_bot") == "")
 check("--offline does not erase the shared memory", memory_file(repo).exists())
 (repo / ".pr-flow.toml").unlink()
 
@@ -715,6 +720,9 @@ check("with a memory and no newer bot reply, local stays",
       route(str(repo), env=env).get("source") == "memory")
 
 stale_reply = asked + [comment("claude[bot]", "**Claude finished**", "2000-01-01T00:00:00Z", "Bot")]
+impostor = asked + [comment("claude-ci-notifier[bot]", "done", "2999-01-01T00:00:00Z", "Bot")]
+check("only the Claude App's own login clears the record",
+      route(str(repo), env=gh_env("impostor", impostor)).get("source") == "memory")
 check("a bot reply OLDER than the record does not clear it",
       route(str(repo), env=gh_env("old", stale_reply)).get("source") == "memory")
 
@@ -782,16 +790,36 @@ memory_file(repo).unlink()
 p = poll("slow", [pr_comment("claude", "Claude Code is working…")], "--record", str(repo))
 check("a bot that acknowledged but was slow is not recorded as absent",
       "route_recorded=no" in p.stderr and not memory_file(repo).exists())
+p = poll("error", [pr_comment("claude", "**Claude encountered an error**")], "--record", str(repo))
+check("a bot that answered with an error is not recorded as absent",
+      "route_recorded=no" in p.stderr and not memory_file(repo).exists())
+p = poll("notrepo", [], "--record", tempfile.mkdtemp())
+check("a non-repo --record dir still reports one route_recorded line",
+      "route_recorded=no (--record dir is not a git repository)" in p.stderr)
+p = subprocess.run(["bash", str(SCRIPT), "poll", "5", '1900" or true or "', "--max", "1",
+                    "--interval", "0"], capture_output=True, text=True, cwd=repo,
+                   env=gh_env("inject", {"comments": [pr_comment("claude", "**Claude finished**",
+                                                                 "2000-01-01T00:00:00Z")]}))
+check("a SINCE that would rewrite the jq filter is refused", p.returncode == 2
+      and "Claude finished" not in p.stdout)
+
+# A write that fails must not claim success (errexit is off inside `|| …`).
+shutil.rmtree(common_dir(repo) / "pr-flow", ignore_errors=True)
+(common_dir(repo) / "pr-flow").write_text("not a dir")
+w = sh("route-record", str(repo), "--pr", "4")
+check("a failed write exits non-zero", w.returncode == 1)
+check("and never prints recorded=yes", "recorded=yes" not in w.stdout)
+(common_dir(repo) / "pr-flow").unlink()
 
 p = poll("norecord", [])
 check("without --record a timeout records nothing", not memory_file(repo).exists())
 
 sh("route-record", str(repo), "--pr", "9")
-p = poll("done", [pr_comment("github-actions", "**Claude finished** review")], "--record", str(repo))
-check("a finished review under the workflow token is seen", p.returncode == 0)
+p = poll("done", [pr_comment("claude", "**Claude finished** review")], "--record", str(repo))
+check("a finished review is returned", p.returncode == 0)
 check("and clears the remembered answer", not memory_file(repo).exists())
-p = poll("ci", [pr_comment("github-actions", "coverage 91%")])
-check("an unrelated CI comment is not a review", p.returncode == 1)
+p = poll("ci", [pr_comment("github-actions", "**Claude finished** (quoted in a CI log)")])
+check("another author quoting the marker is not a review", p.returncode == 1)
 
 if FAILS:
     print("FAIL:")
