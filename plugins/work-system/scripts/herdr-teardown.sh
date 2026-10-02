@@ -247,7 +247,8 @@ print("gone")'
 # Fail-closed by construction: every branch we cannot fully rule out prints
 # `unverified`, because a wrong `none` only costs the offer while a wrong `name=`
 # would send a close request to a stranger session.
-extract_manager='import sys, json, re, unicodedata
+extract_manager='import sys, json
+# session_name() comes from $HERDR_NAME_PRELUDE (herdr-agent.sh), prepended at run time.
 main = sys.argv[1] if len(sys.argv) > 1 else ""
 ws = sys.argv[2] if len(sys.argv) > 2 else ""
 # herdr 0.8 statuses: idle|working|blocked|done|unknown (the same vocabulary
@@ -255,33 +256,6 @@ ws = sys.argv[2] if len(sys.argv) > 2 else ""
 # herdr cannot tell, which is not a confirmed live session. Keep the two in sync by
 # hand — they are different SETS of the same vocabulary, not one shared constant.
 LIVE = ("idle", "working", "blocked", "done")
-
-def session_name(a):
-    # The SendMessage address is the CLAUDE SESSION name, which Claude writes into
-    # the terminal title — NOT the herdr agent name (verified live: a herdr agent
-    # named gcp-auth-159 hosts the session "answer-gcp-auth-questions-buchhalter-159").
-    # herdr strips only its own status glyph from the title, so drop one leading
-    # symbol+space here too (the working spinner: ◐/◑/✳ …). The space is required, so
-    # a name that genuinely starts with punctuation (e.g. /habemus-event) keeps it; a
-    # wrong strip costs only the offer (no ListAgents match), never a misdirected message.
-    # NO fallback to herdr agent `name`: it is a launch label (verified live: agent
-    # gcp-auth-159 hosts session answer-gcp-auth-questions-buchhalter-159), so emitting
-    # it would hand the caller a string that is not an address — and a namesake in
-    # ANOTHER repo could then pass the uniqueness check. No title -> no candidate.
-    t = str(a.get("terminal_title_stripped") or a.get("terminal_title") or "")
-    # Blank EVERY control/format char first (Cc/Cf, plus surrogates/private use):
-    # newlines and tabs would forge extra output lines, and ANSI escapes or a bidi
-    # override (U+202E) could make the printed name read differently than it matches.
-    # A mangled name simply fails the caller ListAgents match — fail closed, as intended.
-    t = "".join(" " if unicodedata.category(c) in ("Cc", "Cf", "Cs", "Co") else c for c in t)
-    # Then drop ONE leading symbol+space (the herdr/claude spinner glyph) and collapse.
-    t = re.sub(r"^[^\w\s]\s+", "", t.strip())
-    t = re.sub(r"\s+", " ", t).strip()
-    # 64 chars, not 200: the value is echoed into the caller prompt (the confirmation
-    # question and the SendMessage address) BEFORE any gate runs, and a pane title is
-    # settable by any process in that pane. A real session name is short; a long one is
-    # prose, and prose in that slot is an injection surface, not an address.
-    return "" if len(t) > 64 else t
 
 root, wtdir = match_roots(main)
 try:
@@ -430,6 +404,7 @@ case "$cmd" in
     # No python3 guard here: ha_list fails (code 3) when either tool is missing.
     agents_json="$(ha_list)" || { echo unverified; exit 0; }
     out="$(printf '%s' "$agents_json" | PYTHONUTF8=1 python3 -c "$HERDR_MATCH_PRELUDE
+$HERDR_NAME_PRELUDE
 $extract_manager" "$3" "$2" 2>/dev/null || true)"
     [ -n "$out" ] || out=unverified
     printf '%s\n' "$out"
