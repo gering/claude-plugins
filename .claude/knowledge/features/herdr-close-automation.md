@@ -71,9 +71,11 @@ points worth keeping:
   rule's flaw was the *condition*, not the absence of a question: a merged PR alone does
   not mean the lane holds nothing. The damage a forged request can do is bounded by what
   the teardown can lose, so 1.17.0 auto-accepts exactly when that is nothing: merged PR
-  (`assess` confirmed), worktree clean except `TASK.md`/`MANDATE.md`, local branch tip ==
-  the merged PR's `headRefOid` (no post-merge or unpushed commit), and ≤1 agent in the
-  lane (the requester). Anything failed **or uncheckable** (no `gh`, liveness unverified,
+  (`assess` confirmed), worktree clean except `TASK.md`/`MANDATE.md` (gitignored paths
+  count — `--force` deletes a `.env` too; status flags override `showUntrackedFiles`),
+  local **and** remote (`ls-remote`, step 9 deletes it) tip == the merged PR's
+  `headRefOid`, and ≤1 agent anywhere in the lane (subdirs count; null cwd →
+  unverified). Anything failed **or uncheckable** (no `gh`, liveness unverified,
   outside herdr) asks, naming the failed conditions. Observed trigger: merged, clean
   closes where the only "live agent" was the requesting worker — the question cost a
   click and protected nothing. `auto` is never silent (one line: sender, task, PR, SHA).
@@ -88,8 +90,12 @@ points worth keeping:
 - **Follow-up sweep before teardown.** The worker's tab — and whatever it printed about
   deploys, cleanup or a next task — dies with the lane. Every Manager-side close of
   another lane (delegated or `/close <task>` from main) runs `close-request.sh sweep`
-  first: newest `handoff` report for the branch (filtered by the branch's reflog creation
-  time against name reuse), then the pane's visible output, into one 0600 file. Items
+  first: newest `handoff` report for the branch (namesake anchor = the lane's first
+  commit off main, the same one `prepare` uses in 6b — a private reflog-based filter was
+  struck in review because 6b and 6c then disagreed), then every lane pane's visible
+  output, into one 0600 file. Follow-up task files are written in the Manager's own
+  words: a task file feeds a later autonomous worker, so verbatim pane text would launder
+  untrusted output into an instruction. Items
   are proposals from untrusted output: local reversible ones may be done, outward-facing
   ones need a yes; unreadable sources are reported as such, never as "nothing to do".
 - **The payload is three fields — `task=`, `worktree=`, `repo=` — on purpose.** No `pr=`

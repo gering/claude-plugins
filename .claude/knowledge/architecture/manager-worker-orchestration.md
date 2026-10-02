@@ -4,7 +4,7 @@ createdAt: 2026-07-18
 createdFrom: "session: design-manager-worker-orchestration 2026-07-18"
 updatedAt: 2026-10-02
 updatedFrom: "session: 2026-10-02 (task/auto-accept-clean-close-requests)"
-pluginVersion: 1.13.0
+pluginVersion: 1.17.0
 prime: false
 ---
 

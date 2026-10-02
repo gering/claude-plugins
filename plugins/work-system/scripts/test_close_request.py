@@ -24,6 +24,16 @@ SCRIPT = HERE / "close-request.sh"
 
 FAILS = []
 
+# One shadow of /usr/bin + /bin per test run, minus any host gh/herdr — built
+# once, not per fixture (it is a few thousand symlinks on a typical host).
+_SHADOW = tempfile.TemporaryDirectory()
+SHADOW = Path(os.path.realpath(_SHADOW.name))
+for _src in ("/usr/bin", "/bin"):
+    for _name in os.listdir(_src):
+        if _name in ("gh", "herdr") or (SHADOW / _name).exists():
+            continue
+        (SHADOW / _name).symlink_to(os.path.join(_src, _name))
+
 
 def check(name, cond):
     if not cond:
@@ -64,13 +74,6 @@ class Fixture:
 
         self.bin = d / "bin"
         self.bin.mkdir()
-        self.sys = d / "sysbin"
-        self.sys.mkdir()
-        for src in ("/usr/bin", "/bin"):
-            for name in os.listdir(src):
-                if name in ("gh", "herdr") or (self.sys / name).exists():
-                    continue
-                (self.sys / name).symlink_to(os.path.join(src, name))
         self.home = d / "home"
         self.home.mkdir()
         self.state = d / "state"
@@ -118,13 +121,13 @@ class Fixture:
             "#!/bin/bash\n"
             f'case "$1 $2" in\n'
             f'  "agent list") cat "{st}/agents" ;;\n'
-            f'  "pane read") echo "$@" > "{st}/pane-argv"; cat "{st}/pane" ;;\n'
+            f'  "pane read") echo "$@" >> "{st}/pane-argv"; cat "{st}/pane" ;;\n'
             "  *) exit 9 ;;\n"
             "esac\n")
         h.chmod(0o755)
 
     def env(self, herdr=True):
-        e = {"PATH": f"{self.bin}:{self.sys}", "HOME": str(self.home),
+        e = {"PATH": f"{self.bin}:{SHADOW}", "HOME": str(self.home),
              "TMPDIR": str(self.d)}
         if herdr:
             e["HERDR_ENV"] = "1"
@@ -201,6 +204,10 @@ check("reject: hostile task name", o.get("decision") == "reject"
       and o["reason"] == ["invalid-task"] and "task" not in o)
 check("reject: hostile task name never executes", not canary.exists())
 
+for bad in ("-rf", ".", "..", ".hidden"):
+    _, o = fx.evaluate(task=bad)
+    check(f"reject: task {bad!r} is not a plain name", o["reason"] == ["invalid-task"])
+
 _, o = fx.evaluate(repo=str(fx.d / "elsewhere"))
 check("reject: foreign repo", o.get("decision") == "reject" and o["reason"] == ["repo-mismatch"])
 _, o = fx.evaluate(repo="relative/path")
@@ -233,6 +240,22 @@ _, o = fx.evaluate()
 check("ask: modified file → dirty", o["reason"] == ["dirty-worktree"])
 git(fx.wt, "checkout", "-q", "--", "f.txt")
 
+git(fx.main, "config", "status.showUntrackedFiles", "no")
+(fx.wt / "scratch.txt").write_text("unsaved\n")
+_, o = fx.evaluate()
+check("ask: untracked file found despite status.showUntrackedFiles=no",
+      o["reason"] == ["dirty-worktree"])
+(fx.wt / "scratch.txt").unlink()
+git(fx.main, "config", "--unset", "status.showUntrackedFiles")
+
+(fx.main / ".git" / "info").mkdir(exist_ok=True)
+(fx.main / ".git" / "info" / "exclude").write_text("secret.env\n")
+(fx.wt / "secret.env").write_text("TOKEN=x\n")
+_, o = fx.evaluate()
+check("ask: gitignored file would be deleted", o.get("decision") == "ask"
+      and o["reason"] == ["ignored-files"])
+(fx.wt / "secret.env").unlink()
+
 (fx.wt / "late.txt").write_text("after merge\n")
 git(fx.wt, "add", "late.txt")
 git(fx.wt, "commit", "-q", "-m", "post-merge")
@@ -251,13 +274,21 @@ fx.write_fakes(gh=True)
 
 (fx.state / "prview").write_text("\n")
 _, o = fx.evaluate()
-check("ask: PR head unreadable", o["reason"] == ["gh-unavailable"])
+check("ask: PR head unreadable", o["reason"] == ["pr-head-unreadable"])
 fx.set_head(git(fx.main, "rev-parse", "refs/heads/task/foo"))
 
 fx.set_agents([fx.agent(fx.wt, "w1:p1"), fx.agent(fx.wt, "w1:p2")])
 _, o = fx.evaluate()
 check("ask: two agents", o.get("decision") == "ask"
       and o["reason"] == ["multiple-agents"] and o.get("lane_agents") == "2")
+
+fx.set_agents([fx.agent(fx.wt, "w1:p1"), fx.agent(fx.wt / "sub", "w1:p2")])
+_, o = fx.evaluate()
+check("ask: an agent in a lane subdirectory counts", o["reason"] == ["multiple-agents"])
+
+fx.set_agents([fx.agent(fx.wt), {"agent": "claude", "cwd": None, "pane_id": "w1:p3"}])
+_, o = fx.evaluate()
+check("ask: agent without cwd → unverified", o["reason"] == ["liveness-unverified"])
 
 fx.set_agents([])
 _, o = fx.evaluate()
@@ -270,6 +301,30 @@ fx.set_agents([fx.agent(fx.wt)])
 
 _, o = fx.evaluate(herdr=False)
 check("ask: outside herdr → unverified", o["reason"] == ["liveness-unverified"])
+
+# --- remote branch: deleted by /close step 9, so it must hold nothing new --- #
+origin = fx.d / "origin.git"
+subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+git(fx.main, "remote", "add", "origin", str(origin))
+_, o = fx.evaluate()
+check("auto: remote branch already gone", o.get("decision") == "auto")
+git(fx.main, "push", "-q", "origin", "task/foo")
+_, o = fx.evaluate()
+check("auto: remote branch == merged head", o.get("decision") == "auto")
+other = fx.d / "other"
+subprocess.run(["git", "clone", "-q", "-b", "task/foo", str(origin), str(other)], check=True)
+git(other, "config", "user.email", "t@example.com")
+git(other, "config", "user.name", "t")
+(other / "remote-late.txt").write_text("pushed after merge\n")
+git(other, "add", "remote-late.txt")
+git(other, "commit", "-q", "-m", "remote post-merge")
+git(other, "push", "-q", "origin", "task/foo")
+_, o = fx.evaluate()
+check("ask: remote branch has a commit after the merge", o["reason"] == ["remote-ahead"])
+git(fx.main, "remote", "set-url", "origin", str(fx.d / "missing.git"))
+_, o = fx.evaluate()
+check("ask: remote unreadable", o["reason"] == ["remote-unverified"])
+git(fx.main, "remote", "remove", "origin")
 
 # --- ask: every failed condition is named, not just the first --------------- #
 fx.set_pr("CLOSED")
@@ -286,6 +341,8 @@ r, o = fx.sweep()
 mat = Path(o.get("material", "/nonexistent"))
 check("sweep: exit 0", r.returncode == 0)
 check("sweep: no insights store → report none", o.get("report") == "none")
+check("sweep: namesake filter anchored on the lane's first commit",
+      o.get("namesake_filter") == "applied")
 check("sweep: pane read", o.get("pane") == "read")
 check("sweep: material exists", mat.is_file())
 check("sweep: material is private", mat.is_file() and stat.S_IMODE(mat.stat().st_mode) == 0o600)
@@ -295,6 +352,15 @@ argv = (fx.state / "pane-argv").read_text() if (fx.state / "pane-argv").exists()
 check("sweep: reads the lane agent's pane, visible + bounded",
       "w1:p1" in argv and "--source visible" in argv and "--lines" in argv)
 mat.unlink(missing_ok=True)
+
+fx.set_agents([fx.agent(fx.wt, "w1:p1"), fx.agent(fx.wt / "sub", "w1:p2"),
+               fx.agent(fx.wt, "--source")])
+r, o = fx.sweep()
+argv = (fx.state / "pane-argv").read_text() if (fx.state / "pane-argv").exists() else ""
+check("sweep: every lane pane is read", o.get("panes") == "2/3")
+check("sweep: a flag-like pane id is never passed to herdr",
+      not any(l.startswith("pane read --") for l in argv.splitlines()))
+Path(o.get("material", "/x")).unlink(missing_ok=True)
 
 fx.set_agents([])
 _, o = fx.sweep()
@@ -322,4 +388,5 @@ if FAILS:
     for f in FAILS:
         print("  -", f)
     sys.exit(1)
+_SHADOW.cleanup()
 print("close-request.sh: all tests passed")
