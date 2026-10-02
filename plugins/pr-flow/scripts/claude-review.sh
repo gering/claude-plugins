@@ -41,6 +41,27 @@
 #       may try the bot and let a bounded poll settle it; a recommend-only
 #       caller names both routes.
 #
+#   route [<dir>] [--offline]
+#       Which review route this repo takes (docs/REVIEW-ROUTING.md §1). Combines
+#       the declared `review.route` setting (.pr-flow.toml, default auto), the
+#       remembered no-bot answer, the has-bot probe and — unless --offline —
+#       one cheap `gh api` look at recent comment authors. Always emits:
+#         route=bot|local   post @claude review, or go straight to the local review
+#         record=yes|no     on a timed-out poll, call `route-record` (auto only)
+#         source=setting|memory|probe|evidence|default
+#         why=              one line for the round report
+#         has_bot=          the probe's verdict, unchanged
+#       Exits 0 for every answer.
+#
+#   route-record [<dir>] --pr <N>
+#       Remember that no bot answered PR <N>: later rounds and lanes of this repo
+#       route local until cleared. Per repo (git common dir), never committed.
+#
+#   route-clear [<dir>]
+#       Forget the remembered answer. Also done automatically by a poll that
+#       sees a finished Claude review, by has_bot=yes, and by an explicit
+#       `review.route = github`.
+#
 # Exit codes:
 #   0 = success (output contains the body, possibly empty for `latest`)
 #   1 = timeout (poll) or error
@@ -49,6 +70,8 @@
 #   has_bot= line, never the status.
 
 set -euo pipefail
+
+SCHEMA="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/schema/settings.schema.json"
 
 usage() {
   # Every comment line after the shebang, up to the first non-comment line — the
@@ -128,6 +151,8 @@ subcmd_poll() {
       fi
       # "**Claude finished" = completion marker
       if [[ "$body" == *"**Claude finished"* ]]; then
+        # A reply proves a bot: drop a remembered "no bot answered".
+        route_forget "."
         printf '%s\n' "$body"
         exit 0
       fi
@@ -363,6 +388,169 @@ subcmd_has_bot() {
   emit unknown "no workflow references the review bot (inspected $src) — but the Claude GitHub App needs none, so its absence cannot be shown locally"
 }
 
+# --- Route memory ------------------------------------------------------------
+# `has_bot=unknown` is settled empirically by /cycle's poll. Without memory every
+# round and every lane paid the ten-minute probe again in a repo where nothing has
+# ever answered. The answer lives in the git COMMON dir, so all worktrees of the
+# repo share it and it can never be committed.
+route_file() {
+  local root="$1" common
+  common="$(git -C "$root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+  [[ -n "$common" ]] || return 1
+  printf '%s/pr-flow/review-route\n' "$common"
+}
+
+# Prints "<recorded_at> <pr>" when a valid no-bot record exists, nothing else.
+# Values are format-checked: they end up in the round report verbatim.
+route_memory() {
+  local file at pr
+  file="$(route_file "$1")" || return 0
+  [[ -f "$file" && ! -L "$file" ]] || return 0
+  at="$(sed -n 's/^recorded_at=//p' "$file" | head -n1)"
+  pr="$(sed -n 's/^pr=//p' "$file" | head -n1)"
+  [[ "$at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$ ]] || return 0
+  [[ "$pr" =~ ^[0-9]+$ ]] || pr=""
+  grep -qx 'no_bot=yes' "$file" || return 0
+  printf '%s %s\n' "$at" "$pr"
+}
+
+route_forget() {
+  local file
+  file="$(route_file "$1")" || return 0
+  rm -f -- "$file" 2>/dev/null || true
+}
+
+# The declared `review.route` (auto|github|local). The default and the enum come
+# from this plugin's own schema, so the schema stays the one place they live.
+# Read here rather than through the settings plugin's settings.py: that plugin is
+# optional, and its discovery does not find installed plugins yet. The file is
+# refused if it is a symlink (a checked-out link would read outside the repo).
+# Prints "<value> <note>"; note is empty or a one-line reason the value was not
+# taken from the file.
+route_setting() {
+  python3 - "$1/.pr-flow.toml" "$SCHEMA" <<'PY' 2>/dev/null || echo "auto could not read .pr-flow.toml (python3 3.11+ needed) — using the default"
+import json, os, sys
+cfg, schema = sys.argv[1], sys.argv[2]
+prop = json.load(open(schema))["properties"]["review"]["properties"]["route"]
+default, allowed = prop["default"], prop["enum"]
+if not os.path.lexists(cfg):
+    print(default); sys.exit()
+if os.path.islink(cfg):
+    print(default, ".pr-flow.toml is a symlink — ignored, using the default"); sys.exit()
+try:
+    import tomllib
+    with open(cfg, "rb") as f:
+        val = tomllib.load(f).get("review", {}).get("route", default)
+except Exception as e:
+    print(default, f".pr-flow.toml unreadable ({type(e).__name__}) — using the default"); sys.exit()
+if val not in allowed:
+    print(default, f"review.route must be one of {'|'.join(allowed)} — using the default"); sys.exit()
+print(val)
+PY
+}
+
+# Cheap evidence under `auto`: one page of the repo's most recent issue/PR
+# comments. `@claude` asked repeatedly and not ONE comment by a bot account means
+# a review bot is unlikely — never proof (has_bot stays unknown), and never
+# remembered. A bare comment count is no signal: a young repo has few comments
+# whether or not a bot is installed; an unanswered mention is the signal.
+# Prints "<total> <bots> <mentions>" or nothing when gh cannot answer.
+route_evidence() {
+  command -v gh >/dev/null || return 0
+  ( cd "$1" && gh api 'repos/{owner}/{repo}/issues/comments?sort=created&direction=desc&per_page=100' \
+      --jq '"\(length) \([.[] | select(.user.type == "Bot")] | length) \([.[] | select(.user.type != "Bot" and ((.body // "") | test("(^|\\s)@claude\\b"; "i")))] | length)"' 2>/dev/null ) || true
+}
+
+ROUTE_EVIDENCE_MIN_ASKS=2
+
+subcmd_route() {
+  local dir="." offline=false root setting note mem at pr probe hb ev total bots asks
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --offline) offline=true; shift ;;
+      -*) echo "Unknown flag: $1" >&2; exit 2 ;;
+      *) dir="$1"; shift ;;
+    esac
+  done
+  emit_route() {
+    echo "route=$1"
+    echo "record=$2"
+    echo "source=$3"
+    echo "why=${note:+$note; }$4"
+    echo "has_bot=$hb"
+  }
+  root="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null || true)"
+  probe="$(subcmd_has_bot "$dir")"
+  hb="$(sed -n 's/^has_bot=//p' <<<"$probe")"
+  if [[ -z "$root" ]]; then
+    note=""; emit_route bot no default "not inside a git repository — try the bot"; return 0
+  fi
+  read -r setting note <<<"$(route_setting "$root")"
+
+  case "$setting" in
+    local)
+      emit_route local no setting "review.route = local (.pr-flow.toml)"; return 0 ;;
+    github)
+      # An explicit `github` is the user overruling the remembered answer.
+      route_forget "$root"
+      emit_route bot no setting "review.route = github (.pr-flow.toml)"; return 0 ;;
+  esac
+
+  # auto
+  if [[ "$hb" = yes ]]; then
+    route_forget "$root"
+    emit_route bot no probe "$(sed -n 's/^why=//p' <<<"$probe")"; return 0
+  fi
+  mem="$(route_memory "$root")"
+  if [[ -n "$mem" ]]; then
+    read -r at pr <<<"$mem"
+    emit_route local no memory "no bot answered on ${at%%T*}${pr:+ (PR #$pr)} — remembered; \`claude-review.sh route-clear\` or review.route = github to retry the bot"
+    return 0
+  fi
+  if ! $offline; then
+    ev="$(route_evidence "$root")"
+    if [[ "$ev" =~ ^([0-9]+)\ ([0-9]+)\ ([0-9]+)$ ]]; then
+      total="${BASH_REMATCH[1]}"; bots="${BASH_REMATCH[2]}"; asks="${BASH_REMATCH[3]}"
+      if (( bots == 0 && asks >= ROUTE_EVIDENCE_MIN_ASKS )); then
+        emit_route local no evidence "likely no bot: @claude was asked $asks times in the last $total comments on this repo and no bot account ever replied (not proof)"
+        return 0
+      fi
+    fi
+  fi
+  emit_route bot yes default "has_bot=$hb — try the bot; a timed-out poll switches this repo to local"
+}
+
+subcmd_route_record() {
+  local dir="." pr="" root file tmp setting note
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --pr) pr="${2:-}"; shift 2 ;;
+      -*) echo "Unknown flag: $1" >&2; exit 2 ;;
+      *) dir="$1"; shift ;;
+    esac
+  done
+  [[ "$pr" =~ ^[0-9]+$ ]] || { echo "route-record: --pr <N> required" >&2; exit 2; }
+  root="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" || { echo "route-record: not a git repository" >&2; exit 1; }
+  read -r setting note <<<"$(route_setting "$root")"
+  if [[ "$setting" != auto ]]; then
+    echo "recorded=no"; echo "why=review.route = $setting — only auto remembers"; return 0
+  fi
+  file="$(route_file "$root")" || { echo "route-record: no git dir" >&2; exit 1; }
+  mkdir -p -- "${file%/*}"
+  [[ ! -L "$file" ]] || { echo "route-record: $file is a symlink — refusing" >&2; exit 1; }
+  tmp="$(mktemp "${file%/*}/.review-route.XXXXXX")"
+  printf 'no_bot=yes\nrecorded_at=%s\npr=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$pr" >"$tmp"
+  mv -f -- "$tmp" "$file"
+  echo "recorded=yes"; echo "file=$file"
+}
+
+subcmd_route_clear() {
+  local root
+  root="$(git -C "${1:-.}" rev-parse --show-toplevel 2>/dev/null)" || { echo "route-clear: not a git repository" >&2; exit 1; }
+  route_forget "$root"
+  echo "cleared=yes"
+}
+
 main() {
   local cmd="${1:-}"
   shift || true
@@ -371,6 +559,9 @@ main() {
     latest)        subcmd_latest "$@" ;;
     latest-after)  subcmd_latest_after "$@" ;;
     has-bot)       subcmd_has_bot "$@" ;;
+    route)         subcmd_route "$@" ;;
+    route-record)  subcmd_route_record "$@" ;;
+    route-clear)   subcmd_route_clear "$@" ;;
     ""|-h|--help)  usage ;;
     *)             echo "Unknown subcommand: $cmd" >&2; usage ;;
   esac

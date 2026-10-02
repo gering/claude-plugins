@@ -90,21 +90,20 @@ Strip the flags first; whatever is left over is the commit message.
    - If output is empty: trigger manually in step 7
 
 7. **Trigger Claude review** (only if no auto-trigger detected):
-   - **First: is there a review bot at all?** `@claude review` is a comment — it
-     succeeds whether or not anything is listening, and then step 8 polls until it
-     times out. **Follow `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-ROUTING.md`** — read
-     it; it is the one copy of the probe → answer → local-route tree shared with
-     `/open`, `/check` and `/rebase`. This skill's stage behavior:
-     - `has_bot=yes` → run `gh pr comment <PR_NUMBER> --body "@claude review"` and
-       continue to step 8.
-     - `has_bot=no` → not emitted today (see §1); if it ever is, do not comment
-       and apply the spec's §2 directly.
-     - `has_bot=unknown` → **try the bot, do not ask** (the spec's §1 split:
-       a triggering consumer settles it empirically, a recommend-only one names
-       both routes). Post the comment, enter step 8, and let the bounded poll
-       decide. If the poll times out, nothing was listening — say so and fall
-       through to §2 for this round. Asking here would stop `--loop` on *every*
-       iteration, since steps 3–10 re-run each round.
+   - **First: which route?** `@claude review` is a comment — it succeeds whether
+     or not anything is listening, and then step 8 polls until it times out.
+     **Follow `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-ROUTING.md`** — read it; it is the
+     one copy of the probe → route → local-route tree shared with `/open`,
+     `/check` and `/rebase`. Run its `route` call (network allowed here) and keep
+     `route=`, `record=` and `why=` for this round:
+     - `route=local` → **do not comment, do not poll.** Apply the spec's §2 now.
+       The round report states `route: local — <why=>`.
+     - `route=bot` → run `gh pr comment <PR_NUMBER> --body "@claude review"` and
+       continue to step 8. **Do not ask** on `has_bot=unknown` (the spec's §1
+       split): the bounded poll decides, and asking would stop `--loop` on every
+       iteration. If the poll times out, nothing was listening — when
+       `record=yes`, run the spec's `route-record` for this PR so later rounds
+       and lanes skip the probe, say so, and fall through to §2 for this round.
      - **Booking:** on a plain `/cycle`, book the round per §2 **before** you
        trigger, on whichever route you take — the bot path consumes the lane's
        budget exactly as the local one does. Under `--loop` the loop body has
@@ -117,10 +116,10 @@ Strip the flags first; whatever is left over is the commit message.
      ```
    - Default timeout is 20 iterations × 30s = 10 minutes. Override with `--max N --interval S` if needed.
    - On success: the script prints the review comment body to stdout (exit 0).
-   - On timeout: the script prints "TIMEOUT" to stderr and exits 1 — surface the PR URL to the user.
+   - On timeout: the script prints "TIMEOUT" to stderr and exits 1 — surface the PR URL, then step 7's timeout branch (`route-record` when `record=yes`, then the local route).
    - Background Bash tasks can use `gh` via `Bash(gh:*)` in the allowlist; background agents cannot.
 
-9. **Inform user**:
+9. **Inform user** (bot route only — on `route=local` the §2 report replaces this):
    ```
    Review triggered on PR #<PR_NUMBER>.
    Polling in the background — you can continue working.
@@ -253,9 +252,10 @@ The review wait is a background Bash poll, so the user can interject at any time
 - `gh` not installed or not authenticated → stop with clear error in step 0
 - No uncommitted changes → skip commit, just push + trigger
 - No PR exists → inform user, suggest creating one
-- No `@claude` review bot on the repo → the probe cannot prove that locally, so
-  step 7 follows `docs/REVIEW-ROUTING.md`: it posts the comment, and only a
-  timed-out poll routes to the local review
+- No `@claude` review bot on the repo → step 7's `route` decides: a declared
+  `review.route = local`, a remembered timed-out poll, or unanswered-mention
+  evidence go local at once; otherwise it posts, and a timed-out poll records
+  the answer and routes local
 - Base branch has new commits → handled by `/rebase` (delegated in step 2)
 - Branch already up-to-date with remote → skip push, just trigger review
 - Review auto-triggered after push → skip manual trigger, go straight to polling

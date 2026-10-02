@@ -264,6 +264,12 @@ entries are grouped per plugin, newest first.
 
 ## pr-flow
 
+### 1.5.0 — 2026-10-02
+- **Review route remembered per repo.** A bot-less repo no longer pays `/cycle`'s ten-minute `@claude review` poll on every round and every lane: a timed-out poll is recorded once (git common dir, shared by all worktrees, never committed), and later rounds go straight to `/swarm:review`. Every round report states the route and why (`route: local — no bot answered on <date> (PR #N)`).
+- New `review.route` setting (`.pr-flow.toml`, `auto` | `github` | `local`, default `auto` = today's try-once). `github` and a probed `has_bot=yes` clear the remembered answer; `claude-review.sh route-clear` does so by hand.
+- Cheap evidence under `auto`: when `@claude` was asked repeatedly in the repo's last 100 comments and no bot account ever replied, route local at once — stated as "likely", never recorded, and `has_bot` stays `unknown`.
+- New `claude-review.sh` subcommands `route`, `route-record`, `route-clear`; `/cycle`, `/open`, `/check`, `/rebase` branch on `route` (recommend-only skills use `--offline`). Canonical rule stays `docs/REVIEW-ROUTING.md`.
+
 ### 1.4.0 — 2026-09-07
 - `/open` and `/cycle` honor a work-system autonomy mandate (soft-coupled via `scripts/mandate-shim.sh`): a pre-authorized PR-open is no longer re-confirmed, and `--loop`'s round cap defaults to the mandate's remaining review budget, consuming a round per iteration so the limit survives a resumed session. A missing work-system reports "unknown" (ask), never a refusal.
 - `/open` and `/cycle` **detect whether a review bot exists** before recommending or triggering one. A repo with no `@claude` workflow is routed to `/swarm:review --pr <N>` (run when the mandate allows local review, offered otherwise) instead of into a `/cycle` that has nothing to trigger and polls until timeout.
