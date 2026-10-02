@@ -185,7 +185,14 @@ Verifies CI green, required approvals present, no open blocking Claude issues, b
 ## Requirements
 
 - `gh` CLI installed and authenticated (`gh auth login`)
-- A GitHub repo. An `@claude` review bot (a workflow using `anthropics/claude-code-action` on `issue_comment`) is what `/cycle` triggers — **optional**: the local `/swarm:review --pr <N>` covers a repo that has none (see `docs/REVIEW-ROUTING.md`). The probe reads workflow files from the default branch, which can prove a bot but never its absence: the Claude GitHub App answers comments with no workflow of its own, so an ordinary repo with no claude workflow reports `unknown`. `/cycle` then tries the bot once and lets a bounded poll settle it — a timed-out poll is remembered per repo, so later rounds and lanes go straight to the local review (`route: local — no bot answered on <date>`). Pin the route with `review.route = "github"` or `"local"` under `[review]` in `.pr-flow.toml` (default `auto`); `claude-review.sh route-clear` forgets the remembered answer
+- A GitHub repo. An `@claude` review bot (a workflow using `anthropics/claude-code-action` on `issue_comment`) is what `/cycle` triggers — **optional**: the local `/swarm:review --pr <N>` covers a repo that has none (see `docs/REVIEW-ROUTING.md`). The probe reads workflow files from the default branch, which can prove a bot but never its absence: the Claude GitHub App answers comments with no workflow of its own, so an ordinary repo with no claude workflow reports `unknown`. `/cycle` then tries the bot once and lets a bounded poll settle it — a timed-out poll is remembered per repo, so later rounds and lanes go straight to the local review (`route: local — no bot answered on <date>`). A Claude bot reply seen later switches the repo back automatically. Pin the route in `.pr-flow.toml` (default `auto`):
+
+  ```toml
+  [review]
+  route = "local"   # or "github"
+  ```
+
+  `claude-review.sh route-clear` forgets the remembered answer by hand
 - Active PR on a non-default branch
 
 Each skill runs a preflight check and stops with a clear message if requirements are missing.

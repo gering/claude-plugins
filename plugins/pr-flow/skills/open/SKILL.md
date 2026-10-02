@@ -225,13 +225,11 @@ user, not that they said no.
     - **If output is empty** → no review started. Before recommending anything,
       find out *why* — a slow trigger and an absent bot need opposite advice.
       **Follow `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-ROUTING.md`** — read it; it is
-      the one copy of the probe → route → local-route tree that `/cycle`,
-      `/check` and `/rebase` follow too. Run its `route` call. This skill's stage
-      behavior: it never triggers (creation, not triggering, is its job) —
-      `route=local` → apply §2 (run or offer the local review) and state the
-      `why=`; `has_bot=yes` → recommend `/cycle`; otherwise name both routes and
-      let the user pick, per §1's consumer split. It books a round only if it
-      actually runs the local review.
+      the one copy of the routing rule that `/cycle`, `/check` and `/rebase`
+      follow too. Run its `route` call (networked) and act on the `/open` row of
+      its §1 consumer table, quoting `why=`. It never triggers (creation, not
+      triggering, is its job), and books a round only if it actually runs the
+      local review.
 
 11. **Final summary**:
     ```
@@ -242,9 +240,7 @@ user, not that they said no.
 
     Next step:
     - [if review auto-triggered]   Review results will appear when polling completes (~1-5 min)
-    - [if bot exists, not fired]   Run `/cycle` to trigger Claude review manually
-    - [if route=local]             <per REVIEW-ROUTING.md §2: local review run, or offered — plus the why= line>
-    - [if bot unknown]             <the probe's why= line, both routes named>
+    - [if not auto-triggered]      <the `/open` row of REVIEW-ROUTING.md §1 for this route — exactly one of: §2 local review run/offered · run `/cycle` · both routes named; always with the why= line>
     - [if CI failed/missing]       Investigate CI config before pushing more work
     ```
 
