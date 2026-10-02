@@ -2,8 +2,9 @@
 """Tests for close-request.sh — the Manager's auto-accept decision + sweep.
 
 Each case builds a REAL git repo with a task worktree under .claude/worktrees/,
-then drives the real script with a fake `gh` and a fake `herdr` on a PATH that
-holds nothing else from the host (so a real gh/herdr can never leak in). HOME is
+then drives the real script with a fake `gh` and a fake `herdr` in front of a
+shadow copy of /usr/bin + /bin with every host gh/herdr filtered out (CI runners
+ship gh in /usr/bin, so a plain /usr/bin:/bin PATH would leak the real one). HOME is
 a throwaway dir so the sweep's insights lookup never touches the user's store.
 
 Covers: the `auto` path (one and zero agents), every `reject` reason, every
@@ -63,6 +64,13 @@ class Fixture:
 
         self.bin = d / "bin"
         self.bin.mkdir()
+        self.sys = d / "sysbin"
+        self.sys.mkdir()
+        for src in ("/usr/bin", "/bin"):
+            for name in os.listdir(src):
+                if name in ("gh", "herdr") or (self.sys / name).exists():
+                    continue
+                (self.sys / name).symlink_to(os.path.join(src, name))
         self.home = d / "home"
         self.home.mkdir()
         self.state = d / "state"
@@ -116,7 +124,7 @@ class Fixture:
         h.chmod(0o755)
 
     def env(self, herdr=True):
-        e = {"PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.home),
+        e = {"PATH": f"{self.bin}:{self.sys}", "HOME": str(self.home),
              "TMPDIR": str(self.d)}
         if herdr:
             e["HERDR_ENV"] = "1"
