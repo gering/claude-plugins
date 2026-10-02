@@ -38,7 +38,7 @@ Local mixture-of-agents code review. Fans out one review across Claude lens suba
 
 ### Settings
 
-Plugin settings system: per-plugin TOML config resolved over schema defaults. Each plugin owns its config file (`.work-system.toml`, `.knowledge-system.toml`, `.pr-flow.toml`), defaults, and validation schema; users override only what they need. `list`, `show`, `get`, `set`, `validate` via one script and skill. Includes a `[related_projects]` sibling-project address book for cross-project orchestration. *(Phase 1: config surface only — consumer wiring lands next.)*
+Plugin settings system: per-plugin TOML config resolved over schema defaults. Each plugin owns its config file (`.work-system.toml`, `.knowledge-system.toml`, `.pr-flow.toml`), defaults, and validation schema; users override only what they need. `list`, `show`, `get`, `set`, `validate` via one script and skill. Includes a `[related_projects]` sibling-project address book for cross-project orchestration. *(First runtime consumer: pr-flow's `review.route`.)*
 
 **Commands:** `/settings` *(subcommands: `list`, `show`, `get`, `set`, `unset`, `validate`, `defaults`)*
 

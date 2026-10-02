@@ -42,7 +42,7 @@ there is no separate "previously raised" table.
 **Verdict:** ✅ clean  |  ⚠️ <N> blocker(s)  |  ❌ merge blocked
 **CI:** <N passed, N failed, N running>
 **Stale:** no  |  ⚠️ yes — new push since review (<commits> commits)
-**Route:** bot  |  local — <the route's why= line, verbatim>
+**Route:** <bot | local> — <the route's why= line, verbatim — on either route>
 ```
 
 The `Route` line is required whenever the skill ran `route` this round (`/cycle`

@@ -8,8 +8,9 @@
 #       Default: 20 iterations, 30s interval (= 10 minutes max).
 #       A finished review clears the remembered no-bot answer. --record (pass it
 #       when `route` said record=yes) books a timeout as that answer itself —
-#       unless the bot acknowledged ("Claude Code is working") and was only slow;
-#       the outcome goes to stderr as route_recorded=yes|no.
+#       unless any Claude comment appeared (slow, or edited into an error);
+#       the outcome goes to stderr as one route_recorded=yes|no line. SINCE_ISO
+#       must be `date -u +%Y-%m-%dT%H:%M:%SZ` output.
 #
 #   latest <PR> [--json]
 #       Print the body of the latest Claude review comment (any status).
@@ -58,8 +59,10 @@
 #         source=setting|memory|probe|evidence|default
 #         why=              one line for the round report
 #         has_bot=          the probe's verdict, unchanged (empty: not probed,
-#                           because review.route = local)
+#                           because review.route pins the route)
 #         lane=             the directory that answered
+#         lane_source=      with --branch: branch, or cwd when no worktree
+#                           holds it (REVIEW-ROUTING.md §0)
 #       Exits 0 for every answer.
 #
 #   route-record [<dir>] --pr <N>
@@ -136,7 +139,7 @@ subcmd_poll() {
 
   local max_iters=20
   local interval=30
-  local record_dir="" seen_working=false
+  local record_dir="" seen_bot=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --max)      max_iters="$2"; shift 2 ;;
@@ -147,23 +150,28 @@ subcmd_poll() {
     esac
   done
 
+  # $since is spliced into the jq program text: a value carrying a quote
+  # could rewrite the filter (`1900" or true or "`) and pass an old comment off
+  # as this round's review. Only the format `date -u +%FT%TZ` produces.
+  [[ "$since" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+    || { echo "poll: SINCE_ISO must look like 2026-01-31T12:00:00Z" >&2; exit 2; }
+
   require_gh
 
   for ((i=1; i<=max_iters; i++)); do
     sleep "$interval"
     local body
     # Strip fractional seconds from .createdAt for whole-second comparison
-    # with $since (see note in subcmd_latest_after). claude-code-action posts as
-    # `claude` (the App) or, with a workflow token, as `github-actions` — the
-    # latter only counts when it carries the action's own markers, so an
-    # unrelated CI comment is never read as a review.
+    # with $since (see note in subcmd_latest_after).
     body=$(gh pr view "$pr" --json comments \
-      --jq "[.comments[] | select(.author.login == \"claude\" or (.author.login == \"github-actions\" and ((.body // \"\") | test(\"Claude Code is working|\\\\*\\\\*Claude finished\")))) | select((.createdAt | sub(\"\\\\.[0-9]+Z$\"; \"Z\")) > \"$since\")] | last | .body // \"\"")
+      --jq "[.comments[] | select(.author.login == \"claude\") | select((.createdAt | sub(\"\\\\.[0-9]+Z$\"; \"Z\")) > \"$since\")] | last | .body // \"\"")
 
     if [[ -n "$body" ]]; then
+      # ANY Claude comment in the window — working, finished, or edited into an
+      # error — proves a bot exists; only silence may be booked as "no bot".
+      seen_bot=true
       # "Claude Code is working" = in-progress marker; keep polling
       if [[ "$body" == *"Claude Code is working"* ]]; then
-        seen_working=true
         continue
       fi
       # "**Claude finished" = completion marker
@@ -179,14 +187,20 @@ subcmd_poll() {
   echo "TIMEOUT" >&2
   # --record: the script, not the caller's memory, books the no-bot answer —
   # a --loop poll can outlive an interjection or a compaction. A bot that
-  # acknowledged but was slow is NOT "no bot": never record that.
+  # answered at all (slow, or failed) is NOT "no bot": never record that.
+  # Always exactly one route_recorded= line, so the caller can report it.
   if [[ -n "$record_dir" ]]; then
-    local root
-    if $seen_working; then
-      echo "route_recorded=no (the bot acknowledged but did not finish in time)" >&2
-    elif root="$(git -C "$record_dir" rev-parse --show-toplevel 2>/dev/null)" \
-         && [[ "$pr" =~ ^[1-9][0-9]*$ ]]; then
-      echo "route_$(route_record_write "$root" "$pr" | head -n1)" >&2
+    local root out
+    if $seen_bot; then
+      echo "route_recorded=no (the bot answered but did not finish in time)" >&2
+    elif ! root="$(git -C "$record_dir" rev-parse --show-toplevel 2>/dev/null)"; then
+      echo "route_recorded=no (--record dir is not a git repository)" >&2
+    elif ! [[ "$pr" =~ ^[1-9][0-9]*$ ]]; then
+      echo "route_recorded=no (PR is not a plain number)" >&2
+    elif out="$(route_record_write "$root" "$pr" 2>&1)" && [[ "$out" == recorded=* ]]; then
+      echo "route_${out%%$'\n'*}" >&2
+    else
+      echo "route_recorded=no (write failed: ${out%%$'\n'*})" >&2
     fi
   fi
   exit 1
@@ -452,16 +466,19 @@ route_forget() {
 # The worktree holding <branch> (REVIEW-ROUTING.md §0: the lane is a flag). Read
 # from git itself, so it works without work-system — a wrapper that fell back to
 # the shim's stdout handed `verdict=no-work-system` to `git -C` as a directory.
+# Prints "<branch|cwd> <dir>" — the dir last, so a path with spaces survives
+# `read -r src dir`; `cwd` = no worktree holds it (§0's lane_source).
 lane_for_branch() {
   local branch="$1" wt="" line
-  [[ -n "$branch" ]] || { echo .; return 0; }
-  while IFS= read -r line; do
-    case "$line" in
-      "worktree "*) wt="${line#worktree }" ;;
-      "branch refs/heads/$branch") echo "$wt"; return 0 ;;
-    esac
-  done < <(git worktree list --porcelain 2>/dev/null)
-  echo .
+  if [[ -n "$branch" ]]; then
+    while IFS= read -r line; do
+      case "$line" in
+        "worktree "*) wt="${line#worktree }" ;;
+        "branch refs/heads/$branch") printf 'branch %s\n' "$wt"; return 0 ;;
+      esac
+    done < <(git worktree list --porcelain 2>/dev/null)
+  fi
+  echo "cwd ."
 }
 
 # The declared `review.route` (auto|github|local). Default, enum AND the config
@@ -503,13 +520,14 @@ PY
 #   asks   `@claude` mentions by people the bot would actually obey (owner,
 #          member, collaborator) — an outsider's mention is ignored by the bot,
 #          so counting it let anyone on a public repo force the local route.
-#   last_claude_reply   newest comment by a Claude bot account — the evidence
-#          that clears a remembered "no bot answered".
+#   last_claude_reply   newest comment by the Claude App (`claude[bot]`, the
+#          same author `poll` reads) — the evidence that clears a remembered
+#          "no bot answered". A reply paged out of these 100 is not seen.
 route_evidence() {
   command -v gh >/dev/null || return 0
   ( cd "$1" && gh api 'repos/{owner}/{repo}/issues/comments?sort=created&direction=desc&per_page=100' --jq '
       def bot: (.user.type // "") == "Bot";
-      def claude_bot: bot and ((.user.login // "") | test("^claude"; "i"));
+      def claude_bot: bot and (.user.login // "") == "claude[bot]";
       def ask: (bot | not)
         and ((.author_association // "") | IN("OWNER", "MEMBER", "COLLABORATOR"))
         and ((.body // "") | test("(^|\\s)@claude\\b"; "i"));
@@ -520,18 +538,20 @@ route_evidence() {
 ROUTE_EVIDENCE_MIN_ASKS=2
 
 subcmd_route() {
-  local dir="." branch="" has_branch=false offline=false root setting note
+  local dir="." branch="" lane_source="" offline=false root setting note
   local mem at pr probe="" hb="" ev="" total bots asks last cleared=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --offline) offline=true; shift ;;
       --branch) [[ $# -ge 2 ]] || { echo "route: --branch needs a value" >&2; exit 2; }
-                branch="$2"; has_branch=true; shift 2 ;;
+                branch="$2"; shift 2 ;;
       -*) echo "Unknown flag: $1" >&2; exit 2 ;;
       *) dir="$1"; shift ;;
     esac
   done
-  $has_branch && dir="$(lane_for_branch "$branch")"
+  if [[ -n "$branch" ]]; then
+    read -r lane_source dir <<<"$(lane_for_branch "$branch")"
+  fi
   emit_route() {
     echo "route=$1"
     echo "record=$2"
@@ -539,6 +559,7 @@ subcmd_route() {
     echo "why=${cleared:+$cleared; }$4"
     echo "has_bot=$hb"
     echo "lane=$dir"
+    [[ -z "$lane_source" ]] || echo "lane_source=$lane_source"
   }
   root="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null || true)"
   if [[ -z "$root" ]]; then
@@ -553,7 +574,6 @@ subcmd_route() {
       # only a networked (triggering) caller acts on it. --offline is read-only:
       # /check must not erase memory every other lane relies on.
       $offline || route_forget "$root"
-      probe="$(subcmd_has_bot "$root")"; hb="$(sed -n 's/^has_bot=//p' <<<"$probe")"
       emit_route bot no setting "$note"; return 0 ;;
   esac
 
@@ -598,11 +618,14 @@ route_record_write() {
     echo "recorded=no"; echo "why=review.route = $setting — only auto remembers"; return 0
   fi
   file="$(route_file "$root")" || { echo "route-record: no git dir" >&2; return 1; }
-  mkdir -p -- "${file%/*}"
+  # Every step guarded explicitly: callers use `|| …`, which switches errexit
+  # off inside this function, and a silent failure would still say recorded=yes.
+  mkdir -p -- "${file%/*}" || { echo "route-record: cannot create ${file%/*}" >&2; return 1; }
   [[ ! -L "$file" ]] || { echo "route-record: $file is a symlink — refusing" >&2; return 1; }
-  tmp="$(mktemp "${file%/*}/.review-route.XXXXXX")"
-  printf 'no_bot=yes\nrecorded_at=%s\npr=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$pr" >"$tmp"
-  mv -f -- "$tmp" "$file"
+  tmp="$(mktemp "${file%/*}/.review-route.XXXXXX")" || { echo "route-record: cannot write in ${file%/*}" >&2; return 1; }
+  printf 'no_bot=yes\nrecorded_at=%s\npr=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$pr" >"$tmp" \
+    && mv -f -- "$tmp" "$file" \
+    || { rm -f -- "$tmp"; echo "route-record: cannot write $file" >&2; return 1; }
   echo "recorded=yes"; echo "file=$file"
 }
 
