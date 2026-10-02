@@ -454,6 +454,14 @@ mat = Path(o.get("material", "/x"))
 check("sweep: --pr different → match no, body withheld", o.get("report_match") == "no"
       and mat.is_file() and "notes of" not in mat.read_text())
 mat.unlink(missing_ok=True)
+script = fx.fake_insights([("ins-url", "2026-09-01T00:00:00Z",
+                            "https://github.com/o/r/pull/9")])
+_, o = fx.sweep(script=script, extra=["--pr", "7"])
+mat = Path(o.get("material", "/x"))
+check("sweep: a URL-shaped work.pr is a PR number too",
+      o.get("report_pr") == "9" and o.get("report_match") == "no"
+      and mat.is_file() and "notes of" not in mat.read_text())
+mat.unlink(missing_ok=True)
 script = fx.fake_insights([("ins-nopr", "2026-09-01T00:00:00Z", None)])
 _, o = fx.sweep(script=script, extra=["--pr", "7"])
 mat = Path(o.get("material", "/x"))

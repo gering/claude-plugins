@@ -326,8 +326,9 @@ Rules:
    ```sh
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/close-request.sh" sweep "<task-name>" --pr <n>
    ```
-   Pass `--pr` with the PR being closed whenever you know it (`pr=` from `evaluate`);
-   omit it only when there is none. It writes one private file (`material=`) holding
+   Pass `--pr` with the PR being closed whenever you know it — `pr=` from `evaluate` on
+   a close-request, step 1's `pr_number` on a user-invoked `/close <task>`; omit it only
+   when there is none. It writes one private file (`material=`) holding
    the newest `handoff` insights report for the task **name**
    (`report=<id>|none|absent|unusable`) and, as a fallback, the visible output of every
    pane in the lane (`pane=read|none|unverified|absent`, `panes=<read>/<agents>`). Read
@@ -351,7 +352,8 @@ Rules:
    - **Outward-facing or destructive** (deploy, kick off a worker, push, delete remote
      resources) → list it and get an explicit yes first, after the close.
    For the step-11 summary: the items as a short list; none found → "no follow-ups
-   found"; nothing readable (`report` not an id and `pane` not `read`) → "follow-up
+   found"; nothing readable (no report body — `report` not an id, or `report_match=no` —
+   and `pane` not `read`) → "follow-up
    sweep: nothing readable (report=…, pane=…)" — never imply "nothing to do". The sweep
    never blocks or delays the close.
 

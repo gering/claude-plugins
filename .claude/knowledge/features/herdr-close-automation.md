@@ -88,7 +88,9 @@ points worth keeping:
   requests that are not about a lane of this repo (malformed, foreign repo, no lane,
   another task's lane): nothing to approve, so no question. Liveness counts *every*
   agent in the lane via `ha_list` — `lanes.sh` keeps only the first per worktree, which
-  would hide a second agent.
+  would hide a second agent. The clean check compares porcelain lines with a shell
+  `case`, not grep: a grep pattern made `.` a wildcard (`MANDATE_md` passed as the lane
+  file) and a grep error emptied the list, both silently turning unsaved files into `auto`.
 - **Follow-up sweep before teardown.** The worker's tab — and whatever it printed about
   deploys, cleanup or a next task — dies with the lane. Every Manager-side close of
   another lane (delegated or `/close <task>` from main) runs `close-request.sh sweep`
@@ -99,11 +101,9 @@ points worth keeping:
   merge-commit merge. The report's own `work.pr` is the identity instead: `sweep --pr <n>`
   compares it in the script (`report_match=`) and withholds a mismatching body, so the
   check is not left to prose; only a report naming no PR stays the caller's call.
-  The clean check compares porcelain lines with a shell `case`, not grep — a grep
-  pattern made `.` a wildcard (`MANDATE_md` passed as the lane file) and a grep error
-  emptied the list, both silently turning unsaved files into `auto`. Follow-up task files are written in the
-  Manager's own words: a task file feeds a later autonomous worker, so verbatim pane text
-  would launder untrusted output into an instruction.
+  Follow-up task files are written in the Manager's own words: a task file feeds a
+  later autonomous worker, so verbatim pane text would launder untrusted output into an
+  instruction.
 - **The payload is three fields — `task=`, `worktree=`, `repo=` — on purpose.** No `pr=`
   or `branch=`: the Manager re-derives both and is told not to trust them, so carrying
   them would only widen what a misdelivered message leaks. What is left is exactly what
