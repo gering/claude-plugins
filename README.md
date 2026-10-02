@@ -22,7 +22,7 @@ Generic task and worktree workflow system. Manage tasks as markdown files, work 
 
 ### PR Flow
 
-PR review feedback loop. Create PRs with readiness checks, commit + push + trigger `@claude` review, inspect status, work through review issues interactively, and merge safely with pre-merge documentation checks. Reads a work-system mandate when there is one (no second confirmation for an already-authorized step), and probes whether the repo has an `@claude` review bot at all. The probe can prove a bot but never its absence (the GitHub App needs no workflow file), so it answers yes / no / cannot-tell and routes to the local `/swarm:review` only where a bot is provably unreachable — otherwise it asks.
+PR review feedback loop. Create PRs with readiness checks, commit + push + trigger `@claude` review, inspect status, work through review issues interactively, and merge safely with pre-merge documentation checks. Reads a work-system mandate when there is one (no second confirmation for an already-authorized step), and probes whether the repo has an `@claude` review bot at all. The probe can prove a bot but never its absence (the GitHub App needs no workflow file), so it answers yes / no / cannot-tell; `/cycle` tries the bot once and remembers a no-answer per repo, so later rounds and lanes go straight to the local `/swarm:review` (or pin it with `review.route` in `.pr-flow.toml`).
 
 **Commands:** `/open`, `/cycle`, `/check`, `/fix`, `/rebase`, `/merge`
 
