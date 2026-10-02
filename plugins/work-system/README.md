@@ -288,7 +288,7 @@ scope: dark-mode theming only; no design-system refactor
 terminal_gate: reviewed-pr
 allow: commit,push-own-branch,open-pr,local-review,agreed-fixes,rebase-own-branch
 deny: merge,deploy,force-push-shared,destructive
-review_budget: 2
+review_budget: 3
 review_rounds_used: 0
 ---
 ```
