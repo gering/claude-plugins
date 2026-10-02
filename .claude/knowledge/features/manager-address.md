@@ -38,6 +38,12 @@ name-only `herdr-teardown.sh manager-session` once PR #69 has landed.
   `$HERDR_MATCH_PRELUDE`; the SendMessage name sanitizer (title-derived, control
   chars blanked, spinner glyph stripped, 64-char cap) moved into
   `$HERDR_NAME_PRELUDE` in `herdr-agent.sh` and is shared with `herdr-teardown.sh`.
+- **Native workers ping too.** codex/grok/kimi never run `/continue`, so
+  `agent-registry.sh bootstrap_prompt()` carries the three milestones and the
+  `manager.sh prompt` call.
+- **Leftmost-tab `unique` is deliberate** (TASK.md): pings are information only,
+  and `evidence=` keeps the guess visible. A state-changing consumer (the `/close`
+  delegation) can still demand `evidence=kicker` or ask first.
 - **Two routes, one body.** `manager.sh body` builds the single attributed line
   (`[work-system ping from task=… worktree=…] … (info only…)`) both routes send.
   SendMessage is skill-side (a script cannot call a tool) and needs exactly one
@@ -52,6 +58,23 @@ name-only `herdr-teardown.sh manager-session` once PR #69 has landed.
   with ten `─`", not "consists only of `─`". Dim, gray and inverse (cursor) cells
   are not a draft: CC renders prompt suggestions dim, and the pilot showed
   suggestions are not user input. No rules found → `unknown` → no send.
+  The SGR parse must be a real state machine: off-codes (22 dim, 27 inverse,
+  39 default fg) remove state, and the sub-parameters of `38;5;n` / `38;2;r;g;b`
+  are consumed — a bare "is 2 or 7 in the param list" check read `38;5;2`
+  (green) as dim and a color component 7 as inverse, so a real draft read
+  `clear` (found by three families in review).
+- **Fallback scope is the caller's workspace, never the record's.** The record is
+  unvalidated until PY_RESOLVE revalidates it; letting it scope the root scan made
+  a stale record (workspace migrated) aim the scan at the wrong workspace.
+- **Tab order is fetched lazily, into a file.** The resolver prints
+  `need_tabs=<ws>` only when a tie-break needs it; the caller then runs
+  `herdr tab list` into a temp file and re-runs. A file, not env/argv (the E2BIG
+  lesson from `herdr-tab-glyph.sh`).
+- **Ping text is a user turn on the herdr route.** The sender prefix and the
+  info-only trailer can be imitated, so the skill (and the native-worker
+  bootstrap prompt) restricts event text to fixed shapes and forbids relaying
+  third-party content. Task/worktree fields are sanitized and stripped of
+  brackets.
 - **Non-claude Managers get no herdr ping.** Native Codex trust dialogs read as
   `idle` on herdr 0.8.2, and there is no verified composer parser for them, so
   `prompt` refuses (`draft-check-unsupported-for-<agent>`). That is an accepted

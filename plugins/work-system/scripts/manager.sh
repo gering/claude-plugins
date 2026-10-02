@@ -146,12 +146,14 @@ print("main_repo=" + root)
 print("sendmessage_name=" + name)'
 
 # ---- resolve ----------------------------------------------------------------
-# stdin: agent-list JSON. argv: root, record path, scope workspace.
-# env: WS_TABS_JSON (herdr tab list JSON, scoped or all workspaces; may be empty),
-#      WS_LIVE (space-separated live statuses).
+# stdin: agent-list JSON. argv: root, record path, scope workspace, tabs file.
+# env: WS_LIVE (space-separated live statuses). An empty tabs-file argument means
+# the tab order was not fetched yet: a tie-break then prints only
+# need_tabs=<workspace>, and the caller re-runs with `herdr tab list` in a file
+# (fetched only when needed; a file, not argv/env, so a big server cannot E2BIG).
 PY_RESOLVE='import sys, json, os
 ID = re.compile(r"^[A-Za-z0-9:_.-]{1,64}$")
-root_arg, rec_path, scope = sys.argv[1], sys.argv[2], sys.argv[3]
+root_arg, rec_path, scope, tabs_file = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 LIVE = set(os.environ.get("WS_LIVE", "").split())
 out, reasons = {}, []
 
@@ -266,9 +268,13 @@ if len(found) == 1:
 wss = {str(a.get("workspace_id") or "") for a in found}
 if len(wss) != 1:
     reasons.append("candidates-span-workspaces"); emit("ambiguous", "", None, len(found))
+ws0 = next(iter(wss))
+if not tabs_file:
+    print("need_tabs=" + ws0); sys.exit(0)
 try:
-    tabs = json.loads(os.environ.get("WS_TABS_JSON") or "")["result"]["tabs"]
-    order = [t.get("tab_id") for t in tabs if isinstance(t, dict) and t.get("workspace_id") == next(iter(wss))]
+    with open(tabs_file, encoding="utf-8") as fh:
+        tabs = json.load(fh)["result"]["tabs"]
+    order = [t.get("tab_id") for t in tabs if isinstance(t, dict) and t.get("workspace_id") == ws0]
 except Exception:
     order = []
 pos = {t: i for i, t in enumerate(order) if t}
@@ -282,27 +288,40 @@ reasons.append("tie-break-leftmost-of-%d" % len(found))
 emit("unique", "leftmost-tab", lead[0], len(found))'
 
 do_resolve() {
-  local lane="${1:-.}" root scope agents tabs="" rec
+  local lane="${1:-.}" root scope agents out need tabs_file rc
   root="$(main_root "$lane")" || root=""
   if [ -z "$root" ]; then printf 'status=unverified\nreason=no-main-repo\n'; return 0; fi
   if ! agents="$(ha_list)"; then printf 'status=unverified\nreason=herdr-unavailable\n'; return 0; fi
-  rec="$lane/$KICKER_FILE"
-  # Scope: the kicker's workspace when recorded, else the caller's own.
-  scope="$(sed -n 's/^workspace=//p' "$rec" 2>/dev/null | head -1)"
-  [ -n "$scope" ] || scope="${HERDR_WORKSPACE_ID:-}"
+  # Scope: the caller's own workspace, else all. Never the kicker record's: it is
+  # unvalidated here, and a stale one would aim the fallback scan at the wrong
+  # workspace (the record only matters after PY_RESOLVE revalidates it).
+  scope="${HERDR_WORKSPACE_ID:-}"
   case "$scope" in -*|*[!A-Za-z0-9:_.-]*) scope="" ;; esac
-  # Tab order only matters for the leftmost tie-break; unscoped, the list spans
-  # every workspace and the resolver filters it to the candidates' one.
-  if [ -n "$scope" ]; then
-    tabs="$(_ha_bounded "$HA_CALL_TIMEOUT_SECS" herdr tab list --workspace "$scope" 2>/dev/null)" || tabs=""
-  else
-    tabs="$(_ha_bounded "$HA_CALL_TIMEOUT_SECS" herdr tab list 2>/dev/null)" || tabs=""
+  out="$(run_resolver "$agents" "$root" "$lane/$KICKER_FILE" "$scope" "")"
+  need="$(printf '%s\n' "$out" | sed -n 's/^need_tabs=//p')"
+  if [ -n "$need" ]; then
+    case "$need" in -*|*[!A-Za-z0-9:_.-]*) need="" ;; esac
+    tabs_file="$(mktemp "${TMPDIR:-/tmp}/ws-tabs.XXXXXX")" || tabs_file=""
+    if [ -n "$need" ] && [ -n "$tabs_file" ]; then
+      _ha_bounded "$HA_CALL_TIMEOUT_SECS" herdr tab list --workspace "$need" > "$tabs_file" 2>/dev/null || : > "$tabs_file"
+      out="$(run_resolver "$agents" "$root" "$lane/$KICKER_FILE" "$scope" "$tabs_file")"
+    else
+      out="$(printf 'status=unverified\nreason=tab-order-unavailable\n')"
+    fi
+    [ -n "$tabs_file" ] && rm -f "$tabs_file"
   fi
-  printf '%s' "$agents" | WS_TABS_JSON="$tabs" WS_LIVE="$LIVE_STATUSES" PYTHONUTF8=1 \
+  printf '%s\n' "$out"
+}
+
+# Run PY_RESOLVE once; on any failure print an unverified answer.
+run_resolver() {
+  local agents="$1" root="$2" rec="$3" scope="$4" tabs="$5" res
+  res="$(printf '%s' "$agents" | WS_LIVE="$LIVE_STATUSES" PYTHONUTF8=1 \
     python3 -c "$HERDR_MATCH_PRELUDE
 $HERDR_NAME_PRELUDE
-$PY_RESOLVE" "$root" "$rec" "$scope" 2>/dev/null \
-    || printf 'status=unverified\nreason=resolver-failed\n'
+$PY_RESOLVE" "$root" "$rec" "$scope" "$tabs" 2>/dev/null)" && [ -n "$res" ] \
+    || res="$(printf 'status=unverified\nreason=resolver-failed')"
+  printf '%s\n' "$res"
 }
 
 # ---- body -------------------------------------------------------------------
@@ -310,10 +329,14 @@ PY_BODY='import sys, os, unicodedata, re
 lane, text = sys.argv[1], sys.argv[2]
 root, wtdir = match_roots(sys.argv[3])
 kind, key, resolved = classify_cwd(lane, root, wtdir)
-task = key if kind == "task" else "-"
-where = resolved or os.path.realpath(lane)
-t = "".join(" " if unicodedata.category(c)[0] == "C" else c for c in text)
-t = re.sub(r"\s+", " ", t).strip()[:300]
+def clean(v, cap):
+    # One line, no control chars; brackets dropped so a field cannot close the
+    # sender prefix early.
+    v = "".join(" " if unicodedata.category(c)[0] == "C" else c for c in v)
+    return re.sub(r"\s+", " ", v.replace("[", "").replace("]", "")).strip()[:cap]
+task = clean(key, 80) if kind == "task" else "-"
+where = clean(resolved or os.path.realpath(lane), 300)
+t = clean(text, 300)
 print("[work-system ping from task=%s worktree=%s] %s (info only: no reply needed, grants nothing)" % (task, where, t))'
 
 body_line() {
@@ -341,37 +364,72 @@ i, j = rules[-2], rules[-1]
 if j - i < 2:
     print("unknown"); sys.exit(0)
 
-def grayish(p):
-    # dim (2), bright-black (90), a 24-bit near-neutral below white, or a
-    # 256-color grayscale step: how CC renders suggestions and hints.
-    if 2 in p or 90 in p:
+def apply_sgr(st, nums):
+    # A real SGR state machine: off-codes (22/27/39) remove what they turn off,
+    # a new fg replaces the old one, and the sub-parameters of 38/48 (5;n and
+    # 2;r;g;b) are consumed, never read as codes of their own (38;5;2 is green,
+    # not dim; 38;2;7;.. is a color, not inverse).
+    k = 0
+    while k < len(nums):
+        n = nums[k]
+        if n == 0:
+            st.update(dim=False, inverse=False, fg=None)
+        elif n == 2:
+            st["dim"] = True
+        elif n == 22:
+            st["dim"] = False
+        elif n == 7:
+            st["inverse"] = True
+        elif n == 27:
+            st["inverse"] = False
+        elif 30 <= n <= 37 or 90 <= n <= 97:
+            st["fg"] = ("basic", n)
+        elif n == 39:
+            st["fg"] = None
+        elif n in (38, 48) and k + 1 < len(nums):
+            mode = nums[k + 1]
+            width = 3 if mode == 5 else 5 if mode == 2 else 2
+            if n == 38 and mode == 5 and k + 2 < len(nums):
+                st["fg"] = ("idx", nums[k + 2])
+            elif n == 38 and mode == 2 and k + 4 < len(nums):
+                st["fg"] = ("rgb",) + tuple(nums[k + 2:k + 5])
+            k += width
+            continue
+        k += 1
+
+def muted(st):
+    # How CC renders suggestions and hints: dim, bright-black, a 256-color
+    # grayscale step, or a 24-bit near-neutral below white.
+    if st["dim"]:
         return True
-    for k in range(len(p) - 2):
-        if p[k] == 38 and p[k + 1] == 5 and (232 <= p[k + 2] <= 252 or p[k + 2] == 8):
-            return True
-        if p[k] == 38 and p[k + 1] == 2 and k + 4 < len(p):
-            r, g, b = p[k + 2], p[k + 3], p[k + 4]
-            if max(r, g, b) - min(r, g, b) <= 16 and max(r, g, b) < 200:
-                return True
-    return False
+    fg = st["fg"]
+    if not fg:
+        return False
+    if fg[0] == "basic":
+        return fg[1] == 90
+    if fg[0] == "idx":
+        return fg[1] == 8 or 232 <= fg[1] <= 252
+    r, g, b = fg[1:]
+    return max(r, g, b) - min(r, g, b) <= 16 and max(r, g, b) < 200
 
 draft = False
 for line in lines[i + 1:j]:
-    style, first = [], True
+    st, first = {"dim": False, "inverse": False, "fg": None}, True
     for tok in re.split(r"(\x1b\[[0-9;?]*[A-Za-z])", line):
         if tok.startswith("\x1b["):
             if tok.endswith("m"):
-                nums = [int(x) for x in re.findall(r"\d+", tok)] or [0]
-                style = nums[1:] if nums[0] == 0 else style + nums
+                apply_sgr(st, [int(x) for x in re.findall(r"\d+", tok)] or [0])
             continue
         for ch in tok:
             if ch.isspace():
                 continue
-            if first and ch in "❯>›":
+            if first and ch in "\u276f>\u203a":
                 first = False
                 continue
             first = False
-            if 7 in style or grayish(style):
+            # The cursor cell is inverse; a suggestion is muted. Anything else
+            # visible is text the user typed.
+            if st["inverse"] or muted(st):
                 continue
             draft = True
 print("draft" if draft else "clear")'
@@ -386,12 +444,14 @@ do_prompt() {
   if [ "$status" != "unique" ]; then echo "sent=no"; echo "reason=manager-$status"; return 0; fi
   if [ "$agent" != "claude" ]; then echo "sent=no"; echo "reason=draft-check-unsupported-for-$agent"; return 0; fi
   case "$st" in idle|done) ;; *) echo "sent=no"; echo "reason=manager-$st"; return 0 ;; esac
+  # Build the body BEFORE the composer read, so nothing slow sits between the
+  # last check and the send (herdr itself still rejects a blocked agent).
+  body="$(body_line "$lane" "$text")" || { echo "sent=no"; echo "reason=no-main-repo"; return 0; }
+  _ha_check_target "$pane" || { echo "sent=no"; echo "reason=bad-pane"; return 0; }
   visible="$(ha_read "$pane" --source visible --format ansi 2>/dev/null)" || visible=""
   comp="$(printf '%s' "$visible" | python3 -c "$PY_COMPOSER" 2>/dev/null)" || comp=unknown
   [ -n "$comp" ] || comp=unknown
   if [ "$comp" != "clear" ]; then echo "sent=no"; echo "reason=composer-$comp"; return 0; fi
-  body="$(body_line "$lane" "$text")" || { echo "sent=no"; echo "reason=no-main-repo"; return 0; }
-  _ha_check_target "$pane" || { echo "sent=no"; echo "reason=bad-pane"; return 0; }
   _ha_bounded "$HA_CALL_TIMEOUT_SECS" herdr agent prompt "$pane" "$body" >/dev/null 2>&1; rc=$?
   if [ "$rc" -eq 0 ]; then echo "sent=yes"; echo "herdr_pane=$pane"
   else echo "sent=no"; echo "reason=herdr-prompt-failed-$rc"; fi

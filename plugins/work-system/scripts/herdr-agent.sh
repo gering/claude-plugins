@@ -24,6 +24,8 @@
 #                               and classify_cwd() — prepend it to a consumer
 #                               python snippet so the cwd match logic is reused,
 #                               never copied (the "realpath cwd match prelude").
+#        $HERDR_NAME_PRELUDE    a python3 source string defining session_name():
+#                               the sanitized SendMessage name of an agent row.
 #        ha_have / ha_list / ha_get / ha_read / ha_wait   the shell wrappers.
 #      Sourcing must stay side-effect free (the CLI dispatch at the foot is
 #      guarded by "am I the executed script?") so a consumer can take the
