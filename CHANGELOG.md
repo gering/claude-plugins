@@ -52,6 +52,12 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.18.0 — 2026-10-02
+- Add `scripts/manager.sh`: one deterministic Manager resolver with both addresses (herdr pane + agent session, and the SendMessage name). A live-revalidated kicker record beats the repo-root scan; several root agents fall to a stated leftmost-tab tie-break; anything uncertain is never `unique`.
+- `/kickoff` and `/adopt` record the kicking session in the git-excluded `.ws-kicker`.
+- `/continue` pings the Manager at three milestones (PR opened, review round started, terminal gate reached) via `SendMessage` or a guarded `herdr agent prompt` that never types into a busy Manager or over a user draft.
+- The SendMessage-name sanitizer moves into `herdr-agent.sh` (`$HERDR_NAME_PRELUDE`), shared with `herdr-teardown.sh manager-session`.
+
 ### 1.17.0 — 2026-10-02
 - The Manager **auto-accepts a delegated close-request when nothing is left to decide**, instead of asking before every teardown. A new tested helper, `scripts/close-request.sh evaluate`, reads the received message from a file (it never reaches a command line) and prints `decision=auto|ask|reject` plus one `reason=` per failed condition. `auto` requires all of: valid task name, own repo, a real lane bound to `task/<task>`, a confirmed merged PR, a worktree clean except `TASK.md`/`MANDATE.md` (no modified, untracked or gitignored path — checked with flags that override `status.showUntrackedFiles`), the local and remote branch tips equal to the merged PR's head (no post-merge or unpushed commits, nothing pushed after the merge that step 9 would delete), and at most one agent — the requester — anywhere in the lane (subdirectories count; an agent without a readable cwd makes it unverified). Anything failed or uncheckable (no `gh`, liveness unverified, outside herdr) asks, and the question now names the failed conditions. `auto` prints one visible line (sender, task, PR, merge SHA) before teardown. On by default; residual risk accepted: a merged, clean lane closes a few minutes early.
 - `reject` is new: a malformed request, a foreign repo, a path that is no lane, or another task's lane is refused without a question — there is nothing to approve.

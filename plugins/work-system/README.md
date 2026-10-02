@@ -530,6 +530,27 @@ task name to reopen that one's tab from here). The reopen shares the tested
 `scripts/herdr-launch.sh` with `/kickoff` (a `resume` mode alongside `launch`); see
 `skills/continue/SKILL.md`.
 
+### Workers ping the Manager at milestones
+
+`/kickoff` and `/adopt` leave the kicking session's address in the worktree
+(`.ws-kicker`, git-excluded like `MANDATE.md`): its herdr pane, agent-session
+UUID, SendMessage name and canonical repo. A worker running `/continue` then sends
+the Manager one line at each milestone — **PR opened**, **review round started**
+(`x/y`), **terminal gate reached** (ready-for-merge / needs-decision) — so the
+Manager no longer has to poll for them. No reply is expected and a ping grants
+nothing.
+
+`scripts/manager.sh resolve` answers "who is the Manager?" deterministically:
+the kicker record wins only after it is revalidated live (same pane, same agent
+session, still at the repo root, still running); otherwise the live agents at the
+repo root are the candidates, and with several, the leftmost tab wins as a
+*stated* tie-break (`evidence=leftmost-tab`). Anything uncertain is `ambiguous` or
+`unverified`, and nothing is sent. Claude workers use `SendMessage` when exactly
+one live session carries the resolved name; everyone else goes through
+`manager.sh prompt`, which types into the Manager's pane only when it is an idle
+Claude session with no user draft in its composer (a dim prompt suggestion is not
+a draft).
+
 ### Task tabs carry their state glyph
 
 Inside herdr, every task tab's sidebar name is prefixed with the task's state
