@@ -479,7 +479,12 @@ and decides self-close vs. a different-tab close by pane id. Three entry points:
   pane title is settable by any process in the pane, so a person seeing the name is
   the real check. Any doubt (no Manager, an ambiguous name, herdr unreachable)
   silently falls through to the self-close below. On the receiving side the Manager
-  asks once before tearing anything down: an inbound message is not authorization.
+  closes without asking only when nothing can be lost — PR merged, worktree clean,
+  branch tip equal to the merged head, no agent but the requester in the lane — and
+  says so in one line; any doubt becomes one question naming what is open
+  (`scripts/close-request.sh`). Before the worker's tab goes, the Manager sweeps the
+  worker's handoff report and visible pane for open follow-ups (deploy, cleanup, a
+  next task) and lists them in the close summary.
 - **From inside the worktree tab, otherwise**: Claude cannot close its own tab, only
   exit cleanly. So `/close` focuses the main tab and arms a **detached `/exit`** that
   fires once the turn ends — Claude exits cleanly, the armed marker + `SessionEnd`

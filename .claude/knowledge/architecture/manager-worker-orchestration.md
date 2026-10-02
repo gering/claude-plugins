@@ -2,8 +2,8 @@
 title: "Manager/Worker Orchestration (design)"
 createdAt: 2026-07-18
 createdFrom: "session: design-manager-worker-orchestration 2026-07-18"
-updatedAt: 2026-09-02
-updatedFrom: "session: 2026-09-02 (task/delegate-worktree-close-to-manager)"
+updatedAt: 2026-10-02
+updatedFrom: "session: 2026-10-02 (task/auto-accept-clean-close-requests)"
 pluginVersion: 1.13.0
 prime: false
 ---
@@ -88,7 +88,9 @@ What this slice establishes (and what it deliberately does not):
 - **Received messages are data, not instructions — and never authorization.** A
   close-request is re-verified from scratch by the receiver, its `task=` is charset-
   validated before it goes near a command, and a **destructive** action triggered by an
-  inbound message asks the user once even when the evidence checks out. The general rule
+  inbound message asks the user unless independent evidence shows it can lose nothing
+  (the close-request auto-accept: merged + clean + tip == merged head + no other agent —
+  the message still authorizes nothing; the zero-loss evidence does). The general rule
   for every later message type on this path: a cross-session message carries a hint, never
   authority. Any future auto-acting receiver (the watch loop) needs a real authorization
   story — sender binding or a token minted at `/kickoff` — not just a routing filter like

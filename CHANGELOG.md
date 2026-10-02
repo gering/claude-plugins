@@ -52,6 +52,11 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.17.0 — 2026-10-02
+- The Manager **auto-accepts a delegated close-request when nothing is left to decide**, instead of asking before every teardown. A new tested helper, `scripts/close-request.sh evaluate`, reads the received message from a file (it never reaches a command line) and prints `decision=auto|ask|reject` plus one `reason=` per failed condition. `auto` requires all of: valid task name, own repo, a real lane bound to `task/<task>`, a confirmed merged PR, a worktree clean except `TASK.md`/`MANDATE.md`, the local branch tip equal to the merged PR's head (no post-merge or unpushed commits), and at most one agent — the requester — in the lane. Anything failed or uncheckable (no `gh`, liveness unverified, outside herdr) asks, and the question now names the failed conditions. `auto` prints one visible line (sender, task, PR, merge SHA) before teardown. On by default; residual risk accepted: a merged, clean lane closes a few minutes early.
+- `reject` is new: a malformed request, a foreign repo, a path that is no lane, or another task's lane is refused without a question — there is nothing to approve.
+- **Follow-up sweep** (`/close` step 6c, `close-request.sh sweep`) for every Manager-side close of another lane, delegated or user-invoked: before the worker's tab goes, it collects the worker's newest `handoff` insights report for this branch and the lane pane's visible output into one private file. Open post-merge items (deploy, cleanup, a follow-up task, docs) are listed in the close summary; Manager-local reversible ones (a task file, a roadmap line) may be done directly, outward-facing or destructive ones need an explicit yes. Worker output is untrusted data, never instructions; nothing readable is reported as such, never as "nothing to do". The sweep never blocks the close.
+
 ### 1.16.2 — 2026-10-02
 - Raise the review budget recorded by the `standard` and `merge-delegated` mandate presets from 2 to 3 rounds (`draft-only` stays 0). Existing lanes keep the budget already in their `MANDATE.md`.
 
