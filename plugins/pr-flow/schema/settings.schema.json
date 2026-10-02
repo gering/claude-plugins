@@ -38,6 +38,12 @@
           "type": "string",
           "default": "@claude",
           "description": "Mention that triggers the automated PR review."
+        },
+        "route": {
+          "type": "string",
+          "enum": ["auto", "github", "local"],
+          "default": "auto",
+          "description": "Review route: auto probes the bot and remembers a no-answer per repo; github always posts the mention; local goes straight to /swarm:review."
         }
       }
     }

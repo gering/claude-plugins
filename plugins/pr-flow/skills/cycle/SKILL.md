@@ -79,48 +79,48 @@ Strip the flags first; whatever is left over is the commit message.
      ```
    - If no previous comments exist, skip silently
 
-6. **Check for auto-triggered review**:
+6. **Route, then check for an auto-triggered review**:
+   - **Route first** — every round states its route. **Follow
+     `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-ROUTING.md`** (read it; it is the one copy
+     of the routing rule shared with `/open`, `/check` and `/rebase`) and run its
+     `route` call. Keep `route=`, `record=`, `why=` and `lane=` for this round; the
+     round report quotes `why=`.
    - Store the current timestamp before checking:
      - ISO: `date -u +%Y-%m-%dT%H:%M:%SZ` → TRIGGER_ISO
    - Wait ~5 seconds after push, then check if a review was already auto-triggered:
      ```
      bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" latest-after <PR_NUMBER> "<TRIGGER_ISO>"
      ```
-   - If output is non-empty: a review was auto-triggered by the project's CI/webhook config — skip to step 8 (polling)
-   - If output is empty: trigger manually in step 7
+   - If output is non-empty: a review was auto-triggered — a bot evidently exists,
+     so skip to step 8 and poll **without** `--record`
+   - If output is empty: step 7
 
-7. **Trigger Claude review** (only if no auto-trigger detected):
-   - **First: is there a review bot at all?** `@claude review` is a comment — it
-     succeeds whether or not anything is listening, and then step 8 polls until it
-     times out. **Follow `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-ROUTING.md`** — read
-     it; it is the one copy of the probe → answer → local-route tree shared with
-     `/open`, `/check` and `/rebase`. This skill's stage behavior:
-     - `has_bot=yes` → run `gh pr comment <PR_NUMBER> --body "@claude review"` and
-       continue to step 8.
-     - `has_bot=no` → not emitted today (see §1); if it ever is, do not comment
-       and apply the spec's §2 directly.
-     - `has_bot=unknown` → **try the bot, do not ask** (the spec's §1 split:
-       a triggering consumer settles it empirically, a recommend-only one names
-       both routes). Post the comment, enter step 8, and let the bounded poll
-       decide. If the poll times out, nothing was listening — say so and fall
-       through to §2 for this round. Asking here would stop `--loop` on *every*
-       iteration, since steps 3–10 re-run each round.
-     - **Booking:** on a plain `/cycle`, book the round per §2 **before** you
-       trigger, on whichever route you take — the bot path consumes the lane's
-       budget exactly as the local one does. Under `--loop` the loop body has
-       already booked this iteration; do not book twice.
+7. **Trigger per the route** (only if no auto-trigger detected) — the spec's §1
+   consumer table, `/cycle` row:
+   - `route=local` → **do not comment, do not poll.** Apply the spec's §2 now.
+   - `route=bot` → run `gh pr comment <PR_NUMBER> --body "@claude review"` and
+     continue to step 8. **Never ask** on `has_bot=unknown` — the bounded poll
+     decides, and asking would stop `--loop` on every iteration.
+   - **Booking:** on a plain `/cycle`, book the round per §2 **before** you
+     trigger, on whichever route you take — the bot path consumes the lane's
+     budget exactly as the local one does. Under `--loop` the loop body has
+     already booked this iteration; do not book twice.
 
 8. **Launch background polling via Bash**:
-   - Use the **Bash tool** with `run_in_background: true` to invoke the shared polling script:
+   - Use the **Bash tool** with `run_in_background: true` to invoke the shared polling script —
+     append `--record "<lane=>"` when step 6 said `record=yes` and step 7 posted
+     the comment (never on the auto-trigger path):
      ```
-     bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" poll <PR_NUMBER> "<TRIGGER_ISO>"
+     bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" poll <PR_NUMBER> "<TRIGGER_ISO>" [--record "<lane>"]
      ```
    - Default timeout is 20 iterations × 30s = 10 minutes. Override with `--max N --interval S` if needed.
    - On success: the script prints the review comment body to stdout (exit 0).
-   - On timeout: the script prints "TIMEOUT" to stderr and exits 1 — surface the PR URL to the user.
+   - On timeout: the script prints "TIMEOUT" (plus `route_recorded=yes|no` under
+     `--record`) to stderr and exits 1 — surface the PR URL and whether the
+     no-bot answer was recorded, then apply the spec's §2 for this round.
    - Background Bash tasks can use `gh` via `Bash(gh:*)` in the allowlist; background agents cannot.
 
-9. **Inform user**:
+9. **Inform user** (bot route only — on `route=local` the §2 report replaces this):
    ```
    Review triggered on PR #<PR_NUMBER>.
    Polling in the background — you can continue working.
@@ -253,9 +253,10 @@ The review wait is a background Bash poll, so the user can interject at any time
 - `gh` not installed or not authenticated → stop with clear error in step 0
 - No uncommitted changes → skip commit, just push + trigger
 - No PR exists → inform user, suggest creating one
-- No `@claude` review bot on the repo → the probe cannot prove that locally, so
-  step 7 follows `docs/REVIEW-ROUTING.md`: it posts the comment, and only a
-  timed-out poll routes to the local review
+- No `@claude` review bot on the repo → step 6's `route` decides: a declared
+  `review.route = local`, a remembered timed-out poll, or unanswered-mention
+  evidence go local at once; otherwise it posts, and a timed-out `poll --record`
+  books the answer and routes local. A later Claude bot reply clears it again
 - Base branch has new commits → handled by `/rebase` (delegated in step 2)
 - Branch already up-to-date with remote → skip push, just trigger review
 - Review auto-triggered after push → skip manual trigger, go straight to polling

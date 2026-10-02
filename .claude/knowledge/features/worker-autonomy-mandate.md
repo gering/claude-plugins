@@ -1,9 +1,9 @@
 ---
 title: "Worker Autonomy Mandate (MANDATE.md)"
 createdAt: 2026-09-07
-updatedAt: 2026-09-14
+updatedAt: 2026-10-02
 createdFrom: "branch: task/extend-worker-autonomy"
-updatedFrom: "branch: task/extend-worker-autonomy"
+updatedFrom: "branch: task/fix-review-route-without-bot"
 pluginVersion: 1.9.0
 prime: false
 ---
@@ -156,9 +156,10 @@ be answered by silence, or an absent plugin reads as a refusal.
 
 Shipped alongside, and the same class of bug: `/open` and `/cycle` used to send
 bot-less repos to `/cycle`, which comments `@claude review` into the void and
-polls until timeout. Both now ask `claude-review.sh has-bot` before recommending
-or triggering one, and route a repo without one to the local `/swarm:review --pr
-<N>` (run when the mandate allows it, offered otherwise) — see
+polls until timeout. Both now branch on `claude-review.sh route` (the probe plus
+the `review.route` setting and a per-repo remembered no-bot answer — see
+`plugins/pr-flow/docs/REVIEW-ROUTING.md`) before recommending or triggering one,
+and route a repo without one to the local `/swarm:review --pr <N>` (run when the mandate allows it, offered otherwise) — see
 [swarm-review-pipeline](swarm-review-pipeline.md). Reporting a missing capability
 beats recommending a command that cannot succeed here.
 

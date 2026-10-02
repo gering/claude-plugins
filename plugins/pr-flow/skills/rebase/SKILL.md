@@ -129,7 +129,7 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
        bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" poll <PR_NUMBER> "<TRIGGER_ISO>"
        ```
        Use the **Bash tool** with `run_in_background: true`. When it completes, render the review following the shared format spec at `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md` — read that file before presenting. Required sections: header, status line, findings markdown table, single-line recommendation. (A post-rebase review is round 0 — no prior findings, so no `Status` column.)
-     - If output is empty → no auto-trigger detected. Before recommending `/cycle`, run the probe from `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-ROUTING.md` (`claude-review.sh has-bot`): `yes` → the user can run `/cycle` to trigger a review manually; `no` → point at `/swarm:review --pr <N>` instead; `unknown` → say why and name both. Do NOT trigger or review here — `/rebase` is a rebase tool.
+     - If output is empty → no auto-trigger detected. Before recommending `/cycle`, run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" route --offline --branch "$(git branch --show-current)"` and recommend per the `/check`, `/rebase` row of `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-ROUTING.md` §1's consumer table, with its `why=`. Do NOT trigger or review here — `/rebase` is a rebase tool.
 
 10. **Final summary**:
     ```

@@ -31,10 +31,14 @@ so the properties under test are exactly the ones that grep got wrong:
     a working bot as absent), the candidate set is never capped, and an I/O
     failure is "unknown", never "no".
 
+The `route` section below covers the remembered answer layered on top.
 The other subcommands (poll/latest/latest-after) talk to `gh` and are exercised
 in production by /cycle and /check.
 """
+import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -97,10 +101,13 @@ def check(name, cond):
         FAILS.append(name)
 
 
+def sh(*args, env=None, cwd=None):
+    return subprocess.run(["bash", str(SCRIPT), *args], capture_output=True, text=True,
+                          env=env, cwd=cwd)
+
+
 def run(*args):
-    return subprocess.run(
-        ["bash", str(SCRIPT), "has-bot", *args], capture_output=True, text=True
-    )
+    return sh("has-bot", *args)
 
 
 def kv(out):
@@ -579,9 +586,244 @@ for fixture, label in ((COMMENT_TRIGGERED, "block mapping"),
           kv(run(str(repo_with(fixture))).stdout).get("has_bot") == "yes")
 
 
+
+# --- route: setting, memory, evidence ----------------------------------------
+# `has_bot=unknown` is settled by /cycle's poll. Before `route`, nothing kept the
+# answer, so every round and every lane of a bot-less repo posted `@claude review`
+# and polled ten minutes again (PR #69, #70). The properties under test:
+#   * `review.route` pins the route; `auto` (the default) keeps today's try-once;
+#   * a recorded timeout is shared by every worktree and never committed;
+#   * it is reversible: a later Claude bot reply, has_bot=yes,
+#     review.route=github and route-clear drop it — but --offline never writes;
+#   * evidence is conservative (only mentions the bot would obey) and never
+#     remembered;
+#   * the poll books a timeout itself, and never once any Claude comment appeared.
+def route(*args, env=None, cwd=None):
+    return kv(sh("route", *args, env=env, cwd=cwd).stdout)
+
+
+def common_dir(repo):
+    return Path(sh_git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+
+
+def sh_git(repo, *args):
+    return subprocess.run(["git", "-C", str(repo), *args],
+                          capture_output=True, text=True).stdout.strip()
+
+
+def memory_file(repo):
+    return common_dir(repo) / "pr-flow" / "review-route"
+
+
+repo = repo_with_committed()
+r = route(str(repo), "--offline")
+check("auto + unknown tries the bot", r.get("route") == "bot")
+check("and asks the caller to record a timeout", r.get("record") == "yes")
+check("the default route is named as such", r.get("source") == "default")
+check("has_bot vocabulary is unchanged", r.get("has_bot") == "unknown")
+
+(repo / ".pr-flow.toml").write_text('[review]\nroute = "local"\n')
+r = route(str(repo), "--offline")
+check("review.route = local skips the bot", r.get("route") == "local")
+check("and says it came from the setting",
+      r.get("source") == "setting" and ".pr-flow.toml" in r.get("why", ""))
+check("a pinned route skips the probe", r.get("has_bot") == "")
+rec = kv(sh("route-record", str(repo), "--pr", "7").stdout)
+check("only auto records a timeout", rec.get("recorded") == "no")
+
+(repo / ".pr-flow.toml").write_text('[review]\nroute = "sometimes"\n')
+r = route(str(repo), "--offline")
+check("an invalid route falls back to the schema default", r.get("route") == "bot")
+check("and the note says why", "review.route must be one of" in r.get("why", ""))
+(repo / ".pr-flow.toml").unlink()
+
+target = Path(tempfile.mkdtemp()) / "outside.toml"
+target.write_text('[review]\nroute = "local"\n')
+(repo / ".pr-flow.toml").symlink_to(target)
+r = route(str(repo), "--offline")
+check("a symlinked .pr-flow.toml is not followed", r.get("route") == "bot")
+check("and the note names the symlink", "symlink" in r.get("why", ""))
+(repo / ".pr-flow.toml").unlink()
+
+# route-record argument hygiene: usage errors are exit 2, not a silent exit 1.
+check("route-record needs a PR number", sh("route-record", str(repo)).returncode == 2)
+check("a trailing --pr is a usage error", sh("route-record", str(repo), "--pr").returncode == 2)
+check("PR 0 is refused", sh("route-record", str(repo), "--pr", "0").returncode == 2)
+check("a zero-padded PR is refused", sh("route-record", str(repo), "--pr", "012").returncode == 2)
+
+# A timed-out poll is remembered — for every worktree of the repo.
+rec = kv(sh("route-record", str(repo), "--pr", "70").stdout)
+check("auto records a timeout", rec.get("recorded") == "yes")
+check("the record lives in the git common dir, outside the tree",
+      Path(rec.get("file", "")) == memory_file(repo) and not (repo / "pr-flow").exists())
+r = route(str(repo), "--offline")
+check("a remembered timeout routes local", r.get("route") == "local")
+check("from memory", r.get("source") == "memory")
+check("the report names the PR", "PR #70" in r.get("why", ""))
+check("the report names the date", re.search(r"no bot answered on \d{4}-\d\d-\d\d",
+                                             r.get("why", "")) is not None)
+check("memory is not recorded again", r.get("record") == "no")
+wt = Path(tempfile.mkdtemp()) / "lane"
+subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "task/x", str(wt)],
+               check=True)
+check("another lane of the same repo shares the answer",
+      route(str(wt), "--offline").get("route") == "local")
+check("git status stays clean", sh_git(repo, "status", "--porcelain") == "")
+
+# --branch resolves the lane itself — no work-system needed, and a wrapper's
+# stdout can no longer stand in for a directory.
+r = route("--offline", "--branch", "task/x", cwd=repo)
+check("--branch resolves the worktree holding the branch",
+      Path(r.get("lane", "")).resolve() == wt.resolve() and r.get("route") == "local")
+check("and says the branch answered", r.get("lane_source") == "branch")
+check("a branch no worktree holds says cwd",
+      route("--offline", "--branch", "nope", cwd=repo).get("lane_source") == "cwd")
+check("--branch without a value is a usage error",
+      sh("route", "--branch").returncode == 2)
+
+# Reversible — but only from a networked caller. --offline is read-only.
+(repo / ".pr-flow.toml").write_text('[review]\nroute = "github"\n')
+r = route(str(repo), "--offline")
+check("review.route = github overrides the memory", r.get("route") == "bot")
+check("but never records", r.get("record") == "no")
+check("and a pin skips the probe", r.get("has_bot") == "")
+check("--offline does not erase the shared memory", memory_file(repo).exists())
+(repo / ".pr-flow.toml").unlink()
+
+# Stub `gh` that runs the REAL --jq expression over a fixture, so the filters
+# (bot accounts, author_association, reply timestamps) are what is under test.
+stub = Path(tempfile.mkdtemp())
+(stub / "gh").write_text(r"""#!/usr/bin/env bash
+[ "$1" = auth ] && exit 0
+expr=""
+while [ $# -gt 0 ]; do [ "$1" = --jq ] && expr="$2"; shift; done
+exec jq -r "$expr" "$GH_FIXTURE"
+""")
+(stub / "gh").chmod(0o755)
+fixtures = Path(tempfile.mkdtemp())
+
+
+def gh_env(name, data):
+    f = fixtures / f"{name}.json"
+    f.write_text(json.dumps(data))
+    return dict(os.environ, PATH=f"{stub}{os.pathsep}{os.environ['PATH']}", GH_FIXTURE=str(f))
+
+
+def comment(login, body, when="2026-01-01T00:00:00Z", kind="User", assoc="OWNER"):
+    return {"user": {"login": login, "type": kind}, "body": body,
+            "created_at": when, "author_association": assoc}
+
+
+asked = [comment("owner", "@claude review", f"2026-01-0{i}T00:00:00Z") for i in (1, 2)]
+env = gh_env("asked", asked)
+check("with a memory and no newer bot reply, local stays",
+      route(str(repo), env=env).get("source") == "memory")
+
+stale_reply = asked + [comment("claude[bot]", "**Claude finished**", "2000-01-01T00:00:00Z", "Bot")]
+impostor = asked + [comment("claude-ci-notifier[bot]", "done", "2999-01-01T00:00:00Z", "Bot")]
+check("only the Claude App's own login clears the record",
+      route(str(repo), env=gh_env("impostor", impostor)).get("source") == "memory")
+check("a bot reply OLDER than the record does not clear it",
+      route(str(repo), env=gh_env("old", stale_reply)).get("source") == "memory")
+
+fresh = asked + [comment("claude[bot]", "**Claude finished**", "2999-01-01T00:00:00Z", "Bot")]
+r = route(str(repo), env=gh_env("fresh", fresh))
+check("a Claude bot reply after the record switches back to the bot",
+      r.get("route") == "bot" and r.get("source") == "default")
+check("and says so in the report", "remembered no-bot cleared" in r.get("why", ""))
+check("and the record is gone", not memory_file(repo).exists())
+
+r = route(str(repo), env=env)
+check("repeated unanswered @claude mentions route local", r.get("route") == "local")
+check("as evidence, not proof", r.get("source") == "evidence"
+      and "not proof" in r.get("why", "") and r.get("has_bot") == "unknown")
+check("evidence is never remembered", not memory_file(repo).exists())
+check("any bot comment defeats the evidence",
+      route(str(repo), env=gh_env("bot", asked + [comment("ci[bot]", "green", kind="Bot")]))
+      .get("route") == "bot")
+check("a single mention is not enough",
+      route(str(repo), env=gh_env("one", asked[:1])).get("route") == "bot")
+outsiders = [comment("rando", "@claude review", assoc="NONE") for _ in range(5)]
+check("mentions by outsiders the bot would ignore do not count",
+      route(str(repo), env=gh_env("outsiders", outsiders)).get("route") == "bot")
+check("--offline never asks gh", route(str(repo), "--offline", env=env).get("route") == "bot")
+
+# has_bot=yes beats a remembered timeout; only a networked call clears it.
+botrepo = repo_with(COMMENT_TRIGGERED)
+sh("route-record", str(botrepo), "--pr", "3")
+r = route(str(botrepo), "--offline")
+check("has_bot=yes beats a remembered timeout", r.get("route") == "bot" and r.get("source") == "probe")
+check("--offline leaves the record alone", memory_file(botrepo).exists())
+route(str(botrepo), env=gh_env("none", []))
+check("a networked route clears it", not memory_file(botrepo).exists())
+
+sh("route-record", str(repo), "--pr", "71")
+sh("route-clear", str(wt))
+check("route-clear from any lane forgets it",
+      route(str(repo), "--offline").get("source") == "default")
+
+# A tampered record is ignored, not echoed into the round report.
+memory_file(repo).write_text("no_bot=yes\nrecorded_at=$(touch /tmp/pwn)\npr=1\n")
+check("a malformed record is ignored",
+      route(str(repo), "--offline").get("source") == "default")
+memory_file(repo).unlink()
+
+
+# --- poll --record: the script books the timeout, never on a slow bot --------
+def poll(name, comments, *extra):
+    env = gh_env(name, {"comments": comments})
+    return subprocess.run(["bash", str(SCRIPT), "poll", "5", "2026-01-01T00:00:00Z",
+                           "--max", "1", "--interval", "0", *extra],
+                          capture_output=True, text=True, cwd=repo, env=env)
+
+
+def pr_comment(login, body, when="2026-02-01T00:00:00Z"):
+    return {"author": {"login": login}, "body": body, "createdAt": when}
+
+
+p = poll("silent", [], "--record", str(repo))
+check("a silent timeout exits 1", p.returncode == 1 and "TIMEOUT" in p.stderr)
+check("and is booked by the script", "route_recorded=yes" in p.stderr
+      and memory_file(repo).exists())
+memory_file(repo).unlink()
+
+p = poll("slow", [pr_comment("claude", "Claude Code is working…")], "--record", str(repo))
+check("a bot that acknowledged but was slow is not recorded as absent",
+      "route_recorded=no" in p.stderr and not memory_file(repo).exists())
+p = poll("error", [pr_comment("claude", "**Claude encountered an error**")], "--record", str(repo))
+check("a bot that answered with an error is not recorded as absent",
+      "route_recorded=no" in p.stderr and not memory_file(repo).exists())
+p = poll("notrepo", [], "--record", tempfile.mkdtemp())
+check("a non-repo --record dir still reports one route_recorded line",
+      "route_recorded=no (--record dir is not a git repository)" in p.stderr)
+p = subprocess.run(["bash", str(SCRIPT), "poll", "5", '1900" or true or "', "--max", "1",
+                    "--interval", "0"], capture_output=True, text=True, cwd=repo,
+                   env=gh_env("inject", {"comments": [pr_comment("claude", "**Claude finished**",
+                                                                 "2000-01-01T00:00:00Z")]}))
+check("a SINCE that would rewrite the jq filter is refused", p.returncode == 2
+      and "Claude finished" not in p.stdout)
+
+# A write that fails must not claim success (errexit is off inside `|| …`).
+shutil.rmtree(common_dir(repo) / "pr-flow", ignore_errors=True)
+(common_dir(repo) / "pr-flow").write_text("not a dir")
+w = sh("route-record", str(repo), "--pr", "4")
+check("a failed write exits non-zero", w.returncode == 1)
+check("and never prints recorded=yes", "recorded=yes" not in w.stdout)
+(common_dir(repo) / "pr-flow").unlink()
+
+p = poll("norecord", [])
+check("without --record a timeout records nothing", not memory_file(repo).exists())
+
+sh("route-record", str(repo), "--pr", "9")
+p = poll("done", [pr_comment("claude", "**Claude finished** review")], "--record", str(repo))
+check("a finished review is returned", p.returncode == 0)
+check("and clears the remembered answer", not memory_file(repo).exists())
+p = poll("ci", [pr_comment("github-actions", "**Claude finished** (quoted in a CI log)")])
+check("another author quoting the marker is not a review", p.returncode == 1)
+
 if FAILS:
     print("FAIL:")
     for f in FAILS:
         print("  -", f)
     sys.exit(1)
-print("claude-review.sh has-bot: all tests passed")
+print("claude-review.sh has-bot + route: all tests passed")
