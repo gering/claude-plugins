@@ -18,6 +18,8 @@ EFFORTS = {
     "kimi": {"low", "high", "max"},
 }
 MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]*\Z")
+# Codex names a capability family, resolved to a concrete model once per run.
+CODEX_FAMILIES = ("astra", "sol", "terra", "luna")
 
 
 def profile_name(value: object) -> str:
@@ -56,10 +58,14 @@ def load_profiles(workflow: Path) -> dict:
         _keys(profile["externals"], {"codex", "grok", "kimi"})
         for backend, config in [*(('stage', v) for v in profile["stages"].values()), *profile["externals"].items()]:
             keys = {"model", "effort"} if backend == "stage" else {"model", "effort", "tools", "toolBudget"}
+            if backend == "codex":
+                keys.add("family")
             _keys(config, keys)
+            if backend == "codex" and config["family"] not in CODEX_FAMILIES:
+                raise ValueError(f"invalid codex family in {name}")
             model = config["model"]
             if model is None:
-                if backend not in ("stage", "grok"):
+                if backend not in ("stage", "grok", "codex"):
                     raise ValueError(f"{backend} requires an explicit model")
             elif not isinstance(model, str) or not MODEL.fullmatch(model):
                 raise ValueError(f"invalid model in {name}/{backend}")
@@ -79,13 +85,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workflow", required=True, type=Path)
     parser.add_argument("--profile", default="default")
-    parser.add_argument("--codex-model", action="store_true", help="print only the selected model ID")
+    parser.add_argument("--codex-policy", action="store_true",
+                        help="print the codex family, exact pin (may be empty) and effort as key=value")
     args = parser.parse_args()
     try:
         profile = load_profiles(args.workflow)[profile_name(args.profile)]
     except (OSError, ValueError, TypeError) as exc:
         parser.error(str(exc))
-    print(profile["externals"]["codex"]["model"] if args.codex_model else json.dumps(profile))
+    if args.codex_policy:
+        codex = profile["externals"]["codex"]
+        print(f"family={codex['family']}\nmodel={codex['model'] or ''}\neffort={codex['effort']}")
+    else:
+        print(json.dumps(profile))
 
 
 if __name__ == "__main__":

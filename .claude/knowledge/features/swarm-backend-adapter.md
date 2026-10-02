@@ -3,7 +3,7 @@ title: "Swarm Backend Adapter Layer"
 createdAt: 2026-07-03
 updatedAt: 2026-09-22
 createdFrom: "PR #21"
-updatedFrom: "auto-select-latest-grok + add-swarm-review-profiles"
+updatedFrom: "auto-select-latest-grok + add-swarm-review-profiles + auto-select-latest-codex-families"
 pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
@@ -499,11 +499,22 @@ backend rc null.
   ACP `thinking` `low|high|max` (the `kimi-for-coding` models only `on`) → the
   adapter maps `medium`→`low`, `xhigh`→`high`. All mappings degrade a stale
   caller instead of erroring.
-- **Codex model ownership moved to profiles:** the pipeline passes `--model`
-  explicitly from the central workflow map in every profile. `CODEX_DEFAULT_MODEL`
-  remains only the direct-adapter fallback, not a second workflow default.
-  Prep's `list --json --codex-model` and execution read the same staged map;
-  see [swarm-review-pipeline](swarm-review-pipeline.md).
+- **Codex profiles name a FAMILY, not a model** (swarm 0.14.0). Fable→Astra,
+  Opus→Sol, Sonnet→Terra, Haiku→Luna; `codex-select.py` is the ONE selector
+  (prep's `codex-model`, readiness, a bare `run codex`) and picks per family the
+  newest listed, visible `gpt-<N>[.<M>]-<family>` whose listed efforts include
+  the profile's — numeric order (6.10 > 6.9, bare major = .0), never across
+  families, so mixed generations are correct (Terra had no GPT-6 on 2026-09-22
+  while Astra/Sol/Luna did). Why a narrow family grammar on top of the shared
+  transport grammar: dated/preview/fast/spark IDs sort "newer" lexically and
+  would otherwise win silently. Pins (profile model, `SWARM_CODEX_MODEL`) stay
+  exact and are never rejected for being unlisted. Catalog unusable or no family
+  member → the family's FLOOR (last shipped pin) as visible `source=fallback`,
+  not a dropped voice: a catalog hiccup should not cost an ensemble family.
+  Resolution happens ONCE in prep and is frozen into `args.codex` like Grok; no
+  token → codex dropped (fail closed), because a voice without `--model` would
+  re-resolve on its own. Never read `~/.codex/models_cache.json`: a same-day
+  cache from an older client omitted GPT-6 that the live catalog listed.
 - **Codex's picker catalog is not an access oracle.** Version-pinned upstream
   research for CLI 0.153.4 found that `model/list` swallows refresh failures into
   bundled/cached data and permits custom IDs absent from the picker. The new
@@ -516,7 +527,7 @@ backend rc null.
   intentionally strict auth-probe behavior below. The CLI may refresh its own
   auth/cache even though the probe generates no review.
   Because the answer can never change the verdict, only `ready`/`list` probe
-  it (where its hint is shown); `run` skips it via a void setter, since each
+  it (where its hint is shown; `codex-model` in prep is the other reader); `run` skips it via a void setter, since each
   voice otherwise paid an app-server start for nothing. And "the check did not
   run" is reserved for an UNREADABLE catalog — a model absent from a catalog
   that was read gets its own advisory line, or the operator hunts a broken probe.

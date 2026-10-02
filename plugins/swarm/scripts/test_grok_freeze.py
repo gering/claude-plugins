@@ -29,7 +29,9 @@ def check(name, cond):
 
 m = re.search(r"^const GROK_RUN = \(\(\) => \{.*?^const GROK_DROPPED = [^\n]*\n", SOURCE, re.S | re.M)
 q = re.search(r"^const shQuote = [^\n]*\n", SOURCE, re.M)
-if not (m and q):
+# The shared run-token splitter GROK_RUN (and CODEX_RUN) call, also lifted verbatim.
+k = re.search(r"^const parseRunToken = .*?^}\n", SOURCE, re.S | re.M)
+if not (m and q and k):
     print("grok-freeze tests FAILED:\n  - could not find the GROK_RUN block / shQuote in swarm-review.js "
           "(it moved or was renamed — fix this test, do not ignore it)")
     sys.exit(1)
@@ -41,7 +43,7 @@ if not shutil.which("node"):
 def freeze(token, voices=("codex", "grok")):
     js = (f"const INPUT = {json.dumps({'grok': token} if token is not None else {})}\n"
           f"const wantVoices = {json.dumps(list(voices))}\n"
-          + q.group(0) + m.group(0)
+          + q.group(0) + k.group(0) + m.group(0)
           + "console.log(JSON.stringify({run: GROK_RUN, env: GROK_FROZEN_ENV, dropped: GROK_DROPPED}))\n")
     r = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
