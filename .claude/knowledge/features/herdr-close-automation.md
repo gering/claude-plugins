@@ -96,8 +96,12 @@ points worth keeping:
   output, into one 0600 file. **No time anchor against name reuse** — two review rounds
   struck both candidates: a reflog anchor diverged from 6b's `prepare`, and the
   first-commit-off-main anchor moves on rebase (committer date) and vanishes after a
-  merge-commit merge. The report's own `work.pr` is the identity instead
-  (`report_pr=` vs. the PR being closed). Follow-up task files are written in the
+  merge-commit merge. The report's own `work.pr` is the identity instead: `sweep --pr <n>`
+  compares it in the script (`report_match=`) and withholds a mismatching body, so the
+  check is not left to prose; only a report naming no PR stays the caller's call.
+  The clean check compares porcelain lines with a shell `case`, not grep — a grep
+  pattern made `.` a wildcard (`MANDATE_md` passed as the lane file) and a grep error
+  emptied the list, both silently turning unsaved files into `auto`. Follow-up task files are written in the
   Manager's own words: a task file feeds a later autonomous worker, so verbatim pane text
   would launder untrusted output into an instruction.
 - **The payload is three fields — `task=`, `worktree=`, `repo=` — on purpose.** No `pr=`

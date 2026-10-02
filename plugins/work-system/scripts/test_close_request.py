@@ -149,8 +149,38 @@ class Fixture:
                            text=True, timeout=60)
         return r, parse(r.stdout)
 
-    def sweep(self, task="foo", herdr=True):
-        r = subprocess.run(["bash", str(SCRIPT), "sweep", task], cwd=self.main,
+    def fake_insights(self, reports):
+        """Run sweep from a copy of the scripts dir whose insights bridge is a fake:
+        `reported` lists `reports` [(id, recorded_at, pr|None)], `read` returns
+        each one's JSON. Tests close-request.sh's own selection + identity check."""
+        sd = self.d / "scripts"
+        sd.mkdir(exist_ok=True)
+        for f in HERE.glob("*.sh"):
+            (sd / f.name).write_text(f.read_text())
+        st = self.state
+        helper = st / "insights.py"
+        helper.write_text(
+            "import json, sys\n"
+            f"db = json.load(open({str(st / 'reports.json')!r}))\n"
+            "print(json.dumps(db[sys.argv[2]]))\n")
+        db = {rid: {"summary": f"notes of {rid}",
+                    "work": {"pr": {"value": pr}} if pr is not None else {}}
+              for rid, _, pr in reports}
+        (st / "reports.json").write_text(json.dumps(db))
+        listing = "".join(f"report={rid} recorded_at={at} trigger=handoff\n"
+                          for rid, at, _ in reports)
+        (st / "listing").write_text(listing)
+        (sd / "insights-handoff.sh").write_text(
+            "#!/bin/bash\n"
+            'case "$1" in\n'
+            f'  probe) echo "helper={helper}" ;;\n'
+            f'  reported) cat "{st}/listing" ;;\n'
+            "  *) exit 9 ;;\n"
+            "esac\n")
+        return sd / SCRIPT.name
+
+    def sweep(self, task="foo", herdr=True, script=SCRIPT, extra=()):
+        r = subprocess.run(["bash", str(script), "sweep", task, *extra], cwd=self.main,
                            env=self.env(herdr), capture_output=True, text=True,
                            timeout=60)
         return r, parse(r.stdout)
@@ -262,6 +292,15 @@ _, o = fx.evaluate()
 check("ask: gitignored file would be deleted", o.get("decision") == "ask"
       and o["reason"] == ["ignored-files"])
 (fx.wt / "secret.env").unlink()
+# The lane-file allowlist is exact: a lookalike name is real work, not TASK.md.
+(fx.main / ".git" / "info" / "exclude").write_text("TASK.md\nMANDATE.md\nMANDATE_md\n")
+(fx.wt / "MANDATE_md").write_text("notes\n")
+(fx.wt / "TASKxmd").write_text("notes\n")
+_, o = fx.evaluate()
+check("ask: lane-file lookalikes are not the lane files",
+      o.get("decision") == "ask" and set(o["reason"]) == {"ignored-files", "dirty-worktree"})
+(fx.wt / "MANDATE_md").unlink()
+(fx.wt / "TASKxmd").unlink()
 
 (fx.wt / "late.txt").write_text("after merge\n")
 git(fx.wt, "add", "late.txt")
@@ -388,6 +427,39 @@ Path(o.get("material", "/x")).unlink(missing_ok=True)
 
 r, o = fx.sweep(task="foo;bar")
 check("sweep: invalid task → usage", r.returncode == 2 and "material" not in o)
+for bad in (["--pr"], ["--pr", "7x"], ["--pr", "7", "x"], ["--bogus"]):
+    r, o = fx.sweep(extra=bad)
+    check(f"sweep: bad args {bad} → usage", r.returncode == 2 and "material" not in o)
+
+# Report selection + identity, against a fake insights bridge.
+fx.set_agents([fx.agent(fx.bar)])
+script = fx.fake_insights([("ins-old", "2026-01-01T00:00:00Z", 3),
+                           ("ins-new", "2026-09-01T00:00:00Z", 7)])
+_, o = fx.sweep(script=script)
+mat = Path(o.get("material", "/x"))
+check("sweep: newest report wins", o.get("report") == "ins-new"
+      and o.get("report_recorded_at") == "2026-09-01T00:00:00Z")
+check("sweep: report_pr from work.pr", o.get("report_pr") == "7")
+check("sweep: no --pr → no report_match", "report_match" not in o)
+check("sweep: report body in material", mat.is_file() and "notes of ins-new" in mat.read_text())
+mat.unlink(missing_ok=True)
+_, o = fx.sweep(script=script, extra=["--pr", "7"])
+mat = Path(o.get("material", "/x"))
+check("sweep: --pr equal → match yes", o.get("report_match") == "yes"
+      and mat.is_file() and "notes of ins-new" in mat.read_text())
+mat.unlink(missing_ok=True)
+_, o = fx.sweep(script=script, extra=["--pr", "9"])
+mat = Path(o.get("material", "/x"))
+check("sweep: --pr different → match no, body withheld", o.get("report_match") == "no"
+      and mat.is_file() and "notes of" not in mat.read_text())
+mat.unlink(missing_ok=True)
+script = fx.fake_insights([("ins-nopr", "2026-09-01T00:00:00Z", None)])
+_, o = fx.sweep(script=script, extra=["--pr", "7"])
+mat = Path(o.get("material", "/x"))
+check("sweep: report without PR → match unknown, body kept",
+      o.get("report_match") == "unknown" and "report_pr" not in o
+      and mat.is_file() and "notes of ins-nopr" in mat.read_text())
+mat.unlink(missing_ok=True)
 fx.close()
 
 r = subprocess.run(["bash", str(SCRIPT), "bogus"], capture_output=True, text=True)
