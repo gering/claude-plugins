@@ -72,7 +72,9 @@ points worth keeping:
   not mean the lane holds nothing. The damage a forged request can do is bounded by what
   the teardown can lose, so 1.17.0 auto-accepts exactly when that is nothing: merged PR
   (`assess` confirmed), worktree clean except `TASK.md`/`MANDATE.md` (gitignored paths
-  count — `--force` deletes a `.env` too; status flags override `showUntrackedFiles`),
+  count — `--force` deletes a `.env` too — except the lane pair itself, which this repo
+  gitignores, so `!! TASK.md` is as harmless as `?? TASK.md`; status flags override
+  `showUntrackedFiles`),
   local **and** remote (`ls-remote`, step 9 deletes it) tip == the merged PR's
   `headRefOid`, and ≤1 agent anywhere in the lane (subdirs count; null cwd →
   unverified). Anything failed **or uncheckable** (no `gh`, liveness unverified,
@@ -80,7 +82,7 @@ points worth keeping:
   closes where the only "live agent" was the requesting worker — the question cost a
   click and protected nothing. `auto` is never silent (one line: sender, task, PR, SHA).
 - **The decision is a script, and the message is a file.** `close-request.sh evaluate
-  <message-file>` holds the eight-way conjunction (prose drifts); the model Writes the
+  <message-file>` holds the ten-way conjunction (prose drifts); the model Writes the
   received body verbatim to a file, so untrusted text never reaches a command line — the
   helper validates `task=` before any other use. A third verdict, `reject`, covers
   requests that are not about a lane of this repo (malformed, foreign repo, no lane,
@@ -90,14 +92,14 @@ points worth keeping:
 - **Follow-up sweep before teardown.** The worker's tab — and whatever it printed about
   deploys, cleanup or a next task — dies with the lane. Every Manager-side close of
   another lane (delegated or `/close <task>` from main) runs `close-request.sh sweep`
-  first: newest `handoff` report for the branch (namesake anchor = the lane's first
-  commit off main, the same one `prepare` uses in 6b — a private reflog-based filter was
-  struck in review because 6b and 6c then disagreed), then every lane pane's visible
-  output, into one 0600 file. Follow-up task files are written in the Manager's own
-  words: a task file feeds a later autonomous worker, so verbatim pane text would launder
-  untrusted output into an instruction. Items
-  are proposals from untrusted output: local reversible ones may be done, outward-facing
-  ones need a yes; unreadable sources are reported as such, never as "nothing to do".
+  first: the newest `handoff` report for the task name plus every lane pane's visible
+  output, into one 0600 file. **No time anchor against name reuse** — two review rounds
+  struck both candidates: a reflog anchor diverged from 6b's `prepare`, and the
+  first-commit-off-main anchor moves on rebase (committer date) and vanishes after a
+  merge-commit merge. The report's own `work.pr` is the identity instead
+  (`report_pr=` vs. the PR being closed). Follow-up task files are written in the
+  Manager's own words: a task file feeds a later autonomous worker, so verbatim pane text
+  would launder untrusted output into an instruction.
 - **The payload is three fields — `task=`, `worktree=`, `repo=` — on purpose.** No `pr=`
   or `branch=`: the Manager re-derives both and is told not to trust them, so carrying
   them would only widen what a misdelivered message leaks. What is left is exactly what

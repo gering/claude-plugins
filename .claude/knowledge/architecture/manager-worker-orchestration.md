@@ -89,7 +89,8 @@ What this slice establishes (and what it deliberately does not):
   close-request is re-verified from scratch by the receiver, its `task=` is charset-
   validated before it goes near a command, and a **destructive** action triggered by an
   inbound message asks the user unless independent evidence shows it can lose nothing
-  (the close-request auto-accept: merged + clean + tip == merged head + no other agent —
+  (the close-request auto-accept: merged + clean incl. gitignored paths + local and
+  remote tip == merged head + no other agent in the lane —
   the message still authorizes nothing; the zero-loss evidence does). The general rule
   for every later message type on this path: a cross-session message carries a hint, never
   authority. Any future auto-acting receiver (the watch loop) needs a real authorization

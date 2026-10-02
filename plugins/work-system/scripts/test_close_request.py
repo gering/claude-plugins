@@ -204,6 +204,9 @@ check("reject: hostile task name", o.get("decision") == "reject"
       and o["reason"] == ["invalid-task"] and "task" not in o)
 check("reject: hostile task name never executes", not canary.exists())
 
+_, o = fx.evaluate(task="_under")
+check("reject: underscore-led name passes validation (then mismatches the lane)",
+      o["reason"] == ["lane-mismatch"])
 for bad in ("-rf", ".", "..", ".hidden"):
     _, o = fx.evaluate(task=bad)
     check(f"reject: task {bad!r} is not a plain name", o["reason"] == ["invalid-task"])
@@ -249,7 +252,11 @@ check("ask: untracked file found despite status.showUntrackedFiles=no",
 git(fx.main, "config", "--unset", "status.showUntrackedFiles")
 
 (fx.main / ".git" / "info").mkdir(exist_ok=True)
-(fx.main / ".git" / "info" / "exclude").write_text("secret.env\n")
+(fx.main / ".git" / "info" / "exclude").write_text("TASK.md\nMANDATE.md\n")
+_, o = fx.evaluate()
+check("auto: gitignored TASK.md/MANDATE.md are the lane files, not a reason",
+      o.get("decision") == "auto")
+(fx.main / ".git" / "info" / "exclude").write_text("TASK.md\nMANDATE.md\nsecret.env\n")
 (fx.wt / "secret.env").write_text("TOKEN=x\n")
 _, o = fx.evaluate()
 check("ask: gitignored file would be deleted", o.get("decision") == "ask"
@@ -311,6 +318,11 @@ check("auto: remote branch already gone", o.get("decision") == "auto")
 git(fx.main, "push", "-q", "origin", "task/foo")
 _, o = fx.evaluate()
 check("auto: remote branch == merged head", o.get("decision") == "auto")
+# A ref that only TAIL-matches the ls-remote pattern must not supply the sha.
+subprocess.run(["git", "--git-dir", str(origin), "update-ref",
+                "refs/backup/refs/heads/task/foo", git(fx.main, "rev-parse", "main")], check=True)
+_, o = fx.evaluate()
+check("auto: a tail-matching foreign ref is ignored", o.get("decision") == "auto")
 other = fx.d / "other"
 subprocess.run(["git", "clone", "-q", "-b", "task/foo", str(origin), str(other)], check=True)
 git(other, "config", "user.email", "t@example.com")
@@ -341,8 +353,6 @@ r, o = fx.sweep()
 mat = Path(o.get("material", "/nonexistent"))
 check("sweep: exit 0", r.returncode == 0)
 check("sweep: no insights store → report none", o.get("report") == "none")
-check("sweep: namesake filter anchored on the lane's first commit",
-      o.get("namesake_filter") == "applied")
 check("sweep: pane read", o.get("pane") == "read")
 check("sweep: material exists", mat.is_file())
 check("sweep: material is private", mat.is_file() and stat.S_IMODE(mat.stat().st_mode) == 0o600)
