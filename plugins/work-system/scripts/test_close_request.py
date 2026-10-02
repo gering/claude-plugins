@@ -434,10 +434,11 @@ for bad in (["--pr"], ["--pr", "7x"], ["--pr", "7", "x"], ["--bogus"]):
 # Report selection + identity, against a fake insights bridge.
 fx.set_agents([fx.agent(fx.bar)])
 script = fx.fake_insights([("ins-old", "2026-01-01T00:00:00Z", 3),
-                           ("ins-new", "2026-09-01T00:00:00Z", 7)])
+                           ("ins-new", "2026-09-01T00:00:00Z", 7),
+                           ("ins-future", "2999-01-01T00:00:00Z", 7)])
 _, o = fx.sweep(script=script)
 mat = Path(o.get("material", "/x"))
-check("sweep: newest report wins", o.get("report") == "ins-new"
+check("sweep: newest report wins, a future-dated one skipped", o.get("report") == "ins-new"
       and o.get("report_recorded_at") == "2026-09-01T00:00:00Z")
 check("sweep: report_pr from work.pr", o.get("report_pr") == "7")
 check("sweep: no --pr → no report_match", "report_match" not in o)

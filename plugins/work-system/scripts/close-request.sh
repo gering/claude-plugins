@@ -348,12 +348,18 @@ cmd_sweep() {
     listing="$(bash "$bridge" reported "$task" --trigger handoff --project-dir "$MAIN" 2>/dev/null)"
     case $? in
       0)
-        report="$(printf '%s\n' "$listing" | python3 -c 'import sys
+        # recorded_at is writer-supplied: one dated in the future would outrank
+        # every real report forever, so it is skipped, not trusted.
+        report="$(printf '%s\n' "$listing" | python3 -c 'import sys, datetime
+now = (datetime.datetime.now(datetime.timezone.utc)
+       + datetime.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
 best = None
 for l in sys.stdin:
     if not l.startswith("report="):
         continue
     f = dict(p.split("=", 1) for p in l.split() if "=" in p)
+    if f.get("recorded_at", "") > now:
+        continue
     if best is None or f.get("recorded_at", "") > best[1]:
         best = (f.get("report", ""), f.get("recorded_at", ""))
 if best and best[0]:
