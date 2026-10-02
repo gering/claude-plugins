@@ -47,10 +47,11 @@ it resolves to the cwd and says so via `lane_source=cwd`.
 ## 1. Probe
 
 ```sh
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" has-bot "$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" lane "$(git branch --show-current)" 2>/dev/null || echo .)"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" has-bot "<lane>"
 ```
 
-Anchored on the lane's repo root (a cwd-relative check is wrong from a
+Consumers do not call this directly — `route` (below) runs it. Anchored on the
+lane's repo root (a cwd-relative check is wrong from a
 subdirectory, or from the main repo while the PR belongs to a worktree). No
 network. Always emits the same four keys — `has_bot=`, `why=`, `workflows_dir=`,
 `matched=` (empty when not applicable) — and exits 0 for every answer.
@@ -79,73 +80,74 @@ one), an unreadable directory, a reusable-workflow delegate, and a custom
 `trigger_phrase`. `no` stays in the vocabulary for a future authoritative source
 (an API probe) and is not emitted.
 
-Because `unknown` is normal, what to do with it **splits by consumer**, and this
-is the split — do not restate it elsewhere:
+Because `unknown` is normal, a consumer never branches on `has_bot` alone — it
+branches on the **route** below, which adds the user's pin and what earlier
+rounds already learned. Before the route existed, `/cycle` posted and polled on
+every `unknown`, and a bot-less repo paid the ten-minute poll on every round and
+every lane.
 
-- **A consumer that TRIGGERS (`/cycle`) does not ask.** It posts `@claude review`
-  and lets its bounded poll settle the question empirically; that is strictly
-  more information than the probe can give. If the poll times out, nothing was
-  listening: say so and fall through to §2 for this round. Asking instead would
-  stop `--loop` on every iteration, since its steps re-run each round.
-- **A recommend-only consumer (`/open`, `/check`, `/rebase`) names both routes**
-  and lets the user pick. It has no poll to learn from.
-
-That empirical answer used to be thrown away: every round and every lane of a
-bot-less repo paid the ten-minute poll again. The **route** below remembers it.
-
-### Route — what consumers actually branch on
+### Route — what consumers branch on
 
 ```sh
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" route "$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" lane "$(git branch --show-current)" 2>/dev/null || echo .)"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" route --branch "$(git branch --show-current)"
 ```
 
-Recommend-only consumers add `--offline` (no network; skips the evidence step).
-Emits `route=bot|local`, `record=yes|no`, `source=`, `why=`, `has_bot=` (the
-probe's verdict, vocabulary unchanged) and exits 0. Decided in this order:
+`--branch` resolves the lane from `git worktree list` itself (§0's rule — no
+wrapper, and no work-system needed). Emits `route=bot|local`, `record=yes|no`,
+`source=`, `why=`, `has_bot=` (the probe's verdict, vocabulary unchanged; empty
+when a `local` pin skipped the probe) and `lane=`, and exits 0. Decided in this
+order:
 
 | `source` | when | `route` |
 |---|---|---|
-| `setting` | `.pr-flow.toml` sets `review.route = local` | `local` |
-| `setting` | `review.route = github` — also clears the memory | `bot` |
-| `probe` | `auto` and `has_bot=yes` — also clears the memory | `bot` |
-| `memory` | `auto`, a recorded "no bot answered on <date> (PR #N)" | `local` |
-| `evidence` | `auto`, not `--offline`: in the repo's last 100 comments `@claude` was asked ≥2× and **no** bot account ever wrote | `local` |
+| `setting` | `.pr-flow.toml` has `[review]` / `route = "local"` | `local` |
+| `setting` | `route = "github"` — clears the memory | `bot` |
+| `probe` | `auto` and `has_bot=yes` — clears the memory | `bot` |
+| `memory` | `auto`, a recorded "no bot answered on <date> (PR #N)", and no Claude bot comment in the repo since | `local` |
+| `evidence` | `auto`: in the repo's last 100 comments, owners/members/collaborators asked `@claude` ≥2× and **no** bot account ever wrote | `local` |
 | `default` | everything else (`auto` + `unknown`) | `bot`, `record=yes` |
 
-`review.route` defaults to `auto` (the schema owns the default and the enum).
-The script reads `.pr-flow.toml` itself against that schema — the settings plugin
-is optional and does not yet discover installed plugins — and ignores a symlinked
-or invalid file with a note in `why=`.
+`--offline` (the never-block consumers) skips the network step — no evidence, no
+reply check — and **never writes**: the memory is shared by every lane, so a
+read-only `/check` must not clear it. The clearing actions in the table happen
+only on a networked call.
 
-**Memory.** `record=yes` means: if the poll times out, record it —
+`review.route` defaults to `auto` (the schema owns the default, the enum and the
+file name). The script reads the TOML itself against that schema — the settings
+plugin is optional and does not yet discover installed plugins — and ignores a
+symlinked or invalid file with a note in `why=`.
 
-```sh
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" route-record "<lane>" --pr <N>
-```
+**Memory.** On `record=yes`, `/cycle` passes `--record "<lane=>"` to `poll`, and
+the **script** books a timeout itself — never the caller's recollection, which a
+compaction or an interjection during a ten-minute background poll can lose. It
+does **not** book when the bot acknowledged (`Claude Code is working`) and was
+only slow. It reports `route_recorded=yes|no` on stderr. By hand:
+`claude-review.sh route-record "<lane>" --pr <N>`.
 
-It lives in the git **common** dir (`<common>/pr-flow/review-route`), so every
-worktree of the repo shares it and it can never be committed. It is never written
-into the user's settings. It is cleared by a poll that sees a finished Claude
-review, by `has_bot=yes`, by `review.route = github`, or by hand with
-`claude-review.sh route-clear`. Only `auto` records; evidence is never recorded.
+The record lives in the git **common** dir (`<common>/pr-flow/review-route`),
+shared by every worktree and never committed; it is never written into the
+user's settings. It clears itself — the repo switches back to `auto` — when a
+poll sees a finished Claude review, or a networked `route` sees a Claude bot
+comment newer than the record (a late reply, a manual mention, an App installed
+later), `has_bot=yes`, or `route = "github"`. By hand: `claude-review.sh
+route-clear`. Only `auto` records; evidence is never recorded.
 
-Evidence and memory are **not proof** — `has_bot` stays `unknown`. Their
-weakness is shared and accepted: once local, nothing posts `@claude review`
-again, so a Claude GitHub App installed later is only noticed through `has_bot`,
-a manual mention, `route-clear`, or `review.route = github`. The `why=` line
-names those exits, and **every round report states the route and its `why=`**.
+Evidence and memory are **not proof** — `has_bot` stays `unknown`. **Every round
+report states the route and its `why=`** (see `REVIEW-OUTPUT-FORMAT.md`).
 
-So the consumer split above reads, concretely:
+**The consumer split — the one copy; skills point here, they do not restate it:**
 
-- **`/cycle`**: `route=local` → skip post and poll, go to §2. `route=bot` → post,
-  poll; on timeout, if `record=yes` run `route-record`, then §2 for this round.
-- **Recommend-only**: `route --offline`; `local` → recommend
-  `/swarm:review --pr <N>` with the `why=`; `bot` with `has_bot=yes` → `/cycle`;
-  otherwise name both routes.
+| | `route=local` | `route=bot`, `source` = `setting`/`probe` | `route=bot`, `source=default` |
+|---|---|---|---|
+| **`/cycle`** (triggers; networked) | §2 now — no post, no poll | post, poll; timeout → §2 | post, `poll --record`; timeout → §2. **Never ask** — asking would stop `--loop` every round |
+| **`/open`** (networked, never triggers) | §2 | recommend `/cycle` | name both routes |
+| **`/check`, `/rebase`** (`--offline`) | recommend `/swarm:review --pr <N>` | recommend `/cycle` | name both routes |
+
+Always quote the `why=`.
 
 ## 2. Local route
 
-Reached on `route=local` and from `/cycle`'s timed-out poll. The local review is
+Reached on `route=local` and from a timed-out `/cycle` poll. The local review is
 `/swarm:review --pr <N>` (the swarm plugin). Whether to run it *unasked* is a
 mandate question:
 
@@ -196,17 +198,14 @@ cannot work here.
 
 ## 3. What each consumer adds
 
-- **`/cycle` step 7** — branches on `route`: `local` goes to §2 without posting;
-  `bot` posts `@claude review` and polls, and a timed-out poll records (when
-  `record=yes`) and falls through to §2, whose swarm findings are then this
-  round's review (loop mode included: the loop cares about findings,
-  not where they came from). **Booking:** `--loop` books once per iteration in
-  the loop body; a plain `/cycle` books once, before it triggers. Either way the
-  round is booked **once per review**, on whichever route it takes.
-- **`/open` step 10** — never triggers (creation, not triggering, is its job):
-  it reads `route` (with network — it is not a never-block skill): `local` → §2;
-  `has_bot=yes` → recommend `/cycle`; otherwise both routes. It **books the
-  round** only when it actually runs the local review.
-- **`/check`, `/rebase`** — recommend-only skills. Where they would say "run
-  `/cycle`", they run `route --offline` first and recommend per §1; they never run the
-  local review themselves, and therefore **never book a round**.
+Routing itself is the §1 table. Stage-specific additions only:
+
+- **`/cycle`** — run `route` in step 7, **before** the auto-trigger check, so a
+  round that finds an auto-triggered review still carries a `why=`. An
+  auto-triggered review proves a bot: poll it **without** `--record`. A §2 round's
+  swarm findings are that round's review (`--loop` included). **Booking:**
+  `--loop` books once per iteration in the loop body; a plain `/cycle` books once,
+  before it triggers. Either way **once per review**, on whichever route.
+- **`/open` step 10** — never triggers; it **books the round** only when it
+  actually runs the local review.
+- **`/check`, `/rebase`** — never run the local review, so **never book a round**.
