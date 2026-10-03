@@ -1,10 +1,10 @@
 ---
 title: "herdr /close Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-09-02
+updatedAt: 2026-10-02
 createdFrom: "PR #18"
-updatedFrom: "session: 2026-09-02 (task/delegate-worktree-close-to-manager)"
-pluginVersion: 1.13.0
+updatedFrom: "session: 2026-10-02 (task/auto-accept-clean-close-requests)"
+pluginVersion: 1.17.0
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -64,15 +64,46 @@ points worth keeping:
   there, an unreadable cwd, a junk list element, an empty/malformed list, missing tools
   → `unverified` → no offer, today's flow unchanged. A wrong `none` costs only the
   offer; a wrong `name=` would send a close request to a stranger session.
-- **The request is unauthenticated, so the receiver asks.** Cross-session messages carry
-  no proof of origin, and a close is destructive. The Manager therefore validates
-  (`task=` against `^[A-Za-z0-9._-]+$` before it touches any command, `repo=` against its
-  own main repo), cross-checks `worktree=` against the live lanes, re-runs
-  `task-status.sh assess` itself — and then **asks the user once, even on a verified
-  merged PR**. That is the one place `/close` asks where a user-invoked close would not:
-  a user invocation *is* the authorization; an inbound message is not. Ship-blocking
-  distinction, found in review — the earlier "verified merge proceeds unasked" rule let a
-  forged request delete a worktree somebody was still working in.
+- **The request is unauthenticated, so the receiver asks — on doubt (1.17.0).** Cross-
+  session messages carry no proof of origin, and a close is destructive. 1.13.0 therefore
+  asked before *every* delegated teardown; the earlier "verified merge proceeds unasked"
+  rule had let a forged request delete a worktree somebody was still working in. But that
+  rule's flaw was the *condition*, not the absence of a question: a merged PR alone does
+  not mean the lane holds nothing. The damage a forged request can do is bounded by what
+  the teardown can lose, so 1.17.0 auto-accepts exactly when that is nothing: merged PR
+  (`assess` confirmed), worktree clean except `TASK.md`/`MANDATE.md` (gitignored paths
+  count — `--force` deletes a `.env` too — except the lane pair itself, which this repo
+  gitignores, so `!! TASK.md` is as harmless as `?? TASK.md`; status flags override
+  `showUntrackedFiles`),
+  local **and** remote (`ls-remote`, step 9 deletes it) tip == the merged PR's
+  `headRefOid`, and ≤1 agent anywhere in the lane (subdirs count; null cwd →
+  unverified). Anything failed **or uncheckable** (no `gh`, liveness unverified,
+  outside herdr) asks, naming the failed conditions. Observed trigger: merged, clean
+  closes where the only "live agent" was the requesting worker — the question cost a
+  click and protected nothing. `auto` is never silent (one line: sender, task, PR, SHA).
+- **The decision is a script, and the message is a file.** `close-request.sh evaluate
+  <message-file>` holds the ten-way conjunction (prose drifts); the model Writes the
+  received body verbatim to a file, so untrusted text never reaches a command line — the
+  helper validates `task=` before any other use. A third verdict, `reject`, covers
+  requests that are not about a lane of this repo (malformed, foreign repo, no lane,
+  another task's lane): nothing to approve, so no question. Liveness counts *every*
+  agent in the lane via `ha_list` — `lanes.sh` keeps only the first per worktree, which
+  would hide a second agent. The clean check compares porcelain lines with a shell
+  `case`, not grep: a grep pattern made `.` a wildcard (`MANDATE_md` passed as the lane
+  file) and a grep error emptied the list, both silently turning unsaved files into `auto`.
+- **Follow-up sweep before teardown.** The worker's tab — and whatever it printed about
+  deploys, cleanup or a next task — dies with the lane. Every Manager-side close of
+  another lane (delegated or `/close <task>` from main) runs `close-request.sh sweep`
+  first: the newest `handoff` report for the task name plus every lane pane's visible
+  output, into one 0600 file. **No time anchor against name reuse** — two review rounds
+  struck both candidates: a reflog anchor diverged from 6b's `prepare`, and the
+  first-commit-off-main anchor moves on rebase (committer date) and vanishes after a
+  merge-commit merge. The report's own `work.pr` is the identity instead: `sweep --pr <n>`
+  compares it in the script (`report_match=`) and withholds a mismatching body, so the
+  check is not left to prose; only a report naming no PR stays the caller's call.
+  Follow-up task files are written in the Manager's own words: a task file feeds a
+  later autonomous worker, so verbatim pane text would launder untrusted output into an
+  instruction.
 - **The payload is three fields — `task=`, `worktree=`, `repo=` — on purpose.** No `pr=`
   or `branch=`: the Manager re-derives both and is told not to trust them, so carrying
   them would only widen what a misdelivered message leaks. What is left is exactly what
