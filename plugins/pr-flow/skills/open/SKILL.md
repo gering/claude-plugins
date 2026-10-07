@@ -259,7 +259,7 @@ user, not that they said no.
 - A check cannot run (tool missing, hangs past the timeout) → mark it ⚠️ skipped in the body, still create the PR — checks run unasked (step 3), so there is no "declined" state
 - Linter/tests hang → timeout 5min, mark as ⚠️ skipped, let user decide
 - Repo uses a non-default base (`develop`, `staging`) → ask user if auto-detected base seems wrong
-- `@claude` bot not installed on repo → step 10 follows `docs/REVIEW-ROUTING.md`. A local scan can only *prove* a bot, never rule one out (the GitHub App needs no workflow file); unless the `route` goes local (setting, remembered timeout, or evidence), `/open` names both routes rather than picking
+- `@claude` bot not installed on repo → step 10 follows `docs/REVIEW-ROUTING.md`. what `/open` does per `route` is the §1 consumer table
 
 ## Notes
 

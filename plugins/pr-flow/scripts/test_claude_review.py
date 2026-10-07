@@ -31,9 +31,9 @@ so the properties under test are exactly the ones that grep got wrong:
     a working bot as absent), the candidate set is never capped, and an I/O
     failure is "unknown", never "no".
 
-The `route` section below covers the remembered answer layered on top.
-The other subcommands (poll/latest/latest-after) talk to `gh` and are exercised
-in production by /cycle and /check.
+The `route` section below covers the remembered answer layered on top, and
+`poll` / `latest-after` are run against a stub `gh` that executes their real
+`--jq` filters. `latest` is exercised in production by /cycle and /check.
 """
 import json
 import os
@@ -756,6 +756,17 @@ check("has_bot=yes beats a remembered timeout", r.get("route") == "bot" and r.ge
 check("--offline leaves the record alone", memory_file(botrepo).exists())
 route(str(botrepo), env=gh_env("none", []))
 check("a networked route clears it", not memory_file(botrepo).exists())
+# The bot installed later as a workflow: the probe outranks old unanswered asks
+# too, so the switch back needs no @claude mention from a route that posts none.
+r = route(str(botrepo), env=env)
+check("has_bot=yes beats the evidence", r.get("route") == "bot" and r.get("source") == "probe")
+
+# A reply in the very second the record was written is not "older".
+sh("route-record", str(repo), "--pr", "8")
+at = next(l.split("=", 1)[1] for l in memory_file(repo).read_text().splitlines()
+          if l.startswith("recorded_at="))
+r = route(str(repo), env=gh_env("same", asked + [comment("claude[bot]", "done", at, "Bot")]))
+check("a same-second Claude reply clears the record", not memory_file(repo).exists())
 
 sh("route-record", str(repo), "--pr", "71")
 sh("route-clear", str(wt))
@@ -802,6 +813,19 @@ p = subprocess.run(["bash", str(SCRIPT), "poll", "5", '1900" or true or "', "--m
                                                                  "2000-01-01T00:00:00Z")]}))
 check("a SINCE that would rewrite the jq filter is refused", p.returncode == 2
       and "Claude finished" not in p.stdout)
+
+p = subprocess.run(["bash", str(SCRIPT), "latest-after", "5", '1900" or true or "'],
+                   capture_output=True, text=True, cwd=repo,
+                   env=gh_env("inject2", {"comments": [pr_comment("claude", "**Claude finished**",
+                                                                  "2000-01-01T00:00:00Z")]}))
+check("latest-after refuses the same SINCE injection", p.returncode == 2
+      and "Claude finished" not in p.stdout)
+for bad in (["--max", "0"], ["--max", "x"], ["--interval", "-1"], ["--max"]):
+    p = subprocess.run(["bash", str(SCRIPT), "poll", "5", "2026-01-01T00:00:00Z", *bad,
+                        "--record", str(repo)], capture_output=True, text=True, cwd=repo,
+                       env=gh_env("badmax", {"comments": []}))
+    check(f"poll {' '.join(bad)} is a usage error, never a booked timeout",
+          p.returncode == 2 and not memory_file(repo).exists())
 
 # A write that fails must not claim success (errexit is off inside `|| …`).
 shutil.rmtree(common_dir(repo) / "pr-flow", ignore_errors=True)

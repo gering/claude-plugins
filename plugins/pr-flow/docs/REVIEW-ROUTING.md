@@ -128,12 +128,18 @@ or one that failed with an error, is still a bot. It reports exactly one
 
 The record lives in the git **common** dir (`<common>/pr-flow/review-route`),
 shared by every worktree and never committed; it is never written into the
-user's settings. It clears itself — the repo switches back to `auto` — when a
-poll sees a finished Claude review, or a networked `route` sees a Claude bot
-comment by the App (`claude[bot]`, the author `poll` reads) newer than the
-record — a late reply, a manual mention, an App installed later; a reply paged
-out of the last 100 comments is not seen, `has_bot=yes`, or `route = "github"`. By hand: `claude-review.sh
+user's settings. It clears itself — the repo switches back to `auto` — when
+`has_bot=yes` (a `claude-code-action` workflow lands on the default branch:
+the bot installed later, detected with no mention needed, and it outranks the
+evidence too), a poll sees a finished Claude review, or a networked `route`
+sees a comment by the App (`claude[bot]`, the author `poll` reads) at or after
+the record — a late reply or a manual mention; one paged out of the last 100
+comments is not seen. Also `route = "github"`, or by hand `claude-review.sh
 route-clear`. Only `auto` records; evidence is never recorded.
+
+Not covered, deliberately: a bot with **no** workflow file (Anthropic's managed
+Code Review via the GitHub App). Once the route is local, nothing posts the
+mention that would reveal it — switch back by hand as above.
 
 Evidence and memory are **not proof** — `has_bot` stays `unknown`. **Every round
 report states the route and its `why=`** (see `REVIEW-OUTPUT-FORMAT.md`).
@@ -203,7 +209,7 @@ cannot work here.
 
 Routing itself is the §1 table. Stage-specific additions only:
 
-- **`/cycle`** — run `route` in step 7, **before** the auto-trigger check, so a
+- **`/cycle`** — run `route` in step 6, **before** the auto-trigger check, so a
   round that finds an auto-triggered review still carries a `why=`. An
   auto-triggered review proves a bot: poll it **without** `--record`. A §2 round's
   swarm findings are that round's review (`--loop` included). **Booking:**

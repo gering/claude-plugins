@@ -98,6 +98,14 @@ require_gh() {
   gh auth status >/dev/null 2>&1 || { echo "gh not authenticated — run: gh auth login" >&2; exit 1; }
 }
 
+# SINCE_ISO is spliced into the jq program text: a value carrying a quote could
+# rewrite the filter (`1900" or true or "`) and pass an old comment off as this
+# round's review. Accept only the format `date -u +%FT%TZ` produces.
+require_iso() {
+  [[ "$2" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+    || { echo "$1: SINCE_ISO must look like 2026-01-31T12:00:00Z" >&2; exit 2; }
+}
+
 subcmd_latest() {
   local pr="${1:-}"
   [[ -z "$pr" ]] && usage
@@ -118,6 +126,7 @@ subcmd_latest_after() {
   [[ -z "$pr" || -z "$since" ]] && usage
   local as_json=false
   [[ "${3:-}" == "--json" ]] && as_json=true
+  require_iso latest-after "$since"
   require_gh
   # Strip fractional seconds from .createdAt to match the whole-second
   # precision of $since (produced by `date -u +%Y-%m-%dT%H:%M:%SZ`). Without
@@ -142,19 +151,19 @@ subcmd_poll() {
   local record_dir="" seen_bot=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --max)      max_iters="$2"; shift 2 ;;
-      --interval) interval="$2";  shift 2 ;;
+      --max)      max_iters="${2:-}"; shift $(( $# >= 2 ? 2 : 1 )) ;;
+      --interval) interval="${2:-}";  shift $(( $# >= 2 ? 2 : 1 )) ;;
       --record)   [[ $# -ge 2 ]] || { echo "poll: --record needs the lane dir" >&2; exit 2; }
                   record_dir="$2"; shift 2 ;;
       *) echo "Unknown flag: $1" >&2; exit 2 ;;
     esac
   done
 
-  # $since is spliced into the jq program text: a value carrying a quote
-  # could rewrite the filter (`1900" or true or "`) and pass an old comment off
-  # as this round's review. Only the format `date -u +%FT%TZ` produces.
-  [[ "$since" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
-    || { echo "poll: SINCE_ISO must look like 2026-01-31T12:00:00Z" >&2; exit 2; }
+  require_iso poll "$since"
+  # A zero or non-numeric --max would skip the loop and book "no bot" without
+  # ever looking (bash arithmetic reads garbage as 0).
+  [[ "$max_iters" =~ ^[1-9][0-9]*$ ]] || { echo "poll: --max must be a positive integer" >&2; exit 2; }
+  [[ "$interval" =~ ^[0-9]+$ ]] || { echo "poll: --interval must be a non-negative integer" >&2; exit 2; }
 
   require_gh
 
@@ -446,14 +455,21 @@ route_file() {
 # Prints "<recorded_at> <pr>" when a valid no-bot record exists, nothing else.
 # Values are format-checked: they end up in the round report verbatim.
 route_memory() {
-  local file at pr
+  local file k v at="" pr="" nb=""
   file="$(route_file "$1")" || return 0
   [[ -f "$file" && ! -L "$file" ]] || return 0
-  at="$(sed -n 's/^recorded_at=//p' "$file" | head -n1)"
-  pr="$(sed -n 's/^pr=//p' "$file" | head -n1)"
+  # One read, first value per key: the writer replaces the file atomically, so
+  # a single pass sees one record, never fields from two.
+  while IFS='=' read -r k v; do
+    case "$k" in
+      no_bot)      [[ -n "$nb" ]] || nb="$v" ;;
+      recorded_at) [[ -n "$at" ]] || at="$v" ;;
+      pr)          [[ -n "$pr" ]] || pr="$v" ;;
+    esac
+  done <"$file"
+  [[ "$nb" == yes ]] || return 0
   [[ "$at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$ ]] || return 0
   [[ "$pr" =~ ^[1-9][0-9]*$ ]] || pr=""
-  grep -qx 'no_bot=yes' "$file" || return 0
   printf '%s %s\n' "$at" "$pr"
 }
 
@@ -504,6 +520,9 @@ if os.path.islink(cfg):
     print(default, f"{name} is a symlink — ignored, using the default"); sys.exit()
 try:
     import tomllib
+except ModuleNotFoundError:
+    print(default, f"{name} not read: needs Python 3.11+ (tomllib) — using the default"); sys.exit()
+try:
     with open(cfg, "rb") as f:
         val = tomllib.load(f).get("review", {}).get("route", default)
 except Exception as e:
@@ -595,16 +614,18 @@ subcmd_route() {
     # A Claude bot that has replied anywhere in the repo since the record was
     # written proves the record stale — a late reply, a manual mention, an App
     # installed afterwards. Switch back to auto by forgetting it.
-    if [[ -n "$ev" && "$last" != "-" && "${last%%.*}" > "$at" ]]; then
+    # `>=`, not `>`: both stamps have whole-second precision, so a reply in the
+    # very second the record was written is newer as far as anyone can tell.
+    if [[ -n "$ev" && "$last" != "-" ]] && ! [[ "$at" > "${last%%.*}" ]]; then
       route_forget "$root"
       cleared="${cleared:+$cleared; }a Claude bot replied on ${last%%T*} — remembered no-bot cleared"
     else
-      emit_route local no memory "no bot answered on ${at%%T*}${pr:+ (PR #$pr)} — remembered; cleared automatically once a Claude bot replies, or by \`claude-review.sh route-clear\` / review.route = github"
+      emit_route local no memory "no bot answered on ${at%%T*}${pr:+ (PR #$pr)} — remembered; cleared automatically by a claude-code-action workflow on the default branch or a Claude bot reply, by hand with \`claude-review.sh route-clear\` / review.route = github"
       return 0
     fi
   fi
   if [[ -n "$ev" ]] && (( bots == 0 && asks >= ROUTE_EVIDENCE_MIN_ASKS )); then
-    emit_route local no evidence "likely no bot: @claude was asked $asks times in the last $total comments on this repo and no bot account ever replied (not proof)"
+    emit_route local no evidence "likely no bot: @claude was asked $asks times in the last $total comments on this repo and no bot account ever replied (not proof; a claude-code-action workflow on the default branch or review.route = github overrides it)"
     return 0
   fi
   emit_route bot yes default "has_bot=$hb — try the bot; a timed-out poll switches this repo to local"

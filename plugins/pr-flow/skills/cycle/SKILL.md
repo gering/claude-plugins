@@ -253,10 +253,8 @@ The review wait is a background Bash poll, so the user can interject at any time
 - `gh` not installed or not authenticated → stop with clear error in step 0
 - No uncommitted changes → skip commit, just push + trigger
 - No PR exists → inform user, suggest creating one
-- No `@claude` review bot on the repo → step 6's `route` decides: a declared
-  `review.route = local`, a remembered timed-out poll, or unanswered-mention
-  evidence go local at once; otherwise it posts, and a timed-out `poll --record`
-  books the answer and routes local. A later Claude bot reply clears it again
+- No `@claude` review bot on the repo → step 6's `route` decides; sources and
+  how the remembered answer clears: `docs/REVIEW-ROUTING.md` §1
 - Base branch has new commits → handled by `/rebase` (delegated in step 2)
 - Branch already up-to-date with remote → skip push, just trigger review
 - Review auto-triggered after push → skip manual trigger, go straight to polling

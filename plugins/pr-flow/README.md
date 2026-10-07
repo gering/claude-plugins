@@ -185,7 +185,7 @@ Verifies CI green, required approvals present, no open blocking Claude issues, b
 ## Requirements
 
 - `gh` CLI installed and authenticated (`gh auth login`)
-- A GitHub repo. An `@claude` review bot (a workflow using `anthropics/claude-code-action` on `issue_comment`) is what `/cycle` triggers — **optional**: the local `/swarm:review --pr <N>` covers a repo that has none (see `docs/REVIEW-ROUTING.md`). The probe reads workflow files from the default branch, which can prove a bot but never its absence: the Claude GitHub App answers comments with no workflow of its own, so an ordinary repo with no claude workflow reports `unknown`. `/cycle` then tries the bot once and lets a bounded poll settle it — a timed-out poll is remembered per repo, so later rounds and lanes go straight to the local review (`route: local — no bot answered on <date>`). A Claude bot reply seen later switches the repo back automatically. Pin the route in `.pr-flow.toml` (default `auto`):
+- A GitHub repo. An `@claude` review bot (a workflow using `anthropics/claude-code-action` on `issue_comment`) is what `/cycle` triggers — **optional**: the local `/swarm:review --pr <N>` covers a repo that has none (see `docs/REVIEW-ROUTING.md`). The probe reads workflow files from the default branch, which can prove a bot but never its absence: the Claude GitHub App answers comments with no workflow of its own, so an ordinary repo with no claude workflow reports `unknown`. `/cycle` then tries the bot once and lets a bounded poll settle it — a timed-out poll is remembered per repo, so later rounds and lanes go straight to the local review (`route: local — no bot answered on <date>`). A `claude-code-action` workflow added later on the default branch, or a Claude bot reply seen later, switches the repo back automatically. Reading the setting needs Python 3.11+ (`tomllib`); older Pythons use the default and say so in the route's `why=`. Pin the route in `.pr-flow.toml` (default `auto`):
 
   ```toml
   [review]
@@ -207,7 +207,7 @@ Each skill runs a preflight check and stops with a clear message if requirements
 - **Recommend only what can work, and admit what cannot be known** — before
   pointing at `/cycle`, `/open` probes for an `@claude` review workflow. The probe
   can prove one exists but never that none does (the GitHub App answers with no
-  workflow file), so `/open` names both routes rather than guessing, while
+  workflow file), so `/open` names both routes rather than guessing (unless the route is already local — then it runs or offers the local review per the mandate), while
   `/cycle` posts the comment and lets its bounded poll settle it — once: the
   answer is remembered per repo and every round report states the route taken
 - **Read-only where it matters** — `/check` never mutates anything
@@ -219,7 +219,7 @@ Each skill runs a preflight check and stops with a clear message if requirements
 ## Relationship to other plugins
 
 - **`work-system`** — finish a task with `/close`, then `/open` to create the PR and `/cycle` for the review loop before `/merge`. Soft-coupled both ways (detected, never required): PR state changes refresh work-system's herdr tab glyphs, and `/open`/`/cycle` read the lane's autonomy mandate so a pre-authorized step is not confirmed twice. `--loop`'s round cap defaults to the mandate's remaining review budget
-- **`swarm`** — the local review route when no `@claude` review answers: `/cycle` falls back to `/swarm:review --pr <N>` after its poll finds nothing listening (and goes there directly once that is remembered), and `/open` offers it, rather than recommending a review that cannot run
+- **`swarm`** — the local review route when no `@claude` review answers: `/cycle` falls back to `/swarm:review --pr <N>` after its poll finds nothing listening (and goes there directly once that is remembered), and `/open` runs it when the mandate pre-authorized it, or offers it, rather than recommending a review that cannot run
 - **`pr-review-toolkit`** (external, Anthropic) — local analysis agents. Complementary, not required. Install via `/plugin install pr-review-toolkit@claude-plugins-official`
 
 ## Installation
