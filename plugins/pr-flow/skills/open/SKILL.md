@@ -225,12 +225,11 @@ user, not that they said no.
     - **If output is empty** → no review started. Before recommending anything,
       find out *why* — a slow trigger and an absent bot need opposite advice.
       **Follow `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-ROUTING.md`** — read it; it is
-      the one copy of the probe → answer → local-route tree that `/cycle`,
-      `/check` and `/rebase` follow too. This skill's stage behavior: it never
-      triggers (creation, not triggering, is its job) — on `has_bot=yes` it
-      recommends `/cycle`; on `unknown` (the normal answer) it names both routes
-      and lets the user pick, per §1's consumer split. It books a round only if
-      it actually runs the local review.
+      the one copy of the routing rule that `/cycle`, `/check` and `/rebase`
+      follow too. Run its `route` call (networked) and act on the `/open` row of
+      its §1 consumer table, quoting `why=`. It never triggers (creation, not
+      triggering, is its job), and books a round only if it actually runs the
+      local review.
 
 11. **Final summary**:
     ```
@@ -241,9 +240,7 @@ user, not that they said no.
 
     Next step:
     - [if review auto-triggered]   Review results will appear when polling completes (~1-5 min)
-    - [if bot exists, not fired]   Run `/cycle` to trigger Claude review manually
-    - [if no review bot]           <per REVIEW-ROUTING.md §2: local review run, or offered>
-    - [if bot unknown]             <the probe's why= line, both routes named>
+    - [if not auto-triggered]      <the `/open` row of REVIEW-ROUTING.md §1 for this route — exactly one of: §2 local review run/offered · run `/cycle` · both routes named; always with the why= line>
     - [if CI failed/missing]       Investigate CI config before pushing more work
     ```
 
@@ -262,7 +259,7 @@ user, not that they said no.
 - A check cannot run (tool missing, hangs past the timeout) → mark it ⚠️ skipped in the body, still create the PR — checks run unasked (step 3), so there is no "declined" state
 - Linter/tests hang → timeout 5min, mark as ⚠️ skipped, let user decide
 - Repo uses a non-default base (`develop`, `staging`) → ask user if auto-detected base seems wrong
-- `@claude` bot not installed on repo → step 10 follows `docs/REVIEW-ROUTING.md`. A local scan can only *prove* a bot, never rule one out (the GitHub App needs no workflow file), so this probes `unknown` and `/open` names both routes rather than picking
+- `@claude` bot not installed on repo → step 10 follows `docs/REVIEW-ROUTING.md`. what `/open` does per `route` is the §1 consumer table
 
 ## Notes
 

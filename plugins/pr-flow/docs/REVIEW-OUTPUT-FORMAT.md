@@ -27,7 +27,7 @@ quote it as-is.
 Every presentation MUST include, in this order:
 
 1. **Header** — one line with PR number + verdict emoji
-2. **Status line** — CI, reviews, staleness
+2. **Status line** — CI, reviews, staleness, and the review route (`docs/REVIEW-ROUTING.md` §1)
 3. **Findings table** — all issues as a markdown table
 4. **Recommendation** — exactly one actionable next step
 
@@ -42,7 +42,11 @@ there is no separate "previously raised" table.
 **Verdict:** ✅ clean  |  ⚠️ <N> blocker(s)  |  ❌ merge blocked
 **CI:** <N passed, N failed, N running>
 **Stale:** no  |  ⚠️ yes — new push since review (<commits> commits)
+**Route:** <bot | local> — <the route's why= line, verbatim — on either route>
 ```
+
+The `Route` line is required whenever the skill ran `route` this round (`/cycle`
+always does); it is how the user sees *why* a round went local or to the bot.
 
 One of the three Verdict variants — pick based on severity mix:
 - ✅ no blocking findings, no failed CI → "clean"

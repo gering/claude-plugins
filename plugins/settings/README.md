@@ -118,12 +118,17 @@ plugin acts on it yet.
 
 ## How plugins should consume resolved settings (contract)
 
-Consumer wiring lands in a follow-up. When a plugin adopts settings, it should:
+When a plugin adopts settings, it should:
 
 1. **Read once, resolved.** Call
    `settings.py get <plugin>.<section>.<key> --json` (or `show <plugin> --json`
    for the whole effective config) and use the value. Never read the TOML file
    directly — that skips defaults and validation.
+   *Exception, until installed plugins are discovered:* a plugin that cannot
+   require this one may read its own file itself, **taking default, enum and
+   file name from its own schema** and falling back to the default on a
+   symlinked or invalid file. pr-flow's `review.route` does this
+   (`claude-review.sh route_setting`).
 2. **Fall back to the default, always.** The resolver guarantees a value even
    with no config file. A consumer must not require the file to exist.
 3. **Don't hardcode the old constant beside the lookup.** Replace

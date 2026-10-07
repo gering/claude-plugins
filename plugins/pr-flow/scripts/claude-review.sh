@@ -2,10 +2,15 @@
 # claude-review.sh — shared helper for pr-flow skills
 #
 # Subcommands:
-#   poll <PR> <SINCE_ISO> [--max N] [--interval S]
+#   poll <PR> <SINCE_ISO> [--max N] [--interval S] [--record <lane>]
 #       Poll the PR for a completed Claude review created after SINCE_ISO.
 #       Prints the review body on success, "TIMEOUT" and exits 1 on timeout.
 #       Default: 20 iterations, 30s interval (= 10 minutes max).
+#       A finished review clears the remembered no-bot answer. --record (pass it
+#       when `route` said record=yes) books a timeout as that answer itself —
+#       unless any Claude comment appeared (slow, or edited into an error);
+#       the outcome goes to stderr as one route_recorded=yes|no line. SINCE_ISO
+#       must be `date -u +%Y-%m-%dT%H:%M:%SZ` output.
 #
 #   latest <PR> [--json]
 #       Print the body of the latest Claude review comment (any status).
@@ -41,6 +46,35 @@
 #       may try the bot and let a bounded poll settle it; a recommend-only
 #       caller names both routes.
 #
+#   route [<dir> | --branch <branch>] [--offline]
+#       Which review route this repo takes (docs/REVIEW-ROUTING.md §1). Combines
+#       the declared `review.route` setting (.pr-flow.toml, default auto), the
+#       remembered no-bot answer, the has-bot probe and — unless --offline —
+#       one cheap `gh api` look at recent comments (which also clears a
+#       remembered answer once a Claude bot has replied since). --branch
+#       resolves the worktree holding that branch. --offline never writes.
+#       Always emits:
+#         route=bot|local   post @claude review, or go straight to the local review
+#         record=yes|no     pass `poll --record <lane>` (auto only)
+#         source=setting|memory|probe|evidence|default
+#         why=              one line for the round report
+#         has_bot=          the probe's verdict, unchanged (empty: not probed,
+#                           because review.route pins the route)
+#         lane=             the directory that answered
+#         lane_source=      with --branch: branch, or cwd when no worktree
+#                           holds it (REVIEW-ROUTING.md §0)
+#       Exits 0 for every answer.
+#
+#   route-record [<dir>] --pr <N>
+#       Remember that no bot answered PR <N>: later rounds and lanes of this repo
+#       route local until cleared. Per repo (git common dir), never committed.
+#
+#   route-clear [<dir>]
+#       Forget the remembered answer. Also done automatically by a poll that
+#       sees a finished Claude review, and by a networked `route` that sees a
+#       Claude bot reply newer than the record, has_bot=yes, or an explicit
+#       `review.route = github`.
+#
 # Exit codes:
 #   0 = success (output contains the body, possibly empty for `latest`)
 #   1 = timeout (poll) or error
@@ -49,6 +83,8 @@
 #   has_bot= line, never the status.
 
 set -euo pipefail
+
+SCHEMA="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/schema/settings.schema.json"
 
 usage() {
   # Every comment line after the shebang, up to the first non-comment line — the
@@ -60,6 +96,14 @@ usage() {
 require_gh() {
   command -v gh >/dev/null || { echo "gh CLI not installed" >&2; exit 1; }
   gh auth status >/dev/null 2>&1 || { echo "gh not authenticated — run: gh auth login" >&2; exit 1; }
+}
+
+# SINCE_ISO is spliced into the jq program text: a value carrying a quote could
+# rewrite the filter (`1900" or true or "`) and pass an old comment off as this
+# round's review. Accept only the format `date -u +%FT%TZ` produces.
+require_iso() {
+  [[ "$2" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+    || { echo "$1: SINCE_ISO must look like 2026-01-31T12:00:00Z" >&2; exit 2; }
 }
 
 subcmd_latest() {
@@ -82,6 +126,7 @@ subcmd_latest_after() {
   [[ -z "$pr" || -z "$since" ]] && usage
   local as_json=false
   [[ "${3:-}" == "--json" ]] && as_json=true
+  require_iso latest-after "$since"
   require_gh
   # Strip fractional seconds from .createdAt to match the whole-second
   # precision of $since (produced by `date -u +%Y-%m-%dT%H:%M:%SZ`). Without
@@ -103,13 +148,22 @@ subcmd_poll() {
 
   local max_iters=20
   local interval=30
+  local record_dir="" seen_bot=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --max)      max_iters="$2"; shift 2 ;;
-      --interval) interval="$2";  shift 2 ;;
+      --max)      max_iters="${2:-}"; shift $(( $# >= 2 ? 2 : 1 )) ;;
+      --interval) interval="${2:-}";  shift $(( $# >= 2 ? 2 : 1 )) ;;
+      --record)   [[ $# -ge 2 ]] || { echo "poll: --record needs the lane dir" >&2; exit 2; }
+                  record_dir="$2"; shift 2 ;;
       *) echo "Unknown flag: $1" >&2; exit 2 ;;
     esac
   done
+
+  require_iso poll "$since"
+  # A zero or non-numeric --max would skip the loop and book "no bot" without
+  # ever looking (bash arithmetic reads garbage as 0).
+  [[ "$max_iters" =~ ^[1-9][0-9]*$ ]] || { echo "poll: --max must be a positive integer" >&2; exit 2; }
+  [[ "$interval" =~ ^[0-9]+$ ]] || { echo "poll: --interval must be a non-negative integer" >&2; exit 2; }
 
   require_gh
 
@@ -122,12 +176,17 @@ subcmd_poll() {
       --jq "[.comments[] | select(.author.login == \"claude\") | select((.createdAt | sub(\"\\\\.[0-9]+Z$\"; \"Z\")) > \"$since\")] | last | .body // \"\"")
 
     if [[ -n "$body" ]]; then
+      # ANY Claude comment in the window — working, finished, or edited into an
+      # error — proves a bot exists; only silence may be booked as "no bot".
+      seen_bot=true
       # "Claude Code is working" = in-progress marker; keep polling
       if [[ "$body" == *"Claude Code is working"* ]]; then
         continue
       fi
       # "**Claude finished" = completion marker
       if [[ "$body" == *"**Claude finished"* ]]; then
+        # A reply proves a bot: drop a remembered "no bot answered".
+        route_forget "${record_dir:-.}"
         printf '%s\n' "$body"
         exit 0
       fi
@@ -135,6 +194,24 @@ subcmd_poll() {
   done
 
   echo "TIMEOUT" >&2
+  # --record: the script, not the caller's memory, books the no-bot answer —
+  # a --loop poll can outlive an interjection or a compaction. A bot that
+  # answered at all (slow, or failed) is NOT "no bot": never record that.
+  # Always exactly one route_recorded= line, so the caller can report it.
+  if [[ -n "$record_dir" ]]; then
+    local root out
+    if $seen_bot; then
+      echo "route_recorded=no (the bot answered but did not finish in time)" >&2
+    elif ! root="$(git -C "$record_dir" rev-parse --show-toplevel 2>/dev/null)"; then
+      echo "route_recorded=no (--record dir is not a git repository)" >&2
+    elif ! [[ "$pr" =~ ^[1-9][0-9]*$ ]]; then
+      echo "route_recorded=no (PR is not a plain number)" >&2
+    elif out="$(route_record_write "$root" "$pr" 2>&1)" && [[ "$out" == recorded=* ]]; then
+      echo "route_${out%%$'\n'*}" >&2
+    else
+      echo "route_recorded=no (write failed: ${out%%$'\n'*})" >&2
+    fi
+  fi
   exit 1
 }
 
@@ -363,6 +440,238 @@ subcmd_has_bot() {
   emit unknown "no workflow references the review bot (inspected $src) — but the Claude GitHub App needs none, so its absence cannot be shown locally"
 }
 
+# --- Route memory ------------------------------------------------------------
+# `has_bot=unknown` is settled by /cycle's poll. Without memory every round and
+# every lane paid the ten-minute probe again in a repo where nothing has ever
+# answered. The answer lives in the git COMMON dir, so all worktrees of the repo
+# share it and it can never be committed.
+route_file() {
+  local root="$1" common
+  common="$(git -C "$root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+  [[ -n "$common" ]] || return 1
+  printf '%s/pr-flow/review-route\n' "$common"
+}
+
+# Prints "<recorded_at> <pr>" when a valid no-bot record exists, nothing else.
+# Values are format-checked: they end up in the round report verbatim.
+route_memory() {
+  local file k v at="" pr="" nb=""
+  file="$(route_file "$1")" || return 0
+  [[ -f "$file" && ! -L "$file" ]] || return 0
+  # One read, first value per key: the writer replaces the file atomically, so
+  # a single pass sees one record, never fields from two.
+  while IFS='=' read -r k v; do
+    case "$k" in
+      no_bot)      [[ -n "$nb" ]] || nb="$v" ;;
+      recorded_at) [[ -n "$at" ]] || at="$v" ;;
+      pr)          [[ -n "$pr" ]] || pr="$v" ;;
+    esac
+  done <"$file"
+  [[ "$nb" == yes ]] || return 0
+  [[ "$at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$ ]] || return 0
+  [[ "$pr" =~ ^[1-9][0-9]*$ ]] || pr=""
+  printf '%s %s\n' "$at" "$pr"
+}
+
+route_forget() {
+  local file
+  file="$(route_file "$1")" || return 0
+  rm -f -- "$file" 2>/dev/null || true
+}
+
+# The worktree holding <branch> (REVIEW-ROUTING.md §0: the lane is a flag). Read
+# from git itself, so it works without work-system — a wrapper that fell back to
+# the shim's stdout handed `verdict=no-work-system` to `git -C` as a directory.
+# Prints "<branch|cwd> <dir>" — the dir last, so a path with spaces survives
+# `read -r src dir`; `cwd` = no worktree holds it (§0's lane_source).
+lane_for_branch() {
+  local branch="$1" wt="" line
+  if [[ -n "$branch" ]]; then
+    while IFS= read -r line; do
+      case "$line" in
+        "worktree "*) wt="${line#worktree }" ;;
+        "branch refs/heads/$branch") printf 'branch %s\n' "$wt"; return 0 ;;
+      esac
+    done < <(git worktree list --porcelain 2>/dev/null)
+  fi
+  echo "cwd ."
+}
+
+# The declared `review.route` (auto|github|local). Default, enum AND the config
+# file name come from this plugin's own schema, so the schema stays the one place
+# they live. Read here rather than through the settings plugin's settings.py:
+# that plugin is optional, and its discovery does not find installed plugins yet.
+# The file is refused if it is a symlink (a checked-out link would read outside
+# the repo). Prints "<value> <note>"; note is empty or a one-line reason the
+# value was not taken from the file.
+route_setting() {
+  python3 - "$1" "$SCHEMA" <<'PY' 2>/dev/null || echo "auto pr-flow settings unreadable (python3 3.11+ needed) — using the default"
+import json, os, sys
+root, schema = sys.argv[1], json.load(open(sys.argv[2]))
+prop = schema["properties"]["review"]["properties"]["route"]
+default, allowed = prop["default"], prop["enum"]
+name = schema.get("x-config-file", ".pr-flow.toml")
+if "/" in name or name in ("", ".", ".."):
+    print(default, "schema x-config-file is not a plain file name — using the default"); sys.exit()
+cfg = os.path.join(root, name)
+if not os.path.lexists(cfg):
+    print(default); sys.exit()
+if os.path.islink(cfg):
+    print(default, f"{name} is a symlink — ignored, using the default"); sys.exit()
+try:
+    import tomllib
+except ModuleNotFoundError:
+    print(default, f"{name} not read: needs Python 3.11+ (tomllib) — using the default"); sys.exit()
+try:
+    with open(cfg, "rb") as f:
+        val = tomllib.load(f).get("review", {}).get("route", default)
+except Exception as e:
+    print(default, f"{name} unreadable ({type(e).__name__}) — using the default"); sys.exit()
+if val not in allowed:
+    print(default, f"review.route must be one of {'|'.join(allowed)} — using the default"); sys.exit()
+print(val, f"review.route = {val} ({name})" if val != default else "")
+PY
+}
+
+# One page of the repo's most recent issue/PR comments, read once per networked
+# `route`. Prints "<total> <bots> <asks> <last_claude_reply>" (the last field is
+# `-` when none), or nothing when gh cannot answer.
+#   asks   `@claude` mentions by people the bot would actually obey (owner,
+#          member, collaborator) — an outsider's mention is ignored by the bot,
+#          so counting it let anyone on a public repo force the local route.
+#   last_claude_reply   newest comment by the Claude App (`claude[bot]`, the
+#          same author `poll` reads) — the evidence that clears a remembered
+#          "no bot answered". A reply paged out of these 100 is not seen.
+route_evidence() {
+  command -v gh >/dev/null || return 0
+  ( cd "$1" && gh api 'repos/{owner}/{repo}/issues/comments?sort=created&direction=desc&per_page=100' --jq '
+      def bot: (.user.type // "") == "Bot";
+      def claude_bot: bot and (.user.login // "") == "claude[bot]";
+      def ask: (bot | not)
+        and ((.author_association // "") | IN("OWNER", "MEMBER", "COLLABORATOR"))
+        and ((.body // "") | test("(^|\\s)@claude\\b"; "i"));
+      "\(length) \([.[] | select(bot)] | length) \([.[] | select(ask)] | length) \(([.[] | select(claude_bot) | .created_at] | max) // "-")"
+    ' 2>/dev/null ) || true
+}
+
+ROUTE_EVIDENCE_MIN_ASKS=2
+
+subcmd_route() {
+  local dir="." branch="" lane_source="" offline=false root setting note
+  local mem at pr probe="" hb="" ev="" total bots asks last cleared=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --offline) offline=true; shift ;;
+      --branch) [[ $# -ge 2 ]] || { echo "route: --branch needs a value" >&2; exit 2; }
+                branch="$2"; shift 2 ;;
+      -*) echo "Unknown flag: $1" >&2; exit 2 ;;
+      *) dir="$1"; shift ;;
+    esac
+  done
+  if [[ -n "$branch" ]]; then
+    read -r lane_source dir <<<"$(lane_for_branch "$branch")"
+  fi
+  emit_route() {
+    echo "route=$1"
+    echo "record=$2"
+    echo "source=$3"
+    echo "why=${cleared:+$cleared; }$4"
+    echo "has_bot=$hb"
+    echo "lane=$dir"
+    [[ -z "$lane_source" ]] || echo "lane_source=$lane_source"
+  }
+  root="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ -z "$root" ]]; then
+    emit_route bot no default "not inside a git repository — try the bot"; return 0
+  fi
+  # The setting first: a pinned route needs neither the probe nor the network.
+  read -r setting note <<<"$(route_setting "$root")"
+  case "$setting" in
+    local) emit_route local no setting "$note"; return 0 ;;
+    github)
+      # An explicit `github` is the user overruling the remembered answer — but
+      # only a networked (triggering) caller acts on it. --offline is read-only:
+      # /check must not erase memory every other lane relies on.
+      $offline || route_forget "$root"
+      emit_route bot no setting "$note"; return 0 ;;
+  esac
+
+  # auto. `note` may carry a reason the file was ignored; keep it visible.
+  [[ -n "$note" ]] && cleared="$note"
+  probe="$(subcmd_has_bot "$root")"; hb="$(sed -n 's/^has_bot=//p' <<<"$probe")"
+  if [[ "$hb" = yes ]]; then
+    $offline || route_forget "$root"
+    emit_route bot no probe "$(sed -n 's/^why=//p' <<<"$probe")"; return 0
+  fi
+  $offline || ev="$(route_evidence "$root")"
+  [[ "$ev" =~ ^([0-9]+)\ ([0-9]+)\ ([0-9]+)\ (.+)$ ]] || ev=""
+  if [[ -n "$ev" ]]; then
+    total="${BASH_REMATCH[1]}"; bots="${BASH_REMATCH[2]}"; asks="${BASH_REMATCH[3]}"; last="${BASH_REMATCH[4]}"
+  fi
+  mem="$(route_memory "$root")"
+  if [[ -n "$mem" ]]; then
+    read -r at pr <<<"$mem"
+    # A Claude bot that has replied anywhere in the repo since the record was
+    # written proves the record stale — a late reply, a manual mention, an App
+    # installed afterwards. Switch back to auto by forgetting it.
+    # `>=`, not `>`: both stamps have whole-second precision, so a reply in the
+    # very second the record was written is newer as far as anyone can tell.
+    if [[ -n "$ev" && "$last" != "-" ]] && ! [[ "$at" > "${last%%.*}" ]]; then
+      route_forget "$root"
+      cleared="${cleared:+$cleared; }a Claude bot replied on ${last%%T*} — remembered no-bot cleared"
+    else
+      emit_route local no memory "no bot answered on ${at%%T*}${pr:+ (PR #$pr)} — remembered; cleared automatically by a claude-code-action workflow on the default branch or a Claude bot reply, by hand with \`claude-review.sh route-clear\` / review.route = github"
+      return 0
+    fi
+  fi
+  if [[ -n "$ev" ]] && (( bots == 0 && asks >= ROUTE_EVIDENCE_MIN_ASKS )); then
+    emit_route local no evidence "likely no bot: @claude was asked $asks times in the last $total comments on this repo and no bot account ever replied (not proof; a claude-code-action workflow on the default branch or review.route = github overrides it)"
+    return 0
+  fi
+  emit_route bot yes default "has_bot=$hb — try the bot; a timed-out poll switches this repo to local"
+}
+
+# Shared by `route-record` and `poll --record`. Prints the two result lines.
+route_record_write() {
+  local root="$1" pr="$2" file tmp setting note
+  read -r setting note <<<"$(route_setting "$root")"
+  if [[ "$setting" != auto ]]; then
+    echo "recorded=no"; echo "why=review.route = $setting — only auto remembers"; return 0
+  fi
+  file="$(route_file "$root")" || { echo "route-record: no git dir" >&2; return 1; }
+  # Every step guarded explicitly: callers use `|| …`, which switches errexit
+  # off inside this function, and a silent failure would still say recorded=yes.
+  mkdir -p -- "${file%/*}" || { echo "route-record: cannot create ${file%/*}" >&2; return 1; }
+  [[ ! -L "$file" ]] || { echo "route-record: $file is a symlink — refusing" >&2; return 1; }
+  tmp="$(mktemp "${file%/*}/.review-route.XXXXXX")" || { echo "route-record: cannot write in ${file%/*}" >&2; return 1; }
+  printf 'no_bot=yes\nrecorded_at=%s\npr=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$pr" >"$tmp" \
+    && mv -f -- "$tmp" "$file" \
+    || { rm -f -- "$tmp"; echo "route-record: cannot write $file" >&2; return 1; }
+  echo "recorded=yes"; echo "file=$file"
+}
+
+subcmd_route_record() {
+  local dir="." pr="" root
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --pr) [[ $# -ge 2 ]] || { echo "route-record: --pr <N> required" >&2; exit 2; }
+            pr="$2"; shift 2 ;;
+      -*) echo "Unknown flag: $1" >&2; exit 2 ;;
+      *) dir="$1"; shift ;;
+    esac
+  done
+  [[ "$pr" =~ ^[1-9][0-9]*$ ]] || { echo "route-record: --pr <N> required" >&2; exit 2; }
+  root="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" || { echo "route-record: not a git repository" >&2; exit 1; }
+  route_record_write "$root" "$pr" || exit 1
+}
+
+subcmd_route_clear() {
+  local root
+  root="$(git -C "${1:-.}" rev-parse --show-toplevel 2>/dev/null)" || { echo "route-clear: not a git repository" >&2; exit 1; }
+  route_forget "$root"
+  echo "cleared=yes"
+}
+
 main() {
   local cmd="${1:-}"
   shift || true
@@ -371,6 +680,9 @@ main() {
     latest)        subcmd_latest "$@" ;;
     latest-after)  subcmd_latest_after "$@" ;;
     has-bot)       subcmd_has_bot "$@" ;;
+    route)         subcmd_route "$@" ;;
+    route-record)  subcmd_route_record "$@" ;;
+    route-clear)   subcmd_route_clear "$@" ;;
     ""|-h|--help)  usage ;;
     *)             echo "Unknown subcommand: $cmd" >&2; usage ;;
   esac

@@ -1,9 +1,9 @@
 ---
 title: "Plugin settings system"
 createdAt: 2026-07-23
-updatedAt: 2026-07-23
+updatedAt: 2026-10-02
 createdFrom: "PR #40"
-updatedFrom: "PR #40"
+updatedFrom: "branch: task/fix-review-route-without-bot"
 pluginVersion: 1.9.0
 prime: true
 ---
@@ -14,7 +14,7 @@ A config layer that makes the plugins' hardcoded conventions (`tasks/`,
 `.claude/worktrees/`, `task/` prefix, …) explicit, overrideable, and
 validatable. The `settings` plugin owns the *infrastructure*; each consuming
 plugin owns its *own* config. Shipped in phase 1 (PR #40) as the config surface
-only — no runtime consumers yet.
+only; the first runtime consumer is pr-flow's `review.route` (1.5.0, below).
 
 Authoritative sources (read these, don't trust this file for mutable detail):
 `plugins/settings/scripts/settings.py` (the loader/resolver/validator/CLI, Python
@@ -53,7 +53,7 @@ It is the cross-project manager-peering address book consumed by
 [manager-worker-orchestration.md](manager-worker-orchestration.md) (the repo path
 is the durable, transport-independent peer address).
 
-## Consumer contract (phase 2, not yet wired)
+## Consumer contract
 
 When a plugin adopts settings, it must: read via `settings.py get <plugin>.<…>
 --json` (or `show <plugin> --json`) — **never the TOML directly**, which skips
@@ -63,6 +63,17 @@ default, not by hardcoding the old constant beside the lookup. First queued
 consumers: work-system paths, and migrating kickoff's committed agent default
 (see [../features/kickoff-agent-selection.md](../features/kickoff-agent-selection.md))
 into a `[agents]` section.
+
+**First runtime consumer — and a deliberate exception (pr-flow 1.5.0).**
+`review.route` is read by `pr-flow/scripts/claude-review.sh` itself (python3
+`tomllib`), not via `settings.py`: the settings plugin is optional and, per the
+residual below, does not discover installed plugins — a hard dependency would
+have made the setting dead in every real install. The exception keeps the
+contract's *intent*: default and enum are read from pr-flow's own schema (never
+restated in code), a symlinked or invalid file falls back to the default with a
+note, and a remembered runtime answer (the no-bot memory) lives in the git
+common dir — never written back into the user's TOML. Revisit once discovery
+works for installed plugins.
 
 ## Hardening lessons (from the swarm + Codex reviews)
 
