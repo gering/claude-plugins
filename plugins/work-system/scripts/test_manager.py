@@ -321,6 +321,90 @@ r = prompt(composer("❯ "), rc=3)
 check("herdr prompt failure reported", r.get("sent") == "no"
       and any(x.startswith("herdr-prompt-failed") for x in r["reasons"]), str(r))
 
+r = prompt(composer("❯ \x1b[7my\x1b[27m"))
+check("one-char draft under the cursor → not sent", r.get("sent") == "no"
+      and "composer-draft" in r["reasons"], str(r))
+r = prompt(composer("❯ \x1b[7mdeploy to prod\x1b[0m"))
+check("fully inverse draft → not sent", r.get("sent") == "no", str(r))
+r = prompt(composer("❯ \x1b[7m \x1b[27m"))
+check("inverse-space cursor alone → sent", r.get("sent") == "yes", str(r))
+for name, inner in (
+    ("light theme black", "❯ \x1b[38;2;0;0;0mdeploy to prod"),
+    ("light theme dark gray", "❯ \x1b[38;2;40;40;40mdeploy"),
+    ("256-color near-black", "❯ \x1b[38;5;233mdeploy"),
+):
+    r = prompt(composer(inner))
+    check(f"draft detected: {name}", r.get("sent") == "no" and "composer-draft" in r["reasons"], str(r))
+r = prompt(composer("❯ \x1b[2mfirst half of a long\n  wrapped suggestion\x1b[0m"))
+check("wrapped dim suggestion is not a draft", r.get("sent") == "yes", str(r))
+
+# event text from stdin: quotes and $(...) are data, never shell
+E.serve([E.agent()], tabs=["w6:t1"], read=composer("❯ "))
+(E.state / "prompt_rc").write_text("0")
+env = dict(os.environ, HERDR_ENV="1", HERDR_PANE_ID="w6:p1", PATH=f"{E.bin}:{os.environ['PATH']}")
+env.pop("HERDR_WORKSPACE_ID", None)
+r = subprocess.run([BASH, str(SCRIPT), "prompt", str(E.wt), "--"], env=env, capture_output=True,
+                   text=True, timeout=60, input="needs-decision: can't merge $(touch /tmp/x)\n")
+sent = (E.state / "prompted").read_text() if (E.state / "prompted").exists() else ""
+check("stdin event sent verbatim", kv(r.stdout).get("sent") == "yes"
+      and "can't merge $(touch /tmp/x)" in sent, r.stdout + sent)
+check("empty stdin is usage", subprocess.run([BASH, str(SCRIPT), "body", "--"], env=env,
+      capture_output=True, text=True, input="").returncode == 2)
+
+# ---- lane = worktree toplevel, from a subdirectory ------------------------------------
+(E.wt / "src").mkdir(exist_ok=True)
+E.write_record()
+E.serve([E.agent(), other], tabs=["w6:t2", "w6:t1"])
+r = kv(E.run("resolve", str(E.wt / "src")).stdout)
+check("subdir lane reads the kicker", r.get("evidence") == "kicker", str(r))
+b = E.run("body", str(E.wt / "src"), "--", "x").stdout
+check("subdir lane keeps the task identity", f"task=alpha worktree={E.wt}]" in b, b)
+
+# ---- kicker: live title differs from the recorded name ----------------------------------
+E.serve([E.agent(title="Someone Else")], tabs=["w6:t1"])
+r = E.resolve()
+check("renamed kicker: pane kept, name withheld", r.get("evidence") == "kicker"
+      and r.get("sendmessage_name") == "" and "kicker-name-changed" in r["reasons"], str(r))
+(E.wt / ".ws-kicker").unlink()
+
+# ---- scope: an unreadable row in ANOTHER workspace is irrelevant -------------------------
+E.serve([E.agent(), {"agent": "claude", "agent_status": "idle", "pane_id": "w9:p1", "workspace_id": "w9"}],
+        tabs=["w6:t1"])
+r = E.resolve(env_extra={"HERDR_WORKSPACE_ID": "w6"})
+check("cwd-less row elsewhere does not veto", r.get("status") == "unique", str(r))
+E.serve([E.agent(), {"agent": "claude", "agent_status": "idle", "pane_id": "w6:p9", "workspace_id": "w6"}],
+        tabs=["w6:t1"])
+r = E.resolve(env_extra={"HERDR_WORKSPACE_ID": "w6"})
+check("cwd-less row in scope still → unverified", r.get("status") == "unverified", str(r))
+
+# ---- record refuses a tracked .ws-kicker -------------------------------------------------
+(E.wt / ".ws-kicker").write_text("x\n")
+subprocess.run(["git", "-C", str(E.wt), "add", "-f", ".ws-kicker"], check=True)
+E.serve(get=E.agent())
+r = kv(E.run("record", str(E.wt)).stdout)
+check("tracked record is refused", r.get("recorded") == "no" and "kicker-file-tracked" in r["reasons"], str(r))
+subprocess.run(["git", "-C", str(E.wt), "rm", "-q", "-f", "--cached", ".ws-kicker"], check=True)
+(E.wt / ".ws-kicker").unlink()
+
+# ---- SendMessage name sanitizer ($HERDR_NAME_PRELUDE) ------------------------------------
+def name_of(**over):
+    a = E.agent()
+    a.pop("terminal_title_stripped")
+    a.update(over)
+    E.serve([a], tabs=["w6:t1"])
+    return E.resolve().get("sendmessage_name")
+
+check("spinner glyph stripped", name_of(terminal_title_stripped="◐ Manager") == "Manager")
+check("glyph strip keeps inner spaces", name_of(terminal_title_stripped="✳ My Repo") == "My Repo")
+check("punctuation-led name kept", name_of(terminal_title_stripped="/habemus") == "/habemus")
+check("falls back to terminal_title", name_of(terminal_title="✳ From Title") == "From Title")
+check("herdr agent name is no address", name_of(name="from-agent-name") == "")
+check("newline scrubbed", name_of(terminal_title_stripped="Manager\nnone") == "Manager none")
+check("ANSI stripped", "\x1b" not in (name_of(terminal_title_stripped="\x1b[31mM\x1b[0m") or ""))
+check("bidi override stripped", "‮" not in (name_of(terminal_title_stripped="Man‮ager") or ""))
+check("64 chars pass", name_of(terminal_title_stripped="x" * 64) == "x" * 64)
+check("65 chars → no name", name_of(terminal_title_stripped="x" * 65) == "")
+
 E.tmp.cleanup()
 if FAILS:
     print("manager.sh: FAILED")

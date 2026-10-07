@@ -2,9 +2,9 @@
 title: "Manager/Worker Orchestration (design)"
 createdAt: 2026-07-18
 createdFrom: "session: design-manager-worker-orchestration 2026-07-18"
-updatedAt: 2026-10-02
-updatedFrom: "session: 2026-10-02 (task/auto-accept-clean-close-requests)"
-pluginVersion: 1.17.0
+updatedAt: 2026-10-07
+updatedFrom: "session: 2026-10-07 (task/add-manager-address)"
+pluginVersion: 1.18.0
 prime: false
 ---
 
@@ -76,8 +76,9 @@ What this slice establishes (and what it deliberately does not):
   watch loop remain separate tasks.
 - **The clean split: the helper *detects and names*, the skill *sends*.** `SendMessage` /
   `ListAgents` are model tools, not shell commands, so a script can never do the send.
-  Keeping detection in `herdr-teardown.sh manager-session` (testable, tri-state) and the
-  send in the skill is what keeps this out of the prose-drift trap.
+  Keeping detection in a script (first `herdr-teardown.sh manager-session`, since 1.18.0
+  `manager.sh resolve`) and the send in the skill is what keeps this out of the
+  prose-drift trap.
 - **The addressing gap this exposed.** The built-ins address sessions **by name**, while
   our lane identity is the **worktree/repo path** — and nothing bridges the two:
   `ListAgents` rows carry no cwd, and its `[ref]` suffixes are not derivable from herdr

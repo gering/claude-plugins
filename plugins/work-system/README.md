@@ -474,10 +474,11 @@ and decides self-close vs. a different-tab close by pane id. Three entry points:
   tab, i.e. via the robust path above. Preferred whenever offered. The offer appears
   only when the Manager is verifiably there and the close is one it can actually
   serve: the merge is confirmed, the branch is a name-resolvable `task/<name>`,
-  exactly one live Claude agent sits at the repo root inside herdr, and its name
-  resolves to exactly one live session. The confirmation names that recipient — a
-  pane title is settable by any process in the pane, so a person seeing the name is
-  the real check. Any doubt (no Manager, an ambiguous name, herdr unreachable)
+  `manager.sh resolve` names one live Claude Manager inside herdr (see *Workers ping
+  the Manager* below), and its name resolves to exactly one live session. The
+  confirmation names that recipient and how it was picked (the kicker record, the
+  only root agent, or the leftmost-tab tie-break) — a pane title is settable by any
+  process in the pane, so a person seeing the name is the real check. Any doubt (no Manager, an ambiguous name, herdr unreachable)
   silently falls through to the self-close below. On the receiving side the Manager
   closes without asking only when nothing can be lost — PR merged, worktree clean
   (gitignored files included), local and remote branch tips equal to the merged head,
@@ -550,7 +551,9 @@ repo root are the candidates, and with several, the leftmost tab wins as a
 one live session carries the resolved name; everyone else goes through
 `manager.sh prompt`, which types into the Manager's pane only when it is an idle
 Claude session with no user draft in its composer (a dim prompt suggestion is not
-a draft).
+a draft). The event text goes in on stdin through a quoted heredoc, so quotes or
+`$(...)` in it never reach a shell. `/close`'s delegation offer uses the same
+resolver.
 
 ### Task tabs carry their state glyph
 

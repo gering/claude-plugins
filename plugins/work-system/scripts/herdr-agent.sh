@@ -82,8 +82,8 @@ def classify_cwd(cwd, root, wtdir):
 
 # ---- shared session-name derivation (the "name prelude") --------------------
 # A python3 source string defining session_name(agent_row): the CC SendMessage
-# address of a herdr agent row. Shared by herdr-teardown.sh manager-session and
-# manager.sh resolve, so the sanitizing lives in exactly one place. Apostrophe-
+# address of a herdr agent row, used by manager.sh resolve. Kept here, beside
+# the match prelude, so the sanitizing lives in exactly one place. Apostrophe-
 # free like the match prelude. Needs `import re, unicodedata` (included).
 HERDR_NAME_PRELUDE='import re, unicodedata
 def session_name(a):

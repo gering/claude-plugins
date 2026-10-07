@@ -366,7 +366,7 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
     1. **PR opened** — `PR opened: #<n> <url>`;
     2. **review started** — a review you run yourself: after `mandate.sh round`
        booked it, `review round <x>/<y> started (route: local)` from that output
-       (`review_rounds_used` / `review_budget`). Driving `/cycle --loop` instead
+       (`x` = `review_rounds_used`, `y` = `review_rounds_used + review_rounds_left`). Driving `/cycle --loop` instead
        (it books its own rounds and does not ping): ping once before it,
        `review loop started (route: github, <n> rounds left)`;
     3. **terminal gate reached** — `ready-for-merge: PR #<n>` or
@@ -378,13 +378,24 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
     bash "${CLAUDE_PLUGIN_ROOT}/scripts/manager.sh" resolve
     ```
     Only `status=unique` is a recipient; `none`/`ambiguous`/`unverified` → skip
-    silently. Then send, by route:
+    silently. The event text always goes in on **stdin through a quoted heredoc**,
+    never as a quoted argument: an apostrophe would break the quoting, and `$(...)`
+    in double quotes would run before the script sees the text. Then send, by route:
     - **You have `SendMessage`** (claude/cc-harness worker) and `sendmessage_name`
       is non-empty: `ListAgents`; if **exactly one** live (non-offline) session has
-      that exact name, `SendMessage` it the line from
-      `manager.sh body -- "<event text>"`. Otherwise use the herdr route.
+      that exact name, `SendMessage` it the line printed by
+      ```sh
+      bash "${CLAUDE_PLUGIN_ROOT}/scripts/manager.sh" body -- <<'EOF'
+      <event text>
+      EOF
+      ```
+      Otherwise use the herdr route.
     - **herdr route** (also the only route for codex/grok/kimi workers):
-      `bash "${CLAUDE_PLUGIN_ROOT}/scripts/manager.sh" prompt -- "<event text>"`.
+      ```sh
+      bash "${CLAUDE_PLUGIN_ROOT}/scripts/manager.sh" prompt -- <<'EOF'
+      <event text>
+      EOF
+      ```
       It re-resolves, and types only into an idle claude Manager with no user
       draft in its composer. `sent=no` (busy, blocked, draft, unsupported) → do
       not retry or type by other means; mention it in one line at most.

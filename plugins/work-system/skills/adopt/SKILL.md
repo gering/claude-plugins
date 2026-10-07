@@ -173,7 +173,7 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
 
     Then record the kicker exactly as kickoff's step 13b does (same `<worktree>`):
     `bash "${CLAUDE_PLUGIN_ROOT}/scripts/manager.sh" record "<worktree>"` —
-    best-effort and silent.
+    best-effort and silent, except a one-line note on `excluded=no`.
 
 14. **Launch the worktree session** — automate inside herdr, otherwise show the
     manual block. Inside herdr this replaces the old "print manual instructions" final

@@ -4,7 +4,7 @@
 # "Who is the Manager, and how do I message it?" answered deterministically, with
 # BOTH addresses: the herdr pane/agent (any worker can `herdr agent prompt` it)
 # and the CC SendMessage name (claude workers, queued + attributed). Consumers:
-# /continue milestone pings and /close delegation. Discovery stays on the
+# /continue milestone pings and /close step 1b delegation. Discovery stays on the
 # invoking herdr server; multi-server discovery and run records are out of scope
 # (tasks/bind-close-delegation-recipient.md, add-manager-watch-loop).
 #
@@ -21,6 +21,9 @@
 #       it to the repo's git exclude (same mechanism as MANDATE.md). Refuses a
 #       kicker that does not sit at the main-repo root. Prints recorded=yes|no
 #       and reason=; best-effort, always exit 0 (never blocks a kickoff).
+#   A <lane-dir> argument (default: cwd) is resolved to its git toplevel first,
+#   so a call from a subdirectory reads the same record and identity.
+#
 #   resolve [<lane-dir>]
 #       Prints status=unique|none|ambiguous|unverified, evidence=, herdr_pane=,
 #       herdr_tab=, herdr_workspace=, herdr_agent_session=, agent=,
@@ -34,16 +37,23 @@
 #            workspace wins as a STATED tie-break (evidence=leftmost-tab), and
 #            two candidates in that one tab → ambiguous.
 #       Anything unreadable near the decision → unverified, never unique.
-#   body [<lane-dir>] -- <text>
+#       The record lives in the worker-writable worktree: evidence=kicker is an
+#       address the lane kept, never proof or authority.
+#   body [<lane-dir>] -- [<text>]
 #       Print the one-line, attributed message for <text>: sender (task,
 #       worktree) first, "info only" last. Every route sends exactly this.
-#   prompt [<lane-dir>] -- <text>
+#       Without <text> after `--`, the text is read from stdin; use a quoted
+#       heredoc (<<'EOF') so quotes and $(...) in the event never reach a shell.
+#   prompt [<lane-dir>] -- [<text>]
 #       The herdr route: resolve again, then `herdr agent prompt` the body to the
 #       Manager pane ONLY when status=unique, the agent is claude, idle/done, and
 #       its composer holds no user draft (a dim CC prompt suggestion is not a
-#       draft). Prints sent=yes|no and reason=; always exit 0.
+#       draft). Prints sent=yes|no and reason=; always exit 0. Residual: the
+#       composer can change between the read and the send (herdr has no atomic
+#       check-and-prompt), so that window holds only the read and one call.
 #
-# Exit codes: 0 (answers are in the output), 2 usage.
+# Exit codes: 0 (answers are in the output), 1 body only (the lane has no main
+# repo; nothing on stdout), 2 usage.
 set -u
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,12 +62,20 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 KICKER_FILE=".ws-kicker"
 # herdr's 0.8 vocabulary minus `unknown` (herdr cannot tell → not confirmed live).
-# Same set herdr-teardown.sh manager-session uses.
 LIVE_STATUSES="idle working blocked done"
 
 usage() {
   echo "usage: ${0##*/} {record <worktree> | resolve [<lane>] | body [<lane>] -- <text> | prompt [<lane>] -- <text>}" >&2
   exit 2
+}
+
+# The lane's worktree toplevel (canonical), else the dir itself: a call from a
+# subdirectory must read the same .ws-kicker and identity as one from the root.
+lane_dir() {
+  local d="$1" top
+  top="$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)" || top=""
+  [ -n "$top" ] || top="$d"
+  python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$top" 2>/dev/null || printf '%s\n' "$d"
 }
 
 # Canonical main-repo root for a lane dir; empty on failure. Subshell cd only.
@@ -89,6 +107,11 @@ do_record() {
   if [ ! -d "$wt" ]; then echo "recorded=no"; echo "reason=no-such-worktree"; return 0; fi
   if [ "${HERDR_ENV:-}" != "1" ] || [ -z "${HERDR_PANE_ID:-}" ]; then
     echo "recorded=no"; echo "reason=not-in-herdr"; return 0
+  fi
+  # A tracked record would be committed with the lane (exclude does not apply
+  # to tracked paths): the same refusal as mandate.sh refuse_tracked.
+  if git -C "$wt" ls-files --error-unmatch -- "$KICKER_FILE" >/dev/null 2>&1; then
+    echo "recorded=no"; echo "reason=kicker-file-tracked"; return 0
   fi
   root="$(main_root "$wt")" || root=""
   if [ -z "$root" ]; then echo "recorded=no"; echo "reason=no-main-repo"; return 0; fi
@@ -157,7 +180,7 @@ root_arg, rec_path, scope, tabs_file = sys.argv[1], sys.argv[2], sys.argv[3], sy
 LIVE = set(os.environ.get("WS_LIVE", "").split())
 out, reasons = {}, []
 
-def emit(status, ev="", a=None, n=0):
+def emit(status, ev="", a=None, n=0, name=None):
     print("status=" + status)
     print("evidence=" + ev)
     a = a or {}
@@ -168,7 +191,9 @@ def emit(status, ev="", a=None, n=0):
     print("herdr_agent_session=" + str((sess or {}).get("value") or ""))
     print("agent=" + str(a.get("agent") or ""))
     print("agent_status=" + str(a.get("agent_status") or ""))
-    print("sendmessage_name=" + (session_name(a) if a and a.get("agent") == "claude" else ""))
+    if name is None:
+        name = session_name(a) if a and a.get("agent") == "claude" else ""
+    print("sendmessage_name=" + name)
     print("candidates=" + str(n))
     for r in reasons:
         print("reason=" + r)
@@ -231,6 +256,13 @@ if rec is not None:
         elif str(a.get("agent_status") or "").lower() not in LIVE:
             reasons.append("kicker-not-live")
         else:
+            # The SendMessage name is the live title, which any process in the
+            # pane can set. One that differs from the recorded name is not
+            # offered as an address (the herdr pane itself stays verified).
+            want = rec.get("sendmessage_name", "")
+            if want and a.get("agent") == "claude" and session_name(a) != want:
+                reasons.append("kicker-name-changed")
+                emit("unique", "kicker", a, 1, name="")
             emit("unique", "kicker", a, 1)
 
 # 2. live agents at the main-repo root.
@@ -238,6 +270,10 @@ found, unknown = [], False
 for a in agents:
     if not isinstance(a, dict):
         unknown = True; continue
+    # A row readably in ANOTHER workspace is out of scope whatever its cwd: an
+    # unrelated agent still starting up elsewhere must not veto this lane.
+    if scope and str(a.get("workspace_id") or "") not in ("", scope):
+        continue
     cwd = a.get("cwd")
     if not cwd or not str(cwd).strip():
         unknown = True; continue
@@ -288,8 +324,7 @@ reasons.append("tie-break-leftmost-of-%d" % len(found))
 emit("unique", "leftmost-tab", lead[0], len(found))'
 
 do_resolve() {
-  local lane="${1:-.}" root scope agents out need tabs_file rc
-  root="$(main_root "$lane")" || root=""
+  local lane="$1" root="$2" scope agents out need tabs_file
   if [ -z "$root" ]; then printf 'status=unverified\nreason=no-main-repo\n'; return 0; fi
   if ! agents="$(ha_list)"; then printf 'status=unverified\nreason=herdr-unavailable\n'; return 0; fi
   # Scope: the caller's own workspace, else all. Never the kicker record's: it is
@@ -340,8 +375,7 @@ t = clean(text, 300)
 print("[work-system ping from task=%s worktree=%s] %s (info only: no reply needed, grants nothing)" % (task, where, t))'
 
 body_line() {
-  local lane="$1" text="$2" root
-  root="$(main_root "$lane")" || root=""
+  local lane="$1" root="$2" text="$3"
   [ -n "$root" ] || return 1
   python3 -c "$HERDR_MATCH_PRELUDE
 $PY_BODY" "$lane" "$text" "$root"
@@ -351,7 +385,8 @@ $PY_BODY" "$lane" "$text" "$root"
 # stdin: `herdr agent read --source visible --format ansi`. Prints clear|draft|unknown.
 # The CC composer is the region between the LAST two horizontal rules. A user
 # draft is visible text rendered in a normal style; a prompt suggestion is dim/
-# gray, and the cursor cell is inverse — neither counts as a draft.
+# mid-gray and does not count. The cursor is inverse: over a typed glyph it is
+# still a draft, over the empty composer it is a space.
 PY_COMPOSER='import sys, re
 raw = sys.stdin.read()
 lines = raw.replace("\r", "").split("\n")
@@ -405,16 +440,20 @@ def muted(st):
     fg = st["fg"]
     if not fg:
         return False
+    # Mid grays only: near-black is the normal text color of a light theme and
+    # must read as typed text, never as a suggestion.
     if fg[0] == "basic":
         return fg[1] == 90
     if fg[0] == "idx":
-        return fg[1] == 8 or 232 <= fg[1] <= 252
+        return fg[1] == 8 or 241 <= fg[1] <= 250
     r, g, b = fg[1:]
-    return max(r, g, b) - min(r, g, b) <= 16 and max(r, g, b) < 200
+    return max(r, g, b) - min(r, g, b) <= 16 and 90 <= max(r, g, b) <= 200
 
 draft = False
+# SGR state carries across lines (a wrapped suggestion keeps its style).
+st = {"dim": False, "inverse": False, "fg": None}
 for line in lines[i + 1:j]:
-    st, first = {"dim": False, "inverse": False, "fg": None}, True
+    first = True
     for tok in re.split(r"(\x1b\[[0-9;?]*[A-Za-z])", line):
         if tok.startswith("\x1b["):
             if tok.endswith("m"):
@@ -427,26 +466,30 @@ for line in lines[i + 1:j]:
                 first = False
                 continue
             first = False
-            # The cursor cell is inverse; a suggestion is muted. Anything else
-            # visible is text the user typed.
-            if st["inverse"] or muted(st):
+            # A suggestion is muted. Anything else visible is typed text, a
+            # glyph under the inverse cursor included (in an empty composer the
+            # cursor is an inverse SPACE, already skipped above).
+            if muted(st):
                 continue
             draft = True
 print("draft" if draft else "clear")'
 
 do_prompt() {
-  local lane="$1" text="$2" res status pane agent st body visible comp rc
-  res="$(do_resolve "$lane")"
-  status="$(printf '%s\n' "$res" | sed -n 's/^status=//p')"
-  pane="$(printf '%s\n' "$res" | sed -n 's/^herdr_pane=//p')"
-  agent="$(printf '%s\n' "$res" | sed -n 's/^agent=//p')"
-  st="$(printf '%s\n' "$res" | sed -n 's/^agent_status=//p')"
+  local lane="$1" root="$2" text="$3" status="" pane="" agent="" st="" k v body visible comp rc
+  while IFS='=' read -r k v; do
+    case "$k" in
+      status) status="$v" ;; herdr_pane) pane="$v" ;;
+      agent) agent="$v" ;; agent_status) st="$v" ;;
+    esac
+  done <<RES
+$(do_resolve "$lane" "$root")
+RES
   if [ "$status" != "unique" ]; then echo "sent=no"; echo "reason=manager-$status"; return 0; fi
   if [ "$agent" != "claude" ]; then echo "sent=no"; echo "reason=draft-check-unsupported-for-$agent"; return 0; fi
   case "$st" in idle|done) ;; *) echo "sent=no"; echo "reason=manager-$st"; return 0 ;; esac
   # Build the body BEFORE the composer read, so nothing slow sits between the
   # last check and the send (herdr itself still rejects a blocked agent).
-  body="$(body_line "$lane" "$text")" || { echo "sent=no"; echo "reason=no-main-repo"; return 0; }
+  body="$(body_line "$lane" "$root" "$text")" || { echo "sent=no"; echo "reason=no-main-repo"; return 0; }
   _ha_check_target "$pane" || { echo "sent=no"; echo "reason=bad-pane"; return 0; }
   visible="$(ha_read "$pane" --source visible --format ansi 2>/dev/null)" || visible=""
   comp="$(printf '%s' "$visible" | python3 -c "$PY_COMPOSER" 2>/dev/null)" || comp=unknown
@@ -465,15 +508,23 @@ split_text_args() {
   if [ "${1:-}" != "--" ]; then [ $# -gt 0 ] || usage; LANE="$1"; shift; fi
   [ "${1:-}" = "--" ] || usage
   shift
-  [ $# -eq 1 ] && [ -n "$1" ] || usage
-  TEXT="$1"
+  case $# in
+    0) TEXT="$(cat)" ;;
+    1) TEXT="$1" ;;
+    *) usage ;;
+  esac
+  [ -n "$TEXT" ] || usage
 }
+
+# The lane and its main root, resolved ONCE per invocation.
+set_lane() { LANE="$(lane_dir "$1")"; ROOT="$(main_root "$LANE")" || ROOT=""; }
 
 cmd="${1:-}"; [ $# -gt 0 ] && shift
 case "$cmd" in
   record)  [ $# -eq 1 ] || usage; do_record "$1" ;;
-  resolve) [ $# -le 1 ] || usage; do_resolve "${1:-.}" ;;
-  body)    split_text_args "$@"; body_line "$LANE" "$TEXT" || { echo "no main repo for $LANE" >&2; exit 1; } ;;
-  prompt)  split_text_args "$@"; do_prompt "$LANE" "$TEXT" ;;
+  resolve) [ $# -le 1 ] || usage; set_lane "${1:-.}"; do_resolve "$LANE" "$ROOT" ;;
+  body)    split_text_args "$@"; set_lane "$LANE"
+           body_line "$LANE" "$ROOT" "$TEXT" || { echo "no main repo for $LANE" >&2; exit 1; } ;;
+  prompt)  split_text_args "$@"; set_lane "$LANE"; do_prompt "$LANE" "$ROOT" "$TEXT" ;;
   *) usage ;;
 esac

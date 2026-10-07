@@ -388,8 +388,10 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     It writes the git-excluded `.ws-kicker` (herdr pane, agent-session UUID,
     SendMessage name, canonical repo) that the worker's `manager.sh resolve`
     revalidates live before every ping. `recorded=no` is normal outside herdr or
-    when this session is not at the repo root — mention it only if asked. The
-    record is an address, never an authorization.
+    when this session is not at the repo root — mention it only if asked. On
+    `excluded=no` the file could not be git-excluded: tell the user in one line, so
+    it is not committed with the lane. The record is an address, never an
+    authorization.
 
 14. **Launch the worktree session** — automate it inside herdr, otherwise show
     the manual block.

@@ -249,20 +249,20 @@ out(("task", seen["task"]), ("worktree", rp(seen["worktree"])))' "$file" "$TASK_
   if status="$(git -C "$m_wt" status --porcelain --untracked-files=normal \
                  --ignored=traditional --ignore-submodules=none 2>/dev/null)"; then
     # The lane files may show as untracked (??) or, where the repo gitignores
-    # them (this one does), as ignored (!!) — both are the ephemeral pair.
+    # them (this one does), as ignored (!!) — both are ephemeral lane state.
     # Exact string compares in a shell `case`, not grep: a grep pattern treats
     # `.` as a wildcard (MANDATE_md would pass as the lane file) and a grep that
     # errors would empty the list — both turn unsaved files into an `auto`.
     while IFS= read -r line; do
       case "$line" in
-        ''|'?? TASK.md'|'?? MANDATE.md'|'!! TASK.md'|'!! MANDATE.md') ;;
+        ''|'?? TASK.md'|'?? MANDATE.md'|'?? .ws-kicker'|'!! TASK.md'|'!! MANDATE.md'|'!! .ws-kicker') ;;
         '!! '*) ignored=$((ignored + 1)) ;;
         *) dirty=$((dirty + 1)) ;;
       esac
     done <<EOF
 $status
 EOF
-    [ "$dirty" -gt 0 ] && reasons+=("dirty-worktree $dirty uncommitted or untracked path(s) beyond TASK.md/MANDATE.md")
+    [ "$dirty" -gt 0 ] && reasons+=("dirty-worktree $dirty uncommitted or untracked path(s) beyond TASK.md/MANDATE.md/.ws-kicker")
     [ "$ignored" -gt 0 ] && reasons+=("ignored-files $ignored gitignored path(s) in the lane would be deleted (not part of any PR)")
   else
     reasons+=("dirty-worktree worktree status could not be read")

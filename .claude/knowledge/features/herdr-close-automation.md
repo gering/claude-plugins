@@ -1,10 +1,10 @@
 ---
 title: "herdr /close Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-10-02
+updatedAt: 2026-10-07
 createdFrom: "PR #18"
-updatedFrom: "session: 2026-10-02 (task/auto-accept-clean-close-requests)"
-pluginVersion: 1.17.0
+updatedFrom: "session: 2026-10-07 (task/add-manager-address)"
+pluginVersion: 1.18.0
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -33,9 +33,11 @@ Manager (one `SendMessage` carrying a `work-system close-request` block, then st
 **Every delegated close removes one use of Scenario B** — the point is not convenience,
 it is deleting a use of the path that cannot self-verify.
 
-Detection lives in `herdr-teardown.sh manager-session` (tri-state
-`name=<session>|none|unverified`, always exit 0, like `worktree-tab-state`). Design
-points worth keeping:
+Detection lived in `herdr-teardown.sh manager-session` until 1.18.0; it is now
+`manager.sh resolve` ([manager-address](manager-address.md)), which adds the kicker
+record and a stated leftmost-tab tie-break where the old detector answered
+`unverified` for two root agents. The question names that evidence. Design points
+from the original detector that still hold:
 
 - **`herdr agent list`, not `pane list`.** Only the agent list distinguishes a live
   claude session from a bare shell that survived an earlier `/exit` — and a shell at
@@ -71,8 +73,8 @@ points worth keeping:
   rule's flaw was the *condition*, not the absence of a question: a merged PR alone does
   not mean the lane holds nothing. The damage a forged request can do is bounded by what
   the teardown can lose, so 1.17.0 auto-accepts exactly when that is nothing: merged PR
-  (`assess` confirmed), worktree clean except `TASK.md`/`MANDATE.md` (gitignored paths
-  count — `--force` deletes a `.env` too — except the lane pair itself, which this repo
+  (`assess` confirmed), worktree clean except `TASK.md`/`MANDATE.md`/`.ws-kicker` (gitignored paths
+  count — `--force` deletes a `.env` too — except the lane files themselves, which this repo
   gitignores, so `!! TASK.md` is as harmless as `?? TASK.md`; status flags override
   `showUntrackedFiles`),
   local **and** remote (`ls-remote`, step 9 deletes it) tip == the merged PR's
@@ -211,6 +213,3 @@ Related: [herdr-kickoff-automation](herdr-kickoff-automation.md), [skill-composi
 source of truth). The "never persistent `cd`" footgun the path commands avoid is a
 rule — see `.claude/rules/cwd-safety.md`.
 
-The name-only `manager-session` detector is slated to give way to `manager.sh
-resolve` ([manager-address](manager-address.md)); its name sanitizer already
-lives in the shared `$HERDR_NAME_PRELUDE`.
