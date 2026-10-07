@@ -284,8 +284,6 @@ for a in agents:
         aws = str(a.get("workspace_id") or "")
         if not aws:
             unknown = True; continue
-        if aws != scope:
-            continue
     if str(a.get("agent_status") or "").lower() not in LIVE:
         unknown = True; continue
     if not ID.match(str(a.get("pane_id") or "")) or not ID.match(str(a.get("tab_id") or "")):
@@ -385,8 +383,9 @@ $PY_BODY" "$lane" "$text" "$root"
 # stdin: `herdr agent read --source visible --format ansi`. Prints clear|draft|unknown.
 # The CC composer is the region between the LAST two horizontal rules. A user
 # draft is visible text rendered in a normal style; a prompt suggestion is dim/
-# mid-gray and does not count. The cursor is inverse: over a typed glyph it is
-# still a draft, over the empty composer it is a space.
+# mid-gray and does not count. The cursor is inverse: over the first char of a
+# suggestion it is part of the suggestion, over typed text it is a draft, and
+# over the empty composer it is a space.
 PY_COMPOSER='import sys, re
 raw = sys.stdin.read()
 lines = raw.replace("\r", "").split("\n")
@@ -445,11 +444,11 @@ def muted(st):
     if fg[0] == "basic":
         return fg[1] == 90
     if fg[0] == "idx":
-        return fg[1] == 8 or 241 <= fg[1] <= 250
+        return fg[1] == 8 or 237 <= fg[1] <= 252
     r, g, b = fg[1:]
     return max(r, g, b) - min(r, g, b) <= 16 and 90 <= max(r, g, b) <= 200
 
-draft = False
+draft, inv_glyph, muted_glyph = False, False, False
 # SGR state carries across lines (a wrapped suggestion keeps its style).
 st = {"dim": False, "inverse": False, "fg": None}
 for line in lines[i + 1:j]:
@@ -466,12 +465,19 @@ for line in lines[i + 1:j]:
                 first = False
                 continue
             first = False
-            # A suggestion is muted. Anything else visible is typed text, a
-            # glyph under the inverse cursor included (in an empty composer the
-            # cursor is an inverse SPACE, already skipped above).
+            # A suggestion is muted; any other normal glyph is typed text. A
+            # glyph under the inverse cursor is decided below: the cursor on the
+            # first char of a suggestion, or typed text (an empty composer has
+            # an inverse SPACE, skipped above).
             if muted(st):
-                continue
-            draft = True
+                muted_glyph = True
+            elif st["inverse"]:
+                inv_glyph = True
+            else:
+                draft = True
+# An inverse glyph with no muted text around it is typed text under the cursor.
+if inv_glyph and not muted_glyph:
+    draft = True
 print("draft" if draft else "clear")'
 
 do_prompt() {
@@ -509,7 +515,9 @@ split_text_args() {
   [ "${1:-}" = "--" ] || usage
   shift
   case $# in
-    0) TEXT="$(cat)" ;;
+    # stdin, bounded: a terminal is no heredoc (usage, never a hang), and only
+    # the first 4 KiB are read (the body keeps 300 chars; argv stays small).
+    0) [ -t 0 ] && usage; TEXT="$(head -c 4096)" ;;
     1) TEXT="$1" ;;
     *) usage ;;
   esac

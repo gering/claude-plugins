@@ -68,8 +68,9 @@ terminal gate) and `/close` step 1b delegation, which replaced the name-only
   with ten `─`", not "consists only of `─`". Dim and **mid**-gray cells are not a
   draft: CC renders prompt suggestions that way, and the pilot showed suggestions
   are not user input. Near-black is NOT muted (it is the normal text color of a
-  light theme), and an inverse cell is NOT skipped: the cursor over a typed glyph is
-  still a draft, while an empty composer's cursor is an inverse space. SGR state
+  light theme). An inverse glyph is the cursor: next to muted text it is the first
+  char of a suggestion (clear), alone or next to normal text it is typed (draft); an
+  empty composer's cursor is an inverse space. SGR state
   carries across lines (a wrapped suggestion). No rules found → `unknown` → no send.
   All of this errs toward `draft`: a false draft costs one ping, a false `clear`
   types into the user's text.

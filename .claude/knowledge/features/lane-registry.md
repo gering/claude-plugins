@@ -44,8 +44,9 @@ repo's whole worktrees dir" that `classify_cwd` does. Forcing them through the
 shared helper would be scope creep with regression risk on a tested path. The
 split held up: when `manager-session` (work-system 1.13.0) needed the *1:N* form
 — is any agent sitting at the repo root? — it sourced `$HERDR_MATCH_PRELUDE`
-rather than growing a third copy. The rule is the operation, not the file: 1:1
-stays local, 1:N uses the prelude.
+rather than growing a third copy (its successor, `manager.sh resolve` since 1.18.0,
+does the same). The rule is the operation, not the file: 1:1 stays local, 1:N uses
+the prelude.
 
 ## `lanes.sh` — the derived-live lane view
 

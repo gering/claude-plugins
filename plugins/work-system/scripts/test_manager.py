@@ -335,6 +335,12 @@ for name, inner in (
 ):
     r = prompt(composer(inner))
     check(f"draft detected: {name}", r.get("sent") == "no" and "composer-draft" in r["reasons"], str(r))
+r = prompt(composer("❯ \x1b[7mt\x1b[27m\x1b[2mry: run the tests\x1b[0m"))
+check("cursor on a suggestion's first char → sent", r.get("sent") == "yes", str(r))
+r = prompt(composer("❯ \x1b[7mh\x1b[27mello"))
+check("cursor over typed text → not sent", r.get("sent") == "no", str(r))
+r = prompt(composer("❯ \x1b[38;5;240mtry: dark-theme hint\x1b[0m"))
+check("256-color 240 hint is not a draft", r.get("sent") == "yes", str(r))
 r = prompt(composer("❯ \x1b[2mfirst half of a long\n  wrapped suggestion\x1b[0m"))
 check("wrapped dim suggestion is not a draft", r.get("sent") == "yes", str(r))
 
@@ -348,6 +354,9 @@ r = subprocess.run([BASH, str(SCRIPT), "prompt", str(E.wt), "--"], env=env, capt
 sent = (E.state / "prompted").read_text() if (E.state / "prompted").exists() else ""
 check("stdin event sent verbatim", kv(r.stdout).get("sent") == "yes"
       and "can't merge $(touch /tmp/x)" in sent, r.stdout + sent)
+r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
+                   text=True, timeout=60, input="x" * 3_000_000)
+check("huge stdin is bounded, not E2BIG", r.returncode == 0 and len(r.stdout) < 1000, r.stderr[:200])
 check("empty stdin is usage", subprocess.run([BASH, str(SCRIPT), "body", "--"], env=env,
       capture_output=True, text=True, input="").returncode == 2)
 

@@ -366,7 +366,9 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
     1. **PR opened** — `PR opened: #<n> <url>`;
     2. **review started** — a review you run yourself: after `mandate.sh round`
        booked it, `review round <x>/<y> started (route: local)` from that output
-       (`x` = `review_rounds_used`, `y` = `review_rounds_used + review_rounds_left`). Driving `/cycle --loop` instead
+       (`x` = `review_rounds_used`, `y` = `review_rounds_used + review_rounds_left`;
+       with no budget recorded, `review_rounds_left` is empty: send
+       `review round <x> started (route: local)` without a denominator). Driving `/cycle --loop` instead
        (it books its own rounds and does not ping): ping once before it,
        `review loop started (route: github, <n> rounds left)`;
     3. **terminal gate reached** — `ready-for-merge: PR #<n>` or

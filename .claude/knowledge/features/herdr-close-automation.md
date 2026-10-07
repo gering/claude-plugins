@@ -62,9 +62,11 @@ from the original detector that still hold:
   Because the title is settable by any process in the pane, the confirmation must **name
   the resolved recipient** — a person catching a wrong name is the actual trust anchor
   here, not the string match.
-- **Fail-closed everywhere.** Two agents at the repo root, a non-claude or not-live one
-  there, an unreadable cwd, a junk list element, an empty/malformed list, missing tools
-  → `unverified` → no offer, today's flow unchanged. A wrong `none` costs only the
+- **Fail-closed everywhere.** An unreadable cwd, a junk list element, an
+  empty/malformed list, missing tools → `unverified` → no offer, today's flow unchanged.
+  (The original detector also refused two root agents or a non-claude one; since 1.18.0
+  two root agents fall to the stated leftmost-tab tie-break, and a non-claude Manager
+  is `unique` with an empty SendMessage name, which 1b treats as no offer.) A wrong `none` costs only the
   offer; a wrong `name=` would send a close request to a stranger session.
 - **The request is unauthenticated, so the receiver asks — on doubt (1.17.0).** Cross-
   session messages carry no proof of origin, and a close is destructive. 1.13.0 therefore
