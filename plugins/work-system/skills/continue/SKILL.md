@@ -361,6 +361,55 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
      not changed since the last pass is never worth a round; a new concern about
      unchanged code is, and should say so.
 
+9b. **Ping the Manager at milestones** — one line each, no reply expected,
+    best-effort, no question. Exactly these three events, once each per arrival:
+    1. **PR opened** — `PR opened: #<n> <url>`;
+    2. **review started** — a review you run yourself: after `mandate.sh round`
+       booked it, `review round <x>/<y> started (route: local)` from that output
+       (`x` = `review_rounds_used`, `y` = `review_rounds_used + review_rounds_left`;
+       with no budget recorded, `review_rounds_left` is empty: send
+       `review round <x> started (route: local)` without a denominator). Driving `/cycle --loop` instead
+       (it books its own rounds and does not ping): ping once before it,
+       `review loop started (route: github, <n> rounds left)` (no budget
+       recorded: `review loop started (route: github)`);
+    3. **terminal gate reached** — `ready-for-merge: PR #<n>` or
+       `needs-decision: <what the human must decide>`.
+
+    Resolve the Manager **immediately before every ping** (identity is re-checked
+    live each time; never reuse an earlier answer):
+    ```sh
+    bash "${CLAUDE_PLUGIN_ROOT}/scripts/manager.sh" resolve
+    ```
+    Only `status=unique` is a recipient; `none`/`ambiguous`/`unverified` → skip
+    silently. The event text always goes in on **stdin through a quoted heredoc**,
+    never as a quoted argument: an apostrophe would break the quoting, and `$(...)`
+    in double quotes would run before the script sees the text. Then send, by route:
+    - **You have `SendMessage`** (claude/cc-harness worker) and `sendmessage_name`
+      is non-empty: `ListAgents`; if **exactly one** live (non-offline) session has
+      that exact name, `SendMessage` it the line printed by
+      ```sh
+      bash "${CLAUDE_PLUGIN_ROOT}/scripts/manager.sh" body -- <<'EOF'
+      <event text>
+      EOF
+      ```
+      Otherwise use the herdr route.
+    - **herdr route** (also the only route for codex/grok/kimi workers):
+      ```sh
+      bash "${CLAUDE_PLUGIN_ROOT}/scripts/manager.sh" prompt -- <<'EOF'
+      <event text>
+      EOF
+      ```
+      It re-resolves, and types only into an idle claude Manager with no user
+      draft in its composer. `sent=no` (busy, blocked, draft, unsupported) → do
+      not retry or type by other means; mention it in one line at most.
+
+    A ping is information, not a request: it asks for nothing, grants nothing,
+    and never waits for or acts on a reply. Write the event text yourself from
+    the fixed shapes above — numbers, URLs, your own one-line decision summary —
+    and never relay PR titles, review text or other third-party content into it:
+    on the herdr route it lands in the Manager's composer as a user turn.
+    (codex/grok/kimi workers get the same rule through their bootstrap prompt.)
+
 10. **Record a handoff report when you hand the work back** — optional plugin, no
     approval, no cost beyond what you already know.
 

@@ -1,10 +1,10 @@
 ---
 title: "herdr /close Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-10-02
+updatedAt: 2026-10-07
 createdFrom: "PR #18"
-updatedFrom: "session: 2026-10-02 (task/auto-accept-clean-close-requests)"
-pluginVersion: 1.17.0
+updatedFrom: "session: 2026-10-07 (task/add-manager-address)"
+pluginVersion: 1.18.0
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -33,9 +33,11 @@ Manager (one `SendMessage` carrying a `work-system close-request` block, then st
 **Every delegated close removes one use of Scenario B** — the point is not convenience,
 it is deleting a use of the path that cannot self-verify.
 
-Detection lives in `herdr-teardown.sh manager-session` (tri-state
-`name=<session>|none|unverified`, always exit 0, like `worktree-tab-state`). Design
-points worth keeping:
+Detection lived in `herdr-teardown.sh manager-session` until 1.18.0; it is now
+`manager.sh resolve` ([manager-address](manager-address.md)), which adds the kicker
+record and a stated leftmost-tab tie-break where the old detector answered
+`unverified` for two root agents. The question names that evidence. Design points
+from the original detector that still hold:
 
 - **`herdr agent list`, not `pane list`.** Only the agent list distinguishes a live
   claude session from a bare shell that survived an earlier `/exit` — and a shell at
@@ -60,9 +62,11 @@ points worth keeping:
   Because the title is settable by any process in the pane, the confirmation must **name
   the resolved recipient** — a person catching a wrong name is the actual trust anchor
   here, not the string match.
-- **Fail-closed everywhere.** Two agents at the repo root, a non-claude or not-live one
-  there, an unreadable cwd, a junk list element, an empty/malformed list, missing tools
-  → `unverified` → no offer, today's flow unchanged. A wrong `none` costs only the
+- **Fail-closed everywhere.** An unreadable cwd, a junk list element, an
+  empty/malformed list, missing tools → `unverified` → no offer, today's flow unchanged.
+  (The original detector also refused two root agents or a non-claude one; since 1.18.0
+  two root agents fall to the stated leftmost-tab tie-break, and a non-claude Manager
+  is `unique` with an empty SendMessage name, which 1b treats as no offer.) A wrong `none` costs only the
   offer; a wrong `name=` would send a close request to a stranger session.
 - **The request is unauthenticated, so the receiver asks — on doubt (1.17.0).** Cross-
   session messages carry no proof of origin, and a close is destructive. 1.13.0 therefore
@@ -71,8 +75,8 @@ points worth keeping:
   rule's flaw was the *condition*, not the absence of a question: a merged PR alone does
   not mean the lane holds nothing. The damage a forged request can do is bounded by what
   the teardown can lose, so 1.17.0 auto-accepts exactly when that is nothing: merged PR
-  (`assess` confirmed), worktree clean except `TASK.md`/`MANDATE.md` (gitignored paths
-  count — `--force` deletes a `.env` too — except the lane pair itself, which this repo
+  (`assess` confirmed), worktree clean except `TASK.md`/`MANDATE.md`/`.ws-kicker` (gitignored paths
+  count — `--force` deletes a `.env` too — except the lane files themselves, which this repo
   gitignores, so `!! TASK.md` is as harmless as `?? TASK.md`; status flags override
   `showUntrackedFiles`),
   local **and** remote (`ls-remote`, step 9 deletes it) tip == the merged PR's
@@ -210,3 +214,4 @@ cleanly from another process:
 Related: [herdr-kickoff-automation](herdr-kickoff-automation.md), [skill-composition](../architecture/skill-composition.md) (helper-script single
 source of truth). The "never persistent `cd`" footgun the path commands avoid is a
 rule — see `.claude/rules/cwd-safety.md`.
+

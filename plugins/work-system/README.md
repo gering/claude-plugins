@@ -474,10 +474,11 @@ and decides self-close vs. a different-tab close by pane id. Three entry points:
   tab, i.e. via the robust path above. Preferred whenever offered. The offer appears
   only when the Manager is verifiably there and the close is one it can actually
   serve: the merge is confirmed, the branch is a name-resolvable `task/<name>`,
-  exactly one live Claude agent sits at the repo root inside herdr, and its name
-  resolves to exactly one live session. The confirmation names that recipient — a
-  pane title is settable by any process in the pane, so a person seeing the name is
-  the real check. Any doubt (no Manager, an ambiguous name, herdr unreachable)
+  `manager.sh resolve` names one live Claude Manager inside herdr (see *Workers ping
+  the Manager* below), and its name resolves to exactly one live session. The
+  confirmation names that recipient and how it was picked (the kicker record, the
+  only root agent, or the leftmost-tab tie-break) — a pane title is settable by any
+  process in the pane, so a person seeing the name is the real check. Any doubt (no Manager, an ambiguous name, herdr unreachable)
   silently falls through to the self-close below. On the receiving side the Manager
   closes without asking only when nothing can be lost — PR merged, worktree clean
   (gitignored files included), local and remote branch tips equal to the merged head,
@@ -529,6 +530,30 @@ worktree. Outside herdr, `/continue <task>` prints the manual
 task name to reopen that one's tab from here). The reopen shares the tested
 `scripts/herdr-launch.sh` with `/kickoff` (a `resume` mode alongside `launch`); see
 `skills/continue/SKILL.md`.
+
+### Workers ping the Manager at milestones
+
+`/kickoff` and `/adopt` leave the kicking session's address in the worktree
+(`.ws-kicker`, git-excluded like `MANDATE.md`): its herdr pane, agent-session
+UUID, SendMessage name and canonical repo. The worker (through `/continue`, or
+its bootstrap prompt for codex/grok/kimi) then sends the Manager one line at each
+milestone — **PR opened**, **review round started**
+(`x/y`, or just `x` when no review budget is recorded), **terminal gate reached** (ready-for-merge / needs-decision) — so the
+Manager no longer has to poll for them. No reply is expected and a ping grants
+nothing.
+
+`scripts/manager.sh resolve` answers "who is the Manager?" deterministically:
+the kicker record wins only after it is revalidated live (same pane, same agent
+session, still at the repo root, still running); otherwise the live agents at the
+repo root are the candidates, and with several, the leftmost tab wins as a
+*stated* tie-break (`evidence=leftmost-tab`). Anything uncertain is `ambiguous` or
+`unverified`, and nothing is sent. Claude workers use `SendMessage` when exactly
+one live session carries the resolved name; everyone else goes through
+`manager.sh prompt`, which types into the Manager's pane only when it is an idle
+Claude session with no user draft in its composer (a dim prompt suggestion is not
+a draft). The event text goes in on stdin through a quoted heredoc, so quotes or
+`$(...)` in it never reach a shell. `/close`'s delegation offer uses the same
+resolver.
 
 ### Task tabs carry their state glyph
 
