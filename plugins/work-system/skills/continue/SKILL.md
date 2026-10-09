@@ -370,7 +370,8 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
        with no budget recorded, `review_rounds_left` is empty: send
        `review round <x> started (route: local)` without a denominator). Driving `/cycle --loop` instead
        (it books its own rounds and does not ping): ping once before it,
-       `review loop started (route: github, <n> rounds left)`;
+       `review loop started (route: github, <n> rounds left)` (no budget
+       recorded: `review loop started (route: github)`);
     3. **terminal gate reached** — `ready-for-merge: PR #<n>` or
        `needs-decision: <what the human must decide>`.
 

@@ -440,19 +440,27 @@ def muted(st):
     if not fg:
         return False
     # Mid grays only: near-black is the normal text color of a light theme and
-    # must read as typed text, never as a suggestion.
+    # must read as typed text, never as a suggestion. One rule for both
+    # encodings: a 256-color grayscale step is mapped to its xterm RGB value
+    # (232+n = 8+10n) and judged like a 24-bit color.
     if fg[0] == "basic":
         return fg[1] == 90
     if fg[0] == "idx":
-        return fg[1] == 8 or 237 <= fg[1] <= 252
-    r, g, b = fg[1:]
-    return max(r, g, b) - min(r, g, b) <= 16 and 90 <= max(r, g, b) <= 200
+        if fg[1] == 8:
+            return True
+        if not 232 <= fg[1] <= 255:
+            return False
+        v = 8 + 10 * (fg[1] - 232)
+        r = g = b = v
+    else:
+        r, g, b = fg[1:]
+    return max(r, g, b) - min(r, g, b) <= 16 and 80 <= max(r, g, b) <= 200
 
-draft, inv_glyph, muted_glyph = False, False, False
+draft = False
 # SGR state carries across lines (a wrapped suggestion keeps its style).
 st = {"dim": False, "inverse": False, "fg": None}
 for line in lines[i + 1:j]:
-    first = True
+    first, cursor = True, False
     for tok in re.split(r"(\x1b\[[0-9;?]*[A-Za-z])", line):
         if tok.startswith("\x1b["):
             if tok.endswith("m"):
@@ -466,18 +474,21 @@ for line in lines[i + 1:j]:
                 continue
             first = False
             # A suggestion is muted; any other normal glyph is typed text. A
-            # glyph under the inverse cursor is decided below: the cursor on the
-            # first char of a suggestion, or typed text (an empty composer has
-            # an inverse SPACE, skipped above).
+            # glyph under the inverse cursor is a suggestion first char only
+            # when the NEXT glyph on its line is muted; otherwise it is typed
+            # (an empty composer has an inverse SPACE, skipped above).
+            if cursor:
+                cursor = False
+                if not muted(st):
+                    draft = True
             if muted(st):
-                muted_glyph = True
-            elif st["inverse"]:
-                inv_glyph = True
+                continue
+            if st["inverse"]:
+                cursor = True
             else:
                 draft = True
-# An inverse glyph with no muted text around it is typed text under the cursor.
-if inv_glyph and not muted_glyph:
-    draft = True
+    if cursor:
+        draft = True
 print("draft" if draft else "clear")'
 
 do_prompt() {

@@ -341,6 +341,15 @@ r = prompt(composer("❯ \x1b[7mh\x1b[27mello"))
 check("cursor over typed text → not sent", r.get("sent") == "no", str(r))
 r = prompt(composer("❯ \x1b[38;5;240mtry: dark-theme hint\x1b[0m"))
 check("256-color 240 hint is not a draft", r.get("sent") == "yes", str(r))
+for name, inner in (
+    ("256-color near-black 237", "❯ \x1b[38;5;237mdeploy"),
+    ("256-color light gray 252", "❯ \x1b[38;5;252mdeploy"),
+    ("fully inverse draft + dim line elsewhere", "❯ \x1b[7mdeploy to prod\x1b[27m\n  \x1b[2mhint\x1b[0m"),
+    ("one inverse char + dim line elsewhere", "❯ \x1b[7mh\x1b[27m\n  \x1b[2mhint\x1b[0m"),
+    ("inverse char at line end before a dim line", "❯ \x1b[2mhint\x1b[0m \x1b[7mx\x1b[27m"),
+):
+    r = prompt(composer(inner))
+    check(f"draft detected: {name}", r.get("sent") == "no" and "composer-draft" in r["reasons"], str(r))
 r = prompt(composer("❯ \x1b[2mfirst half of a long\n  wrapped suggestion\x1b[0m"))
 check("wrapped dim suggestion is not a draft", r.get("sent") == "yes", str(r))
 
