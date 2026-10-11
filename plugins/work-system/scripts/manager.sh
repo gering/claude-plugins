@@ -441,8 +441,9 @@ def muted(st):
         return False
     # Mid grays only: near-black is the normal text color of a light theme and
     # must read as typed text, never as a suggestion. One rule for both
-    # encodings: a 256-color grayscale step is mapped to its xterm RGB value
-    # (232+n = 8+10n) and judged like a 24-bit color.
+    # encodings: a 256-color grayscale-ramp step is mapped to its xterm RGB
+    # value (232+n = 8+10n) and judged like a 24-bit color. Color-cube grays
+    # (59/102/145/188) are not mapped and read as typed text (toward draft).
     if fg[0] == "basic":
         return fg[1] == 90
     if fg[0] == "idx":
@@ -454,7 +455,7 @@ def muted(st):
         r = g = b = v
     else:
         r, g, b = fg[1:]
-    return max(r, g, b) - min(r, g, b) <= 16 and 80 <= max(r, g, b) <= 200
+    return max(r, g, b) - min(r, g, b) <= 16 and 90 <= max(r, g, b) <= 200
 
 draft = False
 # SGR state carries across lines (a wrapped suggestion keeps its style).
@@ -466,24 +467,25 @@ for line in lines[i + 1:j]:
             if tok.endswith("m"):
                 apply_sgr(st, [int(x) for x in re.findall(r"\d+", tok)] or [0])
             continue
+        m = muted(st)
         for ch in tok:
+            # A glyph under the inverse cursor is a suggestion first char only
+            # when the NEXT cell on its line is muted, a blank one included (a
+            # suggestion styles its own spaces); otherwise it is typed text.
+            # An empty composer has an inverse SPACE, which never sets it.
             if ch.isspace():
+                if cursor:
+                    cursor = False
+                    if not m:
+                        draft = True
                 continue
             if first and ch in "\u276f>\u203a":
                 first = False
                 continue
             first = False
-            # A suggestion is muted; any other normal glyph is typed text. A
-            # glyph under the inverse cursor is a suggestion first char only
-            # when the NEXT glyph on its line is muted; otherwise it is typed
-            # (an empty composer has an inverse SPACE, skipped above).
-            if cursor:
+            if m:
                 cursor = False
-                if not muted(st):
-                    draft = True
-            if muted(st):
-                continue
-            if st["inverse"]:
+            elif st["inverse"] and not cursor:
                 cursor = True
             else:
                 draft = True

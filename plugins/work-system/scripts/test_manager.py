@@ -339,9 +339,18 @@ r = prompt(composer("❯ \x1b[7mt\x1b[27m\x1b[2mry: run the tests\x1b[0m"))
 check("cursor on a suggestion's first char → sent", r.get("sent") == "yes", str(r))
 r = prompt(composer("❯ \x1b[7mh\x1b[27mello"))
 check("cursor over typed text → not sent", r.get("sent") == "no", str(r))
-r = prompt(composer("❯ \x1b[38;5;240mtry: dark-theme hint\x1b[0m"))
-check("256-color 240 hint is not a draft", r.get("sent") == "yes", str(r))
 for name, inner in (
+    ("256-color 241 hint", "❯ \x1b[38;5;241mtry: dark-theme hint\x1b[0m"),
+    ("truecolor 90 hint", "❯ \x1b[38;2;90;90;90mtry: dark-theme hint\x1b[0m"),
+    ("cursor on a suggestion first word + muted space",
+     "❯ \x1b[7ma\x1b[27m\x1b[2m fix for the tests\x1b[0m"),
+):
+    r = prompt(composer(inner))
+    check(f"not a draft: {name}", r.get("sent") == "yes", str(r))
+for name, inner in (
+    ("256-color 240", "❯ \x1b[38;5;240mdeploy"),
+    ("truecolor 85", "❯ \x1b[38;2;85;85;85mdeploy to prod"),
+    ("inverse char, plain space, same-line dim hint", "❯ \x1b[7mx\x1b[27m \x1b[2mhint\x1b[0m"),
     ("256-color near-black 237", "❯ \x1b[38;5;237mdeploy"),
     ("256-color light gray 252", "❯ \x1b[38;5;252mdeploy"),
     ("fully inverse draft + dim line elsewhere", "❯ \x1b[7mdeploy to prod\x1b[27m\n  \x1b[2mhint\x1b[0m"),

@@ -538,7 +538,8 @@ task name to reopen that one's tab from here). The reopen shares the tested
 UUID, SendMessage name and canonical repo. The worker (through `/continue`, or
 its bootstrap prompt for codex/grok/kimi) then sends the Manager one line at each
 milestone — **PR opened**, **review round started**
-(`x/y`, or just `x` when no review budget is recorded), **terminal gate reached** (ready-for-merge / needs-decision) — so the
+(`x/y`, just `x` without a recorded budget, or `review loop started` on the
+GitHub route; exact forms in `/continue` step 9b), **terminal gate reached** (ready-for-merge / needs-decision) — so the
 Manager no longer has to poll for them. No reply is expected and a ping grants
 nothing.
 
