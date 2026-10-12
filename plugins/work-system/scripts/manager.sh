@@ -432,8 +432,8 @@ def apply_sgr(st, nums):
         k += 1
 
 def muted(st):
-    # How CC renders suggestions and hints: dim, bright-black, a 256-color
-    # grayscale step, or a 24-bit near-neutral below white.
+    # How CC renders suggestions and hints: dim, bright-black, or a mid gray
+    # (24-bit near-neutral 90..180, or the 256-color ramp steps 241..249).
     if st["dim"]:
         return True
     fg = st["fg"]
@@ -455,7 +455,7 @@ def muted(st):
         r = g = b = v
     else:
         r, g, b = fg[1:]
-    return max(r, g, b) - min(r, g, b) <= 16 and 90 <= max(r, g, b) <= 200
+    return max(r, g, b) - min(r, g, b) <= 16 and 90 <= max(r, g, b) <= 180
 
 draft = False
 # SGR state carries across lines (a wrapped suggestion keeps its style).
@@ -470,27 +470,31 @@ for line in lines[i + 1:j]:
         m = muted(st)
         for ch in tok:
             # A glyph under the inverse cursor is a suggestion first char only
-            # when the NEXT cell on its line is muted, a blank one included (a
-            # suggestion styles its own spaces); otherwise it is typed text.
-            # An empty composer has an inverse SPACE, which never sets it.
+            # when the very NEXT cell is a muted glyph; a blank (whatever its
+            # style) or normal text there makes it typed. An empty composer has
+            # an inverse SPACE, which never sets the cursor.
+            if cursor:
+                cursor = False
+                if ch.isspace() or not m:
+                    draft = True
             if ch.isspace():
-                if cursor:
-                    cursor = False
-                    if not m:
-                        draft = True
                 continue
             if first and ch in "\u276f>\u203a":
                 first = False
                 continue
             first = False
             if m:
-                cursor = False
-            elif st["inverse"] and not cursor:
+                continue
+            if st["inverse"]:
                 cursor = True
             else:
                 draft = True
     if cursor:
         draft = True
+# Paste and image placeholders are user content whatever their style.
+plain = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", "\n".join(lines[i + 1:j]))
+if re.search(r"\[(Pasted text|Image) #[0-9]", plain):
+    draft = True
 print("draft" if draft else "clear")'
 
 do_prompt() {
