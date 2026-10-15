@@ -38,8 +38,10 @@
 #                            --for-agent <selector> asks the registry which
 #                            actions that worker cannot exercise and drops them.
 #                            --preset standard|draft-only|merge-delegated seeds
-#                            allow/deny/terminal_gate/review_budget; explicit k=v
-#                            wins; --without <action> drops tokens from allow
+#                            allow/deny/terminal_gate/review_budget (the
+#                            repo's mandate.review_budget setting replaces
+#                            the budget of standard/merge-delegated); explicit
+#                            k=v wins; --without <action> drops tokens from allow
 #                            (repeatable). Also adds /MANDATE.md to the repo's
 #                            git exclude. task= and authorized_by= are required.
 #   allows <action> [<dir>]  Exit 0 allowed / 1 denied or unlisted / 3 no mandate.
@@ -47,8 +49,10 @@
 #                            (exit 2), never a verdict.
 #   round [<dir>]            Consume one review round; emit the new counters.
 #   actions                  List the known action vocabulary, one per line.
-#   presets                  Emit each preset's allow/deny/terminal_gate/
-#                            review_budget — the source /kickoff renders from.
+#   presets [<dir>]          Emit each preset's allow/deny/terminal_gate/
+#                            review_budget (+ review_budget_source=preset|
+#                            setting) as init would write it for <dir>'s repo
+#                            — the source /kickoff renders from.
 #
 # Output: `key=value` lines on stdout. Exit 0 on success, 2 on usage error OR
 # on a record nobody can vouch for (corrupt frontmatter, a symlink, a file git
@@ -523,12 +527,42 @@ apply_preset() {
   esac
 }
 
+# A repo can give its new lanes a different review budget than the preset
+# (`[mandate] review_budget` in .work-system.toml, read by ws-settings.py from
+# the main checkout). It replaces the budget of every preset that authorizes a
+# review — draft-only authorizes none, so its 0 is not a default to override.
+# A setting that cannot be read never blocks a kickoff: the preset value stands
+# and the reason goes to stderr. Sets REPO_BUDGET (empty = unset/unusable).
+REPO_BUDGET=""; REPO_BUDGET_READ="no"
+read_repo_budget() {
+  [ "$REPO_BUDGET_READ" = "yes" ] && return 0
+  REPO_BUDGET_READ="yes"
+  local out note
+  out="$(python3 -I "$SCRIPT_DIR/ws-settings.py" get "$1" mandate.review_budget 2>&1)" || {
+    echo "${0##*/}: mandate.review_budget setting not read (${out%%$'\n'*}) — using the preset budget" >&2
+    return 0
+  }
+  REPO_BUDGET="$(printf '%s\n' "$out" | sed -n 's/^value=//p')"
+  note="$(printf '%s\n' "$out" | sed -n 's/^note=//p')"
+  [ -z "$note" ] || echo "${0##*/}: $note" >&2
+  case "$REPO_BUDGET" in *[!0-9]*) REPO_BUDGET="" ;; esac
+}
+
+# Apply the repo setting to a preset's budget. Sets BUDGET_SOURCE.
+apply_repo_budget() {
+  BUDGET_SOURCE="preset"
+  case "$1" in standard|merge-delegated) ;; *) return 0 ;; esac
+  read_repo_budget "$2"
+  if [ -n "$REPO_BUDGET" ]; then v_review_budget="$REPO_BUDGET"; BUDGET_SOURCE="setting"; fi
+}
+
 do_presets() {
-  local p v_allow v_deny v_terminal_gate v_review_budget
+  local dir="${1:-.}" p v_allow v_deny v_terminal_gate v_review_budget
   for p in $PRESETS; do
     apply_preset "$p"
-    printf 'preset=%s\nallow=%s\ndeny=%s\nterminal_gate=%s\nreview_budget=%s\n' \
-      "$p" "$v_allow" "$v_deny" "$v_terminal_gate" "$v_review_budget"
+    apply_repo_budget "$p" "$dir"
+    printf 'preset=%s\nallow=%s\ndeny=%s\nterminal_gate=%s\nreview_budget=%s\nreview_budget_source=%s\n' \
+      "$p" "$v_allow" "$v_deny" "$v_terminal_gate" "$v_review_budget" "$BUDGET_SOURCE"
   done
 }
 
@@ -628,7 +662,7 @@ do_init() {
   # authorized_by/allow/deny from an answer the user actually gave.
   local v_task="" v_recorded_at="" v_recorded_by="kickoff" v_authorized_by=""
   local v_scope="" v_terminal_gate="reviewed-pr" v_allow="" v_deny=""
-  local v_review_budget="" v_review_rounds_used="0"
+  local v_review_budget="" v_review_rounds_used="0" explicit_budget="no"
 
   # Two passes: --preset seeds the quadruple, explicit k=v then overrides it,
   # no matter which order they were written in.
@@ -679,7 +713,7 @@ do_init() {
           terminal_gate)      v_terminal_gate="$val" ;;
           allow)              v_allow="$val" ;;
           deny)               v_deny="$val" ;;
-          review_budget)      v_review_budget="$val" ;;
+          review_budget)      v_review_budget="$val"; explicit_budget="yes" ;;
           review_rounds_used) v_review_rounds_used="$val" ;;
           *) die "unknown key: $key" ;;
         esac ;;
@@ -688,6 +722,13 @@ do_init() {
     esac
   done
   [ -n "$want_dir" ] && dir="$want_dir"
+  # After the k=v pass, so an explicit review_budget= still wins.
+  BUDGET_SOURCE="explicit"
+  if [ -z "$preset" ]; then
+    [ "$explicit_budget" = "yes" ] || BUDGET_SOURCE="none"
+  elif [ "$explicit_budget" = "no" ]; then
+    apply_repo_budget "$preset" "$dir"
+  fi
   [ "$expect_without" = "yes" ] && die "--without needs a value: --without <action>"
   [ "$expect_agent" = "yes" ] && die "--for-agent needs a value: --for-agent <selector>"
   if [ -n "$for_agent" ]; then
@@ -832,6 +873,7 @@ EOF
   printf 'mandate_file=%s\n' "$MANDATE_PATH"
   printf 'mandate_exists=yes\n'
   printf 'written=yes\n'
+  printf 'review_budget_source=%s\n' "$BUDGET_SOURCE"
   ensure_excluded "${MANDATE_PATH%/*}"
 }
 
@@ -892,6 +934,6 @@ case "${1:-}" in
   allows)  shift || true; resolve_lane_dir "$CLI_BRANCH" "${2:-.}"; do_allows "${1:-}" "$LANE_DIR" ;;
   round)   shift || true; resolve_lane_dir "$CLI_BRANCH" "${1:-.}"; do_round "$LANE_DIR" ;;
   actions) printf '%s\n' $KNOWN_ACTIONS ;;
-  presets) do_presets ;;
+  presets) shift || true; do_presets "${1:-.}" ;;
   *) echo "usage: ${0##*/} {path|lane|show|init|allows|round|actions|presets} [--branch <name>] [...]" >&2; exit 2 ;;
 esac

@@ -984,6 +984,79 @@ check("a valueless --branch is a usage error", run("show", "--branch").returncod
 check("--branch=<name> works too",
       kv(run("show", "--branch=task/lane-b", str(mainr)).stdout).get("task") == "lane-b")
 
+# --- the repo's mandate.review_budget setting --------------------------------
+# A repo can give new lanes another budget than the preset (.work-system.toml).
+# It replaces the budget of the presets that authorize a review, never draft-
+# only's 0, never an explicit review_budget=, and never blocks when unusable.
+def budget_repo(toml=None):
+    r = make_repo()
+    if toml is not None:
+        (r / ".work-system.toml").write_text(toml)
+    return r
+
+
+def presets_of(d):
+    blocks, cur = {}, None
+    for line in run("presets", str(d)).stdout.splitlines():
+        k, _, v = line.partition("=")
+        if k == "preset":
+            cur = v; blocks[cur] = {}
+        elif cur:
+            blocks[cur][k] = v
+    return blocks
+
+
+def init_budget(d, preset, *extra):
+    r = run("init", str(d), "--preset", preset, "task=t", "authorized_by=user", *extra)
+    return r, kv(run("show", str(d)).stdout).get("review_budget")
+
+
+FIVE = "[mandate]\nreview_budget = 5\n"
+for preset, want in (("standard", "5"), ("merge-delegated", "5"), ("draft-only", "0")):
+    r, got = init_budget(budget_repo(FIVE), preset)
+    check(f"setting: {preset} records {want}", got == want)
+    check(f"setting: {preset} reports its source",
+          kv(r.stdout).get("review_budget_source") == ("setting" if want == "5" else "preset"))
+    check(f"setting: presets shows {preset} as init writes it",
+          presets_of(budget_repo(FIVE))[preset].get("review_budget") == want)
+
+r, got = init_budget(budget_repo(FIVE), "standard", "review_budget=2")
+check("setting: an explicit review_budget= wins", got == "2")
+check("setting: ...and is reported as explicit",
+      kv(r.stdout).get("review_budget_source") == "explicit")
+r, got = init_budget(budget_repo(), "standard")
+check("setting: unset keeps the preset budget", got == "3")
+check("setting: unset reports the preset as source",
+      kv(r.stdout).get("review_budget_source") == "preset")
+r, got = init_budget(budget_repo("[mandate]\nreview_budget = 0\n"), "standard")
+check("setting: 0 is a value, not unset", got == "0")
+
+for bad, why in (("[mandate]\nreview_budget = -1\n", "negative"),
+                 ("[mandate]\nreview_budget = \"5\"\n", "a string"),
+                 ("[mandate]\nreview_budget = true\n", "a boolean"),
+                 ("[mandate\nreview_budget = 5\n", "unparsable TOML")):
+    r, got = init_budget(budget_repo(bad), "standard")
+    check(f"setting: {why} falls back to the preset budget",
+          kv(r.stdout).get("written") == "yes" and got == "3")
+    check(f"setting: {why} says why on stderr", ".work-system.toml" in r.stderr)
+
+sym = budget_repo()
+(sym / "real.toml").write_text(FIVE)
+(sym / ".work-system.toml").symlink_to(sym / "real.toml")
+r, got = init_budget(sym, "standard")
+check("setting: a symlinked config is ignored", got == "3" and "symlink" in r.stderr)
+
+# Read from the MAIN checkout: a branch (e.g. one /adopt took over) cannot raise
+# its own lane's budget, and every lane of a repo sees one value.
+mc = budget_repo("[mandate]\nreview_budget = 4\n")
+subprocess.run(["git", "-C", str(mc), "-c", "user.name=t", "-c", "user.email=t@t",
+                "commit", "-q", "--allow-empty", "-m", "i"], check=True)
+lw = mc / "lane"
+subprocess.run(["git", "-C", str(mc), "worktree", "add", "-q", str(lw), "-b", "x"], check=True)
+(lw / ".work-system.toml").write_text("[mandate]\nreview_budget = 9\n")
+check("setting: a lane reads the main checkout's config",
+      init_budget(lw, "standard")[1] == "4")
+
 
 if FAILS:
     print("FAIL:")

@@ -75,6 +75,19 @@ note, and a remembered runtime answer (the no-bot memory) lives in the git
 common dir — never written back into the user's TOML. Revisit once discovery
 works for installed plugins.
 
+**Second consumer — work-system `mandate.review_budget` (1.19.0).** Same
+self-read exception, but as one reusable helper, `scripts/ws-settings.py get
+<dir> <dotted.key>`, so later work-system settings (paths, the kickoff agent
+default) reuse it instead of growing a second reader. Two deliberate choices:
+the config is read from the repo's **main checkout**, not the linked worktree
+(every lane sees one value, and an adopted branch cannot raise its own lane's
+budget); and a key with **no schema default** means "unset — the caller's own
+default applies" (here: the preset's budget), so the schema need not restate
+the preset value. `mandate.sh init` applies it (not `/kickoff` prose, so
+`/adopt` gets it too) and `presets <dir>` renders the same value, so the
+question the user answers matches what `init` writes. settings.py does not
+enforce `minimum`; ws-settings.py does.
+
 ## Hardening lessons (from the swarm + Codex reviews)
 
 The write path is the risk surface — a naive TOML serializer and an under-vetted

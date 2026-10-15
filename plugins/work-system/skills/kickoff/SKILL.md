@@ -270,11 +270,13 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     **Read the concrete grants out of the script, not out of this file:**
 
     ```sh
-    bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" presets
+    bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" presets "<main-repo>"
     ```
 
     It prints `preset=`, `allow=`, `deny=`, `terminal_gate=` and `review_budget=`
-    for each. Build the question from that output, so what the user consents to is
+    for each — the budget as `init` will write it for this repo:
+    `review_budget_source=setting` means the repo's `[mandate] review_budget` in
+    `.work-system.toml` replaced the preset's own value (say so in the question). Build the question from that output, so what the user consents to is
     what `init` will actually write. A hardcoded copy of the lists stood here and
     is deliberately gone: the user would otherwise agree to a set the script no
     longer writes, and the worker would then stop to ask about an action the user
