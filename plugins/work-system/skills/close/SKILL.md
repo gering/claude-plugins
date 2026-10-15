@@ -59,7 +59,8 @@ Rules:
       `confidence=confirmed`). An unconfirmed merge needs the step-2 question answered by
       the person who has the context — *here*, not stalled in another tab after this
       session already reported "sent" and stopped.
-   3. **The worktree is clean** apart from an untracked `TASK.md` (`git status --short`).
+   3. **The worktree is clean** apart from the lane files `TASK.md`, `MANDATE.md` and
+      `.ws-kicker` (`git status --short`).
       Uncommitted or untracked work means step 7 would ask "force remove?" — the same
       reasoning as condition 2: that decision belongs to the session whose user can see
       what the changes are, not to a Manager tab minutes later.
@@ -70,14 +71,15 @@ Rules:
    5. `[ "${HERDR_ENV:-}" = "1" ]` and `$HERDR_WORKSPACE_ID` is non-empty. Outside herdr
       there is no repo↔session mapping at all (`ListAgents` rows carry no cwd) — never
       guess one from a name that merely *looks* like a Manager.
-   6. The detector names a candidate:
+   6. The Manager resolver names a candidate with a SendMessage address:
       ```sh
-      MGR=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-teardown.sh" manager-session "$HERDR_WORKSPACE_ID" "<main-repo-path>")
+      bash "${CLAUDE_PLUGIN_ROOT}/scripts/manager.sh" resolve
       ```
-      (`<main-repo-path>` from `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path`.)
-      Proceed **only** on
-      `name=<session-name>`; `none` and `unverified` both mean no offer — do not report
-      either, they are the normal quiet case.
+      Proceed **only** on `status=unique` with a non-empty `sendmessage_name=`; keep
+      that name, `evidence=`, `herdr_pane=` and `candidates=` for the question.
+      `none`, `ambiguous`, `unverified` and an empty name (a non-claude Manager, or a
+      kicker whose title changed) all mean no offer — do not report them, they are the
+      normal quiet case.
    7. `ListAgents` lists **exactly one** peer session with that exact name **among live
       interactive sessions** — ignore `offline` rows and Remote Control rows for BOTH the
       match and the ambiguity count (they cannot receive a close, and counting them lets an
@@ -99,11 +101,17 @@ Rules:
    **The question** (exactly one `AskUserQuestion`, three options). Name the resolved
    recipient AND the evidence behind it, so the user can tell their own Manager from a
    same-named stranger — never ask about "the Manager" in the abstract. Say, in the
-   question or its option description: the session name, that it came from the pane
-   titled that way at `<main-repo-path>` in herdr workspace `$HERDR_WORKSPACE_ID`, and
-   that matching that pane to the `ListAgents` session is by NAME only — nothing proves
-   they are the same session. That last clause is the point: it tells the user what they
-   are actually being asked to vouch for.
+   question or its option description: the session name, the herdr pane it came from at
+   `<main-repo-path>`, and how the resolver picked that pane, from `evidence=`:
+   - `kicker` → the session that kicked off this task (recorded at kickoff in
+     `.ws-kicker`, still the same pane and agent session at the repo root). The record
+     sits in this worktree, so it is an address, not proof.
+   - `sole-root-agent` → the only live agent at the repo root in this workspace.
+   - `leftmost-tab` → the leftmost of `<candidates>` live agents at the repo root, a
+     **tie-break, not proof**. Say so plainly.
+   Then add that matching that pane to the `ListAgents` session is by NAME only —
+   nothing proves they are the same session. That clause is the point: it tells the
+   user what they are actually being asked to vouch for.
    - **"Delegate to `<name>`"** *(recommended)* — send **one** `SendMessage` to that name,
      with this body verbatim:
      ```text
@@ -379,11 +387,11 @@ Rules:
      for the user; guessing risks `close-tab` killing the live session's own tab
      mid-turn. Reading ids removes nothing — the teardown itself is step 12, after cleanup.
    - First check for untracked/modified files: `git -C <worktree-path> status --short`
-   - If the only differences are `TASK.md` and/or `MANDATE.md` (both untracked,
-     both written by kickoff/adopt as ephemeral lane state), use `--force` directly:
+   - If the only differences are `TASK.md`, `MANDATE.md` and/or `.ws-kicker` (all
+     untracked, all written by kickoff/adopt as ephemeral lane state), use `--force` directly:
      `git -C <main-repo-path> worktree remove <worktree-path> --force`
    - Otherwise try: `git -C <main-repo-path> worktree remove <worktree-path>`
-   - If fails (uncommitted changes beyond those two):
+   - If fails (uncommitted changes beyond those lane files):
      - Show full status: `git -C <worktree-path> status`
      - Ask: "Force remove? (uncommitted changes will be lost)"
      - If yes: `git -C <main-repo-path> worktree remove <worktree-path> --force`
@@ -682,7 +690,7 @@ no proof of origin, and a close is destructive (worktree removed, branch deleted
    itself proves nothing. But what a forged or mistaken request can *cost* is bounded by
    what the teardown can lose, and `auto` requires that to be nothing: the PR is merged
    (`assess` confirmed), the worktree holds nothing beyond the ephemeral
-   `TASK.md`/`MANDATE.md` — no modified, untracked **or gitignored** path (`--force`
+   `TASK.md`/`MANDATE.md`/`.ws-kicker` — no modified, untracked **or gitignored** path (`--force`
    deletes a gitignored `.env` too) — the local **and** remote branch tips **are** the
    merged PR's head (no commit after the merge, nothing unpushed, nothing pushed later
    that step 9 would delete), and at most one agent — the requester — lives anywhere in

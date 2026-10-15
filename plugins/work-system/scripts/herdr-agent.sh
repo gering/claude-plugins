@@ -24,6 +24,8 @@
 #                               and classify_cwd() — prepend it to a consumer
 #                               python snippet so the cwd match logic is reused,
 #                               never copied (the "realpath cwd match prelude").
+#        $HERDR_NAME_PRELUDE    a python3 source string defining session_name():
+#                               the sanitized SendMessage name of an agent row.
 #        ha_have / ha_list / ha_get / ha_read / ha_wait   the shell wrappers.
 #      Sourcing must stay side-effect free (the CLI dispatch at the foot is
 #      guarded by "am I the executed script?") so a consumer can take the
@@ -77,6 +79,32 @@ def classify_cwd(cwd, root, wtdir):
     if os.path.dirname(cwd) == wtdir:
         return "task", os.path.basename(cwd), cwd
     return None, None, None'
+
+# ---- shared session-name derivation (the "name prelude") --------------------
+# A python3 source string defining session_name(agent_row): the CC SendMessage
+# address of a herdr agent row, used by manager.sh resolve. Kept here, beside
+# the match prelude, so the sanitizing lives in exactly one place. Apostrophe-
+# free like the match prelude. Needs `import re, unicodedata` (included).
+HERDR_NAME_PRELUDE='import re, unicodedata
+def session_name(a):
+    # The SendMessage address is the CLAUDE SESSION name, which Claude writes into
+    # the terminal title -- NOT the herdr agent name (verified live: a herdr agent
+    # named gcp-auth-159 hosts the session "answer-gcp-auth-questions-buchhalter-159").
+    # NO fallback to the herdr agent `name`: it is a launch label, so emitting it
+    # would hand the caller a string that is not an address. No title -> "".
+    t = str(a.get("terminal_title_stripped") or a.get("terminal_title") or "")
+    # Blank EVERY control/format char first (Cc/Cf, plus surrogates/private use):
+    # newlines would forge extra output lines, and ANSI escapes or a bidi override
+    # could make the printed name read differently than it matches.
+    t = "".join(" " if unicodedata.category(c) in ("Cc", "Cf", "Cs", "Co") else c for c in t)
+    # Drop ONE leading symbol+space (the herdr/claude spinner glyph) and collapse.
+    # The space is required, so a punctuation-led name (/habemus-event) survives.
+    t = re.sub(r"^[^\w\s]\s+", "", t.strip())
+    t = re.sub(r"\s+", " ", t).strip()
+    # 64 chars: the value is echoed into prompts before any gate runs, and a pane
+    # title is settable by any process in that pane -- prose there is an injection
+    # surface, not an address.
+    return "" if len(t) > 64 else t'
 
 # Default bound for `wait` when the caller passes none — a wrapper must never
 # wait unboundedly (that would be the busy loop this script exists to avoid).
