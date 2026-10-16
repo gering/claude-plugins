@@ -196,6 +196,26 @@ def check_skill_frontmatter():
             warn(f"{rel(skill)}: description is {words} words (aim <= {DESC_WORDS_WARN})")
 
 
+# Claude Code substitutes `$<digit>` in skill content with the skill's arguments
+# (`$0` = first) at render time, also inside code blocks. A shell helper's `$1`
+# thus became `/swarm:review --pr 65`'s `65`. Forward `"$@"` (not a substitution
+# token) to a script instead; a backslash escape is not used here, since in a
+# code block a missed substitution would leave the backslash in the shell code.
+POSITIONAL_RE = re.compile(r"\$[0-9]")
+
+
+def check_skill_positional_params():
+    """No `$<digit>` anywhere in a SKILL.md — it is replaced by a skill argument."""
+    for skill in sorted((REPO / "plugins").glob("*/skills/*/SKILL.md")):
+        for lineno, line in enumerate(skill.read_text(encoding="utf-8").splitlines(), 1):
+            m = POSITIONAL_RE.search(line)
+            if m:
+                err(
+                    f"{rel(skill)}:{lineno}: '{m.group(0)}' is replaced by a skill "
+                    f"argument at render time — forward \"$@\" to a script instead"
+                )
+
+
 def check_internal_refs():
     """Every ${CLAUDE_PLUGIN_ROOT}/<path> referenced in a plugin must exist.
 
@@ -285,6 +305,7 @@ def main() -> int:
     checks = [
         ("JSON validity + version sync", check_json_and_versions),
         ("SKILL.md frontmatter", check_skill_frontmatter),
+        ("SKILL.md positional parameters", check_skill_positional_params),
         ("internal ${CLAUDE_PLUGIN_ROOT} references", check_internal_refs),
         ("shell script syntax", check_shell_scripts),
         ("plugin tests", check_plugin_tests),

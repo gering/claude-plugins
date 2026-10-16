@@ -122,6 +122,7 @@ if frag:
             '"${SWARM_GROK_MODEL:-grok-4.7}"\n'
             # single-quoted: the STUB must not run it either — only the fragment is under test
             "printf '%s\\n' 'degraded=pinned; $(id) `id`'\n")
+        shutil.copy(HERE / "kv.sh", root / "scripts" / "kv.sh")  # the fragment's real lookup helper
         for shell in ("bash", "zsh", "sh"):
             if not shutil.which(shell):
                 continue

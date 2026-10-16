@@ -180,7 +180,15 @@ cp "${CLAUDE_PLUGIN_ROOT}/workflows/swarm-review.js" "$WORKFLOW" \
 # Read only the validated JSON block from the exact script Workflow will run.
 CODEX_POLICY="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/profiles.py" --workflow "$WORKFLOW" --profile "$PROFILE" --codex-policy)" \
   || { echo "SWARM_PROFILE_ERR=could not resolve the staged profile map"; rm -rf "$TMPD" "$WORKDIR"; exit 1; }
-_cp() { printf '%s\n' "$CODEX_POLICY" | sed -n "s/^$1=//p" | head -n 1; }
+# Lookup helpers forward "$@" to kv.sh and never name a positional parameter:
+# Claude Code substitutes `$<digit>` in skill content with the skill's arguments
+# (check-structure.py refuses one), which once rendered `--pr 65` into every key.
+_cp() { printf '%s\n' "$CODEX_POLICY" | bash "${CLAUDE_PLUGIN_ROOT}/scripts/kv.sh" get "$@"; }
+# The profile map always carries family and effort, so an empty one means the
+# lookup broke — stop, rather than let `--family ""` drop codex as "degraded".
+if [ -z "$(_cp family)" ] || [ -z "$(_cp effort)" ]; then
+  echo "SWARM_PREP_ERR=codex policy lookup came back empty (family='$(_cp family)', effort='$(_cp effort)') although the profile map resolved"; rm -rf "$TMPD" "$WORKDIR"; exit 1
+fi
 echo "PROFILE=$PROFILE"
 
 # --- Diff source: ONE block, ONE `set -euo pipefail`, dispatched by a flag ----
@@ -458,7 +466,7 @@ GROK_KV=""
 if [ "$PROMPT_BYTES" -le "$OVERSIZE_THRESHOLD" ]; then
   GROK_KV="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" grok-model 2>/dev/null)" || true   # exit 1 = nothing selected; GROK_DEGRADED says why
 fi
-_gk() { printf '%s\n' "$GROK_KV" | sed -n "s/^$1=//p" | head -n 1 | tr -cd 'A-Za-z0-9._-'; }
+_gk() { printf '%s\n' "$GROK_KV" | bash "${CLAUDE_PLUGIN_ROOT}/scripts/kv.sh" get "$@" 'A-Za-z0-9._-'; }
 echo "GROK_RUN=selected=$(_gk selected);latest_candidate=$(_gk latest_candidate);source=$(_gk source);catalog=$(_gk catalog);cli_version=$(_gk cli_version)"
 echo "GROK_DEGRADED=$(printf '%s\n' "$GROK_KV" | sed -n 's/^degraded=//p' | head -n 1)"
 # The codex model for THIS run, resolved ONCE from the profile's family (newest
@@ -471,8 +479,16 @@ if [ "$PROMPT_BYTES" -le "$OVERSIZE_THRESHOLD" ]; then
   CODEX_KV="$(SWARM_CODEX_MODEL="${SWARM_CODEX_MODEL:-$(_cp model)}" bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" codex-model --family "$(_cp family)" --effort "$(_cp effort)" 2>"$TMPD/codex-model.err")" || CODEX_KV="$CODEX_KV
 rc=$?"   # exit 1 = nothing selected; 2 = refused input (e.g. a malformed SWARM_CODEX_MODEL)
 fi
-_ck() { printf '%s\n' "$CODEX_KV" | sed -n "s/^$1=//p" | head -n 1 | tr -cd 'A-Za-z0-9._:/+-'; }
+_ck() { printf '%s\n' "$CODEX_KV" | bash "${CLAUDE_PLUGIN_ROOT}/scripts/kv.sh" get "$@" 'A-Za-z0-9._:/+-'; }
 CODEX_MODEL="$(_ck selected)"
+# A model a helper DID select must survive the lookup: an empty token here would
+# drop that voice and run the review Claude-only without an error.
+if printf '%s\n' "$GROK_KV" | grep '^selected=.' >/dev/null && [ -z "$(_gk selected)" ]; then
+  echo "SWARM_PREP_ERR=grok-model selected a model but the lookup returned an empty token"; rm -rf "$TMPD" "$WORKDIR"; exit 1
+fi
+if printf '%s\n' "$CODEX_KV" | grep '^selected=.' >/dev/null && [ -z "$CODEX_MODEL" ]; then
+  echo "SWARM_PREP_ERR=codex-model selected a model but the lookup returned an empty token"; rm -rf "$TMPD" "$WORKDIR"; exit 1
+fi
 echo "CODEX_RUN=selected=$CODEX_MODEL;requested=$(_ck requested);family=$(_ck family);source=$(_ck source);latest_candidate=$(_ck latest_candidate);catalog=$(_ck catalog);effort=$(_cp effort)"
 # Never an empty reason for a dropped codex: fall back to the helper's own stderr.
 CODEX_DEGRADED="$(printf '%s\n' "$CODEX_KV" | sed -n 's/^degraded=//p' | head -n 1)"
@@ -489,6 +505,9 @@ echo "LIVE_JSON=$(SWARM_GROK_PROBE=0 bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.
 
 - `SWARM_PROFILE_ERR=…` → surface the error and **stop**; never substitute another
   profile/model after a conflict or an unreadable/invalid map.
+- `SWARM_PREP_ERR=…` → surface it **verbatim** and **stop**: a prep lookup lost a
+  value its helper produced, so continuing would silently drop that voice. It is a
+  plugin bug to report, never a reason to review Claude-only.
 - `SWARM_PR_ERR=…` (only on the `--pr` path) → surface the message (it carries the
   underlying `gh` stderr when relevant) and **stop** — a `--pr` review has no local
   diff to fall back to. Causes: `gh` missing/unauthenticated, a non-numeric `--pr`

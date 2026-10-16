@@ -1,9 +1,9 @@
 ---
 title: "Skill Design Conventions & Context Economy"
 createdAt: 2026-06-18
-updatedAt: 2026-07-12
+updatedAt: 2026-10-16
 createdFrom: "PR #13"
-updatedFrom: "session: 2026-07-12"
+updatedFrom: "task: fix-swarm-skill-arg-substitution"
 pluginVersion: 1.8.2
 prime: true
 reindexedAt: 2026-07-12
@@ -71,3 +71,22 @@ number to flag drift — surfacing staleness without ever auto-mutating a
 committed project file.
 
 Related: [skill-composition](skill-composition.md), [model-economics](model-economics.md), [ci-structure-checks](../deployment/ci-structure-checks.md).
+
+## Skill bodies are templates: no `$<digit>` anywhere
+
+Claude Code substitutes `$N` (0-based shorthand for `$ARGUMENTS[N]`) in the
+whole rendered SKILL.md, fenced code blocks included. The on-disk file stays
+correct, so the bug only shows when the skill runs with arguments. A prep helper's
+`sed -n "s/^$1=//p"` rendered `/swarm:review --pr 65` as `s/^65=`. Every codex/grok
+model lookup came back empty and the review went Claude-only without an error.
+An index with no argument stays literal, so a test run without arguments passes.
+
+- Keep positional parameters out of skill bodies. Inline helpers forward `"$@"`
+  (not a token) to a script (`swarm/scripts/kv.sh`), which reads them from disk.
+- Don't rely on the documented `\$1` escape inside shell code: if the
+  substitution ever skips it, the backslash lands in the shell.
+- `check-structure.py` fails on any `$<digit>` in a SKILL.md. A declared
+  `arguments:` name (`$name`) is substituted the same way. No skill declares one
+  yet, and the lint doesn't cover it.
+- A value that a helper produced and a lookup then lost is a prep error
+  (`SWARM_PREP_ERR`), not a degraded voice.
