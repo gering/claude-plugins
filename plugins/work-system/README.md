@@ -320,13 +320,17 @@ Three properties are load-bearing:
   and `review_rounds_used` is counted in the file, so a worker resumed with
   `claude -c` after a context loss does not silently restart its allowance.
 
-A repo can give its new lanes a different budget than the preset:
-`[mandate] review_budget = 5` in a committed `.work-system.toml` (read from the
-main checkout, so a branch cannot raise its own lane's budget). It applies to
-`standard` and `merge-delegated`; `draft-only` stays 0, an explicit
-`review_budget=` at `init` wins, and an unreadable or invalid value falls back to
-the preset with a note — never a blocked kickoff. Existing lanes keep what they
-recorded. `scripts/ws-settings.py` is that read path, for any work-system setting.
+A repo sets the budget its new lanes get with `[mandate] review_budget` in
+`.work-system.toml` (default 3, 0–100; `/settings set
+work-system.mandate.review_budget 5` writes it). It is read at the git toplevel
+of the lane being set up — the settings plugin's own root rule — so a branch
+that commits the file (e.g. one `/adopt` takes over) brings its value along;
+`init` and `presets` report `review_budget_source=setting` when that happens.
+It applies to every preset that authorizes a review; `draft-only` stays 0, an
+explicit `review_budget=` at `init` wins, and an unreadable or invalid value
+falls back to the default with a note — never a blocked kickoff. Existing lanes
+keep what they recorded. `scripts/ws-settings.py` is work-system's read path for
+its settings (it reads the file itself: the settings plugin is optional).
 
 Edit `MANDATE.md` by hand to widen or narrow a running lane (raising
 `review_budget` is the usual case); `/kickoff` never rewrites an existing one, and

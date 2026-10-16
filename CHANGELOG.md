@@ -53,9 +53,9 @@ entries are grouped per plugin, newest first.
 ## work-system
 
 ### 1.19.0 — 2026-10-15
-- New setting `[mandate] review_budget` in `.work-system.toml`: the review budget new lanes of a repo record for the `standard` and `merge-delegated` presets. Unset keeps the preset value; `draft-only` stays 0; an explicit `review_budget=` at `init` wins; an unreadable/invalid value falls back to the preset with a note. Existing lanes keep their recorded budget.
+- New setting `[mandate] review_budget` in `.work-system.toml` (default 3, 0–100): the review budget new lanes record for every preset that authorizes a review (`standard`, `merge-delegated`). `draft-only` stays 0; an explicit `review_budget=` at `init` wins; an unreadable/invalid value falls back to the default with a note. Existing lanes keep their recorded budget.
 - `mandate.sh init` reads the setting itself (so `/kickoff` and `/adopt` both get it), and `mandate.sh presets [<dir>]` shows the budget as `init` will write it, with `review_budget_source=preset|setting`; `init` reports `review_budget_source=` too.
-- `scripts/ws-settings.py`: work-system's reusable settings read path (schema-driven type/enum/minimum, main-checkout config, symlink refused, never blocks).
+- `scripts/ws-settings.py`: work-system's reusable settings read path — same root rule as the settings plugin (git toplevel of the directory), schema-driven type/enum/minimum/maximum, symlink and non-regular files refused without blocking.
 
 ### 1.18.0 — 2026-10-02
 - Add `scripts/manager.sh`: one deterministic Manager resolver with both addresses (herdr pane + agent session, and the SendMessage name). A live-revalidated kicker record beats the repo-root scan; several root agents fall to a stated leftmost-tab tie-break; anything uncertain is never `unique`.

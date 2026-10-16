@@ -38,10 +38,10 @@
 #                            --for-agent <selector> asks the registry which
 #                            actions that worker cannot exercise and drops them.
 #                            --preset standard|draft-only|merge-delegated seeds
-#                            allow/deny/terminal_gate/review_budget (the
-#                            repo's mandate.review_budget setting replaces
-#                            the budget of standard/merge-delegated); explicit
-#                            k=v wins; --without <action> drops tokens from allow
+#                            allow/deny/terminal_gate/review_budget (a
+#                            preset that authorizes a review takes its budget
+#                            from the repo's mandate.review_budget setting);
+#                            explicit k=v wins; --without <action> drops tokens from allow
 #                            (repeatable). Also adds /MANDATE.md to the repo's
 #                            git exclude. task= and authorized_by= are required.
 #   allows <action> [<dir>]  Exit 0 allowed / 1 denied or unlisted / 3 no mandate.
@@ -51,8 +51,8 @@
 #   actions                  List the known action vocabulary, one per line.
 #   presets [<dir>]          Emit each preset's allow/deny/terminal_gate/
 #                            review_budget (+ review_budget_source=preset|
-#                            setting) as init would write it for <dir>'s repo
-#                            — the source /kickoff renders from.
+#                            setting) as init would write it into <dir> — the
+#                            source /kickoff renders from.
 #
 # Output: `key=value` lines on stdout. Exit 0 on success, 2 on usage error OR
 # on a record nobody can vouch for (corrupt frontmatter, a symlink, a file git
@@ -503,6 +503,9 @@ do_round() {
   emit_budget "$budget" "$used"
 }
 
+# The budgets below are the floor for a host where the setting cannot be read
+# at all (no python3): the authoritative default is mandate.review_budget's
+# schema default, and test_mandate.py pins the two equal.
 # Presets exist because the choice offered at kickoff is one of three named
 # grants, and prose around a single hardcoded `init` line wrote the standard
 # authorization whichever one the user picked. The allow/deny/gate/budget
@@ -527,33 +530,42 @@ apply_preset() {
   esac
 }
 
-# A repo can give its new lanes a different review budget than the preset
-# (`[mandate] review_budget` in .work-system.toml, read by ws-settings.py from
-# the main checkout). It replaces the budget of every preset that authorizes a
-# review — draft-only authorizes none, so its 0 is not a default to override.
-# A setting that cannot be read never blocks a kickoff: the preset value stands
-# and the reason goes to stderr. Sets REPO_BUDGET (empty = unset/unusable).
-REPO_BUDGET=""; REPO_BUDGET_READ="no"
+# The review budget a new lane records is a repo setting: `[mandate]
+# review_budget` in .work-system.toml, resolved by ws-settings.py at <dir>'s git
+# toplevel (the settings plugin's own root rule) over the schema default. It
+# applies to every preset that authorizes a review — draft-only's 0 means "no
+# review", not a default to override. A setting that cannot be read never
+# blocks a kickoff: the default stands and the reason goes to stderr.
+# Sets REPO_BUDGET (empty = unusable) and REPO_BUDGET_FROM (file|default).
+REPO_BUDGET=""; REPO_BUDGET_FROM=""; REPO_BUDGET_READ="no"
 read_repo_budget() {
   [ "$REPO_BUDGET_READ" = "yes" ] && return 0
   REPO_BUDGET_READ="yes"
   local out note
   out="$(python3 -I "$SCRIPT_DIR/ws-settings.py" get "$1" mandate.review_budget 2>&1)" || {
-    echo "${0##*/}: mandate.review_budget setting not read (${out%%$'\n'*}) — using the preset budget" >&2
+    echo "${0##*/}: mandate.review_budget not read (${out%%$'\n'*}) — using the default" >&2
     return 0
   }
   REPO_BUDGET="$(printf '%s\n' "$out" | sed -n 's/^value=//p')"
+  REPO_BUDGET_FROM="$(printf '%s\n' "$out" | sed -n 's/^source=//p')"
   note="$(printf '%s\n' "$out" | sed -n 's/^note=//p')"
   [ -z "$note" ] || echo "${0##*/}: $note" >&2
-  case "$REPO_BUDGET" in *[!0-9]*) REPO_BUDGET="" ;; esac
+  # ws-settings validated it against the schema; this only guards the hand-off.
+  case "$REPO_BUDGET" in ''|*[!0-9]*)
+    [ -z "$REPO_BUDGET" ] || echo "${0##*/}: mandate.review_budget came back as '$REPO_BUDGET' — using the default" >&2
+    REPO_BUDGET="" ;;
+  esac
 }
 
-# Apply the repo setting to a preset's budget. Sets BUDGET_SOURCE.
+# Apply the setting to a preset that authorizes a review (nonzero budget in
+# apply_preset — the one place that rule lives). Sets BUDGET_SOURCE.
 apply_repo_budget() {
   BUDGET_SOURCE="preset"
-  case "$1" in standard|merge-delegated) ;; *) return 0 ;; esac
+  if [ "$v_review_budget" = "0" ]; then return 0; fi
   read_repo_budget "$2"
-  if [ -n "$REPO_BUDGET" ]; then v_review_budget="$REPO_BUDGET"; BUDGET_SOURCE="setting"; fi
+  [ -n "$REPO_BUDGET" ] || return 0
+  v_review_budget="$REPO_BUDGET"
+  if [ "$REPO_BUDGET_FROM" = "file" ]; then BUDGET_SOURCE="setting"; fi
 }
 
 do_presets() {

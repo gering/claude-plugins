@@ -20,6 +20,7 @@ properties under test are the ones a wrong answer makes unsafe:
 The tests run against real git repos because mandate.sh anchors MANDATE.md at
 the worktree root, not at $PWD.
 """
+import json
 import os
 import re
 import subprocess
@@ -42,7 +43,7 @@ def check(name, cond):
 
 def run(*args):
     return subprocess.run(
-        ["bash", str(SCRIPT), *args], capture_output=True, text=True
+        ["bash", str(SCRIPT), *args], capture_output=True, text=True, timeout=120
     )
 
 
@@ -670,7 +671,9 @@ check("and nothing landed inside it", not any((dd / "MANDATE.md").iterdir()))
 check("and it is not reported as written", "written=yes" not in r.stdout)
 
 # --- presets are printed from the same table init writes ---------------------
-out = run("presets").stdout
+# Into a fresh repo, never the cwd: presets reads the repo's .work-system.toml,
+# and this checkout's own (review_budget = 5) would not match a bare init.
+out = run("presets", str(make_repo())).stdout
 blocks = {}
 cur = None
 for line in out.splitlines():
@@ -985,9 +988,9 @@ check("--branch=<name> works too",
       kv(run("show", "--branch=task/lane-b", str(mainr)).stdout).get("task") == "lane-b")
 
 # --- the repo's mandate.review_budget setting --------------------------------
-# A repo can give new lanes another budget than the preset (.work-system.toml).
-# It replaces the budget of the presets that authorize a review, never draft-
-# only's 0, never an explicit review_budget=, and never blocks when unusable.
+# A repo can give new lanes another budget (.work-system.toml). It sets the
+# budget of the presets that authorize a review, never draft-only's 0, never an
+# explicit review_budget=, and never blocks when unusable.
 def budget_repo(toml=None):
     r = make_repo()
     if toml is not None:
@@ -1034,6 +1037,7 @@ check("setting: 0 is a value, not unset", got == "0")
 for bad, why in (("[mandate]\nreview_budget = -1\n", "negative"),
                  ("[mandate]\nreview_budget = \"5\"\n", "a string"),
                  ("[mandate]\nreview_budget = true\n", "a boolean"),
+                 ("[mandate]\nreview_budget = 18446744073709551616\n", "past the maximum"),
                  ("[mandate\nreview_budget = 5\n", "unparsable TOML")):
     r, got = init_budget(budget_repo(bad), "standard")
     check(f"setting: {why} falls back to the preset budget",
@@ -1046,16 +1050,37 @@ sym = budget_repo()
 r, got = init_budget(sym, "standard")
 check("setting: a symlinked config is ignored", got == "3" and "symlink" in r.stderr)
 
-# Read from the MAIN checkout: a branch (e.g. one /adopt took over) cannot raise
-# its own lane's budget, and every lane of a repo sees one value.
+fifo = budget_repo()
+os.mkfifo(fifo / ".work-system.toml")
+try:
+    r, got = init_budget(fifo, "standard")  # would hang on a blocking open()
+    check("setting: a FIFO config falls back instead of hanging",
+          got == "3" and ".work-system.toml" in r.stderr)
+except subprocess.TimeoutExpired:
+    check("setting: a FIFO config falls back instead of hanging", False)
+
+# The settings plugin's root rule: the git toplevel of the directory written
+# into — for a lane, the worktree's own checkout, the file /settings edits there.
 mc = budget_repo("[mandate]\nreview_budget = 4\n")
 subprocess.run(["git", "-C", str(mc), "-c", "user.name=t", "-c", "user.email=t@t",
                 "commit", "-q", "--allow-empty", "-m", "i"], check=True)
 lw = mc / "lane"
 subprocess.run(["git", "-C", str(mc), "worktree", "add", "-q", str(lw), "-b", "x"], check=True)
 (lw / ".work-system.toml").write_text("[mandate]\nreview_budget = 9\n")
-check("setting: a lane reads the main checkout's config",
-      init_budget(lw, "standard")[1] == "4")
+check("setting: a lane reads its own checkout's config",
+      init_budget(lw, "standard")[1] == "9")
+sub = budget_repo(FIVE)
+(sub / "deep").mkdir()
+check("setting: a subdirectory resolves to the repo's toplevel",
+      presets_of(sub / "deep")["standard"].get("review_budget") == "5")
+
+# The preset table's budgets are only the no-python3 floor; the schema default
+# is authoritative, and the two must not drift.
+schema_default = json.loads((SCRIPT.parent.parent / "schema" / "settings.schema.json")
+                            .read_text())["properties"]["mandate"]["properties"]["review_budget"]["default"]
+floor = re.findall(r'v_review_budget="([1-9][0-9]*)"', SCRIPT.read_text())
+check("setting: schema default equals the preset floor",
+      floor and all(int(f) == schema_default for f in floor))
 
 
 if FAILS:

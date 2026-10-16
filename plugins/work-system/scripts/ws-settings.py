@@ -10,23 +10,24 @@ installed plugins yet — the same deliberate exception pr-flow's `review.route`
 makes. The schema stays the one place a key's type, constraints, default and
 the config file name live; nothing is restated in a caller.
 
-The config is read from the repo's MAIN checkout (first `git worktree list`
-entry), never from the linked worktree <dir> may be: every lane of a repo then
-sees the same value, and a branch — e.g. one `/adopt` took over from someone
-else — cannot change the settings its own lane is set up with.
+The config is read at the git toplevel of <dir> — the same root rule as the
+settings plugin's settings.py, so `/settings get|set` and this reader always
+mean the same file. For a lane that is the worktree's own checkout: a branch
+(e.g. one `/adopt` took over) brings its committed .work-system.toml with it.
 
 Output (stdout, key=value):
   value=<v>    the resolved value; empty when the key has no default and the
                repo does not set it (the caller's own default applies)
   source=file|default|unset
   note=<text>  only when the file could not be used — the value is then the
-               schema default. A setting never blocks the caller.
+               schema default (or unset). A setting never blocks the caller.
 
 Exit 0 whenever a value (or "unset") was resolved, also on a fallback.
 Exit 2 on a usage error: bad arguments or a key the schema does not define.
 """
 import json
 import os
+import stat
 import subprocess
 import sys
 
@@ -39,14 +40,34 @@ def die(msg):
     sys.exit(2)
 
 
-def main_checkout(d):
+def project_root(d):
+    # settings.py's find_project_root(), anchored on <dir> instead of the cwd.
+    # --show-toplevel prints the raw path (no C-quoting), so only the trailing
+    # newline is stripped.
     try:
-        out = subprocess.run(["git", "-C", d, "worktree", "list", "--porcelain"],
+        out = subprocess.run(["git", "-C", d, "rev-parse", "--show-toplevel"],
                              capture_output=True, text=True, check=True).stdout
     except (OSError, subprocess.CalledProcessError):
-        return None
-    first = out.split("\n", 1)[0]
-    return first[len("worktree "):] if first.startswith("worktree ") else None
+        return d
+    return out[:-1] if out.endswith("\n") else out or d
+
+
+def read_regular(path):
+    """Bytes of a regular file, opened without following a symlink and without
+    blocking: an islink() check before open() leaves a window to swap one in,
+    and a FIFO would hang the caller's kickoff on open()."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise IsADirectoryError("not a regular file")
+        chunks = []
+        while True:
+            b = os.read(fd, 65536)
+            if not b:
+                return b"".join(chunks)
+            chunks.append(b)
+    finally:
+        os.close(fd)
 
 
 def check(spec, val):
@@ -63,6 +84,8 @@ def check(spec, val):
         return f"must be one of {'|'.join(map(str, spec['enum']))}"
     if "minimum" in spec and val < spec["minimum"]:
         return f"must be >= {spec['minimum']}"
+    if "maximum" in spec and val > spec["maximum"]:
+        return f"must be <= {spec['maximum']}"
     return None
 
 
@@ -91,13 +114,10 @@ def main(argv):
     name = schema.get("x-config-file", ".work-system.toml")
     if "/" in name or name in ("", ".", ".."):
         emit(default, fallback, "schema x-config-file is not a plain file name — using the default")
-    root = main_checkout(d)
-    if root is None:
-        emit(default, fallback)
-    cfg = os.path.join(root, name)
+    cfg = os.path.join(project_root(d), name)
     if not os.path.lexists(cfg):
         emit(default, fallback)
-    # A checked-out link would read outside the repo.
+    # A checked-out link would read outside the repo (O_NOFOLLOW enforces it).
     if os.path.islink(cfg):
         emit(default, fallback, f"{name} is a symlink — ignored, using the default")
     try:
@@ -105,8 +125,7 @@ def main(argv):
     except ModuleNotFoundError:
         emit(default, fallback, f"{name} not read: needs Python 3.11+ (tomllib) — using the default")
     try:
-        with open(cfg, "rb") as f:
-            data = tomllib.load(f)
+        data = tomllib.loads(read_regular(cfg).decode("utf-8"))
     except Exception as e:  # noqa: BLE001 — any unreadable file falls back
         emit(default, fallback, f"{name} unreadable ({type(e).__name__}) — using the default")
     node = data

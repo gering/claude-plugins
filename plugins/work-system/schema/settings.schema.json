@@ -70,8 +70,10 @@
       "properties": {
         "review_budget": {
           "type": "integer",
+          "default": 3,
           "minimum": 0,
-          "description": "Review rounds the standard and merge-delegated presets record for new lanes in this repo. Unset = the preset's own value; draft-only always records 0; an explicit review_budget= at init wins. Existing lanes keep their recorded budget."
+          "maximum": 100,
+          "description": "Review rounds new lanes in this repo record for every preset that authorizes a review (standard, merge-delegated); draft-only always records 0; an explicit review_budget= at init wins. Existing lanes keep their recorded budget."
         }
       }
     },
