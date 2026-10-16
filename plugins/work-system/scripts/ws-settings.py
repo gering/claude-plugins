@@ -10,8 +10,8 @@ installed plugins yet — the same deliberate exception pr-flow's `review.route`
 makes. The schema stays the one place a key's type, constraints, default and
 the config file name live; nothing is restated in a caller.
 
-The config is read at the git toplevel of <dir> — the same root rule as the
-settings plugin's settings.py, so `/settings get|set` and this reader always
+The config is read at SETTINGS_PROJECT_ROOT, else the git toplevel of <dir> —
+the settings plugin's own root rule, so `/settings get|set` and this reader
 mean the same file. For a lane that is the worktree's own checkout: a branch
 (e.g. one `/adopt` took over) brings its committed .work-system.toml with it.
 
@@ -25,6 +25,7 @@ Output (stdout, key=value):
 Exit 0 whenever a value (or "unset") was resolved, also on a fallback.
 Exit 2 on a usage error: bad arguments or a key the schema does not define.
 """
+import errno
 import json
 import os
 import stat
@@ -41,9 +42,12 @@ def die(msg):
 
 
 def project_root(d):
-    # settings.py's find_project_root(), anchored on <dir> instead of the cwd.
-    # --show-toplevel prints the raw path (no C-quoting), so only the trailing
-    # newline is stripped.
+    # settings.py's find_project_root(), anchored on <dir> instead of the cwd:
+    # SETTINGS_PROJECT_ROOT first, then the git toplevel. --show-toplevel prints
+    # the raw path (no C-quoting), so only the trailing newline is stripped.
+    env = os.environ.get("SETTINGS_PROJECT_ROOT")
+    if env:
+        return env
     try:
         out = subprocess.run(["git", "-C", d, "rev-parse", "--show-toplevel"],
                              capture_output=True, text=True, check=True).stdout
@@ -54,12 +58,12 @@ def project_root(d):
 
 def read_regular(path):
     """Bytes of a regular file, opened without following a symlink and without
-    blocking: an islink() check before open() leaves a window to swap one in,
-    and a FIFO would hang the caller's kickoff on open()."""
+    blocking — one open, no check before it: an islink() pre-check leaves a
+    window to swap a link in, and a FIFO would hang the caller's kickoff."""
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise IsADirectoryError("not a regular file")
+            raise NotRegularFile
         chunks = []
         while True:
             b = os.read(fd, 65536)
@@ -68,6 +72,10 @@ def read_regular(path):
             chunks.append(b)
     finally:
         os.close(fd)
+
+
+class NotRegularFile(Exception):
+    pass
 
 
 def check(spec, val):
@@ -115,18 +123,24 @@ def main(argv):
     if "/" in name or name in ("", ".", ".."):
         emit(default, fallback, "schema x-config-file is not a plain file name — using the default")
     cfg = os.path.join(project_root(d), name)
-    if not os.path.lexists(cfg):
+    try:
+        raw = read_regular(cfg)
+    except FileNotFoundError:
         emit(default, fallback)
-    # A checked-out link would read outside the repo (O_NOFOLLOW enforces it).
-    if os.path.islink(cfg):
-        emit(default, fallback, f"{name} is a symlink — ignored, using the default")
+    except NotRegularFile:
+        emit(default, fallback, f"{name} is not a regular file — ignored, using the default")
+    except OSError as e:
+        # A checked-out link would read outside the repo; O_NOFOLLOW refuses it.
+        if e.errno == errno.ELOOP:
+            emit(default, fallback, f"{name} is a symlink — ignored, using the default")
+        emit(default, fallback, f"{name} unreadable ({e.strerror}) — using the default")
     try:
         import tomllib
     except ModuleNotFoundError:
         emit(default, fallback, f"{name} not read: needs Python 3.11+ (tomllib) — using the default")
     try:
-        data = tomllib.loads(read_regular(cfg).decode("utf-8"))
-    except Exception as e:  # noqa: BLE001 — any unreadable file falls back
+        data = tomllib.loads(raw.decode("utf-8"))
+    except Exception as e:  # noqa: BLE001 — any unparsable file falls back
         emit(default, fallback, f"{name} unreadable ({type(e).__name__}) — using the default")
     node = data
     for part in key.split("."):

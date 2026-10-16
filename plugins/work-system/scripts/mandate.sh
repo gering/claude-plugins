@@ -558,11 +558,12 @@ read_repo_budget() {
 }
 
 # Apply the setting to a preset that authorizes a review (nonzero budget in
-# apply_preset — the one place that rule lives). Sets BUDGET_SOURCE.
+# apply_preset — the one place that rule lives). Takes the dir the mandate is
+# for. Sets BUDGET_SOURCE.
 apply_repo_budget() {
   BUDGET_SOURCE="preset"
   if [ "$v_review_budget" = "0" ]; then return 0; fi
-  read_repo_budget "$2"
+  read_repo_budget "$1"
   [ -n "$REPO_BUDGET" ] || return 0
   v_review_budget="$REPO_BUDGET"
   if [ "$REPO_BUDGET_FROM" = "file" ]; then BUDGET_SOURCE="setting"; fi
@@ -572,7 +573,7 @@ do_presets() {
   local dir="${1:-.}" p v_allow v_deny v_terminal_gate v_review_budget
   for p in $PRESETS; do
     apply_preset "$p"
-    apply_repo_budget "$p" "$dir"
+    apply_repo_budget "$dir"
     printf 'preset=%s\nallow=%s\ndeny=%s\nterminal_gate=%s\nreview_budget=%s\nreview_budget_source=%s\n' \
       "$p" "$v_allow" "$v_deny" "$v_terminal_gate" "$v_review_budget" "$BUDGET_SOURCE"
   done
@@ -739,7 +740,7 @@ do_init() {
   if [ -z "$preset" ]; then
     [ "$explicit_budget" = "yes" ] || BUDGET_SOURCE="none"
   elif [ "$explicit_budget" = "no" ]; then
-    apply_repo_budget "$preset" "$dir"
+    apply_repo_budget "$dir"
   fi
   [ "$expect_without" = "yes" ] && die "--without needs a value: --without <action>"
   [ "$expect_agent" = "yes" ] && die "--for-agent needs a value: --for-agent <selector>"

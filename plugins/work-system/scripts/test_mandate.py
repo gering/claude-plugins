@@ -1028,7 +1028,7 @@ check("setting: an explicit review_budget= wins", got == "2")
 check("setting: ...and is reported as explicit",
       kv(r.stdout).get("review_budget_source") == "explicit")
 r, got = init_budget(budget_repo(), "standard")
-check("setting: unset keeps the preset budget", got == "3")
+check("setting: unset records the schema default", got == "3")
 check("setting: unset reports the preset as source",
       kv(r.stdout).get("review_budget_source") == "preset")
 r, got = init_budget(budget_repo("[mandate]\nreview_budget = 0\n"), "standard")
@@ -1040,7 +1040,7 @@ for bad, why in (("[mandate]\nreview_budget = -1\n", "negative"),
                  ("[mandate]\nreview_budget = 18446744073709551616\n", "past the maximum"),
                  ("[mandate\nreview_budget = 5\n", "unparsable TOML")):
     r, got = init_budget(budget_repo(bad), "standard")
-    check(f"setting: {why} falls back to the preset budget",
+    check(f"setting: {why} falls back to the schema default",
           kv(r.stdout).get("written") == "yes" and got == "3")
     check(f"setting: {why} says why on stderr", ".work-system.toml" in r.stderr)
 
@@ -1049,13 +1049,18 @@ sym = budget_repo()
 (sym / ".work-system.toml").symlink_to(sym / "real.toml")
 r, got = init_budget(sym, "standard")
 check("setting: a symlinked config is ignored", got == "3" and "symlink" in r.stderr)
+env_root = budget_repo(FIVE)
+os.environ["SETTINGS_PROJECT_ROOT"] = str(env_root)
+check("setting: SETTINGS_PROJECT_ROOT wins, as in settings.py",
+      init_budget(budget_repo(), "standard")[1] == "5")
+del os.environ["SETTINGS_PROJECT_ROOT"]
 
 fifo = budget_repo()
 os.mkfifo(fifo / ".work-system.toml")
 try:
     r, got = init_budget(fifo, "standard")  # would hang on a blocking open()
     check("setting: a FIFO config falls back instead of hanging",
-          got == "3" and ".work-system.toml" in r.stderr)
+          got == "3" and "not a regular file" in r.stderr)
 except subprocess.TimeoutExpired:
     check("setting: a FIFO config falls back instead of hanging", False)
 

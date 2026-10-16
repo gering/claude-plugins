@@ -323,9 +323,12 @@ Three properties are load-bearing:
 A repo sets the budget its new lanes get with `[mandate] review_budget` in
 `.work-system.toml` (default 3, 0–100; `/settings set
 work-system.mandate.review_budget 5` writes it). It is read at the git toplevel
-of the lane being set up — the settings plugin's own root rule — so a branch
-that commits the file (e.g. one `/adopt` takes over) brings its value along;
-`init` and `presets` report `review_budget_source=setting` when that happens.
+of the lane being set up — the settings plugin's own root rule. A lane is cut
+from committed history, so **commit** the file: an uncommitted edit in the main
+checkout does not reach new lanes. A branch that commits its own (e.g. one
+`/adopt` takes over) brings that value along; `init` and `presets` report
+`review_budget_source=setting` whenever the file set it, and `/kickoff` shows
+the number before you consent.
 It applies to every preset that authorizes a review; `draft-only` stays 0, an
 explicit `review_budget=` at `init` wins, and an unreadable or invalid value
 falls back to the default with a note — never a blocked kickoff. Existing lanes

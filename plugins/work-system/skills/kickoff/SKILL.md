@@ -273,6 +273,10 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" presets "<worktree>"
     ```
 
+    `<worktree>` is the absolute path step 7 created
+    (`<main-repo>/.claude/worktrees/<task-name>`) — the same one step b's `init`
+    writes into, never the main repo: the budget is read from that checkout.
+
     It prints `preset=`, `allow=`, `deny=`, `terminal_gate=` and `review_budget=`
     for each — the budget exactly as `init` will write it into that worktree.
     `review_budget_source=setting` means the repo's `.work-system.toml` set it
