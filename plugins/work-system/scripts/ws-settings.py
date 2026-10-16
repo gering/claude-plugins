@@ -56,6 +56,10 @@ def project_root(d):
     return out[:-1] if out.endswith("\n") else out or d
 
 
+class NotRegularFile(Exception):
+    pass
+
+
 def read_regular(path):
     """Bytes of a regular file, opened without following a symlink and without
     blocking — one open, no check before it: an islink() pre-check leaves a
@@ -72,10 +76,6 @@ def read_regular(path):
             chunks.append(b)
     finally:
         os.close(fd)
-
-
-class NotRegularFile(Exception):
-    pass
 
 
 def check(spec, val):
@@ -116,6 +116,9 @@ def main(argv):
         spec = spec.get("properties", {}).get(part)
         if spec is None:
             die(f"unknown setting: {key}")
+    # value= is one line of text: only scalars have a faithful rendering.
+    if spec.get("type") not in ("integer", "boolean", "string"):
+        die(f"{key} is not a scalar setting (type {spec.get('type')})")
     default = spec.get("default")
     fallback = "default" if "default" in spec else "unset"
 

@@ -168,6 +168,9 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     messages, and it is quoted back into the worker's context at every resume.
     The frontmatter is what grants, and the body labels the line as data — but a
     line nobody read is still a line nobody read.
+    The same holds for the budget: `review_budget_source=setting` here means the
+    *adopted branch's* committed `.work-system.toml` set it — say that in the
+    question, not "the repo's setting".
     Ask the user, record the answer, and if they decline, skip the file — the
     worker then asks per milestone.
 

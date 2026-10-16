@@ -51,8 +51,9 @@
 #   actions                  List the known action vocabulary, one per line.
 #   presets [<dir>]          Emit each preset's allow/deny/terminal_gate/
 #                            review_budget (+ review_budget_source=preset|
-#                            setting) as init would write it into <dir> — the
-#                            source /kickoff renders from.
+#                            setting, + review_budget_note= when the setting
+#                            was unusable) as init would write it into <dir> —
+#                            the source /kickoff renders from.
 #
 # Output: `key=value` lines on stdout. Exit 0 on success, 2 on usage error OR
 # on a record nobody can vouch for (corrupt frontmatter, a symlink, a file git
@@ -536,23 +537,28 @@ apply_preset() {
 # applies to every preset that authorizes a review — draft-only's 0 means "no
 # review", not a default to override. A setting that cannot be read never
 # blocks a kickoff: the default stands and the reason goes to stderr.
-# Sets REPO_BUDGET (empty = unusable) and REPO_BUDGET_FROM (file|default).
-REPO_BUDGET=""; REPO_BUDGET_FROM=""; REPO_BUDGET_READ="no"
+# Sets REPO_BUDGET (empty = unusable), REPO_BUDGET_FROM (file|default) and
+# REPO_BUDGET_NOTE (why a file was not used; `presets` puts it on stdout).
+REPO_BUDGET=""; REPO_BUDGET_FROM=""; REPO_BUDGET_NOTE=""; REPO_BUDGET_READ="no"
 read_repo_budget() {
   [ "$REPO_BUDGET_READ" = "yes" ] && return 0
   REPO_BUDGET_READ="yes"
-  local out note
+  local out
   out="$(python3 -I "$SCRIPT_DIR/ws-settings.py" get "$1" mandate.review_budget 2>&1)" || {
-    echo "${0##*/}: mandate.review_budget not read (${out%%$'\n'*}) — using the default" >&2
+    REPO_BUDGET_NOTE="mandate.review_budget not read (${out%%$'\n'*}) — using the default"
+    echo "${0##*/}: $REPO_BUDGET_NOTE" >&2
     return 0
   }
   REPO_BUDGET="$(printf '%s\n' "$out" | sed -n 's/^value=//p')"
   REPO_BUDGET_FROM="$(printf '%s\n' "$out" | sed -n 's/^source=//p')"
-  note="$(printf '%s\n' "$out" | sed -n 's/^note=//p')"
-  [ -z "$note" ] || echo "${0##*/}: $note" >&2
+  REPO_BUDGET_NOTE="$(printf '%s\n' "$out" | sed -n 's/^note=//p')"
+  [ -z "$REPO_BUDGET_NOTE" ] || echo "${0##*/}: $REPO_BUDGET_NOTE" >&2
   # ws-settings validated it against the schema; this only guards the hand-off.
   case "$REPO_BUDGET" in ''|*[!0-9]*)
-    [ -z "$REPO_BUDGET" ] || echo "${0##*/}: mandate.review_budget came back as '$REPO_BUDGET' — using the default" >&2
+    if [ -n "$REPO_BUDGET" ]; then
+      REPO_BUDGET_NOTE="mandate.review_budget came back as '$REPO_BUDGET' — using the default"
+      echo "${0##*/}: $REPO_BUDGET_NOTE" >&2
+    fi
     REPO_BUDGET="" ;;
   esac
 }
@@ -576,6 +582,7 @@ do_presets() {
     apply_repo_budget "$dir"
     printf 'preset=%s\nallow=%s\ndeny=%s\nterminal_gate=%s\nreview_budget=%s\nreview_budget_source=%s\n' \
       "$p" "$v_allow" "$v_deny" "$v_terminal_gate" "$v_review_budget" "$BUDGET_SOURCE"
+    if [ -n "$REPO_BUDGET_NOTE" ]; then printf 'review_budget_note=%s\n' "$REPO_BUDGET_NOTE"; fi
   done
 }
 
@@ -735,13 +742,6 @@ do_init() {
     esac
   done
   [ -n "$want_dir" ] && dir="$want_dir"
-  # After the k=v pass, so an explicit review_budget= still wins.
-  BUDGET_SOURCE="explicit"
-  if [ -z "$preset" ]; then
-    [ "$explicit_budget" = "yes" ] || BUDGET_SOURCE="none"
-  elif [ "$explicit_budget" = "no" ]; then
-    apply_repo_budget "$dir"
-  fi
   [ "$expect_without" = "yes" ] && die "--without needs a value: --without <action>"
   [ "$expect_agent" = "yes" ] && die "--for-agent needs a value: --for-agent <selector>"
   if [ -n "$for_agent" ]; then
@@ -834,6 +834,15 @@ do_init() {
     printf 'task_mismatch=no\n'
     echo "${0##*/}: a mandate already exists — re-record only with --force" >&2
     exit 2
+  fi
+
+  # Only once a write is certain (a refused init pays no python3/git), and
+  # after the k=v pass, so an explicit review_budget= still wins.
+  BUDGET_SOURCE="explicit"
+  if [ -z "$preset" ]; then
+    [ "$explicit_budget" = "yes" ] || BUDGET_SOURCE="none"
+  elif [ "$explicit_budget" = "no" ]; then
+    apply_repo_budget "$dir"
   fi
 
   local tmp

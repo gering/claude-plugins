@@ -279,8 +279,11 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
 
     It prints `preset=`, `allow=`, `deny=`, `terminal_gate=` and `review_budget=`
     for each — the budget exactly as `init` will write it into that worktree.
-    `review_budget_source=setting` means the repo's `.work-system.toml` set it
-    (`[mandate] review_budget`); say so in the question. Build the question from that output, so what the user consents to is
+    `review_budget_source=setting` means the checkout's `.work-system.toml` set
+    it (`[mandate] review_budget`); say so in the question. A
+    `review_budget_note=` line means that file was there but unusable and the
+    default stands — relay the note too. Build the question from that output,
+    so what the user consents to is
     what `init` will actually write. A hardcoded copy of the lists stood here and
     is deliberately gone: the user would otherwise agree to a set the script no
     longer writes, and the worker would then stop to ask about an action the user

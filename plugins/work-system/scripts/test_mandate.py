@@ -41,10 +41,27 @@ def check(name, cond):
         FAILS.append(name)
 
 
+# An inherited SETTINGS_PROJECT_ROOT would point every budget case at the
+# caller's repo; the one test that wants it sets it here, then removes it.
+ENV = {k: v for k, v in os.environ.items() if k != "SETTINGS_PROJECT_ROOT"}
+
+
 def run(*args):
     return subprocess.run(
-        ["bash", str(SCRIPT), *args], capture_output=True, text=True, timeout=120
+        ["bash", str(SCRIPT), *args], capture_output=True, text=True, timeout=120,
+        env=ENV,
     )
+
+
+def presets_of(d):
+    blocks, cur = {}, None
+    for line in run("presets", str(d)).stdout.splitlines():
+        k, _, v = line.partition("=")
+        if k == "preset":
+            cur = v; blocks[cur] = {}
+        elif cur:
+            blocks[cur][k] = v
+    return blocks
 
 
 def kv(out):
@@ -673,15 +690,7 @@ check("and it is not reported as written", "written=yes" not in r.stdout)
 # --- presets are printed from the same table init writes ---------------------
 # Into a fresh repo, never the cwd: presets reads the repo's .work-system.toml,
 # and this checkout's own (review_budget = 5) would not match a bare init.
-out = run("presets", str(make_repo())).stdout
-blocks = {}
-cur = None
-for line in out.splitlines():
-    k, _, v = line.partition("=")
-    if k == "preset":
-        cur = v; blocks[cur] = {}
-    elif cur:
-        blocks[cur][k] = v
+blocks = presets_of(make_repo())
 check("presets lists all three", set(blocks) == {"standard", "draft-only", "merge-delegated"})
 for name, fields in blocks.items():
     pr = make_repo()
@@ -998,17 +1007,6 @@ def budget_repo(toml=None):
     return r
 
 
-def presets_of(d):
-    blocks, cur = {}, None
-    for line in run("presets", str(d)).stdout.splitlines():
-        k, _, v = line.partition("=")
-        if k == "preset":
-            cur = v; blocks[cur] = {}
-        elif cur:
-            blocks[cur][k] = v
-    return blocks
-
-
 def init_budget(d, preset, *extra):
     r = run("init", str(d), "--preset", preset, "task=t", "authorized_by=user", *extra)
     return r, kv(run("show", str(d)).stdout).get("review_budget")
@@ -1043,6 +1041,12 @@ for bad, why in (("[mandate]\nreview_budget = -1\n", "negative"),
     check(f"setting: {why} falls back to the schema default",
           kv(r.stdout).get("written") == "yes" and got == "3")
     check(f"setting: {why} says why on stderr", ".work-system.toml" in r.stderr)
+    std = presets_of(budget_repo(bad))["standard"]
+    check(f"setting: {why} is named on presets' stdout",
+          std.get("review_budget") == "3"
+          and ".work-system.toml" in std.get("review_budget_note", ""))
+check("setting: a usable file adds no note",
+      "review_budget_note" not in presets_of(budget_repo(FIVE))["standard"])
 
 sym = budget_repo()
 (sym / "real.toml").write_text(FIVE)
@@ -1050,10 +1054,10 @@ sym = budget_repo()
 r, got = init_budget(sym, "standard")
 check("setting: a symlinked config is ignored", got == "3" and "symlink" in r.stderr)
 env_root = budget_repo(FIVE)
-os.environ["SETTINGS_PROJECT_ROOT"] = str(env_root)
+ENV["SETTINGS_PROJECT_ROOT"] = str(env_root)
 check("setting: SETTINGS_PROJECT_ROOT wins, as in settings.py",
       init_budget(budget_repo(), "standard")[1] == "5")
-del os.environ["SETTINGS_PROJECT_ROOT"]
+del ENV["SETTINGS_PROJECT_ROOT"]
 
 fifo = budget_repo()
 os.mkfifo(fifo / ".work-system.toml")
