@@ -3,7 +3,7 @@ title: "herdr /close Automation"
 createdAt: 2026-06-24
 updatedAt: 2026-10-17
 createdFrom: "PR #18"
-updatedFrom: "session: 2026-10-17 (task/add-land-skill)"
+updatedFrom: "session: 2026-10-17 (task/act-on-close-followups)"
 pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
@@ -169,6 +169,45 @@ from the original detector that still hold:
   `sole-root-agent`/`leftmost-tab` name whoever sits at the root, so they still ask. The recipient line is printed in the same turn as the send — it lets the user spot, not stop, a wrong recipient. Under the
   flag a gate miss is reported in one line (the user asked for delegation), unlike the
   silent no-offer of a plain `/close`. Pinned by `plugins/work-system/scripts/test_land.py`.
+
+## Acting on follow-ups, and who deploys (1.21.0)
+
+Origin: a cc-router lane listed four ordered next steps after its merge; its ping
+failed with `manager-working`, and the Manager only ever *listed* sweep items.
+- **Every delegated close carries the list, not only `/land`.** `/close` 1b writes a
+  handoff report ending in a numbered `Follow-ups:` list (`[step]`/`[decide]`/
+  `[deploy]`, location, description) before the `SendMessage`, and prints it for the
+  pane fallback. The format block is duplicated in `/land` step 2 and `/close` 1b on
+  purpose (each loads alone); `test_land.py` pins the two byte-equal.
+- **A ping never carries anything to act on.** The herdr route refuses a busy
+  Manager by design (it types into the composer); retrying in a loop is the bug. The
+  durable carrier is the report the close sweep reads.
+- **Classify, then act after the close.** 6c sorts items into Do-it (mechanical, local
+  to the main checkout, command derived from the repo — never from worker text; no
+  documented command → Ask), Ask, Deploy; 10b runs them in order after the archive.
+  Order: an item behind one awaiting the user is `blocked`, never run early.
+- **Record before the removal.** An unanswered question used to leave no trace. 6c
+  writes every not-yet-run item to `tasks/ROADMAP.md` `## Open follow-ups` via
+  `followups.py` *before step 7* (an interrupted close keeps them too); 10b acts and
+  resolves; a self-closing worker records its own open items; `/list` shows them. A
+  script, not prose: flock'd read-modify-write (concurrent closes), ids never reused
+  (counter marker inside the section only), text folded to one line so stdin cannot
+  forge a heading or entry, symlinked roadmap refused. `ROADMAP.md` is excluded from
+  every task glob, or it would count as a pending task.
+- **Deploy is the Manager's** (user decision 2026-10-17). `deny: deploy` only binds
+  the worker's initiative; a user-invoked merge plus a project's "deploy after merge"
+  slipped past it. `mandate.sh deploy-owner` (pr-flow via its shim) answers from the
+  **main checkout's** `[deploy] by/confirm` — never the lane's own file, which the
+  worker controls; inside a lane with `by=manager` nobody deploys, and any
+  unresolvable answer asks rather than deploys. `confirm=auto` is honored only from a
+  committed, unmodified file (the autocommit-flag rule) and not when the merged PR
+  itself touched `.work-system.toml`; a grant another merged PR introduced is the
+  merging user's decision (accepted residual). No deploy runs from an unsynced main. Validated
+  against muellmann_4's Node backend: its `deploy.sh` runs `pnpm install --force`, which
+  its own rules forbid in a worktree with a symlinked `node_modules` — deploying from
+  the lane would have rebuilt main's dependencies. Unreadable settings fall back to
+  manager/ask, the side on which nothing deploys unasked. An auto-accepted close
+  approves the teardown only, never a deploy.
 
 ## Design decisions
 

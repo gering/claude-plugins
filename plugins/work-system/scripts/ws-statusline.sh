@@ -214,7 +214,8 @@ glyph_of() {
 }
 
 # ---- walk the backlog -------------------------------------------------------
-# Non-recursive tasks/*.md, excluding index/readme; tasks/archive/ is a subdir
+# Non-recursive tasks/*.md, excluding index/readme and the Manager's ROADMAP.md
+# (followups.py writes it); tasks/archive/ is a subdir
 # and so is naturally excluded by -maxdepth 1.
 
 TOTAL=0; NS=0; ACT=0; PR=0; APP=0; DONE=0
@@ -241,7 +242,7 @@ while IFS= read -r -d '' f; do
     *)        NS=$((NS + 1)) ;;
   esac
 done < <(find "$MAIN/tasks" -maxdepth 1 -type f -name '*.md' \
-    ! -name '_index.md' ! -name 'README.md' -print0 2>/dev/null)
+    ! -name '_index.md' ! -name 'README.md' ! -name 'ROADMAP.md' -print0 2>/dev/null)
 
 [ "$MODE" = states ] && exit 0
 [ "$TOTAL" -eq 0 ] && exit 0

@@ -164,6 +164,24 @@ r = run(root, "allows", "merge", str(corrupt))
 check("a corrupt mandate is exit 2 through the shim", r.returncode == 2)
 check("its stderr survives the shim", "duplicate" in r.stderr)
 
+# --- deploy-owner: /merge asks it before a project's post-merge deploy -------
+# The fake layout carries no ws-settings.py, so the settings fall back to the
+# side on which nothing deploys from a lane unasked (manager), with a note.
+r = run(root, "deploy-owner", str(repo))
+check("deploy-owner passes through", r.returncode == 0)
+check("a main checkout is not a lane", "in_lane=no" in r.stdout)
+check("an unreadable setting falls back to manager", "deploy_by=manager" in r.stdout)
+subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "x"],
+               check=True, env=dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                                    GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t"))
+wt = Path(tempfile.mkdtemp()) / "lane"
+subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "task/x", str(wt)],
+               check=True, capture_output=True)
+r = run(root, "deploy-owner", str(wt))
+check("a linked worktree is a lane", r.returncode == 0 and "in_lane=yes" in r.stdout)
+check("outside git deploy-owner is unknown (exit 3)",
+      run(root, "deploy-owner", tempfile.mkdtemp()).returncode == 3)
+
 # --- usage ------------------------------------------------------------------
 check("unknown verb exits 2", run(root, "bogus").returncode == 2)
 check("the usage line lists lane", "lane" in run(root, "bogus").stderr)

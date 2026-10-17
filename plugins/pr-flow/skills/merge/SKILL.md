@@ -206,6 +206,21 @@ user_invocable: true
         - If `-d` refuses (branch not fully merged, rare after successful PR merge) → report and ask user before `-D`
     - If task/*: offer `/close` (do not auto-run — hand over). Note that `/close` will take precedence over the backup handling above.
     - If worktree: offer `git worktree remove <path>` (ask first, do not auto-run)
+    - **Deploy ownership** — before any deploy the project's instructions call for
+      after a merge ("deploy after merge", a release step), ask work-system who owns it:
+      ```sh
+      bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" deploy-owner
+      ```
+      `in_lane=yes` with `deploy_by=manager` → this session is a work-system lane and
+      the deploy is the Manager's: do **not** deploy, even though the user ran this
+      merge. Say "Deploy is the Manager's — it runs from the main checkout after the
+      close" and name where the procedure is documented (CLAUDE.md, Makefile, README
+      section) in the summary's `Next:` list. The project's own instructions apply
+      unchanged only on `in_lane=no`, on `deploy_by=worker`, or on exit 3 with
+      `verdict=no-work-system` (work-system not installed). Any other answer —
+      exit 2 (a usage error, or a work-system too old to know the verb) or
+      `in_lane=unknown` — means ownership could not be settled: do not deploy on
+      your own; ask the user.
 
 16. **Final summary**:
     ```
