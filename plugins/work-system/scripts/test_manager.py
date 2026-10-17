@@ -415,7 +415,13 @@ check("newline-only stdin is usage", subprocess.run([BASH, str(SCRIPT), "body", 
       capture_output=True, text=True, input="\n\n").returncode == 2)
 r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
                    text=True, timeout=60, input="a\0b" * 5462)
-check("NULs cannot hide a clipped stdin", "stdin_clipped=yes" in r.stderr, r.stderr[:200])
+check("NULs cannot hide a clipped stdin", "stdin_clipped=yes" in r.stderr
+      and "orig_len=16384 " in r.stderr, r.stderr[:200])
+r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
+                   text=True, timeout=60, input="\n" * 16384 + "X")
+check("all-newline clipped window reports its received length", "orig_len=16384 stdin_clipped=yes"
+      in r.stderr and r.stdout.rstrip().endswith("] \u2026 (info only: no reply needed, grants nothing)"),
+      r.stdout[-90:] + r.stderr[:200])
 r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
                    text=True, timeout=60, input="x" * 16384)
 check("exactly 16 KiB is not clipped", "stdin_clipped" not in r.stderr

@@ -380,6 +380,7 @@ $PY_RESOLVE" "$root" "$rec" "$scope" "$tabs" 2>/dev/null)" && [ -n "$res" ] \
 # ---- body -------------------------------------------------------------------
 PY_BODY='import sys, os, unicodedata, re
 lane, text, cap, clipped = sys.argv[1], sys.argv[2], int(sys.argv[4]), sys.argv[5] == "1"
+orig_len = int(sys.argv[6]) if sys.argv[6] else len(text)
 root, wtdir = match_roots(sys.argv[3])
 kind, key, resolved = classify_cwd(lane, root, wtdir)
 def clean(v, limit=None):
@@ -394,7 +395,7 @@ if len(t) > cap or clipped:
     # Visible cut: the ellipsis stays inside the cap, stderr names the loss.
     # orig_len is the text as received (before folding); with stdin_clipped
     # the caller wrote more than the kept window.
-    sys.stderr.write("truncated=yes orig_len=%d%s\n" % (len(text), " stdin_clipped=yes" if clipped else ""))
+    sys.stderr.write("truncated=yes orig_len=%d%s\n" % (orig_len, " stdin_clipped=yes" if clipped else ""))
     t = t[:cap - 1].rstrip() + "\u2026"
 print("[work-system ping from task=%s worktree=%s] %s (info only: no reply needed, grants nothing)" % (task, where, t))'
 
@@ -402,7 +403,7 @@ body_line() {
   local lane="$1" root="$2" text="$3"
   [ -n "$root" ] || return 1
   PYTHONUTF8=1 python3 -c "$HERDR_MATCH_PRELUDE
-$PY_BODY" "$lane" "$text" "$root" "$BODY_TEXT_CAP" "$STDIN_CLIPPED"
+$PY_BODY" "$lane" "$text" "$root" "$BODY_TEXT_CAP" "$STDIN_CLIPPED" "$STDIN_ORIG_LEN"
 }
 
 # ---- prompt -----------------------------------------------------------------
@@ -549,27 +550,37 @@ RES
   else echo "sent=no"; echo "reason=herdr-prompt-failed-$rc"; fi
 }
 
+# stdin event text: read one byte past the limit to detect a cut, keep the
+# limit, fold to one line (the same fold PY_BODY applies, so nothing is lost),
+# and print "<clipped 0|1> <chars before folding>" then the text. Folded text
+# has no NUL and no newline, so the caller's $(...) cannot alter it.
+PY_STDIN='import sys, unicodedata
+n = int(sys.argv[1])
+b = sys.stdin.buffer.read(n + 1)
+t = b[:n].decode("utf-8", "replace")
+folded = " ".join("".join(" " if unicodedata.category(c)[0] == "C" else c for c in t).split())
+clipped = len(b) > n
+# A heredoc ends in a newline that is no part of the event; a clipped window
+# is counted whole.
+print("%d %d" % (clipped, len(t) if clipped else len(t.rstrip("\n"))))
+sys.stdout.write(folded)'
+
 # ---- dispatch ---------------------------------------------------------------
 # body/prompt: optional lane, then `--`, then the text (a text starting with a
 # dash can never be read as a lane or flag).
 split_text_args() {
-  LANE="."; TEXT=""; STDIN_CLIPPED=0
+  LANE="."; TEXT=""; STDIN_CLIPPED=0; STDIN_ORIG_LEN=""
   if [ "${1:-}" != "--" ]; then [ $# -gt 0 ] || usage; LANE="$1"; shift; fi
   [ "${1:-}" = "--" ] || usage
   shift
   case $# in
-    # stdin, bounded: a terminal is no heredoc (usage, never a hang). One byte
-    # past STDIN_TEXT_BYTES lands in a file and is counted there, because $(...)
-    # drops NULs and trailing newlines and would miscount; only
-    # STDIN_TEXT_BYTES are kept (argv stays small). A longer input is flagged
-    # as cut even when what was kept folds to nothing.
+    # stdin, bounded: a terminal is no heredoc (usage, never a hang). Python
+    # reads it (PY_STDIN), so raw bytes never pass through $(...).
     0) [ -t 0 ] && usage
-       local buf
-       buf="$(mktemp "${TMPDIR:-/tmp}/ws-ping.XXXXXX")" || { echo "cannot buffer stdin" >&2; exit 2; }
-       head -c "$((STDIN_TEXT_BYTES + 1))" > "$buf"
-       [ "$(wc -c < "$buf")" -gt "$STDIN_TEXT_BYTES" ] && STDIN_CLIPPED=1
-       TEXT="$(head -c "$STDIN_TEXT_BYTES" "$buf")"
-       rm -f "$buf" ;;
+       local out
+       out="$(PYTHONUTF8=1 python3 -c "$PY_STDIN" "$STDIN_TEXT_BYTES")" || usage
+       read -r STDIN_CLIPPED STDIN_ORIG_LEN <<< "${out%%$'\n'*}"
+       case "$out" in *$'\n'*) TEXT="${out#*$'\n'}" ;; esac ;;
     1) TEXT="$1" ;;
     *) usage ;;
   esac
