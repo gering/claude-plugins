@@ -491,6 +491,7 @@ with tempfile.TemporaryDirectory() as td:
 # safety gate or turn into a cleanup blocker. Assert it against the skill.
 CLOSE = (HERE.parent / "skills" / "close" / "SKILL.md").read_text()
 CONTINUE = (HERE.parent / "skills" / "continue" / "SKILL.md").read_text()
+LAND = (HERE.parent / "skills" / "land" / "SKILL.md").read_text()
 
 
 def at(text, needle):
@@ -523,7 +524,7 @@ check("the close skill prescribes no note fallback", "--note-file" not in CLOSE)
 # pre-existing archive-task.sh invocation in step 10 still interpolates
 # `<task-name>`/`<task-branch>` and predates this feature; claiming otherwise here
 # would assert a guarantee the repo does not have.
-for label, text in (("close", step6b), ("continue", CONTINUE)):
+for label, text in (("close", step6b), ("continue", CONTINUE), ("land", LAND)):
     check(f"{label} passes a lane to the bridge, not a task name", "--lane" in text)
     check(f"{label} never pastes a repo-derived name into a bridge call",
           '--task "<task-name>"' not in text and "--task '<task-name>'" not in text)
@@ -534,7 +535,7 @@ SCRIPT_TEXT = SCRIPT.read_text()
 FLAG_RE = re.compile(r"--[a-z][a-z-]+")
 KNOWN_NON_BRIDGE = {"--pr", "--json", "--jq", "--ff-only", "--quiet", "--short",
                     "--sha", "--date", "--format", "--admin"}
-for label, text in (("close", CLOSE), ("continue", CONTINUE)):
+for label, text in (("close", CLOSE), ("continue", CONTINUE), ("land", LAND)):
     # Join backslash-continued lines first: the SKILLs wrap their commands, and
     # scanning raw lines saw only each command's first fragment.
     for line in re.sub(r"\\\n\s*", " ", text).splitlines():
@@ -546,7 +547,7 @@ for label, text in (("close", CLOSE), ("continue", CONTINUE)):
             check(f"{label} prescribes {flag}, which the bridge accepts",
                   f"{flag})" in SCRIPT_TEXT)
 check("no SKILL prescribes a --related flag",
-      "--related" not in CLOSE and "--related" not in CONTINUE)
+      all("--related" not in s for s in (CLOSE, CONTINUE, LAND)))
 check("--related is not a bridge flag either", "--related)" not in SCRIPT_TEXT)
 ARCHIVE_TEXT = (HERE / "archive-task.sh").read_text()
 check("the archive helper has no note flag either",

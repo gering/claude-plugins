@@ -1,9 +1,9 @@
 ---
 title: "Worker Autonomy Mandate (MANDATE.md)"
 createdAt: 2026-09-07
-updatedAt: 2026-10-02
+updatedAt: 2026-10-17
 createdFrom: "branch: task/extend-worker-autonomy"
-updatedFrom: "branch: task/fix-review-route-without-bot"
+updatedFrom: "session: 2026-10-17 (task/add-land-skill)"
 pluginVersion: 1.9.0
 prime: false
 ---
@@ -24,7 +24,8 @@ The whole point is a hard line between *describing work* and *granting
 permission*. A worker must not conclude it may merge because TASK.md says the
 task ends in a merged PR, because a previous session did it, or because someone
 started it. So only `MANDATE.md`'s **leading frontmatter block** grants
-anything — the parser stops at the closing `---`, and a body that quotes
+the worker's own initiative anything (an explicit user command such as `/land`
+authorizes itself) — the parser stops at the closing `---`, and a body that quotes
 `allow: merge` out of a task file grants nothing. That case is not theoretical:
 task prose gets pasted into these files, which is why `test_mandate.py` asserts
 it.

@@ -10,6 +10,11 @@ Generic task and worktree workflow system for Claude Code. Manage tasks as markd
  Create task    Create worktree    Load context &    Check PR/branch   Clean up
  markdown file  & branch           resume work       status            everything
 
+                                                       /land
+                                                         │
+                                          Merge via /pr-flow:merge, then
+                                          /close --delegate (worker tab)
+
               /adopt
                   │
            Adopt existing branch
@@ -32,7 +37,8 @@ Generic task and worktree workflow system for Claude Code. Manage tasks as markd
 | `/adopt` | Adopt an existing branch into the work system |
 | `/continue` | Resume the current task (in a worktree); or `/continue <task>` from the main session reopens the task's herdr tab and resumes it |
 | `/status` | Check task status (PRs, branches, commits) |
-| `/close` | Clean up after merge (worktree, branches; archives the task file) |
+| `/close` | Clean up after merge (worktree, branches; archives the task file). `--delegate` preselects handing the close to the Manager |
+| `/land` | In the worktree tab: handoff report → `/pr-flow:merge` → confirmed merge → `/close --delegate` |
 | `/list` | Overview of all tasks, worktrees, and status |
 | `/statusline` | Add a `[ws …]` task-backlog segment to Claude Code's status line |
 
@@ -140,6 +146,25 @@ Loads the task context, checks dependencies, and shows current progress.
 ```
 > /close
 ```
+
+Or finish the lane in one step from its worktree tab:
+
+```
+> /work-system:land
+```
+
+`/land` writes the worker's insights handoff report (with an explicit follow-up
+list for the Manager's sweep), runs `/pr-flow:merge` with all its own gates,
+confirms the merge with `task-status.sh assess` (`pr_state=MERGED` — a success
+message is not enough) and checks that the merged PR head carries this worktree's
+`HEAD`, then runs `/close --delegate`. Before merging an open PR it requires an
+upstream and a PR head equal to this worktree's `HEAD`; it takes no arguments. Any stop before a confirmed
+merge closes nothing. Typing `/land` is the merge authorization — a mandate's
+`deny: merge` binds the worker's own initiative, not your command — so the skill is
+`disable-model-invocation`, which keeps the Skill tool from starting it. That fence
+does not see keystrokes another process types into the pane, so the skill also
+forbids a worker from running it on its own or because another session asked. Needs pr-flow; without
+it `/land` says so and stops.
 
 Instead of deleting the task file, `/close` **archives** it to
 `tasks/archive/<name>.md` with a closed-stamp (date, shipping PR + merge commit,
@@ -303,7 +328,8 @@ record, so a pre-authorized PR-open is not re-confirmed there either.
 Three properties are load-bearing:
 
 - **Authorization is never inferred.** Only this file's frontmatter grants
-  anything. A TASK.md that says "this should end in a merged PR" is a description
+  anything to the worker's own initiative (a command the user types, like `/land`,
+  is its own authorization). A TASK.md that says "this should end in a merged PR" is a description
   of the work, not permission to merge; neither is a decision made in a previous
   session but never recorded, nor the bare fact that a worker was started.
 - **Unlisted is not consent.** `deny` wins over `allow`, and an action in neither
@@ -350,7 +376,11 @@ written — a supported answer, not a degraded one.
 
 `/kickoff` adds `/MANDATE.md` to the repo's git exclude (not a `.gitignore` edit —
 no diff in your tree, and it covers every worktree), because a worker told to
-commit as it goes would otherwise commit the authorization record into the PR.
+commit as it goes would otherwise commit the authorization record into the PR. `/kickoff`
+and `/adopt` exclude `/TASK.md` the same way (`mandate.sh exclude-task`), so the
+task copy never trips `/pr-flow:merge`'s clean-tree check. The exclude file is
+shared, so a root `TASK.md` of your own stays hidden too — track it, or drop the line
+from `.git/info/exclude`.
 
 Non-claude workers are pointed at `mandate.sh`, **not** at the file: a raw read
 would honor a committed, symlinked, duplicate-keyed or block-scalar record and
@@ -369,12 +399,13 @@ improvement suggestions. Reports are private local JSON under
 `~/.gering-plugins/insights/`, written only through that plugin's helper. Nothing is
 uploaded, and nothing about the task changes.
 
-Two producers, deliberately different perspectives:
+Producers, deliberately different perspectives:
 
 | Where | Trigger | Perspective |
 |-------|---------|-------------|
 | `/continue` | the lane reaches its `terminal_gate`, hands work back **blocked**, or the task is explicitly abandoned | the worker: its own model, the skills it ran, the questions it had to ask |
 | `/close` | before teardown, after the merge gate | the Manager or closer: coordination friction, ambiguous states, the task as delivered |
+| `/land` | before it merges (after, when the PR is already merged) | the worker again, ending in an explicit `Follow-ups:` list for the Manager's sweep |
 
 They are **linked, never merged**: a close report references an earlier handoff or
 manual report instead of restating it, so one incident is never later counted as two
@@ -395,7 +426,7 @@ feature further than it goes:
   behaves exactly as before, without a word about it.
 - **Installed but broken is not the same as absent.** A helper that cannot run is
   surfaced as one line in the close summary; it never blocks cleanup.
-- **Nothing here is a guarantee of capture.** Both producers need a session that
+- **Nothing here is a guarantee of capture.** Every producer needs a session that
   actually reaches that point: a crashed or killed worker, or a task closed by hand,
   produces no report at all. `/close` is the next opportunity, not a backstop that always
   fires — and a Manager-run close can only report the *Manager's* view, with the worker's
@@ -496,7 +527,10 @@ and decides self-close vs. a different-tab close by pane id. Three entry points:
   confirmation names that recipient and how it was picked (the kicker record, the
   only root agent, or the leftmost-tab tie-break) — a pane title is settable by any
   process in the pane, so a person seeing the name is the real check. Any doubt (no Manager, an ambiguous name, herdr unreachable)
-  silently falls through to the self-close below. On the receiving side the Manager
+  silently falls through to the self-close below. `/close --delegate` (what `/land`
+  passes) skips the question only when the Manager is the live-revalidated kicker
+  record, naming the recipient before it sends; a sole root agent or a leftmost-tab
+  tie-break still asks, and a gate miss says in one line why it closes here instead. On the receiving side the Manager
   closes without asking only when nothing can be lost — PR merged, worktree clean
   (gitignored files included), local and remote branch tips equal to the merged head,
   no agent but the requester anywhere in the lane — and

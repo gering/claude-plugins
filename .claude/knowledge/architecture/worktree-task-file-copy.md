@@ -1,10 +1,10 @@
 ---
 title: "Worktree task file: copy, not symlink"
 createdAt: 2026-07-02
-updatedAt: 2026-07-12
+updatedAt: 2026-10-17
 createdFrom: "session: 2026-07-02"
-updatedFrom: "session: 2026-07-12"
-pluginVersion: 1.8.2
+updatedFrom: "session: 2026-10-17 (task/add-land-skill)"
+pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -37,7 +37,9 @@ there is nothing to simplify.
   file — **doesn't apply**: no skill writes to `TASK.md` (`/continue` builds its
   todo list in-session, not into the file). Purely speculative for manual edits.
 - **Accidental commit poisons the repo:** in a project where `TASK.md` isn't
-  gitignored, a `git add .` commits it. A copy = harmless markdown duplicate; a
+  gitignored, a `git add .` would commit it (since 1.20.0 `/kickoff`/`/adopt` add it
+  to the git exclude via `mandate.sh exclude-task`, which also keeps it out of
+  `/pr-flow:merge`'s clean-tree check). A copy = harmless markdown duplicate; a
   symlink = git stores the *link target* as blob content (a relative `../../../…`
   or host-absolute path pointing outside the tree), broken in every clone after
   merge.

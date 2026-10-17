@@ -48,6 +48,9 @@
 #                            An <action> outside the vocabulary is a usage error
 #                            (exit 2), never a verdict.
 #   round [<dir>]            Consume one review round; emit the new counters.
+#   exclude-task <dir>       Add /TASK.md (the lane's task copy) to the repo's git
+#                            exclude, so a clean-tree check never sees it; emits
+#                            excluded=already|yes|no (no: tracked or unwritable).
 #   actions                  List the known action vocabulary, one per line.
 #   presets [<dir>]          Emit each preset's allow/deny/terminal_gate/
 #                            review_budget (+ review_budget_source=preset|
@@ -637,10 +640,13 @@ list_without() {
 }
 
 # Append one pattern to the repo's git exclude unless git already ignores it.
-# Returns 0 = already ignored, 1 = written, 2 = could not write.
+# Returns 0 = already ignored, 1 = written, 2 = not excluded (tracked, unwritable,
+# or still not ignored after writing — a .gitignore negation wins).
 exclude_one() {
   local dir="$1" pat="$2" excl
   git -C "$dir" check-ignore -q -- "$pat" 2>/dev/null && return 0
+  # A tracked file stays visible whatever the exclude says: report it, add nothing.
+  git -C "$dir" ls-files --error-unmatch -- "$pat" >/dev/null 2>&1 && return 2
   excl="$(git -C "$dir" rev-parse --git-path info/exclude 2>/dev/null)" || excl=""
   [ -n "$excl" ] || return 2
   case "$excl" in /*) ;; *) excl="$dir/$excl" ;; esac
@@ -648,7 +654,12 @@ exclude_one() {
   # nothing it tracks) — say so instead of appending the line once more.
   if [ -f "$excl" ] && grep -qxF -- "/$pat" "$excl" 2>/dev/null; then return 2; fi
   mkdir -p "${excl%/*}" 2>/dev/null || return 2
+  # A last line without its newline would swallow the pattern (`*.log/MANDATE.md`).
+  if [ -s "$excl" ] && [ -n "$(tail -c 1 "$excl")" ]; then
+    printf '\n' >> "$excl" 2>/dev/null || return 2
+  fi
   printf '/%s\n' "$pat" >> "$excl" 2>/dev/null || return 2
+  git -C "$dir" check-ignore -q -- "$pat" 2>/dev/null || return 2
   return 1
 }
 
@@ -955,7 +966,10 @@ case "${1:-}" in
   init)    shift || true; do_init "$@" ;;
   allows)  shift || true; resolve_lane_dir "$CLI_BRANCH" "${2:-.}"; do_allows "${1:-}" "$LANE_DIR" ;;
   round)   shift || true; resolve_lane_dir "$CLI_BRANCH" "${1:-.}"; do_round "$LANE_DIR" ;;
+  exclude-task) shift || true; [ $# -eq 1 ] && [ -d "$1" ] || die "usage: ${0##*/} exclude-task <dir>"
+           rc=0; exclude_one "$1" TASK.md || rc=$?
+           case "$rc" in 0) echo excluded=already ;; 1) echo excluded=yes ;; *) echo excluded=no ;; esac ;;
   actions) printf '%s\n' $KNOWN_ACTIONS ;;
   presets) shift || true; do_presets "${1:-.}" ;;
-  *) echo "usage: ${0##*/} {path|lane|show|init|allows|round|actions|presets} [--branch <name>] [...]" >&2; exit 2 ;;
+  *) echo "usage: ${0##*/} {path|lane|show|init|allows|round|exclude-task|actions|presets} [--branch <name>] [...]" >&2; exit 2 ;;
 esac

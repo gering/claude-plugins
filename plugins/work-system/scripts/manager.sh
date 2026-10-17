@@ -87,16 +87,24 @@ main_root() {
 }
 
 # Append one pattern to the repo's git exclude unless git already ignores it.
-# Mirrors mandate.sh exclude_one (0 already, 1 written, 2 could not write).
+# Mirrors mandate.sh exclude_one (0 already, 1 written, 2 not excluded);
+# test_mandate.py keeps the two bodies identical.
 exclude_one() {
   local dir="$1" pat="$2" excl
   git -C "$dir" check-ignore -q -- "$pat" 2>/dev/null && return 0
+  # A tracked file stays visible whatever the exclude says: report it, add nothing.
+  git -C "$dir" ls-files --error-unmatch -- "$pat" >/dev/null 2>&1 && return 2
   excl="$(git -C "$dir" rev-parse --git-path info/exclude 2>/dev/null)" || excl=""
   [ -n "$excl" ] || return 2
   case "$excl" in /*) ;; *) excl="$dir/$excl" ;; esac
   if [ -f "$excl" ] && grep -qxF -- "/$pat" "$excl" 2>/dev/null; then return 2; fi
   mkdir -p "${excl%/*}" 2>/dev/null || return 2
+  # A last line without its newline would swallow the pattern (`*.log/.ws-kicker`).
+  if [ -s "$excl" ] && [ -n "$(tail -c 1 "$excl")" ]; then
+    printf '\n' >> "$excl" 2>/dev/null || return 2
+  fi
   printf '/%s\n' "$pat" >> "$excl" 2>/dev/null || return 2
+  git -C "$dir" check-ignore -q -- "$pat" 2>/dev/null || return 2
   return 1
 }
 
