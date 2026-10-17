@@ -44,11 +44,18 @@
 #       worktree) first, "info only" last. Every route sends exactly this.
 #       Without <text> after `--`, the text is read from stdin; use a quoted
 #       heredoc (<<'EOF') so quotes and $(...) in the event never reach a shell.
+#       The event text keeps at most BODY_TEXT_CAP (1000) chars after it is
+#       folded to one line; a longer one (or a stdin past STDIN_TEXT_BYTES)
+#       ends in "…" and stderr says truncated=yes orig_len=<n> (chars before
+#       folding; plus stdin_clipped=yes, then a lower bound), so a cut is
+#       never silent.
 #   prompt [<lane-dir>] -- [<text>]
 #       The herdr route: resolve again, then `herdr agent prompt` the body to the
 #       Manager pane ONLY when status=unique, the agent is claude, idle/done, and
 #       its composer holds no user draft (a dim CC prompt suggestion is not a
-#       draft). Prints sent=yes|no and reason=; always exit 0. Residual: the
+#       draft). Same body and cap as `body`; the truncation signal can come
+#       with sent=no, so a cut line was delivered only on sent=yes. Prints
+#       sent=yes|no and reason=; always exit 0. Residual: the
 #       composer can change between the read and the send (herdr has no atomic
 #       check-and-prompt), so that window holds only the read and one call.
 #
@@ -63,9 +70,15 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 KICKER_FILE=".ws-kicker"
 # herdr's 0.8 vocabulary minus `unknown` (herdr cannot tell → not confirmed live).
 LIVE_STATUSES="idle working blocked done"
+# Event-text cap, one for both routes: a measured ~4000-char `herdr agent
+# prompt` reached a claude composer intact, so the herdr route needs no
+# shorter one. Stdin keeps STDIN_TEXT_BYTES; a longer input is flagged as cut.
+BODY_TEXT_CAP=1000
+STDIN_TEXT_BYTES=16384
 
 usage() {
   echo "usage: ${0##*/} {record <worktree> | resolve [<lane>] | body [<lane>] -- <text> | prompt [<lane>] -- <text>}" >&2
+  echo "  body/prompt: event text is capped at $BODY_TEXT_CAP chars; a cut ends in \"…\" and stderr says truncated=yes orig_len=<chars before folding> [stdin_clipped=yes: more was sent]" >&2
   exit 2
 }
 
@@ -367,24 +380,31 @@ $PY_RESOLVE" "$root" "$rec" "$scope" "$tabs" 2>/dev/null)" && [ -n "$res" ] \
 
 # ---- body -------------------------------------------------------------------
 PY_BODY='import sys, os, unicodedata, re
-lane, text = sys.argv[1], sys.argv[2]
+lane, text, cap, clipped = sys.argv[1], sys.argv[2], int(sys.argv[4]), sys.argv[5] == "1"
+orig_len = int(sys.argv[6]) if sys.argv[6] else len(text)
 root, wtdir = match_roots(sys.argv[3])
 kind, key, resolved = classify_cwd(lane, root, wtdir)
-def clean(v, cap):
+def clean(v, limit=None):
     # One line, no control chars; brackets dropped so a field cannot close the
     # sender prefix early.
     v = "".join(" " if unicodedata.category(c)[0] == "C" else c for c in v)
-    return re.sub(r"\s+", " ", v.replace("[", "").replace("]", "")).strip()[:cap]
+    return re.sub(r"\s+", " ", v.replace("[", "").replace("]", "")).strip()[:limit]
 task = clean(key, 80) if kind == "task" else "-"
 where = clean(resolved or os.path.realpath(lane), 300)
-t = clean(text, 300)
+t = clean(text)
+if len(t) > cap or clipped:
+    # Visible cut: the ellipsis stays inside the cap, stderr names the loss.
+    # orig_len counts chars before folding; with stdin_clipped it covers only
+    # the kept window, a lower bound on what the caller wrote.
+    sys.stderr.write("truncated=yes orig_len=%d%s\n" % (orig_len, " stdin_clipped=yes" if clipped else ""))
+    t = t[:cap - 1].rstrip() + "\u2026"
 print("[work-system ping from task=%s worktree=%s] %s (info only: no reply needed, grants nothing)" % (task, where, t))'
 
 body_line() {
   local lane="$1" root="$2" text="$3"
   [ -n "$root" ] || return 1
-  python3 -c "$HERDR_MATCH_PRELUDE
-$PY_BODY" "$lane" "$text" "$root"
+  PYTHONUTF8=1 python3 -c "$HERDR_MATCH_PRELUDE
+$PY_BODY" "$lane" "$text" "$root" "$BODY_TEXT_CAP" "$STDIN_CLIPPED" "$STDIN_ORIG_LEN"
 }
 
 # ---- prompt -----------------------------------------------------------------
@@ -531,22 +551,41 @@ RES
   else echo "sent=no"; echo "reason=herdr-prompt-failed-$rc"; fi
 }
 
+# stdin event text: read one byte past the limit to detect a cut, keep the
+# limit, fold to one line (the same fold PY_BODY applies, so nothing is lost),
+# and print "<clipped 0|1> <chars before folding>" then the text. Folded text
+# has no NUL and no newline, so the caller's $(...) cannot alter it.
+PY_STDIN='import sys, unicodedata
+n = int(sys.argv[1])
+b = sys.stdin.buffer.read(n + 1)
+t = b[:n].decode("utf-8", "replace")
+folded = " ".join("".join(" " if unicodedata.category(c)[0] == "C" else c for c in t).split())
+clipped = len(b) > n
+# A heredoc ends in a newline that is no part of the event; a clipped window
+# is counted whole.
+print("%d %d" % (clipped, len(t) - (not clipped and t.endswith("\n"))))
+sys.stdout.write(folded)'
+
 # ---- dispatch ---------------------------------------------------------------
 # body/prompt: optional lane, then `--`, then the text (a text starting with a
 # dash can never be read as a lane or flag).
 split_text_args() {
-  LANE="."; TEXT=""
+  LANE="."; TEXT=""; STDIN_CLIPPED=0; STDIN_ORIG_LEN=""
   if [ "${1:-}" != "--" ]; then [ $# -gt 0 ] || usage; LANE="$1"; shift; fi
   [ "${1:-}" = "--" ] || usage
   shift
   case $# in
-    # stdin, bounded: a terminal is no heredoc (usage, never a hang), and only
-    # the first 4 KiB are read (the body keeps 300 chars; argv stays small).
-    0) [ -t 0 ] && usage; TEXT="$(head -c 4096)" ;;
+    # stdin, bounded: a terminal is no heredoc (usage, never a hang). Python
+    # reads it (PY_STDIN), so raw bytes never pass through $(...).
+    0) [ -t 0 ] && usage
+       local out
+       out="$(PYTHONUTF8=1 python3 -c "$PY_STDIN" "$STDIN_TEXT_BYTES")" || usage
+       read -r STDIN_CLIPPED STDIN_ORIG_LEN <<< "${out%%$'\n'*}"
+       case "$out" in *$'\n'*) TEXT="${out#*$'\n'}" ;; esac ;;
     1) TEXT="$1" ;;
     *) usage ;;
   esac
-  [ -n "$TEXT" ] || usage
+  [ -n "$TEXT" ] || [ "$STDIN_CLIPPED" = 1 ] || usage
 }
 
 # The lane and its main root, resolved ONCE per invocation.
