@@ -403,6 +403,11 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
       draft in its composer. `sent=no` (busy, blocked, draft, unsupported) → do
       not retry or type by other means; mention it in one line at most.
 
+    Both routes keep at most **1000 characters** of event text. A longer one
+    ends in `…` and stderr says `truncated=yes orig_len=<n>`: shorten the event
+    (a gate summary fits easily) rather than sending the cut line, or name the
+    cut in your report.
+
     A ping is information, not a request: it asks for nothing, grants nothing,
     and never waits for or acts on a reply. Write the event text yourself from
     the fixed shapes above — numbers, URLs, your own one-line decision summary —

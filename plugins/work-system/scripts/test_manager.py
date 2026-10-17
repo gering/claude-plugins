@@ -275,6 +275,21 @@ check("bracket in task name cannot close the prefix", b2.count("]") == 1 and "ta
 check("dash text is not a flag", E.run("body", "--", "-x").returncode == 0)
 check("missing -- is usage", E.run("body", "text").returncode == 2)
 
+# the 1000-char event cap: a cut is marked in the body AND named on stderr
+SUFFIX = " (info only: no reply needed, grants nothing)"
+def event_of(line):
+    return line.split("] ", 1)[1][: -len(SUFFIX)]
+under = "ready-for-merge: PR #9 " + "y" * 977
+r = E.run("body", str(E.wt), "--", under)
+check("at-cap event is unchanged", event_of(r.stdout.strip()) == under and len(under) == 1000, r.stdout)
+check("at-cap event has no truncation signal", "truncated" not in r.stderr, r.stderr)
+r = E.run("body", str(E.wt), "--", "z" * 1400 + " Open user decision: TAIL")
+ev = event_of(r.stdout.strip())
+check("long event ends in an ellipsis", ev.endswith("\u2026") and len(ev) == 1000, ev[-20:])
+check("long event loses its tail visibly", "TAIL" not in ev, ev[-20:])
+check("long event reported on stderr", "truncated=yes orig_len=1425" in r.stderr, r.stderr)
+check("usage names the cap", "1000 chars" in E.run("body").stderr)
+
 # ---- prompt -------------------------------------------------------------------------
 def prompt(read, agents=None, tabs=("w6:t1",), rc=0):
     E.serve(agents if agents is not None else [E.agent()], tabs=list(tabs), read=read)
@@ -375,9 +390,15 @@ r = subprocess.run([BASH, str(SCRIPT), "prompt", str(E.wt), "--"], env=env, capt
 sent = (E.state / "prompted").read_text() if (E.state / "prompted").exists() else ""
 check("stdin event sent verbatim", kv(r.stdout).get("sent") == "yes"
       and "can't merge $(touch /tmp/x)" in sent, r.stdout + sent)
+r = subprocess.run([BASH, str(SCRIPT), "prompt", str(E.wt), "--"], env=env, capture_output=True,
+                   text=True, timeout=60, input="needs-decision: " + "q" * 1200 + "\n")
+sent = (E.state / "prompted").read_text() if (E.state / "prompted").exists() else ""
+check("prompt route marks a cut too", kv(r.stdout).get("sent") == "yes" and "q\u2026 (info only" in sent
+      and "truncated=yes orig_len=1216" in r.stderr, r.stdout + r.stderr)
 r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
                    text=True, timeout=60, input="x" * 3_000_000)
-check("huge stdin is bounded, not E2BIG", r.returncode == 0 and len(r.stdout) < 1000, r.stderr[:200])
+check("huge stdin is bounded, not E2BIG", r.returncode == 0 and len(r.stdout) < 1500
+      and "truncated=yes" in r.stderr, r.stderr[:200])
 check("empty stdin is usage", subprocess.run([BASH, str(SCRIPT), "body", "--"], env=env,
       capture_output=True, text=True, input="").returncode == 2)
 
