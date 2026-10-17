@@ -44,7 +44,7 @@ user_invocable: true
      for one value, or `show <plugin>` for the whole effective config (add
      `--overrides` to see only what the user changed).
    - For a write, use `set`. The script coerces the value to the schema type and
-     rejects out-of-enum values, so pass the raw string (`set
+     rejects out-of-enum or out-of-bounds (`minimum`/`maximum`) values, so pass the raw string (`set
      knowledge-system.mode.knowledge_mode neutral`). It writes only the override
      into the plugin's TOML file at the repo root.
 

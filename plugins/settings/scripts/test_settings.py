@@ -44,6 +44,7 @@ SCHEMA = {
             "properties": {
                 "copy_task_to_worktree": {"type": "boolean", "default": True},
                 "retries": {"type": "integer", "default": 3},
+                "budget": {"type": "integer", "minimum": 0, "maximum": 100, "default": 3},
             },
         },
         "mode": {
@@ -276,6 +277,40 @@ def test_cli_list_show_validate():
     print("ok: cli list/show/validate")
 
 
+def test_numeric_bounds(project: Path):
+    # validate flags a hand-edited value outside minimum/maximum
+    for bad in (-1, 101):
+        findings = settings.validate(SCHEMA, {"behavior": {"budget": bad}}, project)
+        assert any(lvl == "error" and "budget" in m for lvl, m in findings), findings
+    # a value at each bound passes
+    for ok in (0, 100):
+        assert settings.validate(SCHEMA, {"behavior": {"budget": ok}}, project) == []
+    # non-finite floats never pass a bound; a malformed bound is a finding, not a crash
+    ratio = {"type": "object", "properties": {"r": {"type": "number", "minimum": 0}}}
+    for bad in (float("nan"), float("inf")):
+        assert settings.validate(ratio, {"r": bad}, project), bad
+    broken = {"type": "object", "properties": {"n": {"type": "integer", "minimum": "0"}}}
+    findings = settings.validate(broken, {"n": 5}, project)
+    assert any("is not a number" in m for _, m in findings), findings
+
+    cfg_path = project / ".demo.toml"
+    assert run(["set", "demo.behavior.budget", "100"]) == 0
+    before = cfg_path.read_bytes()
+    # set refuses an out-of-range value and leaves the file unchanged
+    assert run(["set", "demo.behavior.budget", "500"]) == 1
+    assert run(["set", "demo.behavior.budget", "-1"]) == 1
+    assert cfg_path.read_bytes() == before
+    assert run(["validate"]) == 0
+
+    # the CLI validate exits non-zero on a hand-edited out-of-range value
+    cfg_path.write_text(before.decode("utf-8").replace("budget = 100", "budget = 500"),
+                        encoding="utf-8")
+    assert run(["validate"]) == 1
+    cfg_path.write_bytes(before)
+    assert run(["unset", "demo.behavior.budget"]) == 0
+    print("ok: numeric bounds (minimum/maximum)")
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -290,6 +325,7 @@ def main() -> int:
         test_symlink_config_refused(project)
         test_cli_set_get_unset(project)
         test_cli_list_show_validate()
+        test_numeric_bounds(project)
     print("\nall settings tests passed")
     return 0
 
