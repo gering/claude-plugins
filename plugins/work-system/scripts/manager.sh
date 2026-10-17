@@ -52,8 +52,9 @@
 #       The herdr route: resolve again, then `herdr agent prompt` the body to the
 #       Manager pane ONLY when status=unique, the agent is claude, idle/done, and
 #       its composer holds no user draft (a dim CC prompt suggestion is not a
-#       draft). Same body and cap as `body`; the cut line is sent, marked, and
-#       the truncation signal goes to stderr. Prints
+#       draft). Same body and cap as `body`; the truncation signal goes to
+#       stderr before the checks, so a cut line was delivered only on sent=yes.
+#       Prints
 #       sent=yes|no and reason=; always exit 0. Residual: the
 #       composer can change between the read and the send (herdr has no atomic
 #       check-and-prompt), so that window holds only the read and one call.
@@ -77,7 +78,7 @@ STDIN_TEXT_BYTES=16384
 
 usage() {
   echo "usage: ${0##*/} {record <worktree> | resolve [<lane>] | body [<lane>] -- <text> | prompt [<lane>] -- <text>}" >&2
-  echo "  body/prompt: event text is capped at $BODY_TEXT_CAP chars; a cut ends in \"…\" and stderr says truncated=yes orig_len=<n>" >&2
+  echo "  body/prompt: event text is capped at $BODY_TEXT_CAP chars; a cut ends in \"…\" and stderr says truncated=yes orig_len=<received length> [stdin_clipped=yes]" >&2
   exit 2
 }
 
@@ -558,12 +559,17 @@ split_text_args() {
   [ "${1:-}" = "--" ] || usage
   shift
   case $# in
-    # stdin, bounded: a terminal is no heredoc (usage, never a hang), and only
-    # STDIN_TEXT_BYTES are kept (argv stays small). One byte more is read so a
-    # longer input is flagged as cut even when what was kept folds under the cap.
-    0) [ -t 0 ] && usage; TEXT="$(head -c "$((STDIN_TEXT_BYTES + 1))")"
+    # stdin, bounded: a terminal is no heredoc (usage, never a hang), and at
+    # most STDIN_TEXT_BYTES + 1 are read (argv stays small). The sentinel keeps
+    # trailing newlines, so the byte count is the raw one: a longer input is
+    # flagged as cut even when what was kept folds to nothing. An unclipped
+    # read drops trailing newlines like a plain $(...) would.
+    0) [ -t 0 ] && usage; TEXT="$(head -c "$((STDIN_TEXT_BYTES + 1))"; printf x)"
+       TEXT="${TEXT%x}"
        if [ "$(printf '%s' "$TEXT" | wc -c)" -gt "$STDIN_TEXT_BYTES" ]; then
-         STDIN_CLIPPED=1; TEXT="$(printf '%s' "$TEXT" | head -c "$STDIN_TEXT_BYTES")"
+         STDIN_CLIPPED=1
+       else
+         TEXT="$(printf '%s' "$TEXT")"
        fi ;;
     1) TEXT="$1" ;;
     *) usage ;;

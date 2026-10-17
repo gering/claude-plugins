@@ -607,7 +607,8 @@ Claude session with no user draft in its composer (a dim prompt suggestion is no
 a draft). The event text goes in on stdin through a quoted heredoc, so quotes or
 `$(...)` in it never reach a shell. The event text keeps up to 1000 characters
 on both routes; a longer one is cut visibly — it ends in `…` and `manager.sh`
-prints `truncated=yes orig_len=<n>` on stderr. `/close`'s delegation offer uses
+prints `truncated=yes orig_len=<n>` on stderr (`orig_len` is the received length;
+`stdin_clipped=yes` marks stdin past its 16 KiB read, even when it folds short). `/close`'s delegation offer uses
 the same resolver.
 
 ### Task tabs carry their state glyph

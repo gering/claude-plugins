@@ -70,8 +70,11 @@ terminal gate) and `/close` step 1b delegation, which replaced the name-only
   composer intact and was answered. Stdin keeps 16 KiB and reads one byte more:
   a longer input is flagged (`stdin_clipped=yes`) even when the kept window
   folds under the cap. `orig_len` is the received length, before folding.
-  On `body` the signal comes before any send (shorten, rebuild); `prompt` has
-  already sent the marked line, so the worker reports the cut, never resends.
+  Stdin is read through a sentinel (`$(head -c …; printf x)`): a plain `$(...)`
+  strips trailing newlines, so a window ending in newlines miscounted as unclipped.
+  On `body` the signal comes before any send (shorten, rebuild); on `prompt` it
+  precedes the composer checks, so the cut line was delivered only on `sent=yes`
+  (then report the cut, never resend).
 
 ## Gotchas
 

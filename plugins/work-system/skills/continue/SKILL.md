@@ -406,8 +406,8 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
     Both routes keep at most **1000 characters** of event text; keep the event
     well under it (a gate summary fits easily). A longer one ends in `…` and
     stderr says `truncated=yes orig_len=<n>`. With `body`, nothing is sent yet:
-    shorten the event and build the line again. `prompt` has already sent the
-    marked line: do not resend, name the cut in your report.
+    shorten the event and build the line again. With `prompt`, `sent=yes` means
+    the marked line was delivered: do not resend, name the cut in your report.
 
     A ping is information, not a request: it asks for nothing, grants nothing,
     and never waits for or acts on a reply. Write the event text yourself from

@@ -404,6 +404,16 @@ r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, captur
                    text=True, timeout=60, input=" " * 16384 + "needs-decision: approve merge?")
 check("clipped stdin is never silent", r.returncode == 0 and "stdin_clipped=yes" in r.stderr
       and "\u2026 (info only" in r.stdout, r.stdout[-80:] + r.stderr)
+for name, data in (("byte 16385 is a newline", " " * 16384 + "\nneeds-decision: do not merge\n"),
+                   ("window is all newlines", "\n" * 16384 + "Xneeds-decision: approve merge?")):
+    r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
+                       text=True, timeout=60, input=data)
+    check(f"clipped stdin flagged when {name}", r.returncode == 0 and "stdin_clipped=yes" in r.stderr,
+          r.stdout[-80:] + r.stderr[:200])
+r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
+                   text=True, timeout=60, input="trailing newlines\n\n\n")
+check("unclipped stdin drops trailing newlines", "orig_len" not in r.stderr
+      and "] trailing newlines (info only" in r.stdout, r.stdout + r.stderr)
 r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
                    text=True, timeout=60, input="ok" + " " * 2000)
 check("whitespace that folds away is no cut", "truncated" not in r.stderr
