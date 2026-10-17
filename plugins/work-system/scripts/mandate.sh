@@ -57,11 +57,19 @@
 #                            setting, + review_budget_note= when the setting
 #                            was unusable) as init would write it into <dir> —
 #                            the source /kickoff renders from.
+#   deploy-owner [<dir>]     Who deploys a merge made from <dir>: in_lane=yes|no
+#                            (exit 3, in_lane=unknown, outside git), deploy_by=
+#                            manager|worker, deploy_confirm=ask|auto (+ note=
+#                            when a setting was unusable), read from the MAIN
+#                            checkout's config — a lane's own file never counts.
+#                            in_lane=yes with deploy_by=manager → the worker
+#                            must not deploy.
 #
 # Output: `key=value` lines on stdout. Exit 0 on success, 2 on usage error OR
 # on a record nobody can vouch for (corrupt frontmatter, a symlink, a file git
 # tracks), 3 when a mandate is required but absent, 4 when a write could not
-# be persisted. `allows` additionally uses exit 1 for a denied action — callers
+# be persisted (`deploy-owner` uses 3 for "ownership unresolvable",
+# in_lane=unknown). `allows` additionally uses exit 1 for a denied action — callers
 # MUST distinguish 1 (denied: stop) from 3 (unknown: ask the user), never
 # collapsing both into "not allowed".
 set -eu
@@ -942,6 +950,49 @@ do_lane() {
   printf '%s\n' "$wt"
 }
 
+# Who deploys a merge made from <dir>. Every mandate denies `deploy`, but that
+# binds only the worker's own initiative: a user-invoked merge followed by a
+# project's "deploy after merge" instruction slipped past it. So deploy has an
+# owner, decided per repo by `[deploy] by` (default manager): inside a lane
+# (a linked worktree) with by=manager the worker stops at the merge. The main
+# checkout is the Manager's own session and is never bound here.
+# The policy is read from the MAIN checkout, never from <dir>: a lane's own
+# .work-system.toml is a file its worker (or an /adopt-ed branch) controls, so
+# reading it there would let the constrained side grant itself the deploy.
+# SETTINGS_PROJECT_ROOT is pinned to that checkout for the same reason.
+# Unreadable settings fall back to the schema defaults — and with no python3 at
+# all to manager/ask, the side on which nothing deploys unasked.
+do_deploy_owner() {
+  local dir="$1" top main key val out by="manager" confirm="ask" note=""
+  top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" || top=""
+  main="$(git -C "$dir" worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p')" || main=""
+  top="$( [ -n "$top" ] && cd "$top" 2>/dev/null && pwd -P)" || top=""
+  main="$( [ -n "$main" ] && cd "$main" 2>/dev/null && pwd -P)" || main=""
+  if [ -z "$top" ] || [ -z "$main" ]; then echo "in_lane=unknown"; exit 3; fi
+  for key in by confirm; do
+    if out="$(SETTINGS_PROJECT_ROOT="$main" python3 -I "$SCRIPT_DIR/ws-settings.py" get "$main" "deploy.$key" 2>&1)"; then
+      val="$(printf '%s\n' "$out" | sed -n 's/^value=//p')"
+      [ -z "$val" ] || printf -v "$key" '%s' "$val"
+      out="$(printf '%s\n' "$out" | sed -n 's/^note=//p')"
+    else
+      out="deploy.$key not read (${out%%$'\n'*}) — using the default"
+    fi
+    [ -z "$out" ] || note="${note:+$note; }$out"
+  done
+  # `auto` is a standing grant to act outward unasked, so — like the close
+  # autocommit flag — only a COMMITTED, unmodified policy carries it: an edit in
+  # the working tree is not a decision anyone merged. Fail closed to ask.
+  if [ "$confirm" = "auto" ] && {
+       ! git -C "$main" ls-files --error-unmatch -- .work-system.toml >/dev/null 2>&1 ||
+       ! git -C "$main" diff --quiet HEAD -- .work-system.toml 2>/dev/null; }; then
+    confirm="ask"
+    note="${note:+$note; }deploy.confirm=auto ignored: .work-system.toml is not committed unmodified on the main checkout"
+  fi
+  if [ "$top" = "$main" ]; then echo "in_lane=no"; else echo "in_lane=yes"; fi
+  printf 'deploy_by=%s\ndeploy_confirm=%s\n' "$by" "$confirm"
+  [ -z "$note" ] || printf 'note=%s\n' "$note"
+}
+
 # Pull `--branch <name>` out of the argument list before the verbs see it, so a
 # consumer makes ONE call with no lane boilerplate. `path`/`lane`/`init` do not
 # take it: the first two ARE the resolution, and init is always given the
@@ -971,5 +1022,6 @@ case "${1:-}" in
            case "$rc" in 0) echo excluded=already ;; 1) echo excluded=yes ;; *) echo excluded=no ;; esac ;;
   actions) printf '%s\n' $KNOWN_ACTIONS ;;
   presets) shift || true; do_presets "${1:-.}" ;;
-  *) echo "usage: ${0##*/} {path|lane|show|init|allows|round|exclude-task|actions|presets} [--branch <name>] [...]" >&2; exit 2 ;;
+  deploy-owner) shift || true; do_deploy_owner "${1:-.}" ;;
+  *) echo "usage: ${0##*/} {path|lane|show|init|allows|round|exclude-task|actions|presets|deploy-owner} [--branch <name>] [...]" >&2; exit 2 ;;
 esac

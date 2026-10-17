@@ -23,7 +23,11 @@ user_invocable: true
    | Worktree | `…/.claude/worktrees/dark-mode` | `task/dark-mode` |
 
 2. **List pending tasks**:
-   - Run: `ls -1 tasks/*.md 2>/dev/null`
+   - Resolve the main checkout once — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path`
+     → `<main-repo-path>` — the backlog lives there even when `/list` runs in a worktree.
+   - Run: `find "<main-repo-path>/tasks" -maxdepth 1 -type f -name '*.md' ! -name '_index.md' ! -name 'README.md' ! -name 'ROADMAP.md' 2>/dev/null`
+     — the same set the `[ws]` statusline counts (`ROADMAP.md` holds the Manager's open
+     follow-ups, not a task)
    - For each task file: read its first line (title) and resolve its real branch via the shared
      helper — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/task-status.sh" resolve "<task-name>"` — then
      read `task_branch` and `branch_exists`:
@@ -59,9 +63,13 @@ user_invocable: true
    ```
 
 5. **Summary statistics**:
-   - Archived count: `find tasks/archive -maxdepth 1 -type f -name '*.md' ! -name '_index.md' 2>/dev/null | wc -l | tr -d ' '`
-     — closed tasks moved aside by `/close` (the non-recursive `tasks/*.md` glob in step 2
+   - Archived count: `find "<main-repo-path>/tasks/archive" -maxdepth 1 -type f -name '*.md' ! -name '_index.md' 2>/dev/null | wc -l | tr -d ' '`
+     — closed tasks moved aside by `/close` (the non-recursive `find` in step 2
      already excludes them). Omit the line when the count is 0.
+   - Open follow-ups — items a closed lane left that the Manager neither ran nor got a
+     yes for (`/close` steps 6c/10b): `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/followups.py" list "<main-repo-path>"`.
+     When `open=` is above 0, print each `item=` under the summary as
+     `⏳ Open follow-ups:` — they stay listed until resolved. Omit when 0.
    ```
    📊 Summary:
    • Total tasks: 3

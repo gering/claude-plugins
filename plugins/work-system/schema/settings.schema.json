@@ -77,6 +77,24 @@
         }
       }
     },
+    "deploy": {
+      "type": "object",
+      "description": "Who deploys a merged lane, and whether it asks first.",
+      "properties": {
+        "by": {
+          "type": "string",
+          "enum": ["manager", "worker"],
+          "default": "manager",
+          "description": "manager: a lane's worker never deploys (not even when project instructions say \"deploy after merge\"); it leaves a deploy follow-up and the Manager deploys from the main checkout after the close. worker: project instructions apply inside the lane as before."
+        },
+        "confirm": {
+          "type": "string",
+          "enum": ["ask", "auto"],
+          "default": "ask",
+          "description": "ask: the Manager asks before each deploy batch. auto: a standing per-repo grant to deploy a merged, closed lane without asking."
+        }
+      }
+    },
     "compat": {
       "type": "object",
       "description": "Migration toggles between Claude-specific and neutral conventions. Storage only in this phase; no plugin consumes them yet.",

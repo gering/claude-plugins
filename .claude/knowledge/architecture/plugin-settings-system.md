@@ -85,6 +85,14 @@ default) reuse it instead of growing a second reader. Lessons from its review:
   "committed policy" was really the main checkout's working tree. One root rule
   for writer and reader beats a guarantee neither tool can keep; the source is
   made visible instead (`review_budget_source=setting`).
+- **Except where the setting is an authorization (`deploy.by`/`deploy.confirm`,
+  1.21.0).** `mandate.sh deploy-owner` reads the *main checkout* with
+  `SETTINGS_PROJECT_ROOT` pinned there: a lane's own `.work-system.toml` is a file
+  its worker controls, and `by = "worker"` there would let the constrained side
+  grant itself the deploy (review finding, critical). A budget only bounds the
+  lane's own effort; a deploy owner decides who may act outward — so the
+  one-root rule yields. `/settings set` in a lane then edits a file this key
+  ignores; that mismatch is the accepted price.
 - **The schema default is the default.** Leaving the leaf default-less ("unset
   = preset value") broke `settings.py get` on an unset key and kept the
   constant beside the lookup. The preset table's number survives only as the
