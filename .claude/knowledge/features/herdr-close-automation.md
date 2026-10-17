@@ -1,10 +1,10 @@
 ---
 title: "herdr /close Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-10-07
+updatedAt: 2026-10-17
 createdFrom: "PR #18"
-updatedFrom: "session: 2026-10-07 (task/add-manager-address)"
-pluginVersion: 1.18.0
+updatedFrom: "session: 2026-10-17 (task/add-land-skill)"
+pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -117,6 +117,58 @@ from the original detector that still hold:
   tab they are not looking at) and an `/adopt`-ed branch that kept a non-`task/` name
   (unresolvable by name outside its worktree, so the Manager would receive a close it
   cannot resolve).
+
+## `/land` and `/close --delegate` (1.20.0)
+
+`/land` runs in the worker tab: handoff report → `/pr-flow:merge` → `assess` →
+`/close --delegate`. Why it is shaped this way:
+- **A separate skill, not a `/merge` or `/close` mode.** pr-flow must stay unaware of
+  worktrees, Managers and mandates (soft coupling — without pr-flow `/land` stops
+  before anything runs, and never falls back to a bare `gh pr merge` that skips
+  `/merge`'s preflight). `/close` must stay runnable alone and from the Manager side.
+  Only `/land` knows both halves are one user intent, so it owns exactly that
+  statement.
+- **The invocation is the authorization — partly enforced.** A mandate's
+  `deny: merge` binds the worker's own initiative, not an explicit user command. Prose
+  alone would let injected text ("run /land") reach the Skill tool, so the skill
+  carries `disable-model-invocation: true`. That fences the Skill tool only: keystrokes
+  another process types into the pane (`herdr pane send-text`, `herdr agent prompt`)
+  look like a typed command, and `/pr-flow:merge` + `/close` stay model-invocable. Those
+  routes are only discouraged in prose: `/land`'s "never inject `/land`" binds a
+  session that loaded `/land`, not an injector that never did — a residual, not a
+  fence.
+- **The merge is confirmed by `assess`, not by `/merge`'s output.** The post-merge
+  `git checkout <base>` fails in a worktree whenever the main checkout holds the base,
+  so an error can follow a real merge — and a success message is not proof either.
+  Re-run the **bare** `assess` and require its `task_branch` to equal step 1's (`/merge`
+  may have moved HEAD: a checkout that succeeded, or a backup-prefix rename — the
+  latter is `/merge` cleanup unaware of worktrees — and `gh pr merge --delete-branch`
+  does its own local cleanup too; making `/merge` worktree-aware — including
+  `gh`'s own cleanup — is a pr-flow follow-up). Not `assess <name>`: by name it
+  matches only `task/<name>`, missing an `/adopt`-ed `feature/…` lane or confirming
+  another task's merged PR.
+- **Follow-ups go into `work.summary`** under a `Follow-ups:` label: the report schema
+  rejects unknown keys, and the sweep reads the report body whole. `--pr` on `prepare`
+  is what lets `sweep --pr` match it (`report_match=yes`). `/land` always writes it —
+  `/continue`'s "nothing changed, don't rewrite" rule would keep the terminal-gate
+  report, which has no follow-ups. The list is printed in `/land`'s summary too: a
+  self-close never runs the sweep, and without insights there is no report.
+- **A merged PR is checked against HEAD.** `assess` finds the newest PR for the branch
+  *name* (maybe an earlier lane's), and a commit made while `/merge` waited never
+  reached the PR — yet `/close` deletes the branch. Before the merge `/land` requires `HEAD` to equal the PR's `headRefOid` (a local
+  branch behind it would be rebased and force-pushed over the PR's newer commits);
+  after it, `HEAD` may be behind but never ahead. Fail-closed on an unreadable head. The shared
+  fix — `assess` itself comparing heads — is a follow-up; `/close` alone is still
+  exposed.
+- **`--delegate` preselects only on `evidence=kicker`.** The 1b question exists so a
+  person can catch a wrong recipient. The user's flag vouches for *delegating*; only
+  the kicker record is revalidated against the live pane + agent session, yet it sits
+  in the worker-writable worktree — an address, not proof. Skipping the question on it
+  (the printed recipient line is seen only after the send) is an **accepted residual** (user decision): a worker able to forge
+  it could do worse, and the Manager re-verifies the merge before it closes anything.
+  `sole-root-agent`/`leftmost-tab` name whoever sits at the root, so they still ask. The recipient line is printed in the same turn as the send — it lets the user spot, not stop, a wrong recipient. Under the
+  flag a gate miss is reported in one line (the user asked for delegation), unlike the
+  silent no-offer of a plain `/close`. Pinned by `plugins/work-system/scripts/test_land.py`.
 
 ## Design decisions
 

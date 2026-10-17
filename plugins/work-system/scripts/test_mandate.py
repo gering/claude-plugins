@@ -1092,6 +1092,48 @@ check("setting: schema default equals the preset floor",
       floor and all(int(f) == schema_default for f in floor))
 
 
+# --- exclude-task: keeps the lane's TASK.md out of a clean-tree check --------
+ex = make_repo()
+excl = ex / ".git" / "info" / "exclude"
+excl.parent.mkdir(parents=True, exist_ok=True)
+excl.write_text("*.log")  # last line without its newline
+(ex / "TASK.md").write_text("task\n")
+check("exclude-task writes the rule",
+      kv(run("exclude-task", str(ex)).stdout).get("excluded") == "yes")
+check("exclude-task is idempotent",
+      kv(run("exclude-task", str(ex)).stdout).get("excluded") == "already")
+check("a missing trailing newline does not swallow the rule",
+      excl.read_text().splitlines() == ["*.log", "/TASK.md"])
+check("TASK.md no longer shows in git status",
+      "TASK.md" not in subprocess.run(["git", "-C", str(ex), "status", "--porcelain"],
+                                      capture_output=True, text=True).stdout)
+check("exclude-task needs a directory", run("exclude-task").returncode == 2)
+tr2 = make_repo()
+(tr2 / "TASK.md").write_text("task\n")
+subprocess.run(["git", "-C", str(tr2), "add", "TASK.md"], check=True)
+check("a tracked TASK.md reports excluded=no on the first call",
+      kv(run("exclude-task", str(tr2)).stdout).get("excluded") == "no")
+ng = make_repo()
+(ng / ".gitignore").write_text("!TASK.md\n")
+(ng / "TASK.md").write_text("task\n")
+check("a .gitignore negation that outranks the rule reports excluded=no",
+      kv(run("exclude-task", str(ng)).stdout).get("excluded") == "no")
+
+
+def exclude_one_body(path):
+    text = path.read_text()
+    body = text[text.index("exclude_one() {"):]
+    body = body[:body.index("\n}\n") + 3]
+    return [l for l in body.splitlines() if not l.strip().startswith("#")]
+
+
+check("manager.sh's exclude_one mirrors mandate.sh's",
+      exclude_one_body(SCRIPT) == exclude_one_body(SCRIPT.parent / "manager.sh"))
+check("and leaves no rule behind",
+      "/TASK.md" not in ((tr2 / ".git" / "info" / "exclude").read_text()
+                         if (tr2 / ".git" / "info" / "exclude").exists() else ""))
+
+
 if FAILS:
     print("FAIL:")
     for f in FAILS:

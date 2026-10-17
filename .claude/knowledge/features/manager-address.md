@@ -1,9 +1,10 @@
 ---
 title: "Manager Address Resolver and Milestone Pings"
 createdAt: 2026-10-02
-updatedAt: 2026-10-07
+updatedAt: 2026-10-17
 createdFrom: "session: 2026-10-02 (task/add-manager-address)"
-pluginVersion: 1.18.0
+updatedFrom: "session: 2026-10-17 (task/add-land-skill)"
+pluginVersion: 1.9.0
 prime: false
 ---
 
@@ -25,7 +26,10 @@ terminal gate) and `/close` step 1b delegation, which replaced the name-only
   a `reason=` and the root scan runs instead. The record is an address, never an
   authorization: it sits in the worker-writable worktree, so a worker could point
   it at any live root agent. `evidence=kicker` is a better guess, not proof — the
-  `/close` delegation question names the evidence and the user confirms.
+  `/close` delegation question names the evidence and the user confirms. The one
+  exception is `/close --delegate` (what `/land` passes): it sends on `kicker`
+  without asking, after printing the recipient — an accepted residual, see
+  [herdr-close-automation](herdr-close-automation.md).
 - **The live title must still match the recorded name.** The SendMessage name is
   the pane's live title, which any process in the pane can set; a kicker whose
   title differs from the recorded name keeps its pane but gets no SendMessage

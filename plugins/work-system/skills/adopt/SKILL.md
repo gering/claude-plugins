@@ -118,6 +118,9 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
 
 10. **Copy files to worktree** (run from main-repo CWD — no `cd`):
     - Copy task file: `cp tasks/<task-name>.md .claude/worktrees/<task-name>/TASK.md`
+    - Keep it out of git, so `/pr-flow:merge`'s clean-tree check (and a `git add -A`)
+      never sees it: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" exclude-task .claude/worktrees/<task-name>`.
+      `excluded=no` (a tracked or unwritable TASK.md) → say so in one line; never fatal.
     - Copy Claude config if present (a fresh worktree has no `.claude/` dir yet, so create it
       first — otherwise the copy silently no-ops):
       `[ -f .claude/settings.json ] && mkdir -p .claude/worktrees/<task-name>/.claude && cp .claude/settings.json .claude/worktrees/<task-name>/.claude/`

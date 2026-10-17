@@ -103,6 +103,7 @@ user_invocable: true
    • /continue       — Resume the active task
    • /status <name>  — Check specific task status
    • /close <name>   — Clean up completed task
+   • /land           — Merge and close, from the task's tab
    ```
 
 ## Output Format

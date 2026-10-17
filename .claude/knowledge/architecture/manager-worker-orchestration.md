@@ -2,9 +2,9 @@
 title: "Manager/Worker Orchestration (design)"
 createdAt: 2026-07-18
 createdFrom: "session: design-manager-worker-orchestration 2026-07-18"
-updatedAt: 2026-10-07
-updatedFrom: "session: 2026-10-07 (task/add-manager-address)"
-pluginVersion: 1.18.0
+updatedAt: 2026-10-17
+updatedFrom: "session: 2026-10-17 (task/add-land-skill)"
+pluginVersion: 1.9.0
 prime: false
 ---
 
@@ -70,7 +70,9 @@ Manager and offers to hand the teardown over as one structured message
 What this slice establishes (and what it deliberately does not):
 
 - **One delegation with human confirmation, no watch loop.** The worker asks once, sends
-  once, and stops — no polling, no re-send, no receipt protocol. `SendMessage` enqueues
+  once, and stops (since 1.20.0 `/close --delegate`, passed by `/land`, skips the
+  question on `evidence=kicker` only — see
+  [herdr-close-automation](../features/herdr-close-automation.md)) — no polling, no re-send, no receipt protocol. `SendMessage` enqueues
   and the Manager drains it at its next turn, which is fine for a close (not
   time-critical). `ready-to-close` handoff payloads, durable AMQ fallback and the Manager
   watch loop remain separate tasks.

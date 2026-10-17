@@ -1,21 +1,26 @@
 ---
-title: "Insights Lifecycle Producers (/continue handoff, /close report)"
+title: "Insights Lifecycle Producers (/continue + /land handoff, /close report)"
 createdAt: 2026-09-20
-updatedAt: 2026-09-21
+updatedAt: 2026-10-17
 createdFrom: "branch: task/integrate-insights-handoffs"
-updatedFrom: "PR #63"
-pluginVersion: 1.15.0
+updatedFrom: "session: 2026-10-17 (task/add-land-skill)"
+pluginVersion: 1.9.0
 prime: false
 ---
 
 # Insights Lifecycle Producers
 
-work-system writes insight reports at two lifecycle points: `/continue` when a
+work-system writes insight reports at two lifecycle points (plus `/land`, below): `/continue` when a
 worker hands its lane back, and `/close` before teardown. The report *contract*
 and store are not described here — they belong to
 [insights-report-store](insights-report-store.md), which these producers reuse
 without copying validation or writing a report file themselves. This entry
 records only the producer-side decisions a later edit could plausibly undo.
+
+Since 1.20.0 `/land` is a third producer: a worker-side `handoff` report
+(`--caller land --pr <n>`) written before it merges (or after, on an already merged PR), always written (no duplicate
+skip), its summary ending in a `Follow-ups:` list for the Manager's sweep. See
+[herdr-close-automation](herdr-close-automation.md).
 
 ## The bridge, and why "absent" ≠ "broken"
 
@@ -206,7 +211,7 @@ not exonerating.
 
 ## Known coverage gap
 
-Both producers need a session that reaches a handoff. A crashed or killed worker
+Every producer needs a session that reaches a handoff. A crashed or killed worker
 writes nothing, and a Manager-run close can only report the *Manager's*
 perspective — the worker's model, skills and friction stay unknown unless that
 worker left its own handoff report to link. Documented as a limitation rather
