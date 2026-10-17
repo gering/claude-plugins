@@ -82,7 +82,7 @@ model lookup came back empty and the review went Claude-only without an error.
 An index with no argument stays literal, so a test run without arguments passes.
 
 - Keep positional parameters out of skill bodies. Inline helpers forward `"$@"`
-  (not a token) to a script (`swarm/scripts/kv.sh`), which reads them from disk.
+  (not a token) to a script (`plugins/swarm/scripts/kv.sh`), which reads them from disk.
 - Don't rely on the documented `\$1` escape inside shell code: if the
   substitution ever skips it, the backslash lands in the shell.
 - `check-structure.py` fails on any `$<digit>` in a SKILL.md. A declared

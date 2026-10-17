@@ -1,9 +1,9 @@
 ---
 title: "CI Structure Checks"
 createdAt: 2026-06-18
-updatedAt: 2026-09-16
+updatedAt: 2026-10-16
 createdFrom: "PR #6"
-updatedFrom: "fix-swarm-silent-voice-loss"
+updatedFrom: "fix-swarm-skill-arg-substitution"
 pluginVersion: 1.8.2
 prime: false
 reindexedAt: 2026-07-12
@@ -30,7 +30,7 @@ a green pipeline and a red working copy drift apart.
 
 ## What it verifies
 
-The script groups its checks into five functions:
+The script groups its checks into six functions:
 
 1. **JSON validity + version sync** — every `plugin.json` / `marketplace.json`
    parses, and each plugin's version matches between the two. Version drift is a
@@ -41,11 +41,15 @@ The script groups its checks into five functions:
    Enforced mechanically because an over-budget description gets silently
    truncated in sessions and can stop matching its triggers (see
    [skill-design-conventions](../architecture/skill-design-conventions.md)).
-3. **Internal `${CLAUDE_PLUGIN_ROOT}` references** — paths referenced in
+3. **SKILL.md positional parameters** — no `$<digit>` anywhere in a SKILL.md.
+   Claude Code substitutes `$N` with the skill's arguments at render time, code
+   blocks included, so an inline shell helper's `$1` silently became a PR number.
+   The on-disk file looks right; only this check sees it.
+4. **Internal `${CLAUDE_PLUGIN_ROOT}` references** — paths referenced in
    Markdown (skills, READMEs) *and* in the hook manifests (`hooks/*.json`)
    actually exist, catching dangling cross-references.
-4. **Shell script syntax** — bundled `.sh` files parse.
-5. **Plugin tests** — runs every `plugins/*/scripts/test_*.py` (bounded timeout,
+5. **Shell script syntax** — bundled `.sh` files parse.
+6. **Plugin tests** — runs every `plugins/*/scripts/test_*.py` (bounded timeout,
    stdin closed); a plugin drops a self-contained assert-based test there and CI
    runs it. It executes discovered files, so the CI job must never expose secrets
    / a write token to untrusted PRs (GitHub withholds both from fork PRs).

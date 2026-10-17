@@ -104,8 +104,12 @@ check("workflow: externalFlags shell-quotes the model it emits",
 check("skill: prep selects once via `agents.sh grok-model`, BEFORE `list`",
       0 < SKILL.find("agents.sh\" grok-model") < SKILL.find("agents.sh\" list --json"))
 for field in ("selected", "latest_candidate", "source", "cli_version"):
-    check(f"skill token and workflow parser agree on `{field}`",
-          f"{field}=$(_gk {field})" in SKILL and f"kv.{field}" in SOURCE)
+    if field == "selected":
+        # Captured once (GROK_MODEL) so the charset guard checks the echoed value.
+        token = 'GROK_MODEL="$(_gk selected)"' in SKILL and "selected=$GROK_MODEL" in SKILL
+    else:
+        token = f"{field}=$(_gk {field})" in SKILL
+    check(f"skill token and workflow parser agree on `{field}`", token and f"kv.{field}" in SOURCE)
 # --- the prep fragment, EXECUTED under the shells a user actually has -------------------
 # The block runs in the user's shell. `${VAR:+--model "$VAR"}` was one word under
 # zsh: the adapter answered "Unknown flag", the token came back empty and the pin

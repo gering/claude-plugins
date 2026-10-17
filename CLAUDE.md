@@ -67,9 +67,11 @@ fails on version drift, so both must match before a PR can merge.
 ## Structure Checks
 
 `scripts/check-structure.py` mechanically verifies repo invariants (JSON
-validity, version sync, SKILL.md frontmatter + description word budget, internal
-`${CLAUDE_PLUGIN_ROOT}` references, shell syntax). It runs in CI on every PR and
-push to main, and can be run locally before pushing. Keep it green.
+validity, version sync, SKILL.md frontmatter + description word budget, no
+`$<digit>` in SKILL.md (render-time arg substitution), internal
+`${CLAUDE_PLUGIN_ROOT}` references, shell syntax, plugin tests). It runs in CI
+on every PR and push to main, and can be run locally before pushing. Keep it
+green.
 
 <!-- BEGIN knowledge-system -->
 ## Project Knowledge System

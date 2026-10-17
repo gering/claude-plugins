@@ -88,8 +88,8 @@ Plugins update automatically when the marketplace is refreshed. To manually upda
 
 ## Development
 
-Structure invariants (JSON validity, version sync, skill frontmatter, internal
-references, shell syntax) are enforced by CI on every PR. Run the same checks
+Structure invariants (JSON validity, version sync, skill frontmatter, no `$<digit>`
+in skill bodies, internal references, shell syntax, plugin tests) are enforced by CI on every PR. Run the same checks
 locally before pushing:
 
 ```

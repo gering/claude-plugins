@@ -7,12 +7,10 @@
 # line does), optionally reduced to the characters of a `tr` set. Exit 0 either
 # way; exit 2 on a malformed call.
 #
-# Why a script: the review skill's prep block used inline helpers like
-# `sed -n "s/^$1=//p"`. Claude Code substitutes `$<digit>` in SKILL.md content
-# with the skill's arguments at render time (`$1` = the second argument), so
-# `/swarm:review --pr 65` rendered every lookup as `s/^65=//p` and the codex and
-# grok model selections came back empty. The callers now forward `"$@"`, which is
-# not a substitution token, and the key matching lives here, read from disk.
+# A script because SKILL.md content is a template: Claude Code substitutes
+# `$<digit>` with the skill's arguments, so an inline helper cannot name a
+# positional parameter. Callers forward `"$@"` instead (see the knowledge entry
+# architecture/skill-design-conventions.md).
 set -euo pipefail
 
 usage() { echo "usage: kv.sh get <key> [<charset>]" >&2; exit 2; }

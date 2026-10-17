@@ -50,7 +50,7 @@ class KvScript(unittest.TestCase):
 
 
 class RenderedPrepHelpers(unittest.TestCase):
-    HELPERS = ("_cp", "_gk", "_ck")
+    HELPERS = ("_cp", "_gr", "_gk", "_cr", "_ck")
 
     def helper_lines(self, text: str) -> list[str]:
         lines = [l for l in text.splitlines() if re.match(r"(%s)\(\) \{" % "|".join(self.HELPERS), l)]
@@ -61,20 +61,23 @@ class RenderedPrepHelpers(unittest.TestCase):
         rendered = render(SKILL.read_text(encoding="utf-8"), ["--pr", "65"])
         script = "\n".join([
             'CODEX_POLICY="family=terra\nmodel=\neffort=high"',
-            'GROK_KV="selected=grok-5\ncli_version=1.2"',
+            'GROK_KV="selected=grok-5\ncli_version=1.2\ndegraded=pinned; not latest"',
             'CODEX_KV="selected=gpt-6-terra\nsource=catalog-latest"',
             *self.helper_lines(rendered),
-            'echo "$(_cp family)|$(_cp effort)|$(_gk selected)|$(_ck selected)|$(_ck source)"',
+            'echo "$(_cp family)|$(_cp effort)|$(_gk selected)|$(_ck selected)|$(_ck source)|$(_gr degraded)"',
         ])
         out = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                              env={"CLAUDE_PLUGIN_ROOT": str(PLUGIN), "PATH": "/usr/bin:/bin"})
-        self.assertEqual(out.stdout.strip(), "terra|high|grok-5|gpt-6-terra|catalog-latest", out.stderr)
+        self.assertEqual(out.stdout.strip(), "terra|high|grok-5|gpt-6-terra|catalog-latest|pinned; not latest", out.stderr)
 
     def test_empty_lookups_stop_the_prep(self):
         skill = SKILL.read_text(encoding="utf-8")
-        self.assertIn('if [ -z "$(_cp family)" ] || [ -z "$(_cp effort)" ]; then', skill)
-        self.assertIn("SWARM_PREP_ERR=grok-model selected a model", skill)
-        self.assertIn("SWARM_PREP_ERR=codex-model selected a model", skill)
+        self.assertIn('if [ -z "$CODEX_FAMILY" ] || [ -z "$CODEX_EFFORT" ]; then', skill)
+        self.assertIn('if [ "$(_gr selected)" != "$GROK_MODEL" ]; then', skill)
+        self.assertIn('if [ "$(_cr selected)" != "$CODEX_MODEL" ]; then', skill)
+        self.assertIn("SWARM_PREP_ERR=grok-model selected a model id", skill)
+        self.assertIn("SWARM_PREP_ERR=codex-model selected a model id", skill)
+        self.assertIn('[ -r "${CLAUDE_PLUGIN_ROOT}/scripts/kv.sh" ]', skill)
         self.assertIn("- `SWARM_PREP_ERR=…` → surface it **verbatim** and **stop**", skill)
 
 
