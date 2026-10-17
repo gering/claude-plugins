@@ -320,6 +320,23 @@ Three properties are load-bearing:
   and `review_rounds_used` is counted in the file, so a worker resumed with
   `claude -c` after a context loss does not silently restart its allowance.
 
+A repo sets the budget its new lanes get with `[mandate] review_budget` in
+`.work-system.toml` (default 3, 0–100; `/settings set
+work-system.mandate.review_budget 5` writes it; `/settings` does not yet check
+the 0–100 bounds, so an out-of-range value it accepts still falls back to 3). It
+is read at `SETTINGS_PROJECT_ROOT` if set, else the git toplevel of the lane
+being set up — the settings plugin's own root rule. A lane is cut
+from committed history, so **commit** the file: an uncommitted edit in the main
+checkout does not reach new lanes. A branch that commits its own (e.g. one
+`/adopt` takes over) brings that value along; `init` and `presets` report
+`review_budget_source=setting` whenever the file set it, and `/kickoff` shows
+the number before you consent.
+It applies to every preset that authorizes a review; `draft-only` stays 0, an
+explicit `review_budget=` at `init` wins, and an unreadable or invalid value
+falls back to the default with a note — never a blocked kickoff. Existing lanes
+keep what they recorded. `scripts/ws-settings.py` is work-system's read path for
+its settings (it reads the file itself: the settings plugin is optional).
+
 Edit `MANDATE.md` by hand to widen or narrow a running lane (raising
 `review_budget` is the usual case); `/kickoff` never rewrites an existing one, and
 refuses outright if the file on disk names a *different* task — that is what an

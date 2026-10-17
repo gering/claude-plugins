@@ -1,9 +1,9 @@
 ---
 title: "Plugin settings system"
 createdAt: 2026-07-23
-updatedAt: 2026-10-02
+updatedAt: 2026-10-16
 createdFrom: "PR #40"
-updatedFrom: "branch: task/fix-review-route-without-bot"
+updatedFrom: "branch: task/raise-standard-review-budget-to-5"
 pluginVersion: 1.9.0
 prime: true
 ---
@@ -74,6 +74,30 @@ restated in code), a symlinked or invalid file falls back to the default with a
 note, and a remembered runtime answer (the no-bot memory) lives in the git
 common dir — never written back into the user's TOML. Revisit once discovery
 works for installed plugins.
+
+**Second consumer — work-system `mandate.review_budget` (1.19.0).** Same
+self-read exception, but as one reusable helper, `scripts/ws-settings.py get
+<dir> <dotted.key>`, so later work-system settings (paths, the kickoff agent
+default) reuse it instead of growing a second reader. Lessons from its review:
+- **Same root as settings.py** (git toplevel of the dir). A first version read
+  the *main checkout* so an adopted branch could not raise its own budget — but
+  then `/settings set` inside a lane edited a file the runtime ignored, and
+  "committed policy" was really the main checkout's working tree. One root rule
+  for writer and reader beats a guarantee neither tool can keep; the source is
+  made visible instead (`review_budget_source=setting`).
+- **The schema default is the default.** Leaving the leaf default-less ("unset
+  = preset value") broke `settings.py get` on an unset key and kept the
+  constant beside the lookup. The preset table's number survives only as the
+  no-python3 floor, pinned equal to the schema default by a test.
+- **Open, don't check-then-open:** `O_NOFOLLOW|O_NONBLOCK` + `S_ISREG` — an
+  `islink()` pre-check races, and a FIFO hangs a kickoff on `open()`.
+- **Bound integers the shell will do arithmetic on** (`maximum`): TOML ints are
+  arbitrary-precision, bash's `[ -ge ]` is not. settings.py enforces neither
+  `minimum` nor `maximum` yet; ws-settings.py does.
+
+`mandate.sh init` applies it (not `/kickoff` prose, so `/adopt` gets it too) and
+`presets <dir>` renders the same value, so the question the user answers matches
+what `init` writes.
 
 ## Hardening lessons (from the swarm + Codex reviews)
 

@@ -20,6 +20,7 @@ properties under test are the ones a wrong answer makes unsafe:
 The tests run against real git repos because mandate.sh anchors MANDATE.md at
 the worktree root, not at $PWD.
 """
+import json
 import os
 import re
 import subprocess
@@ -40,10 +41,27 @@ def check(name, cond):
         FAILS.append(name)
 
 
+# An inherited SETTINGS_PROJECT_ROOT would point every budget case at the
+# caller's repo; the one test that wants it sets it here, then removes it.
+ENV = {k: v for k, v in os.environ.items() if k != "SETTINGS_PROJECT_ROOT"}
+
+
 def run(*args):
     return subprocess.run(
-        ["bash", str(SCRIPT), *args], capture_output=True, text=True
+        ["bash", str(SCRIPT), *args], capture_output=True, text=True, timeout=120,
+        env=ENV,
     )
+
+
+def presets_of(d):
+    blocks, cur = {}, None
+    for line in run("presets", str(d)).stdout.splitlines():
+        k, _, v = line.partition("=")
+        if k == "preset":
+            cur = v; blocks[cur] = {}
+        elif cur:
+            blocks[cur][k] = v
+    return blocks
 
 
 def kv(out):
@@ -670,15 +688,9 @@ check("and nothing landed inside it", not any((dd / "MANDATE.md").iterdir()))
 check("and it is not reported as written", "written=yes" not in r.stdout)
 
 # --- presets are printed from the same table init writes ---------------------
-out = run("presets").stdout
-blocks = {}
-cur = None
-for line in out.splitlines():
-    k, _, v = line.partition("=")
-    if k == "preset":
-        cur = v; blocks[cur] = {}
-    elif cur:
-        blocks[cur][k] = v
+# Into a fresh repo, never the cwd: presets reads the repo's .work-system.toml,
+# and this checkout's own (review_budget = 5) would not match a bare init.
+blocks = presets_of(make_repo())
 check("presets lists all three", set(blocks) == {"standard", "draft-only", "merge-delegated"})
 for name, fields in blocks.items():
     pr = make_repo()
@@ -983,6 +995,101 @@ check("an empty --branch is the same as none",
 check("a valueless --branch is a usage error", run("show", "--branch").returncode == 2)
 check("--branch=<name> works too",
       kv(run("show", "--branch=task/lane-b", str(mainr)).stdout).get("task") == "lane-b")
+
+# --- the repo's mandate.review_budget setting --------------------------------
+# A repo can give new lanes another budget (.work-system.toml). It sets the
+# budget of the presets that authorize a review, never draft-only's 0, never an
+# explicit review_budget=, and never blocks when unusable.
+def budget_repo(toml=None):
+    r = make_repo()
+    if toml is not None:
+        (r / ".work-system.toml").write_text(toml)
+    return r
+
+
+def init_budget(d, preset, *extra):
+    r = run("init", str(d), "--preset", preset, "task=t", "authorized_by=user", *extra)
+    return r, kv(run("show", str(d)).stdout).get("review_budget")
+
+
+FIVE = "[mandate]\nreview_budget = 5\n"
+for preset, want in (("standard", "5"), ("merge-delegated", "5"), ("draft-only", "0")):
+    r, got = init_budget(budget_repo(FIVE), preset)
+    check(f"setting: {preset} records {want}", got == want)
+    check(f"setting: {preset} reports its source",
+          kv(r.stdout).get("review_budget_source") == ("setting" if want == "5" else "preset"))
+    check(f"setting: presets shows {preset} as init writes it",
+          presets_of(budget_repo(FIVE))[preset].get("review_budget") == want)
+
+r, got = init_budget(budget_repo(FIVE), "standard", "review_budget=2")
+check("setting: an explicit review_budget= wins", got == "2")
+check("setting: ...and is reported as explicit",
+      kv(r.stdout).get("review_budget_source") == "explicit")
+r, got = init_budget(budget_repo(), "standard")
+check("setting: unset records the schema default", got == "3")
+check("setting: unset reports the preset as source",
+      kv(r.stdout).get("review_budget_source") == "preset")
+r, got = init_budget(budget_repo("[mandate]\nreview_budget = 0\n"), "standard")
+check("setting: 0 is a value, not unset", got == "0")
+
+for bad, why in (("[mandate]\nreview_budget = -1\n", "negative"),
+                 ("[mandate]\nreview_budget = \"5\"\n", "a string"),
+                 ("[mandate]\nreview_budget = true\n", "a boolean"),
+                 ("[mandate]\nreview_budget = 18446744073709551616\n", "past the maximum"),
+                 ("[mandate\nreview_budget = 5\n", "unparsable TOML")):
+    r, got = init_budget(budget_repo(bad), "standard")
+    check(f"setting: {why} falls back to the schema default",
+          kv(r.stdout).get("written") == "yes" and got == "3")
+    check(f"setting: {why} says why on stderr", ".work-system.toml" in r.stderr)
+    std = presets_of(budget_repo(bad))["standard"]
+    check(f"setting: {why} is named on presets' stdout",
+          std.get("review_budget") == "3"
+          and ".work-system.toml" in std.get("review_budget_note", ""))
+check("setting: a usable file adds no note",
+      "review_budget_note" not in presets_of(budget_repo(FIVE))["standard"])
+
+sym = budget_repo()
+(sym / "real.toml").write_text(FIVE)
+(sym / ".work-system.toml").symlink_to(sym / "real.toml")
+r, got = init_budget(sym, "standard")
+check("setting: a symlinked config is ignored", got == "3" and "symlink" in r.stderr)
+env_root = budget_repo(FIVE)
+ENV["SETTINGS_PROJECT_ROOT"] = str(env_root)
+check("setting: SETTINGS_PROJECT_ROOT wins, as in settings.py",
+      init_budget(budget_repo(), "standard")[1] == "5")
+del ENV["SETTINGS_PROJECT_ROOT"]
+
+fifo = budget_repo()
+os.mkfifo(fifo / ".work-system.toml")
+try:
+    r, got = init_budget(fifo, "standard")  # would hang on a blocking open()
+    check("setting: a FIFO config falls back instead of hanging",
+          got == "3" and "not a regular file" in r.stderr)
+except subprocess.TimeoutExpired:
+    check("setting: a FIFO config falls back instead of hanging", False)
+
+# The settings plugin's root rule: the git toplevel of the directory written
+# into — for a lane, the worktree's own checkout, the file /settings edits there.
+mc = budget_repo("[mandate]\nreview_budget = 4\n")
+subprocess.run(["git", "-C", str(mc), "-c", "user.name=t", "-c", "user.email=t@t",
+                "commit", "-q", "--allow-empty", "-m", "i"], check=True)
+lw = mc / "lane"
+subprocess.run(["git", "-C", str(mc), "worktree", "add", "-q", str(lw), "-b", "x"], check=True)
+(lw / ".work-system.toml").write_text("[mandate]\nreview_budget = 9\n")
+check("setting: a lane reads its own checkout's config",
+      init_budget(lw, "standard")[1] == "9")
+sub = budget_repo(FIVE)
+(sub / "deep").mkdir()
+check("setting: a subdirectory resolves to the repo's toplevel",
+      presets_of(sub / "deep")["standard"].get("review_budget") == "5")
+
+# The preset table's budgets are only the no-python3 floor; the schema default
+# is authoritative, and the two must not drift.
+schema_default = json.loads((SCRIPT.parent.parent / "schema" / "settings.schema.json")
+                            .read_text())["properties"]["mandate"]["properties"]["review_budget"]["default"]
+floor = re.findall(r'v_review_budget="([1-9][0-9]*)"', SCRIPT.read_text())
+check("setting: schema default equals the preset floor",
+      floor and all(int(f) == schema_default for f in floor))
 
 
 if FAILS:

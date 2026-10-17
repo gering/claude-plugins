@@ -1,0 +1,3 @@
+[mandate]
+# Review rounds new lanes in this repo get (standard/merge-delegated presets).
+review_budget = 5

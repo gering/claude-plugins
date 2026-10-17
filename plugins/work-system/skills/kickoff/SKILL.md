@@ -270,11 +270,20 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     **Read the concrete grants out of the script, not out of this file:**
 
     ```sh
-    bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" presets
+    bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" presets "<worktree>"
     ```
 
+    `<worktree>` is the absolute path step 7 created
+    (`<main-repo>/.claude/worktrees/<task-name>`) — the same one step b's `init`
+    writes into, never the main repo: the budget is read from that checkout.
+
     It prints `preset=`, `allow=`, `deny=`, `terminal_gate=` and `review_budget=`
-    for each. Build the question from that output, so what the user consents to is
+    for each — the budget exactly as `init` will write it into that worktree.
+    `review_budget_source=setting` means the checkout's `.work-system.toml` set
+    it (`[mandate] review_budget`); say so in the question. A
+    `review_budget_note=` line means that file was there but unusable and the
+    default stands — relay the note too. Build the question from that output,
+    so what the user consents to is
     what `init` will actually write. A hardcoded copy of the lists stood here and
     is deliberately gone: the user would otherwise agree to a set the script no
     longer writes, and the worker would then stop to ask about an action the user

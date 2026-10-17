@@ -64,6 +64,19 @@
         }
       }
     },
+    "mandate": {
+      "type": "object",
+      "description": "Defaults for the MANDATE.md that /kickoff and /adopt record for a new lane.",
+      "properties": {
+        "review_budget": {
+          "type": "integer",
+          "default": 3,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Review rounds new lanes in this repo record for every preset that authorizes a review (standard, merge-delegated); draft-only always records 0; an explicit review_budget= at init wins. Existing lanes keep their recorded budget."
+        }
+      }
+    },
     "compat": {
       "type": "object",
       "description": "Migration toggles between Claude-specific and neutral conventions. Storage only in this phase; no plugin consumes them yet.",
