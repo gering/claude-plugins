@@ -132,7 +132,7 @@ user's settings. It clears itself — the repo switches back to `auto` — when
 `has_bot=yes` (a `claude-code-action` workflow lands on the default branch:
 the bot installed later, detected with no mention needed, and it outranks the
 evidence too), a poll sees a finished Claude review, or a networked `route`
-sees a comment by the App (`claude[bot]`, the author `poll` reads) at or after
+sees a comment by the App (`claude_author` in `claude-review.sh`'s `CLAUDE_JQ`: `claude[bot]` in this REST read, `claude` in `poll`'s GraphQL one) at or after
 the record — a late reply or a manual mention; one paged out of the last 100
 comments is not seen. Also `route = "github"`, or by hand `claude-review.sh
 route-clear`. Only `auto` records; evidence is never recorded.

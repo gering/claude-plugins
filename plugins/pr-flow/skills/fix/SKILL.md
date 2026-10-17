@@ -24,11 +24,13 @@ user_invocable: true
    - Store `PR_NUMBER`.
 
 2. **Fetch latest Claude review**:
-   - Run:
+   - Run (the newest *finished* Claude review — the same one `/cycle`'s poll returns):
      ```
-     gh pr view <PR_NUMBER> --json comments --jq '[.comments[] | select(.author.login == "claude") | select(.body | contains("**Claude finished"))] | last | .body'
+     bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" latest <PR_NUMBER> --done --json
      ```
-   - If empty, stop: "No completed Claude review found. Run `/cycle` to trigger one."
+     → `{createdAt, body, pending}`
+   - If `body` is empty, stop: "No completed Claude review found. Run `/cycle` to trigger one."
+   - If `pending` is true, a newer Claude comment is still running or failed — see Edge Cases.
 
 3. **Parse issues**:
    - Split the review body into discrete findings (grouped by file, each with severity if noted)
@@ -85,7 +87,7 @@ user_invocable: true
 
 ## Edge Cases
 
-- Review comment exists but is still in progress (starts with "Claude Code is working") → stop, ask user to wait or run `/check` to poll
+- A newer Claude comment is still in progress or failed (step 2's `pending` is true) → stop and say so; the user waits for it or re-runs `/cycle`, which polls
 - Latest review is older than the last push → warn: "The review is stale; the code has changed since. Run `/cycle` for a fresh review."
 - Review body has no parseable issues (just "LGTM") → inform user, no action needed
 - User selects issues that don't exist (e.g. "fix #99") → list valid numbers and ask again

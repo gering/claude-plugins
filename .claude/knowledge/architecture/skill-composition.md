@@ -34,9 +34,10 @@ semantics rather than relying on this summary.
 ## 2. Shared scripts as single source of truth
 
 Logic used by multiple skills lives in one script, not copied prose.
-`plugins/pr-flow/scripts/claude-review.sh` (poll / latest / latest-after) is
-shared by five skills — `/check`, `/cycle`, `/merge`, `/open`, `/rebase`
-(note: `/fix` does **not** use it; it only consumes the review *format* below).
+`plugins/pr-flow/scripts/claude-review.sh` (poll / latest / latest-after /
+comment-ids, plus the route subcommands) is shared by every pr-flow skill that
+reads reviews, `/fix` included — it also holds the one definition of a finished
+Claude review (see [pr-flow-review-comment-predicate](../features/pr-flow-review-comment-predicate.md)).
 One implementation to harden — real-world fixes (fractional-seconds parsing,
 merge-method detection from PR history, `mergeStateStatus` interpretation) land
 once and all callers benefit.
