@@ -69,9 +69,9 @@ Strip the flags first; whatever is left over is the commit message.
    - If already up-to-date, continue
 
 5. **Hide previous review comments**:
-   - Find all previous Claude review comments on the PR:
+   - Find all previous Claude comments on the PR (one node ID per line):
      ```
-     gh pr view <PR_NUMBER> --json comments --jq '[.comments[] | select(.author.login == "claude") | .id]'
+     bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" comment-ids <PR_NUMBER>
      ```
    - For each comment ID, minimize it as "OUTDATED" via GraphQL:
      ```
@@ -264,8 +264,7 @@ The review wait is a background Bash poll, so the user can interject at any time
 ## Notes
 
 - The review bot typically responds within 1-5 minutes
-- The review comment starts with `**Claude finished @<user>'s task in ...**`
-- The actual feedback follows after a `---` separator
+- The `@claude` bot's comment starts with `**Claude finished @<user>'s task in ...**`, the feedback after a `---` separator; an auto-review workflow posts its review directly (e.g. `## Review`). Both count — `claude-review.sh` holds the one definition of a finished Claude review
 - Steps 1-7 run in the foreground (fast, interactive)
 - Step 8 runs as a background Bash task (no permission issues, unlike background agents)
 - When the Bash task completes, the raw comment is returned and summarized by the main agent (step 10)
