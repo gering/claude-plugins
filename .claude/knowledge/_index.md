@@ -1,7 +1,7 @@
 # Knowledge Index
 
 ## Architecture
-- `architecture/skill-design-conventions.md` — Context economy as design principle; description budget + `skillListingBudgetFraction`; Trigger-line format
+- `architecture/skill-design-conventions.md` — Context economy as design principle; description budget + `skillListingBudgetFraction`; Trigger-line format; no `$<digit>` in skill bodies (render-time arg substitution)
 - `architecture/skill-composition.md` — Flag contracts (`--no-poll`/`--auto`), shared scripts, format contracts, soft coupling
 - `architecture/model-economics.md` — Which model per skill and why (Haiku/Sonnet/session-model)
 - `architecture/idempotent-scaffolding.md` — Scaffolding into shared user files: absorb unmarked sections, lazy dirs, never overwrite user content
