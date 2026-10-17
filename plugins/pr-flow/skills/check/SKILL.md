@@ -37,8 +37,11 @@ user_invocable: true
    - If a human requested changes, list their open review bodies briefly
 
 4. **Latest Claude review** (if any):
-   - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" latest <PR_NUMBER> --json`
-   - Parse JSON: `{createdAt, body}`
+   - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" latest <PR_NUMBER> --json --done`
+     (`--done`: the newest *finished* review, never a newer in-progress or error comment)
+   - Parse JSON: `{createdAt, body, pending}`. `pending: true` → a newer Claude
+     review is still running or failed: say so in the snapshot, and it outranks
+     any merge-ready verdict built on the older review
    - If `body` is non-empty:
      - Extract issue count and summary
      - Show timestamp (how old is it?)

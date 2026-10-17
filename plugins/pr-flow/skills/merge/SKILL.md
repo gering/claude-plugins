@@ -78,9 +78,9 @@ user_invocable: true
 7. **Open Claude review issues**:
    - Fetch the latest Claude review comment via the shared helper:
      ```
-     bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" latest <PR_NUMBER>
+     bash "${CLAUDE_PLUGIN_ROOT}/scripts/claude-review.sh" latest <PR_NUMBER> --done
      ```
-     Returns the raw body of the most recent `@claude`-authored comment, or empty if none.
+     Returns the raw body of the most recent *finished* Claude review, or empty if none — `--done` keeps a newer in-progress or error comment from standing in for it (and hiding its blocking issues).
    - If exists AND newer than last push: parse for **blocking** severity issues
    - If exists BUT older than last push: mark as stale, advise `/cycle` first
    - Count open blocking issues

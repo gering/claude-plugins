@@ -277,6 +277,10 @@ entries are grouped per plugin, newest first.
 
 ## pr-flow
 
+### 1.5.1 — 2026-10-17
+- **`/cycle` no longer times out on auto-review workflow repos.** The poll accepted only the `**Claude finished` header the `@claude` comment bot writes; a `claude-code-review.yml` workflow posts its review directly (`## Review`), so every round waited the full ten minutes. A finished review is now any Claude comment that does not start with the working or error marker.
+- One shared definition of "a Claude review comment" in `claude-review.sh`, used by `poll`, `latest`, `latest-after`, route evidence, `/fix`, `/check`, `/merge` and `/cycle` (new `latest --done`, `comment-ids`). Workflow-token (`github-actions`) comments still do not count.
+
 ### 1.5.0 — 2026-10-02
 - **Review route remembered per repo.** A bot-less repo no longer pays `/cycle`'s ten-minute `@claude review` poll on every round and every lane: a timed-out poll is recorded once (git common dir, shared by all worktrees, never committed), and later rounds go straight to `/swarm:review`. Every round report states the route and why (`route: local — no bot answered on <date> (PR #N)`).
 - New `review.route` setting (`.pr-flow.toml`, `auto` | `github` | `local`, default `auto` = today's try-once). `github` and a probed `has_bot=yes` clear the remembered answer; `claude-review.sh route-clear` does so by hand.

@@ -3,7 +3,8 @@
 #
 # Subcommands:
 #   poll <PR> <SINCE_ISO> [--max N] [--interval S] [--record <lane>]
-#       Poll the PR for a completed Claude review created after SINCE_ISO.
+#       Poll the PR for a completed Claude review created after SINCE_ISO
+#       (CLAUDE_JQ below: the one definition of a Claude comment and of done).
 #       Prints the review body on success, "TIMEOUT" and exits 1 on timeout.
 #       Default: 20 iterations, 30s interval (= 10 minutes max).
 #       A finished review clears the remembered no-bot answer. --record (pass it
@@ -12,13 +13,21 @@
 #       the outcome goes to stderr as one route_recorded=yes|no line. SINCE_ISO
 #       must be `date -u +%Y-%m-%dT%H:%M:%SZ` output.
 #
-#   latest <PR> [--json]
+#   latest <PR> [--json] [--done]
 #       Print the body of the latest Claude review comment (any status).
 #       With --json: print {createdAt, body} as JSON instead of raw body.
+#       With --done: only completed reviews (what `poll` returns), so an
+#       in-progress or failed comment never stands in for the review. With
+#       --done --json the JSON adds `pending`: true when a newer Claude
+#       comment is still working or failed.
 #       Prints empty string (or empty JSON) if no Claude comments exist.
 #
-#   latest-after <PR> <SINCE_ISO> [--json]
+#   latest-after <PR> <SINCE_ISO> [--json] [--done]
 #       Like `latest`, but only considers comments created after SINCE_ISO.
+#
+#   comment-ids <PR>
+#       Node IDs of every Claude comment on the PR, one per line (any status) —
+#       what /cycle minimizes before a new round.
 #
 #   has-bot [<dir>]
 #       Does this repo have a comment-triggered Claude review workflow?
@@ -106,39 +115,102 @@ require_iso() {
     || { echo "$1: SINCE_ISO must look like 2026-01-31T12:00:00Z" >&2; exit 2; }
 }
 
-subcmd_latest() {
-  local pr="${1:-}"
-  [[ -z "$pr" ]] && usage
-  local as_json=false
-  [[ "${2:-}" == "--json" ]] && as_json=true
-  require_gh
-  if $as_json; then
-    gh pr view "$pr" --json comments \
-      --jq '[.comments[] | select(.author.login == "claude")] | last | {createdAt: (.createdAt // ""), body: (.body // "")}'
+# The ONE definition of "a Claude comment" and of "a finished review", shared
+# by poll, latest, latest-after, comment-ids and route's evidence. Every place
+# used to carry its own author filter and completion marker, and they drifted:
+# poll accepted only the `**Claude finished` header the @claude comment bot
+# writes, so on a repo whose auto-review workflow posts its review directly
+# (`## Review`) every poll timed out while latest-after returned that very
+# comment. Widening one filter alone in a fix round broke the others.
+#   claude_author   the Claude GitHub App: `claude` in `gh pr view` (GraphQL
+#                   strips the [bot] suffix), `claude[bot]` of type Bot in the
+#                   REST API. Workflow-token comments (github-actions) do NOT
+#                   count: every CI job posts as that account, so a coverage
+#                   report would pass for a review. Known residual: `gh pr view`
+#                   exposes no author type, so a USER account named `claude`
+#                   passes the GraphQL arm; closing it needs `gh api graphql`.
+#   claude_review   a Claude comment that is done: non-blank, not the
+#                   in-progress tracking marker, not the error marker (an error
+#                   read as a review with no findings would end --loop clean).
+#                   Markers count only where the bot writes them, at the start
+#                   of the body (the error one only in its bold header form) —
+#                   a review QUOTING one, or opening with those words, is still
+#                   a review. No
+#                   positive header: the @claude bot's `**Claude finished` is
+#                   exactly what auto-review workflows (`## Review`, `Review:`)
+#                   never write.
+#   newest_review   the newest done review of a comment list, or null.
+#   newer_pending   a working or failed Claude comment newer than that review:
+#                   the review shown is not the latest word.
+#   created_after   whole-second comparison: `date -u +%FT%TZ` has no
+#                   fraction, and "56.5Z" sorts before "56Z".
+read -r -d '' CLAUDE_JQ <<'JQ' || true
+def claude_author: ((.author.login // "") == "claude")
+  or ((.user.login // "") == "claude[bot]" and (.user.type // "") == "Bot");
+def claude_working: (.body // "") | test("^\\s*(\\*\\*)?Claude Code is working");
+def claude_failed: (.body // "") | test("^\\s*\\*\\*Claude encountered an error");
+def claude_review: claude_author and ((.body // "") | test("\\S"))
+  and (claude_working | not) and (claude_failed | not);
+def newest_review: map(select(claude_review)) | last;
+def newer_pending: ((newest_review // {}).createdAt // "") as $t
+  | any(.[]; (claude_working or claude_failed) and ((.createdAt // .created_at // "") > $t));
+def created_after($s): ((.createdAt // .created_at // "") | sub("\\.[0-9]+Z$"; "Z")) > $s;
+JQ
+
+# Shared flag parsing for latest/latest-after: --json and --done, any order.
+latest_flags() {
+  as_json=false done_only=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) as_json=true ;;
+      --done) done_only=true ;;
+      *) echo "Unknown flag: $1" >&2; exit 2 ;;
+    esac
+    shift
+  done
+}
+
+latest_print() {
+  local pr="$1" sel="$2" render
+  if $done_only && $as_json; then
+    # One fetch answers both: the finished review, and whether a newer run is
+    # still going (or failed) — a caller comparing two reads would race.
+    render='newer_pending as $p | newest_review | {createdAt: (.createdAt // ""), body: (.body // ""), pending: $p}'
+  elif $done_only; then
+    render='newest_review | .body // ""'
+  elif $as_json; then
+    render='last | {createdAt: (.createdAt // ""), body: (.body // "")}'
   else
-    gh pr view "$pr" --json comments \
-      --jq '[.comments[] | select(.author.login == "claude")] | last | .body // ""'
+    render='last | .body // ""'
   fi
+  gh pr view "$pr" --json comments \
+    --jq "$CLAUDE_JQ [.comments[] | select(claude_author) | $sel] | $render"
+}
+
+subcmd_latest() {
+  local pr="${1:-}" as_json done_only
+  [[ -z "$pr" ]] && usage
+  shift
+  latest_flags "$@"
+  require_gh
+  latest_print "$pr" "."
 }
 
 subcmd_latest_after() {
-  local pr="${1:-}" since="${2:-}"
+  local pr="${1:-}" since="${2:-}" as_json done_only
   [[ -z "$pr" || -z "$since" ]] && usage
-  local as_json=false
-  [[ "${3:-}" == "--json" ]] && as_json=true
+  shift 2
+  latest_flags "$@"
   require_iso latest-after "$since"
   require_gh
-  # Strip fractional seconds from .createdAt to match the whole-second
-  # precision of $since (produced by `date -u +%Y-%m-%dT%H:%M:%SZ`). Without
-  # this, a comment created within the same whole second as the trigger
-  # compares lexicographically as earlier ("56.5Z" < "56Z") and is missed.
-  if $as_json; then
-    gh pr view "$pr" --json comments \
-      --jq "[.comments[] | select(.author.login == \"claude\") | select((.createdAt | sub(\"\\\\.[0-9]+Z$\"; \"Z\")) > \"$since\")] | last | {createdAt: (.createdAt // \"\"), body: (.body // \"\")}"
-  else
-    gh pr view "$pr" --json comments \
-      --jq "[.comments[] | select(.author.login == \"claude\") | select((.createdAt | sub(\"\\\\.[0-9]+Z$\"; \"Z\")) > \"$since\")] | last | .body // \"\""
-  fi
+  latest_print "$pr" "select(created_after(\"$since\"))"
+}
+
+subcmd_comment_ids() {
+  local pr="${1:-}"
+  [[ -z "$pr" ]] && usage
+  require_gh
+  gh pr view "$pr" --json comments --jq "$CLAUDE_JQ .comments[] | select(claude_author) | .id"
 }
 
 subcmd_poll() {
@@ -169,28 +241,27 @@ subcmd_poll() {
 
   for ((i=1; i<=max_iters; i++)); do
     sleep "$interval"
-    local body
-    # Strip fractional seconds from .createdAt for whole-second comparison
-    # with $since (see note in subcmd_latest_after).
-    body=$(gh pr view "$pr" --json comments \
-      --jq "[.comments[] | select(.author.login == \"claude\") | select((.createdAt | sub(\"\\\\.[0-9]+Z$\"; \"Z\")) > \"$since\")] | last | .body // \"\"")
+    local out
+    # One read classifies the window with the shared predicate: `review` and
+    # newest_review's body (the same answer `latest-after --done` gives), else
+    # `pending` when some Claude comment is there (working or failed), else
+    # `none`.
+    out=$(gh pr view "$pr" --json comments --jq "$CLAUDE_JQ
+      [.comments[] | select(claude_author) | select(created_after(\"$since\"))]
+      | if length == 0 then \"none\"
+        else (newest_review | if . == null then \"pending\" else \"review \\(.body)\" end) end")
 
-    if [[ -n "$body" ]]; then
+    case "$out" in
+      none|"") ;;
       # ANY Claude comment in the window — working, finished, or edited into an
       # error — proves a bot exists; only silence may be booked as "no bot".
-      seen_bot=true
-      # "Claude Code is working" = in-progress marker; keep polling
-      if [[ "$body" == *"Claude Code is working"* ]]; then
-        continue
-      fi
-      # "**Claude finished" = completion marker
-      if [[ "$body" == *"**Claude finished"* ]]; then
+      pending) seen_bot=true ;;
+      "review "*)
         # A reply proves a bot: drop a remembered "no bot answered".
         route_forget "${record_dir:-.}"
-        printf '%s\n' "$body"
-        exit 0
-      fi
-    fi
+        printf '%s\n' "${out#review }"
+        exit 0 ;;
+    esac
   done
 
   echo "TIMEOUT" >&2
@@ -539,18 +610,17 @@ PY
 #   asks   `@claude` mentions by people the bot would actually obey (owner,
 #          member, collaborator) — an outsider's mention is ignored by the bot,
 #          so counting it let anyone on a public repo force the local route.
-#   last_claude_reply   newest comment by the Claude App (`claude[bot]`, the
-#          same author `poll` reads) — the evidence that clears a remembered
+#   last_claude_reply   newest comment by the Claude App (CLAUDE_JQ's
+#          claude_author, the same one `poll` reads) — the evidence that clears a remembered
 #          "no bot answered". A reply paged out of these 100 is not seen.
 route_evidence() {
   command -v gh >/dev/null || return 0
-  ( cd "$1" && gh api 'repos/{owner}/{repo}/issues/comments?sort=created&direction=desc&per_page=100' --jq '
+  ( cd "$1" && gh api 'repos/{owner}/{repo}/issues/comments?sort=created&direction=desc&per_page=100' --jq "$CLAUDE_JQ"'
       def bot: (.user.type // "") == "Bot";
-      def claude_bot: bot and (.user.login // "") == "claude[bot]";
       def ask: (bot | not)
         and ((.author_association // "") | IN("OWNER", "MEMBER", "COLLABORATOR"))
         and ((.body // "") | test("(^|\\s)@claude\\b"; "i"));
-      "\(length) \([.[] | select(bot)] | length) \([.[] | select(ask)] | length) \(([.[] | select(claude_bot) | .created_at] | max) // "-")"
+      "\(length) \([.[] | select(bot)] | length) \([.[] | select(ask)] | length) \(([.[] | select(claude_author) | .created_at] | max) // "-")"
     ' 2>/dev/null ) || true
 }
 
@@ -679,6 +749,7 @@ main() {
     poll)          subcmd_poll "$@" ;;
     latest)        subcmd_latest "$@" ;;
     latest-after)  subcmd_latest_after "$@" ;;
+    comment-ids)   subcmd_comment_ids "$@" ;;
     has-bot)       subcmd_has_bot "$@" ;;
     route)         subcmd_route "$@" ;;
     route-record)  subcmd_route_record "$@" ;;
