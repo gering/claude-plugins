@@ -398,7 +398,16 @@ check("prompt route marks a cut too", kv(r.stdout).get("sent") == "yes" and "q\u
 r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
                    text=True, timeout=60, input="x" * 3_000_000)
 check("huge stdin is bounded, not E2BIG", r.returncode == 0 and len(r.stdout) < 1500
-      and "truncated=yes" in r.stderr, r.stderr[:200])
+      and "truncated=yes" in r.stderr and "stdin_clipped=yes" in r.stderr, r.stderr[:200])
+# a cut past the stdin read is flagged even when the kept window folds under the cap
+r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
+                   text=True, timeout=60, input=" " * 16384 + "needs-decision: approve merge?")
+check("clipped stdin is never silent", r.returncode == 0 and "stdin_clipped=yes" in r.stderr
+      and "\u2026 (info only" in r.stdout, r.stdout[-80:] + r.stderr)
+r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
+                   text=True, timeout=60, input="ok" + " " * 2000)
+check("whitespace that folds away is no cut", "truncated" not in r.stderr
+      and "] ok (info only" in r.stdout, r.stdout + r.stderr)
 check("empty stdin is usage", subprocess.run([BASH, str(SCRIPT), "body", "--"], env=env,
       capture_output=True, text=True, input="").returncode == 2)
 

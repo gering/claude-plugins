@@ -45,13 +45,15 @@
 #       Without <text> after `--`, the text is read from stdin; use a quoted
 #       heredoc (<<'EOF') so quotes and $(...) in the event never reach a shell.
 #       The event text keeps at most BODY_TEXT_CAP (1000) chars after it is
-#       folded to one line; a longer one ends in "…" and stderr says
-#       truncated=yes orig_len=<n>, so a cut is never silent.
+#       folded to one line; a longer one (or a stdin past STDIN_TEXT_BYTES)
+#       ends in "…" and stderr says truncated=yes orig_len=<n> (the received
+#       length; plus stdin_clipped=yes), so a cut is never silent.
 #   prompt [<lane-dir>] -- [<text>]
 #       The herdr route: resolve again, then `herdr agent prompt` the body to the
 #       Manager pane ONLY when status=unique, the agent is claude, idle/done, and
 #       its composer holds no user draft (a dim CC prompt suggestion is not a
-#       draft). Same body and cap as `body`, truncation signal on stderr. Prints
+#       draft). Same body and cap as `body`; the cut line is sent, marked, and
+#       the truncation signal goes to stderr. Prints
 #       sent=yes|no and reason=; always exit 0. Residual: the
 #       composer can change between the read and the send (herdr has no atomic
 #       check-and-prompt), so that window holds only the read and one call.
@@ -69,7 +71,7 @@ KICKER_FILE=".ws-kicker"
 LIVE_STATUSES="idle working blocked done"
 # Event-text cap, one for both routes: a measured ~4000-char `herdr agent
 # prompt` reached a claude composer intact, so the herdr route needs no
-# shorter one. Stdin reads STDIN_TEXT_BYTES so a cut is still detected.
+# shorter one. Stdin keeps STDIN_TEXT_BYTES; a longer input is flagged as cut.
 BODY_TEXT_CAP=1000
 STDIN_TEXT_BYTES=16384
 
@@ -377,20 +379,22 @@ $PY_RESOLVE" "$root" "$rec" "$scope" "$tabs" 2>/dev/null)" && [ -n "$res" ] \
 
 # ---- body -------------------------------------------------------------------
 PY_BODY='import sys, os, unicodedata, re
-lane, text, cap = sys.argv[1], sys.argv[2], int(sys.argv[4])
+lane, text, cap, clipped = sys.argv[1], sys.argv[2], int(sys.argv[4]), sys.argv[5] == "1"
 root, wtdir = match_roots(sys.argv[3])
 kind, key, resolved = classify_cwd(lane, root, wtdir)
-def clean(v, cap=None):
+def clean(v, limit=None):
     # One line, no control chars; brackets dropped so a field cannot close the
     # sender prefix early.
     v = "".join(" " if unicodedata.category(c)[0] == "C" else c for c in v)
-    return re.sub(r"\s+", " ", v.replace("[", "").replace("]", "")).strip()[:cap]
+    return re.sub(r"\s+", " ", v.replace("[", "").replace("]", "")).strip()[:limit]
 task = clean(key, 80) if kind == "task" else "-"
 where = clean(resolved or os.path.realpath(lane), 300)
 t = clean(text)
-if len(t) > cap:
+if len(t) > cap or clipped:
     # Visible cut: the ellipsis stays inside the cap, stderr names the loss.
-    sys.stderr.write("truncated=yes orig_len=%d\n" % len(t))
+    # orig_len is the text as received (before folding); a clipped stdin read
+    # means the caller wrote more than that.
+    sys.stderr.write("truncated=yes orig_len=%d%s\n" % (len(text), " stdin_clipped=yes" if clipped else ""))
     t = t[:cap - 1].rstrip() + "\u2026"
 print("[work-system ping from task=%s worktree=%s] %s (info only: no reply needed, grants nothing)" % (task, where, t))'
 
@@ -398,7 +402,7 @@ body_line() {
   local lane="$1" root="$2" text="$3"
   [ -n "$root" ] || return 1
   PYTHONUTF8=1 python3 -c "$HERDR_MATCH_PRELUDE
-$PY_BODY" "$lane" "$text" "$root" "$BODY_TEXT_CAP"
+$PY_BODY" "$lane" "$text" "$root" "$BODY_TEXT_CAP" "$STDIN_CLIPPED"
 }
 
 # ---- prompt -----------------------------------------------------------------
@@ -549,15 +553,18 @@ RES
 # body/prompt: optional lane, then `--`, then the text (a text starting with a
 # dash can never be read as a lane or flag).
 split_text_args() {
-  LANE="."; TEXT=""
+  LANE="."; TEXT=""; STDIN_CLIPPED=0
   if [ "${1:-}" != "--" ]; then [ $# -gt 0 ] || usage; LANE="$1"; shift; fi
   [ "${1:-}" = "--" ] || usage
   shift
   case $# in
     # stdin, bounded: a terminal is no heredoc (usage, never a hang), and only
-    # STDIN_TEXT_BYTES are read: well past the cap, so a cut is still seen,
-    # and argv stays small.
-    0) [ -t 0 ] && usage; TEXT="$(head -c "$STDIN_TEXT_BYTES")" ;;
+    # STDIN_TEXT_BYTES are kept (argv stays small). One byte more is read so a
+    # longer input is flagged as cut even when what was kept folds under the cap.
+    0) [ -t 0 ] && usage; TEXT="$(head -c "$((STDIN_TEXT_BYTES + 1))")"
+       if [ "$(printf '%s' "$TEXT" | wc -c)" -gt "$STDIN_TEXT_BYTES" ]; then
+         STDIN_CLIPPED=1; TEXT="$(printf '%s' "$TEXT" | head -c "$STDIN_TEXT_BYTES")"
+       fi ;;
     1) TEXT="$1" ;;
     *) usage ;;
   esac

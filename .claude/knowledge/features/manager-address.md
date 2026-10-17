@@ -67,8 +67,11 @@ terminal gate) and `/close` step 1b delegation, which replaced the name-only
   routes; a cut ends in `…` plus `truncated=yes orig_len=<n>` on stderr (a plain
   300-char slice once lost a gate ping's open decision unnoticed). No shorter
   herdr cap: a measured ~4000-char `herdr agent prompt` (0.8.2) reached a claude
-  composer intact and was answered. Stdin reads 16 KiB, past the cap, so the cut
-  is still detected.
+  composer intact and was answered. Stdin keeps 16 KiB and reads one byte more:
+  a longer input is flagged (`stdin_clipped=yes`) even when the kept window
+  folds under the cap. `orig_len` is the received length, before folding.
+  On `body` the signal comes before any send (shorten, rebuild); `prompt` has
+  already sent the marked line, so the worker reports the cut, never resends.
 
 ## Gotchas
 

@@ -52,6 +52,10 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.20.1 — 2026-10-17
+- `manager.sh body`/`prompt` no longer cut a milestone ping silently: the event text keeps up to 1000 characters (was 300) on both routes, and a longer one ends in `…` while stderr reports `truncated=yes orig_len=<n>` (`stdin_clipped=yes` when stdin ran past its 16 KiB read). One cap for both routes: a measured ~4000-char `herdr agent prompt` reached a claude composer intact.
+- The cap is documented in `manager.sh` usage, `/continue` step 9b (shorten and rebuild on `body`; on `prompt` report the cut, never resend) and the codex/grok/kimi bootstrap prompt.
+
 ### 1.20.0 — 2026-10-17
 - Add `/land`: one command in the worker tab that finishes a lane — writes the handoff insights report with an explicit `Follow-ups:` list for the Manager's sweep, runs `/pr-flow:merge` with all its gates, confirms the merge via `task-status.sh assess` (`confidence=confirmed`), then runs `/close --delegate`. Any stop before a confirmed merge closes nothing; without pr-flow it stops before anything runs. The user's invocation is the merge authorization; the skill is `disable-model-invocation`, so the Skill tool cannot start it. Takes no arguments. Stops on a missing or closed PR, without `gh`, on an open PR whose branch has no upstream or whose head differs from this worktree's `HEAD`, and when the merged PR's head does not contain `HEAD` (an earlier lane's PR, or a commit made while `/merge` waited); prints the follow-ups in its summary as well. It always writes its own handoff report (a terminal-gate report has no follow-ups) and prints its summary before `/close`, whose output stays last.
 - `/kickoff` and `/adopt` add `/TASK.md` to the repo's git exclude (`mandate.sh exclude-task`, best-effort; the exclude helper now also survives a last line without newline), so `/pr-flow:merge`'s clean-tree check — and with it `/land` — no longer stops on the lane's task file in repos that do not gitignore it.
