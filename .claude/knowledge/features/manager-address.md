@@ -72,8 +72,8 @@ terminal gate) and `/close` step 1b delegation, which replaced the name-only
   to nothing, and it hands back text already folded to one line. Never let raw
   bytes cross `$(...)`: substitution drops NULs and trailing newlines, and three
   review rounds found a miscount in each shell-side trick (sentinel, temp file)
-  in turn. `orig_len` is the length before folding, minus a heredoc's final
-  newline.
+  in turn. `orig_len` counts chars before folding, minus a heredoc's final
+  newline; with `stdin_clipped` it is a lower bound.
   On `body` the signal comes before any send (shorten, rebuild); on `prompt` it
   precedes the composer checks, so the cut line was delivered only on `sent=yes`
   (then report the cut, never resend).

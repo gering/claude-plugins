@@ -418,8 +418,11 @@ r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, captur
 check("NULs cannot hide a clipped stdin", "stdin_clipped=yes" in r.stderr
       and "orig_len=16384 " in r.stderr, r.stderr[:200])
 r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
+                   text=True, timeout=60, input="a" * 1100 + "\n\n\n\n")
+check("only the heredoc's final newline is uncounted", "orig_len=1103" in r.stderr, r.stderr)
+r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
                    text=True, timeout=60, input="\n" * 16384 + "X")
-check("all-newline clipped window reports its received length", "orig_len=16384 stdin_clipped=yes"
+check("all-newline clipped window counts its kept window", "orig_len=16384 stdin_clipped=yes"
       in r.stderr and r.stdout.rstrip().endswith("] \u2026 (info only: no reply needed, grants nothing)"),
       r.stdout[-90:] + r.stderr[:200])
 r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,

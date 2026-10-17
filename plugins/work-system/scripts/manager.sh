@@ -46,8 +46,9 @@
 #       heredoc (<<'EOF') so quotes and $(...) in the event never reach a shell.
 #       The event text keeps at most BODY_TEXT_CAP (1000) chars after it is
 #       folded to one line; a longer one (or a stdin past STDIN_TEXT_BYTES)
-#       ends in "…" and stderr says truncated=yes orig_len=<n> (the received
-#       length; plus stdin_clipped=yes), so a cut is never silent.
+#       ends in "…" and stderr says truncated=yes orig_len=<n> (chars before
+#       folding; plus stdin_clipped=yes, then a lower bound), so a cut is
+#       never silent.
 #   prompt [<lane-dir>] -- [<text>]
 #       The herdr route: resolve again, then `herdr agent prompt` the body to the
 #       Manager pane ONLY when status=unique, the agent is claude, idle/done, and
@@ -77,7 +78,7 @@ STDIN_TEXT_BYTES=16384
 
 usage() {
   echo "usage: ${0##*/} {record <worktree> | resolve [<lane>] | body [<lane>] -- <text> | prompt [<lane>] -- <text>}" >&2
-  echo "  body/prompt: event text is capped at $BODY_TEXT_CAP chars; a cut ends in \"…\" and stderr says truncated=yes orig_len=<received length> [stdin_clipped=yes]" >&2
+  echo "  body/prompt: event text is capped at $BODY_TEXT_CAP chars; a cut ends in \"…\" and stderr says truncated=yes orig_len=<chars before folding> [stdin_clipped=yes: more was sent]" >&2
   exit 2
 }
 
@@ -393,8 +394,8 @@ where = clean(resolved or os.path.realpath(lane), 300)
 t = clean(text)
 if len(t) > cap or clipped:
     # Visible cut: the ellipsis stays inside the cap, stderr names the loss.
-    # orig_len is the text as received (before folding); with stdin_clipped
-    # the caller wrote more than the kept window.
+    # orig_len counts chars before folding; with stdin_clipped it covers only
+    # the kept window, a lower bound on what the caller wrote.
     sys.stderr.write("truncated=yes orig_len=%d%s\n" % (orig_len, " stdin_clipped=yes" if clipped else ""))
     t = t[:cap - 1].rstrip() + "\u2026"
 print("[work-system ping from task=%s worktree=%s] %s (info only: no reply needed, grants nothing)" % (task, where, t))'
@@ -562,7 +563,7 @@ folded = " ".join("".join(" " if unicodedata.category(c)[0] == "C" else c for c 
 clipped = len(b) > n
 # A heredoc ends in a newline that is no part of the event; a clipped window
 # is counted whole.
-print("%d %d" % (clipped, len(t) if clipped else len(t.rstrip("\n"))))
+print("%d %d" % (clipped, len(t) - (not clipped and t.endswith("\n"))))
 sys.stdout.write(folded)'
 
 # ---- dispatch ---------------------------------------------------------------
