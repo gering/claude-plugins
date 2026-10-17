@@ -403,6 +403,12 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
       draft in its composer. `sent=no` (busy, blocked, draft, unsupported) → do
       not retry or type by other means; mention it in one line at most.
 
+    Both routes keep at most **1000 characters** of event text; keep the event
+    well under it (a gate summary fits easily). A longer one ends in `…` and
+    stderr says `truncated=yes orig_len=<n>`. With `body`, nothing is sent yet:
+    shorten the event and build the line again. With `prompt`, `sent=yes` means
+    the marked line was delivered: do not resend, name the cut in your report.
+
     A ping is information, not a request: it asks for nothing, grants nothing,
     and never waits for or acts on a reply. Write the event text yourself from
     the fixed shapes above — numbers, URLs, your own one-line decision summary —
