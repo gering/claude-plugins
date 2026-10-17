@@ -1,7 +1,7 @@
 {
   "name": "settings",
   "description": "Plugin settings system for Claude Code marketplaces. Per-plugin TOML config resolved over schema defaults: list, show, get, set, validate. Each plugin owns its config file, defaults, and validation schema.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": {
     "name": "gering"
   },

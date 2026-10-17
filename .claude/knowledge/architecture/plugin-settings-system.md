@@ -1,9 +1,9 @@
 ---
 title: "Plugin settings system"
 createdAt: 2026-07-23
-updatedAt: 2026-10-16
+updatedAt: 2026-10-17
 createdFrom: "PR #40"
-updatedFrom: "branch: task/raise-standard-review-budget-to-5"
+updatedFrom: "branch: task/enforce-settings-numeric-bounds"
 pluginVersion: 1.9.0
 prime: true
 ---
@@ -100,8 +100,10 @@ default) reuse it instead of growing a second reader. Lessons from its review:
 - **Open, don't check-then-open:** `O_NOFOLLOW|O_NONBLOCK` + `S_ISREG` — an
   `islink()` pre-check races, and a FIFO hangs a kickoff on `open()`.
 - **Bound integers the shell will do arithmetic on** (`maximum`): TOML ints are
-  arbitrary-precision, bash's `[ -ge ]` is not. settings.py enforces neither
-  `minimum` nor `maximum` yet; ws-settings.py does.
+  arbitrary-precision, bash's `[ -ge ]` is not. settings.py (0.1.1+)
+  refuses an out-of-bounds `set` and flags it in `validate` (one check in
+  `_validate_node`), but its `get`/`show` still return a stored value as-is;
+  ws-settings.py falls back to the default. Separate validators on purpose.
 
 `mandate.sh init` applies it (not `/kickoff` prose, so `/adopt` gets it too) and
 `presets <dir>` renders the same value, so the question the user answers matches

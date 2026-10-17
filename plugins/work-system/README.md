@@ -348,10 +348,10 @@ Three properties are load-bearing:
 
 A repo sets the budget its new lanes get with `[mandate] review_budget` in
 `.work-system.toml` (default 3, 0–100; `/settings set
-work-system.mandate.review_budget 5` writes it; `/settings` does not yet check
-the 0–100 bounds, so an out-of-range value it accepts still falls back to 3). It
-is read at `SETTINGS_PROJECT_ROOT` if set, else the git toplevel of the lane
-being set up — the settings plugin's own root rule. A lane is cut
+work-system.mandate.review_budget 5` writes it, and settings 0.1.1+ refuses a
+value outside 0–100; an out-of-range value still falls back to 3). It is read
+at `SETTINGS_PROJECT_ROOT` if set, else the git toplevel of the lane being set
+up — the settings plugin's own root rule. A lane is cut
 from committed history, so **commit** the file: an uncommitted edit in the main
 checkout does not reach new lanes. A branch that commits its own (e.g. one
 `/adopt` takes over) brings that value along; `init` and `presets` report
