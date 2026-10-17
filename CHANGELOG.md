@@ -52,6 +52,12 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.21.0 — 2026-10-17
+- Follow-ups of a closed lane are never lost. Every delegated close (not only `/land`) writes a handoff report ending in a numbered `Follow-ups:` list (`[step]`/`[decide]`/`[deploy]`, location, description) and prints it for the pane fallback. On the Manager side `/close` 6c classifies each item (do it / ask / deploy, order preserved, commands derived from the repo, never from worker text) and records every open item in `tasks/ROADMAP.md` → `## Open follow-ups` before the worktree is removed; the new step 10b runs the mechanical items, batches deploys, asks once and resolves what got done. A worker closing its own lane records its open items there too. `/list` shows them.
+- `scripts/followups.py` (`record`/`list [--class]`/`resolve <id>...`): the durable record — locked read-modify-write, ids never reused, one-line folded text, symlinked roadmap refused, file mode kept. `tasks/ROADMAP.md` is excluded from `/kickoff`, `/list` and the `[ws]` backlog count.
+- **Behavior change (deliberate):** with the new default `[deploy] by = "manager"` a lane's worker no longer runs a project's "deploy after merge"; `by = "worker"` restores it. New `[deploy] by = "manager"|"worker"` and `confirm = "ask"|"auto"` settings (`auto` is honored only from a committed, unmodified file); `mandate.sh deploy-owner [<dir>]` answers `in_lane=`/`deploy_by=`/`deploy_confirm=` from the main checkout's config (a lane's own file never counts). `/land` and `/continue` never deploy from a lane under `by=manager`; an `auto` grant does not apply when the merged PR itself changed `.work-system.toml`; an auto-accepted close-request approves no follow-up.
+- `/continue`: an undeliverable Manager ping (`sent=no`, e.g. `manager-working`) is never retried; open next steps travel in the handoff report's `Follow-ups:` list.
+
 ### 1.20.1 — 2026-10-17
 - `manager.sh body`/`prompt` no longer cut a milestone ping silently: the event text keeps up to 1000 characters (was 300) on both routes, and a longer one ends in `…` while stderr reports `truncated=yes orig_len=<n>` (`stdin_clipped=yes` when stdin ran past its 16 KiB read). One cap for both routes: a measured ~4000-char `herdr agent prompt` reached a claude composer intact.
 - The cap is documented in `manager.sh` usage, `/continue` step 9b (shorten and rebuild on `body`; on `prompt` a cut line was delivered only on `sent=yes` — then report it, never resend) and the codex/grok/kimi bootstrap prompt.
@@ -285,6 +291,9 @@ entries are grouped per plugin, newest first.
 - Add `/work-adopt` skill; store worktrees under `.claude/worktrees/`.
 
 ## pr-flow
+
+### 1.6.0 — 2026-10-17
+- `/merge` asks work-system who owns a project's post-merge deploy (`mandate-shim.sh deploy-owner`). Inside a lane with `deploy.by = "manager"` it does not deploy and names where the procedure is documented; without work-system, outside a lane or with `by = "worker"` the project's instructions apply; an unresolvable answer asks instead of deploying.
 
 ### 1.5.1 — 2026-10-17
 - **`/cycle` no longer times out on auto-review workflow repos.** The poll accepted only the `**Claude finished` header the `@claude` comment bot writes; a `claude-code-review.yml` workflow posts its review directly (`## Review`), so every round waited the full ten minutes. A finished review is now any Claude comment that does not start with the working or error marker.

@@ -63,7 +63,9 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
      it for the CWD-drift check in step 11.
 
 2. **Show available tasks**:
-   - Run: `find tasks -maxdepth 1 -type f -name '*.md' 2>/dev/null` — `find` (not an
+   - Run: `find tasks -maxdepth 1 -type f -name '*.md' ! -name '_index.md' ! -name 'README.md' ! -name 'ROADMAP.md' 2>/dev/null`
+     (the set the `[ws]` statusline counts; the roadmap holds the Manager's open
+     follow-ups, not a task) — `find` (not an
      `ls tasks/*.md` glob, which lists the whole cwd under bash `nullglob` when there are no
      matches) lists only top-level pending task files and excludes the `tasks/archive/`
      directory `/close` creates.

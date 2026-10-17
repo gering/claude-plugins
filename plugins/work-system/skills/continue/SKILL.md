@@ -324,7 +324,14 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
    stop there. Reaching the gate is *done*, not a pause: report the result and the
    decision the human now owns. Do not step past the gate — `merge` and `deploy`
    are separate grants, and a gate the user already delegated (`terminal_gate=merged`)
-   is likewise settled and must not be re-confirmed.
+   is likewise settled and must not be re-confirmed. A merge — delegated, or one the
+   user ran — is never followed by a deploy from this lane when
+   `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" deploy-owner` prints
+   `deploy_by=manager` (the default), even when the project's instructions say
+   "deploy after merge": the Manager deploys from the main checkout. Leave a `[deploy]`
+   follow-up (step 10) naming where the procedure is documented. An answer that is
+   neither `manager` nor `worker` (exit 2/3, `in_lane=unknown`) is no permission
+   either: do not deploy, ask.
 
 9. **Checks and review inside the mandate**:
    - **Run the project's checks** (from `CLAUDE.md`) when `local-review` or
@@ -400,8 +407,13 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
       EOF
       ```
       It re-resolves, and types only into an idle claude Manager with no user
-      draft in its composer. `sent=no` (busy, blocked, draft, unsupported) → do
-      not retry or type by other means; mention it in one line at most.
+      draft in its composer. `sent=no` (busy — `reason=manager-working` —, blocked,
+      draft, unsupported) → do not retry, loop, sleep-and-resend or type by other
+      means; mention it in one line at most. A dropped ping loses nothing, because
+      a ping never carries anything the Manager must act on: open next steps go
+      into the handoff report's `Follow-ups:` list (step 10), which the Manager's
+      close sweep reads whether or not a ping arrived. The SendMessage route queues
+      for a busy Manager; that is why it is tried first.
 
     Both routes keep at most **1000 characters** of event text; keep the event
     well under it (a gate summary fits easily). A longer one ends in `…` and
@@ -466,6 +478,10 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
 
     **Fields this skill is the only one that can fill honestly** (field meanings: the
     report contract at the `contract=` path `prepare` printed above):
+    - `work.summary` ends with the **open next steps** in the Follow-ups format
+      `/land` step 2 defines (numbered = ordered; `[step]`/`[decide]`/`[deploy]`; a
+      location; descriptions, no commands or URLs) — `Follow-ups: none` when nothing
+      is open. This list, not a ping, is how they reach the Manager.
     - `task_status` is the *task's* state, not the trigger's. Reaching `reviewed-pr`
       is `in_progress`: the PR is open and reviewed, and the merge is still the human's
       decision. Only an actually finished task is `completed`.

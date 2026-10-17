@@ -56,6 +56,12 @@ If a clear pattern emerges (e.g. 18 of 20 last PRs were squashed), `/merge` sugg
 
 **Why it matters.** If your team keeps backups, `/merge` respects that. If you don't, it doesn't create clutter. Zero config — detected from repo state.
 
+### No deploy from a work-system lane
+
+**What it does.** Before running a deploy the project's instructions call for after a merge, `/merge` asks work-system (through its mandate shim, `deploy-owner`) who owns it. Inside a lane with `deploy.by = "manager"` (work-system's default) it does not deploy; it names where the deploy procedure is documented, and the Manager deploys from the main checkout after the close. Outside a lane, with `deploy.by = "worker"`, or without work-system, the project's instructions apply unchanged.
+
+**Why it matters.** A deploy from a worktree can run against the wrong checkout (or rebuild a shared `node_modules`), and parallel lanes would each deploy on their own. One owner deploys once, from main.
+
 ### Force-push safety
 
 **What it does.** Any force-push inside `/rebase` uses `--force-with-lease`, never `--force`. If the remote advanced since the last fetch (e.g., a teammate pushed), the push fails fast with a clear message. Whether `/rebase` asks first depends on risk: when the files changed on base and on the branch don't overlap, it rebases + force-pushes immediately (invoking the skill is the authorization); when files overlap, it presents a selection menu (rebase / show diff / leave as-is) before touching anything.

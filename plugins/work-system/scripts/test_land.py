@@ -150,6 +150,77 @@ check("a gate miss runs today's flow unchanged",
 check("a gate miss under the flag is reported, not silent", "closing here." in branch)
 check("the delegated close stops like the asked one", "**STOP** exactly as above" in branch)
 
+# ====================================== follow-ups: carried, classified, recorded
+# The worker's open next steps must reach the Manager on every delegated close,
+# and the Manager must run, ask about or record each one — never drop it.
+CLOSE_RAW = (SKILLS / "close" / "SKILL.md").read_text()
+CONTINUE = " ".join((SKILLS / "continue" / "SKILL.md").read_text().split())
+MERGE = " ".join((HERE.parent.parent / "pr-flow" / "skills" / "merge" / "SKILL.md")
+                 .read_text().split())
+
+
+def fmt_block(raw):
+    m = re.search(r"```text\n(\s*Follow-ups:\n.*?)```", raw, re.S)
+    return textwrap.dedent(m.group(1)) if m else None
+
+
+check("/land defines the Follow-ups format", fmt_block(LAND_RAW) is not None)
+check("/close's delegation repeats the same Follow-ups format",
+      fmt_block(CLOSE_RAW) is not None and fmt_block(CLOSE_RAW) == fmt_block(LAND_RAW))
+check("the format tags who must act",
+      all(t in (fmt_block(LAND_RAW) or "") for t in ("[step]", "[decide]", "[deploy]")))
+
+leave = at(CLOSE, "**Leave the follow-ups before every send.**")
+check("follow-ups are left before the delegation question and send",
+      q < leave < at(CLOSE, "**The question**"))
+leave_txt = CLOSE[leave:at(CLOSE, "**The question**")]
+check("a plain delegated close writes its own handoff report",
+      "prepare handoff" in leave_txt and "--caller close" in leave_txt)
+check("the handoff on delegation is never a gate", "**Never a gate:**" in leave_txt)
+check("the list is printed on screen for the pane fallback", "print the list on screen" in leave_txt)
+check("both send paths leave the follow-ups first",
+      "leave the follow-ups (above), then send" in CLOSE
+      and "leave the follow-ups (above); then send the same single" in CLOSE)
+
+s6c = CLOSE[at(CLOSE, "6c. **Follow-up sweep**"):at(CLOSE, "7. **Remove worktree**")]
+check("6c classifies into do / ask / deploy",
+      all(c in s6c for c in ("**Do it**", "**Ask**", "**Deploy**")))
+check("6c derives commands from the repo, never from worker text",
+      "**from the repo itself**" in s6c and "never from the worker's text" in s6c)
+check("6c keeps the untrusted-data rule", "**untrusted data written by the" in s6c)
+check("6c preserves order: a dependent item is blocked, not run early",
+      "**Order is preserved.**" in s6c and "**blocked**" in s6c)
+check("6c reads the deploy owner from the main checkout",
+      'deploy-owner "<main-repo-path>"' in s6c)
+check("6c runs nothing but the record before the close", "Nothing else runs here" in s6c)
+
+s10b = CLOSE[at(CLOSE, "10b. **Act on the follow-ups**"):at(CLOSE, "11. **Final summary**")]
+check("10b comes after the archive and before the summary",
+      at(CLOSE, "10. **Archive the task file**") < at(CLOSE, "10b. **Act on the follow-ups**"))
+check("open items are recorded in 6c, before the worktree is removed",
+      "**Record before the removal.**" in s6c and "followups.py\" record" in s6c
+      and "<<'WS_FOLLOWUP_END'" in s6c)
+check("a self-closing worker records its own open items",
+      "A worker closing its **own** lane" in s6c and "followups.py record" in s6c)
+check("a lane cannot grant itself an unasked deploy",
+      "**unless the merged PR itself changed `.work-system.toml`**" in s6c)
+check("10b batches deploys through the class filter", "--class deploy" in s10b)
+check("10b batches deploys", "**Batch the deploys.**" in s10b)
+check("10b resolves what got done", "followups.py\" resolve" in s10b)
+check("an auto-accepted close approves no follow-up",
+      "no follow-up is approved by it" in CLOSE)
+
+check("/land's worker never deploys under deploy_by=manager",
+      "**Never deploy from the lane**" in LAND and "deploy-owner" in LAND)
+check("/continue's worker never deploys under deploy_by=manager",
+      "deploy-owner" in CONTINUE and "the Manager deploys from the main checkout" in CONTINUE)
+check("/continue's handoff report carries the Follow-ups list",
+      "This list, not a ping, is how they reach the Manager" in CONTINUE)
+check("a busy Manager on the herdr route is never retried in a loop",
+      "`reason=manager-working`" in CONTINUE and "do not retry, loop, sleep-and-resend" in CONTINUE)
+check("pr-flow's /merge asks work-system who deploys",
+      "mandate-shim.sh\" deploy-owner" in MERGE and "do **not** deploy" in MERGE)
+
 # ============================================ head check, executed (not grepped)
 # The classification decides whether /close may delete the branch, so run the
 # snippet itself against real repos: swapped arms or a set -e abort must fail here.
