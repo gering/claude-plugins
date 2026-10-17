@@ -408,12 +408,18 @@ for name, data in (("byte 16385 is a newline", " " * 16384 + "\nneeds-decision: 
                    ("window is all newlines", "\n" * 16384 + "Xneeds-decision: approve merge?")):
     r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
                        text=True, timeout=60, input=data)
-    check(f"clipped stdin flagged when {name}", r.returncode == 0 and "stdin_clipped=yes" in r.stderr,
+    check(f"clipped stdin flagged when {name}", r.returncode == 0 and "stdin_clipped=yes" in r.stderr
+          and "Xneeds" not in r.stdout,
           r.stdout[-80:] + r.stderr[:200])
+check("newline-only stdin is usage", subprocess.run([BASH, str(SCRIPT), "body", "--"], env=env,
+      capture_output=True, text=True, input="\n\n").returncode == 2)
 r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
-                   text=True, timeout=60, input="trailing newlines\n\n\n")
-check("unclipped stdin drops trailing newlines", "orig_len" not in r.stderr
-      and "] trailing newlines (info only" in r.stdout, r.stdout + r.stderr)
+                   text=True, timeout=60, input="a\0b" * 5462)
+check("NULs cannot hide a clipped stdin", "stdin_clipped=yes" in r.stderr, r.stderr[:200])
+r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
+                   text=True, timeout=60, input="x" * 16384)
+check("exactly 16 KiB is not clipped", "stdin_clipped" not in r.stderr
+      and "orig_len=16384" in r.stderr, r.stderr[:200])
 r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
                    text=True, timeout=60, input="ok" + " " * 2000)
 check("whitespace that folds away is no cut", "truncated" not in r.stderr

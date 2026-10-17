@@ -52,9 +52,8 @@
 #       The herdr route: resolve again, then `herdr agent prompt` the body to the
 #       Manager pane ONLY when status=unique, the agent is claude, idle/done, and
 #       its composer holds no user draft (a dim CC prompt suggestion is not a
-#       draft). Same body and cap as `body`; the truncation signal goes to
-#       stderr before the checks, so a cut line was delivered only on sent=yes.
-#       Prints
+#       draft). Same body and cap as `body`; the truncation signal can come
+#       with sent=no, so a cut line was delivered only on sent=yes. Prints
 #       sent=yes|no and reason=; always exit 0. Residual: the
 #       composer can change between the read and the send (herdr has no atomic
 #       check-and-prompt), so that window holds only the read and one call.
@@ -393,8 +392,8 @@ where = clean(resolved or os.path.realpath(lane), 300)
 t = clean(text)
 if len(t) > cap or clipped:
     # Visible cut: the ellipsis stays inside the cap, stderr names the loss.
-    # orig_len is the text as received (before folding); a clipped stdin read
-    # means the caller wrote more than that.
+    # orig_len is the text as received (before folding); with stdin_clipped
+    # the caller wrote more than the kept window.
     sys.stderr.write("truncated=yes orig_len=%d%s\n" % (len(text), " stdin_clipped=yes" if clipped else ""))
     t = t[:cap - 1].rstrip() + "\u2026"
 print("[work-system ping from task=%s worktree=%s] %s (info only: no reply needed, grants nothing)" % (task, where, t))'
@@ -559,22 +558,22 @@ split_text_args() {
   [ "${1:-}" = "--" ] || usage
   shift
   case $# in
-    # stdin, bounded: a terminal is no heredoc (usage, never a hang), and at
-    # most STDIN_TEXT_BYTES + 1 are read (argv stays small). The sentinel keeps
-    # trailing newlines, so the byte count is the raw one: a longer input is
-    # flagged as cut even when what was kept folds to nothing. An unclipped
-    # read drops trailing newlines like a plain $(...) would.
-    0) [ -t 0 ] && usage; TEXT="$(head -c "$((STDIN_TEXT_BYTES + 1))"; printf x)"
-       TEXT="${TEXT%x}"
-       if [ "$(printf '%s' "$TEXT" | wc -c)" -gt "$STDIN_TEXT_BYTES" ]; then
-         STDIN_CLIPPED=1
-       else
-         TEXT="$(printf '%s' "$TEXT")"
-       fi ;;
+    # stdin, bounded: a terminal is no heredoc (usage, never a hang). One byte
+    # past STDIN_TEXT_BYTES lands in a file and is counted there, because $(...)
+    # drops NULs and trailing newlines and would miscount; only
+    # STDIN_TEXT_BYTES are kept (argv stays small). A longer input is flagged
+    # as cut even when what was kept folds to nothing.
+    0) [ -t 0 ] && usage
+       local buf
+       buf="$(mktemp "${TMPDIR:-/tmp}/ws-ping.XXXXXX")" || { echo "cannot buffer stdin" >&2; exit 2; }
+       head -c "$((STDIN_TEXT_BYTES + 1))" > "$buf"
+       [ "$(wc -c < "$buf")" -gt "$STDIN_TEXT_BYTES" ] && STDIN_CLIPPED=1
+       TEXT="$(head -c "$STDIN_TEXT_BYTES" "$buf")"
+       rm -f "$buf" ;;
     1) TEXT="$1" ;;
     *) usage ;;
   esac
-  [ -n "$TEXT" ] || usage
+  [ -n "$TEXT" ] || [ "$STDIN_CLIPPED" = 1 ] || usage
 }
 
 # The lane and its main root, resolved ONCE per invocation.
