@@ -33,7 +33,9 @@ so the properties under test are exactly the ones that grep got wrong:
 
 The `route` section below covers the remembered answer layered on top, and
 `poll` / `latest-after` are run against a stub `gh` that executes their real
-`--jq` filters. `latest` is exercised in production by /cycle and /check.
+`--jq` filters. The last section feeds one comment fixture set to every
+consumer of the shared CLAUDE_JQ predicate (poll, latest, latest-after,
+comment-ids, route evidence) and asserts they agree.
 """
 import json
 import os
@@ -844,6 +846,94 @@ check("a finished review is returned", p.returncode == 0)
 check("and clears the remembered answer", not memory_file(repo).exists())
 p = poll("ci", [pr_comment("github-actions", "**Claude finished** (quoted in a CI log)")])
 check("another author quoting the marker is not a review", p.returncode == 1)
+
+
+# --- one predicate: every consumer agrees on the same comments ----------------
+# The same fixtures, read by every subcommand that decides "a Claude review".
+# A workflow-posted review (`## Review`, no `**Claude finished` header) used to
+# time out the poll while latest-after returned it.
+def run_sub(name, comments, *args):
+    return subprocess.run(["bash", str(SCRIPT), *args], capture_output=True, text=True,
+                          cwd=repo, env=gh_env(name, {"comments": comments}))
+
+
+T0 = "2026-01-01T00:00:00Z"
+QUOTING = ("## Review\n\nOn error the bot writes `**Claude encountered an error`; "
+           "while running, `Claude Code is working`.")
+CASES = {
+    # name: (comments, expected done-review body or None, any Claude comment?)
+    "bot-finished": ([pr_comment("claude", "**Claude finished @me's task** ok")],
+                     "**Claude finished @me's task** ok", True),
+    "workflow-review": ([pr_comment("claude", "## Review\n\nLooks good.")],
+                        "## Review\n\nLooks good.", True),
+    "working": ([pr_comment("claude", "Claude Code is working…")], None, True),
+    "failed": ([pr_comment("claude", "**Claude encountered an error after 1m**")], None, True),
+    "blank": ([pr_comment("claude", "  ")], None, True),
+    # Markers count only at the start of the body: a review QUOTING one is done.
+    "quotes-markers": ([pr_comment("claude", QUOTING)], QUOTING, True),
+    # Only the bold header form is the error marker; prose opening with the words is not.
+    "opens-with-words": ([pr_comment("claude", "Claude encountered an error in auth.py")],
+                         "Claude encountered an error in auth.py", True),
+    "bold-working": ([pr_comment("claude", "**Claude Code is working…**")], None, True),
+    "ci-token": ([pr_comment("github-actions", "## Review\n\nLGTM")], None, False),
+    "lookalike": ([pr_comment("claude-bot", "## Review")], None, False),
+    "old": ([pr_comment("claude", "## Review", "2025-12-31T23:59:59Z")], None, False),
+    # A second run's tracking comment after a finished review: the review stands.
+    "review-then-working": ([pr_comment("claude", "## Review"),
+                             pr_comment("claude", "Claude Code is working…", "2026-02-02T00:00:00Z")],
+                            "## Review", True),
+}
+for name, (comments, review, any_claude) in CASES.items():
+    p = run_sub("agree-" + name, comments, "poll", "5", T0, "--max", "1", "--interval", "0")
+    polled = p.stdout.rstrip("\n") if p.returncode == 0 else None
+    done = run_sub("agree-" + name, comments, "latest-after", "5", T0, "--done").stdout.rstrip("\n") or None
+    anyc = json.loads(run_sub("agree-" + name, comments, "latest-after", "5", T0, "--json").stdout
+                      or "null") not in (None, {"createdAt": "", "body": ""})
+    check(f"{name}: poll returns the done review", polled == review)
+    check(f"{name}: latest-after --done agrees with poll", done == review)
+    check(f"{name}: latest-after sees a Claude comment iff one exists", anyc == any_claude)
+
+p = run_sub("ids", [dict(pr_comment("claude", "## Review"), id="IC_1"),
+                    dict(pr_comment("github-actions", "## Review"), id="IC_2"),
+                    dict(pr_comment("claude", "Claude Code is working…"), id="IC_3")],
+            "comment-ids", "5")
+check("comment-ids lists every Claude comment and nothing else", p.stdout.split() == ["IC_1", "IC_3"])
+p = run_sub("donejson", [pr_comment("claude", "## Review"),
+                         pr_comment("claude", "Claude Code is working…", "2026-02-02T00:00:00Z")],
+            "latest", "5", "--done", "--json")
+check("latest --done --json skips a newer in-progress comment",
+      json.loads(p.stdout).get("body") == "## Review")
+check("and flags it as pending, from the same read", json.loads(p.stdout).get("pending") is True)
+for name, comments, want in (
+        ("pend-none", [pr_comment("claude", "## Review")], False),
+        ("pend-older", [pr_comment("claude", "**Claude encountered an error**", "2026-01-15T00:00:00Z"),
+                        pr_comment("claude", "## Review")], False),
+        ("pend-failed", [pr_comment("claude", "## Review"),
+                         pr_comment("claude", "**Claude encountered an error**", "2026-02-02T00:00:00Z")], True),
+        ("pend-noreview", [pr_comment("claude", "Claude Code is working…")], True)):
+    out = json.loads(run_sub(name, comments, "latest", "5", "--done", "--json").stdout)
+    check(f"{name}: pending is {want}", out.get("pending") is want)
+check("latest rejects an unknown flag", run_sub("badflag", [], "latest", "5", "--bogus").returncode == 2)
+
+# route's REST shape goes through the same claude_author.
+sh("route-record", str(repo), "--pr", "12")
+route(str(repo), env=gh_env("rest-ci", asked + [comment("github-actions[bot]", "## Review", "2999-01-01T00:00:00Z", "Bot")]))
+check("route evidence: a workflow-token comment does not clear the record", memory_file(repo).exists())
+route(str(repo), env=gh_env("rest-claude", asked + [comment("claude[bot]", "## Review", "2999-01-01T00:00:00Z", "Bot")]))
+check("route evidence: a Claude App comment clears it", not memory_file(repo).exists())
+
+# No skill or doc carries its own author filter or completion marker any more.
+plugin = HERE.parent
+inline = [str(f.relative_to(plugin)) for f in plugin.rglob("*.md")
+          if re.search(r'author\.login\s*==\s*"claude"|contains\("\*\*Claude finished', f.read_text())]
+check(f"no inline Claude-comment filter outside claude-review.sh: {inline}", not inline)
+# Callers that act on a review's findings must read the FINISHED one: a newer
+# error comment standing in for it hid its blocking issues from /merge.
+for skill in ("merge", "check", "fix"):
+    text = (plugin / "skills" / skill / "SKILL.md").read_text()
+    calls = re.findall(r'claude-review\.sh" latest <PR_NUMBER>[^`\n]*', text)
+    check(f"/{skill} reads the finished review via latest --done: {calls}",
+          any("--done" in c for c in calls))
 
 if FAILS:
     print("FAIL:")

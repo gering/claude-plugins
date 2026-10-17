@@ -8,7 +8,7 @@ PR review feedback loop for Claude Code. Commit, push, trigger the `@claude` Git
 
 **What it does.** `/cycle` and `/open` trigger the `@claude` review bot, then launch the polling script as a **background Bash task**. You get the review results pushed back into the conversation when they arrive (1–5 minutes typical). In the meantime you keep working.
 
-**Why it matters.** Waiting in the foreground for a review bot would waste 3+ minutes of session time per iteration. Polling runs on a shared shell script (`scripts/claude-review.sh`), so there is no duplicated logic between `/open` and `/cycle`.
+**Why it matters.** Waiting in the foreground for a review bot would waste 3+ minutes of session time per iteration. Polling runs on a shared shell script (`scripts/claude-review.sh`), so there is no duplicated logic between `/open` and `/cycle` — and that script holds the one definition of a finished Claude review (an `@claude` bot reply or an auto-review workflow's `## Review` alike), which `/fix`, `/check` and `/merge` read through it too.
 
 ### Auto-trigger detection — no duplicate reviews
 
