@@ -10,8 +10,8 @@ Design invariants (see plugins/settings/README.md):
   - Defaults live in the schema, never duplicated into config TOML files.
   - Only user overrides are written; a missing config file is fully valid.
   - `show --resolved` is the merged view consumers should read.
-  - Validation covers syntax (TOML) and semantics (types, enums, unknown keys,
-    related-project paths).
+  - Validation covers syntax (TOML) and semantics (types, enums, numeric
+    bounds, unknown keys, related-project paths).
 
 Runtime deps: Python 3.11+ stdlib only (`tomllib`). No third-party packages, no
 build step — matching the rest of this build-less marketplace repo.
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -270,6 +271,9 @@ def _validate_node(node: dict, value: object, path: str, findings, project_root)
         allowed = ", ".join(json.dumps(v) for v in node["enum"])
         findings.append(("error", f"{path}: {value!r} not in allowed values [{allowed}]"))
 
+    if _matches_type(value, "number"):
+        _validate_bounds(node, value, path, findings)
+
     if typ == "object" and isinstance(value, dict):
         props = node.get("properties", {})
         for key in node.get("required", []):
@@ -285,6 +289,24 @@ def _validate_node(node: dict, value: object, path: str, findings, project_root)
     if typ == "array" and isinstance(value, list) and "items" in node:
         for i, item in enumerate(value):
             _validate_node(node["items"], item, f"{path}[{i}]", findings, project_root)
+
+
+def _validate_bounds(node: dict, value, path: str, findings):
+    bounds = {k: node[k] for k in ("minimum", "maximum") if k in node}
+    if not bounds:
+        return
+    # NaN compares False against everything, and inf clears a one-sided bound.
+    if not math.isfinite(value):
+        findings.append(("error", f"{path}: {value!r} is not a finite number"))
+        return
+    for key, bound in bounds.items():
+        if not _matches_type(bound, "number"):
+            findings.append(("error", f"{path}: schema {key} {bound!r} is not a number"))
+            continue
+        if key == "minimum" and value < bound:
+            findings.append(("error", f"{path}: {value!r} is below minimum {bound!r}"))
+        if key == "maximum" and value > bound:
+            findings.append(("error", f"{path}: {value!r} is above maximum {bound!r}"))
 
 
 def _validate_related_projects(value, path, findings, project_root):

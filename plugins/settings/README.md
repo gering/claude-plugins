@@ -21,7 +21,7 @@ Each plugin owns its settings, the settings plugin owns only the infrastructure:
 
 | Owned by each plugin | Owned by `settings` |
 |----------------------|---------------------|
-| `schema/settings.schema.json` (types, enums, defaults, config filename) | discovery, resolve, validate, read/write CLI |
+| `schema/settings.schema.json` (types, enums, bounds, defaults, config filename) | discovery, resolve, validate, read/write CLI |
 | the semantic meaning of its keys | the merge + validation engine |
 
 A plugin adds settings by dropping a `schema/settings.schema.json` into its own
@@ -52,7 +52,7 @@ python3 plugins/settings/scripts/settings.py <subcommand>
 | `show [plugin] --overrides` | only the user overrides (raw) |
 | `defaults [plugin]` | schema defaults only |
 | `get <plugin>.<section>.<key>` | one resolved value |
-| `set <plugin>.<section>.<key> <value>` | write one override (type-coerced, enum-checked) |
+| `set <plugin>.<section>.<key> <value>` | write one override (type-coerced, enum- and bounds-checked) |
 | `unset <plugin>.<section>.<key>` | remove one override, pruning emptied sections |
 | `validate [plugin]` | check TOML syntax + schema semantics; non-zero exit on errors |
 
@@ -65,8 +65,9 @@ separated roots to scan for `*/schema/settings.schema.json`) and
 
 A `settings.schema.json` is a **subset of JSON Schema** plus two custom keys.
 The subset the validator understands: `type` (`string` / `integer` / `number` /
-`boolean` / `array` / `object`), `properties`, `items`, `enum`, `required`, and
-`default`. Defaults live here — never in the config TOML.
+`boolean` / `array` / `object`), `properties`, `items`, `enum`, `minimum` /
+`maximum` (numbers only), `required`, and `default`. Defaults live here —
+never in the config TOML.
 
 ```jsonc
 {
@@ -161,6 +162,6 @@ deliberately, later.
 ## Tests
 
 `scripts/test_settings.py` (run by `scripts/check-structure.py` in CI) covers
-default extraction, resolve merge, validation (type / enum / unknown key /
-related-project paths), TOML round-trip, value coercion, and the `set`/`get`/
-`unset` CLI cycle against a throwaway schema and project root.
+default extraction, resolve merge, validation (type / enum / numeric bounds /
+unknown key / related-project paths), TOML round-trip, value coercion, and the
+`set`/`get`/`unset` CLI cycle against a throwaway schema and project root.

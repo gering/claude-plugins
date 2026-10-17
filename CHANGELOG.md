@@ -703,6 +703,9 @@ Fixes from a full `/swarm:review` of this branch (23 findings, 3 model families,
 
 ## settings
 
+### 0.1.1 — 2026-10-17
+- Enforce schema `minimum`/`maximum`: `set` refuses and `validate` flags a number outside the bounds (e.g. `work-system.mandate.review_budget 500`), instead of storing it while the consumer silently falls back to its default. NaN/inf never pass a bound; a non-numeric bound in a schema is reported, not a crash. A value stored out of range under 0.1.0 now blocks every `set` for that plugin until fixed; run `/settings validate` after upgrading.
+
 ### 0.1.0 — 2026-07-16
 - Initial settings plugin (phase 1: config surface). Per-plugin TOML config resolved over schema defaults, with `list` / `show [--overrides]` / `get` / `set` / `unset` / `validate` / `defaults` via `scripts/settings.py` (Python 3.11+ stdlib) and the `/settings` skill. Each plugin owns a `schema/settings.schema.json` (types, enums, defaults, config filename); work-system, knowledge-system, and pr-flow ship schemas whose defaults match current behavior. Includes a `[related_projects]` sibling-project address book (path-existence warnings, not errors). Consumer wiring lands in a follow-up.
 
