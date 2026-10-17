@@ -1092,6 +1092,60 @@ check("setting: schema default equals the preset floor",
       floor and all(int(f) == schema_default for f in floor))
 
 
+# --- deploy-owner: who deploys a merge made from <dir> ------------------------
+# A lane (linked worktree) with deploy.by=manager must not deploy; the main
+# checkout is the Manager's own session and is never bound.
+d_main = budget_repo()
+d = kv(run("deploy-owner", str(d_main)).stdout)
+check("deploy-owner: main checkout is not a lane", d.get("in_lane") == "no")
+check("deploy-owner: defaults are manager/ask",
+      d.get("deploy_by") == "manager" and d.get("deploy_confirm") == "ask")
+d = kv(run("deploy-owner", str(lw)).stdout)
+check("deploy-owner: a linked worktree is a lane", d.get("in_lane") == "yes")
+# The lane's own file is worker-controlled: it must never grant the deploy.
+(lw / ".work-system.toml").write_text('[deploy]\nby = "worker"\nconfirm = "auto"\n')
+d = kv(run("deploy-owner", str(lw)).stdout)
+check("deploy-owner: a lane's own config never grants the deploy",
+      d.get("deploy_by") == "manager" and d.get("deploy_confirm") == "ask")
+r = subprocess.run(["bash", str(SCRIPT), "deploy-owner", str(lw)], capture_output=True,
+                   text=True, env=dict(ENV, SETTINGS_PROJECT_ROOT=str(lw)))
+check("deploy-owner: SETTINGS_PROJECT_ROOT cannot redirect the read",
+      kv(r.stdout).get("deploy_by") == "manager")
+(mc / ".work-system.toml").write_text('[deploy]\nby = "worker"\nconfirm = "auto"\n')
+d = kv(run("deploy-owner", str(lw)).stdout)
+check("deploy-owner: the main checkout's config decides for its lanes",
+      d.get("in_lane") == "yes" and d.get("deploy_by") == "worker")
+# `auto` is an outward grant: only a committed, unmodified policy carries it.
+check("deploy-owner: an uncommitted auto grant falls back to ask",
+      d.get("deploy_confirm") == "ask" and "confirm=auto ignored" in d.get("note", ""))
+GIT_ID = ["-c", "user.name=t", "-c", "user.email=t@t"]
+subprocess.run(["git", "-C", str(mc), "add", ".work-system.toml"], check=True)
+subprocess.run(["git", "-C", str(mc), *GIT_ID, "commit", "-q", "-m", "policy"], check=True)
+d = kv(run("deploy-owner", str(lw)).stdout)
+check("deploy-owner: a committed auto grant holds", d.get("deploy_confirm") == "auto")
+(mc / ".work-system.toml").write_text('[deploy]\nby = "worker"\nconfirm = "auto"\n# edited\n')
+check("deploy-owner: a locally modified policy drops auto",
+      kv(run("deploy-owner", str(lw)).stdout).get("deploy_confirm") == "ask")
+subprocess.run(["git", "-C", str(mc), "rm", "-q", "-f", ".work-system.toml"], check=True)
+subprocess.run(["git", "-C", str(mc), *GIT_ID, "commit", "-q", "-m", "drop"], check=True)
+(mc / ".work-system.toml").write_text("[mandate]\nreview_budget = 4\n")
+bad = budget_repo('[deploy]\nby = "anyone"\n')
+r = run("deploy-owner", str(bad))
+d = kv(r.stdout)
+check("deploy-owner: an invalid value falls back to manager",
+      r.returncode == 0 and d.get("deploy_by") == "manager")
+check("deploy-owner: and says why", "deploy.by" in d.get("note", ""))
+r = run("deploy-owner", tempfile.mkdtemp())
+check("deploy-owner: outside git is unknown (exit 3)",
+      r.returncode == 3 and "in_lane=unknown" in r.stdout)
+deploy_schema = json.loads((SCRIPT.parent.parent / "schema" / "settings.schema.json")
+                           .read_text())["properties"]["deploy"]["properties"]
+check("deploy-owner: the no-python3 floor equals the schema defaults",
+      'by="manager" confirm="ask"' in SCRIPT.read_text()
+      and deploy_schema["by"]["default"] == "manager"
+      and deploy_schema["confirm"]["default"] == "ask")
+
+
 # --- exclude-task: keeps the lane's TASK.md out of a clean-tree check --------
 ex = make_repo()
 excl = ex / ".git" / "info" / "exclude"

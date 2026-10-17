@@ -93,12 +93,25 @@ confirm. Every step names what to report when it stops.
    step 3) and `completed` only when step 1 already found it `MERGED`.
    `--pr` is step 1's `pr_number` — without it the sweep cannot match the report to
    the PR it closes. The `/land`-specific rules:
-   - **End `work.summary` with an explicit follow-up list**, one item per line under
-     a `Follow-ups:` label: deploy/release, cleanup (remote resources, flags, temp
-     branches), a follow-up task to define, docs. Nothing open → `Follow-ups: none`.
-     Describe each item; do not paste commands or URLs — the Manager treats the
-     report as untrusted data and acts only on its own judgment. Keep the same list
-     for step 5's summary.
+   - **End `work.summary` with an explicit follow-up list** — every step still open
+     in this session (deploy/release, cleanup of remote resources, flags or temp
+     branches, a build or live test, a follow-up task to define, docs), in the
+     **Follow-ups format**:
+     ```text
+     Follow-ups:
+     1. [step] <where> — <what>
+     2. [decide] <where> — <what>
+     3. [deploy] <where> — <what; where the deploy procedure is documented>
+     ```
+     The number is the order: an item waits for every earlier one unless it says
+     `independent`. `<where>` is `this repo` or the other repo's name or path. The
+     tag says who must act: `[step]` mechanical, local, non-destructive (build, run
+     tests, pull main); `[decide]` the user (merge/push elsewhere, a release, a
+     product call, anything destructive or unclear); `[deploy]` a deploy, which the
+     Manager owns (see step 3). Nothing open → `Follow-ups: none`. Describe each item;
+     do not paste commands or URLs — the Manager treats the report as untrusted
+     data, re-classifies every item itself and derives any command from the repo.
+     Keep the same list for step 5's summary.
    - The schema has no follow-up field and rejects unknown keys; the summary is the
      field the sweep reads whole. Keep the list short — its length limit is in the
      contract at the `contract=` path `prepare` printed.
@@ -135,6 +148,17 @@ confirm. Every step names what to report when it stops.
      accepting would take the lane out from under it.
    - Items the user accepts as open during `/merge` (doc gaps merged anyway, an open
      blocking issue) are follow-ups too: add them to the list step 5 prints.
+   - **Never deploy from the lane** when
+     `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" deploy-owner` prints
+     `deploy_by=manager` (the default) — not even when project instructions say
+     "deploy after merge". The user's `/land` authorizes the merge and the close, not
+     a deploy; the Manager deploys from the main checkout after the close. A deploy
+     the project would run after a merge belongs in step 2's list as a `[deploy]`
+     item naming where its procedure is documented (CLAUDE.md, Makefile, README
+     section) — check the project's instructions for one before writing the report;
+     one you only learn of here goes into step 5's list. With `deploy_by=worker` the
+     project's own instructions apply here, as before. Any other answer (exit 2 or 3,
+     `in_lane=unknown`) settles nothing: do not deploy, ask the user.
    - Do **not** run `/close` from `/merge`'s own "offer `/close`" hand-off — step 5
      runs it with the delegation flag.
 

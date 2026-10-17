@@ -52,6 +52,12 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.21.0 — 2026-10-17
+- Follow-ups of a closed lane are never lost. Every delegated close (not only `/land`) writes a handoff report ending in a numbered `Follow-ups:` list (`[step]`/`[decide]`/`[deploy]`, location, description) and prints it for the pane fallback. On the Manager side `/close` 6c classifies each item (do it / ask / deploy, order preserved, commands derived from the repo, never from worker text) and records every open item in `tasks/ROADMAP.md` → `## Open follow-ups` before the worktree is removed; the new step 10b runs the mechanical items, batches deploys, asks once and resolves what got done. A worker closing its own lane records its open items there too. `/list` shows them.
+- `scripts/followups.py` (`record`/`list [--class]`/`resolve <id>...`): the durable record — locked read-modify-write, ids never reused, one-line folded text, symlinked roadmap refused, file mode kept. `tasks/ROADMAP.md` is excluded from `/kickoff`, `/list` and the `[ws]` backlog count.
+- **Behavior change (deliberate):** with the new default `[deploy] by = "manager"` a lane's worker no longer runs a project's "deploy after merge"; `by = "worker"` restores it. New `[deploy] by = "manager"|"worker"` and `confirm = "ask"|"auto"` settings (`auto` is honored only from a committed, unmodified file); `mandate.sh deploy-owner [<dir>]` answers `in_lane=`/`deploy_by=`/`deploy_confirm=` from the main checkout's config (a lane's own file never counts). `/land` and `/continue` never deploy from a lane under `by=manager`; an `auto` grant does not apply when the merged PR itself changed `.work-system.toml`; an auto-accepted close-request approves no follow-up.
+- `/continue`: an undeliverable Manager ping (`sent=no`, e.g. `manager-working`) is never retried; open next steps travel in the handoff report's `Follow-ups:` list.
+
 ### 1.20.0 — 2026-10-17
 - Add `/land`: one command in the worker tab that finishes a lane — writes the handoff insights report with an explicit `Follow-ups:` list for the Manager's sweep, runs `/pr-flow:merge` with all its gates, confirms the merge via `task-status.sh assess` (`confidence=confirmed`), then runs `/close --delegate`. Any stop before a confirmed merge closes nothing; without pr-flow it stops before anything runs. The user's invocation is the merge authorization; the skill is `disable-model-invocation`, so the Skill tool cannot start it. Takes no arguments. Stops on a missing or closed PR, without `gh`, on an open PR whose branch has no upstream or whose head differs from this worktree's `HEAD`, and when the merged PR's head does not contain `HEAD` (an earlier lane's PR, or a commit made while `/merge` waited); prints the follow-ups in its summary as well. It always writes its own handoff report (a terminal-gate report has no follow-ups) and prints its summary before `/close`, whose output stays last.
 - `/kickoff` and `/adopt` add `/TASK.md` to the repo's git exclude (`mandate.sh exclude-task`, best-effort; the exclude helper now also survives a last line without newline), so `/pr-flow:merge`'s clean-tree check — and with it `/land` — no longer stops on the lane's task file in repos that do not gitignore it.
@@ -281,6 +287,9 @@ entries are grouped per plugin, newest first.
 - Add `/work-adopt` skill; store worktrees under `.claude/worktrees/`.
 
 ## pr-flow
+
+### 1.6.0 — 2026-10-17
+- `/merge` asks work-system who owns a project's post-merge deploy (`mandate-shim.sh deploy-owner`). Inside a lane with `deploy.by = "manager"` it does not deploy and names where the procedure is documented; without work-system, outside a lane or with `by = "worker"` the project's instructions apply; an unresolvable answer asks instead of deploying.
 
 ### 1.5.0 — 2026-10-02
 - **Review route remembered per repo.** A bot-less repo no longer pays `/cycle`'s ten-minute `@claude review` poll on every round and every lane: a timed-out poll is recorded once (git common dir, shared by all worktrees, never committed), and later rounds go straight to `/swarm:review`. Every round report states the route and why (`route: local — no bot answered on <date> (PR #N)`).

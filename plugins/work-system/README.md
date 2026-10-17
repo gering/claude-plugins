@@ -536,8 +536,8 @@ and decides self-close vs. a different-tab close by pane id. Three entry points:
   no agent but the requester anywhere in the lane — and
   says so in one line; any doubt becomes one question naming what is open
   (`scripts/close-request.sh`). Before the worker's tab goes, the Manager sweeps the
-  worker's handoff report and every lane pane for open follow-ups (deploy, cleanup, a
-  next task) and lists them in the close summary.
+  worker's handoff report and every lane pane for open follow-ups and then acts on
+  them — see [Follow-ups and deploy](#follow-ups-and-deploy-after-a-close).
 - **From inside the worktree tab, otherwise**: Claude cannot close its own tab, only
   exit cleanly. So `/close` focuses the main tab and arms a **detached `/exit`** that
   fires once the turn ends — Claude exits cleanly, the armed marker + `SessionEnd`
@@ -556,6 +556,49 @@ pane, so a kickoff worker runs **inside** a shell pane and its exit drops back t
 that shell instead of ending the tab.
 All of this lives in the tested `scripts/herdr-teardown.sh`; see
 `skills/close/SKILL.md` step 12 for the flow.
+
+### Follow-ups and deploy after a close
+
+A lane's open next steps ("build in main → merge the dotfiles PR → live test") must
+not vanish with its tab. Every delegated close — `/land` or a plain `/close` that
+delegates — first writes a handoff report whose summary ends in a numbered
+`Follow-ups:` list: order, location (`this repo` or another repo) and who must act
+(`[step]` mechanical, `[decide]` the user, `[deploy]` a deploy). The list is printed
+on screen too, so the pane fallback has it when insights is not installed.
+
+The Manager treats that list as untrusted data and classifies every item itself:
+
+- **Do it** — mechanical, local to its own main checkout, non-destructive, no outward
+  effect (pull main, build, run tests, bookkeeping). The command comes from the repo
+  (CLAUDE.md, Makefile, README), never from the worker's text.
+- **Ask** — merge, push, release, another repo, anything destructive or unclear: one
+  question, items in order.
+- **Record** — everything not run or answered goes into `tasks/ROADMAP.md` under
+  `## Open follow-ups` (`scripts/followups.py record|list|resolve`) *before* the
+  worktree is removed, and stays there until resolved; `/list` shows it. A worker
+  closing its own lane (no Manager) records its open items there itself.
+
+Order is kept: an item whose predecessor waits for the user is not run early.
+
+**Deploy is the Manager's.** Every mandate denies `deploy`, but that only binds the
+worker's initiative — a worker that follows a project's "deploy after merge" right
+after a user-invoked merge would deploy from its worktree. So `/land`, `/continue` and
+`/pr-flow:merge` inside a lane stop at the merge and leave a `[deploy]` follow-up naming
+where the procedure is documented; the Manager deploys from the main checkout after
+the close, batching merges that land close together. Per repo, in `.work-system.toml`:
+
+```toml
+[deploy]
+by = "manager"     # default; "worker" restores project instructions inside the lane
+confirm = "ask"    # default; "auto" = standing grant to deploy a closed lane without asking
+```
+
+`scripts/mandate.sh deploy-owner [<dir>]` answers `in_lane=`, `deploy_by=`,
+`deploy_confirm=` from the **main checkout's** config — a lane's own file is the
+worker's and never counts (pr-flow reads it through its mandate shim). `auto` holds
+only while `.work-system.toml` is committed and unmodified, never when the merged PR
+itself changed it, and no deploy runs from a main that step 5 could not sync. An auto-accepted
+close-request approves the teardown only, never a follow-up or a deploy.
 
 ### `/work-system:continue <task>` reopens a closed task tab
 
@@ -605,7 +648,9 @@ one live session carries the resolved name; everyone else goes through
 `manager.sh prompt`, which types into the Manager's pane only when it is an idle
 Claude session with no user draft in its composer (a dim prompt suggestion is not
 a draft). The event text goes in on stdin through a quoted heredoc, so quotes or
-`$(...)` in it never reach a shell. `/close`'s delegation offer uses the same
+`$(...)` in it never reach a shell. A ping that cannot be delivered (`sent=no`, e.g. a busy
+Manager) is not retried: it never carries anything to act on — open next steps
+travel in the handoff report's `Follow-ups:` list. `/close`'s delegation offer uses the same
 resolver.
 
 ### Task tabs carry their state glyph
