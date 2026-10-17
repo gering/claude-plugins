@@ -3,7 +3,7 @@ title: "Manager Address Resolver and Milestone Pings"
 createdAt: 2026-10-02
 updatedAt: 2026-10-17
 createdFrom: "session: 2026-10-02 (task/add-manager-address)"
-updatedFrom: "session: 2026-10-17 (task/add-land-skill)"
+updatedFrom: "session: 2026-10-17 (task/fix-manager-ping-truncation)"
 pluginVersion: 1.9.0
 prime: false
 ---
@@ -63,6 +63,12 @@ terminal gate) and `/close` step 1b delegation, which replaced the name-only
   SendMessage is skill-side (a script cannot call a tool) and needs exactly one
   live session with the name. The herdr route `manager.sh prompt` re-resolves and
   types only into an idle/done **claude** Manager whose composer holds no draft.
+- **One event cap, never silent.** The event text keeps 1000 chars on both
+  routes; a cut ends in `…` plus `truncated=yes orig_len=<n>` on stderr (a plain
+  300-char slice once lost a gate ping's open decision unnoticed). No shorter
+  herdr cap: a measured ~4000-char `herdr agent prompt` (0.8.2) reached a claude
+  composer intact and was answered. Stdin reads 16 KiB, past the cap, so the cut
+  is still detected.
 
 ## Gotchas
 

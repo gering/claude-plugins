@@ -605,8 +605,10 @@ one live session carries the resolved name; everyone else goes through
 `manager.sh prompt`, which types into the Manager's pane only when it is an idle
 Claude session with no user draft in its composer (a dim prompt suggestion is not
 a draft). The event text goes in on stdin through a quoted heredoc, so quotes or
-`$(...)` in it never reach a shell. `/close`'s delegation offer uses the same
-resolver.
+`$(...)` in it never reach a shell. The event text keeps up to 1000 characters
+on both routes; a longer one is cut visibly — it ends in `…` and `manager.sh`
+prints `truncated=yes orig_len=<n>` on stderr. `/close`'s delegation offer uses
+the same resolver.
 
 ### Task tabs carry their state glyph
 
