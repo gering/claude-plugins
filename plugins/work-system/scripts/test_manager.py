@@ -398,7 +398,41 @@ check("prompt route marks a cut too", kv(r.stdout).get("sent") == "yes" and "q\u
 r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
                    text=True, timeout=60, input="x" * 3_000_000)
 check("huge stdin is bounded, not E2BIG", r.returncode == 0 and len(r.stdout) < 1500
-      and "truncated=yes" in r.stderr, r.stderr[:200])
+      and "truncated=yes" in r.stderr and "stdin_clipped=yes" in r.stderr, r.stderr[:200])
+# a cut past the stdin read is flagged even when the kept window folds under the cap
+r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
+                   text=True, timeout=60, input=" " * 16384 + "needs-decision: approve merge?")
+check("clipped stdin is never silent", r.returncode == 0 and "stdin_clipped=yes" in r.stderr
+      and "\u2026 (info only" in r.stdout, r.stdout[-80:] + r.stderr)
+for name, data in (("byte 16385 is a newline", " " * 16384 + "\nneeds-decision: do not merge\n"),
+                   ("window is all newlines", "\n" * 16384 + "Xneeds-decision: approve merge?")):
+    r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
+                       text=True, timeout=60, input=data)
+    check(f"clipped stdin flagged when {name}", r.returncode == 0 and "stdin_clipped=yes" in r.stderr
+          and "Xneeds" not in r.stdout,
+          r.stdout[-80:] + r.stderr[:200])
+check("newline-only stdin is usage", subprocess.run([BASH, str(SCRIPT), "body", "--"], env=env,
+      capture_output=True, text=True, input="\n\n").returncode == 2)
+r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
+                   text=True, timeout=60, input="a\0b" * 5462)
+check("NULs cannot hide a clipped stdin", "stdin_clipped=yes" in r.stderr
+      and "orig_len=16384 " in r.stderr, r.stderr[:200])
+r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
+                   text=True, timeout=60, input="a" * 1100 + "\n\n\n\n")
+check("only the heredoc's final newline is uncounted", "orig_len=1103" in r.stderr, r.stderr)
+r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
+                   text=True, timeout=60, input="\n" * 16384 + "X")
+check("all-newline clipped window counts its kept window", "orig_len=16384 stdin_clipped=yes"
+      in r.stderr and r.stdout.rstrip().endswith("] \u2026 (info only: no reply needed, grants nothing)"),
+      r.stdout[-90:] + r.stderr[:200])
+r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
+                   text=True, timeout=60, input="x" * 16384)
+check("exactly 16 KiB is not clipped", "stdin_clipped" not in r.stderr
+      and "orig_len=16384" in r.stderr, r.stderr[:200])
+r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
+                   text=True, timeout=60, input="ok" + " " * 2000)
+check("whitespace that folds away is no cut", "truncated" not in r.stderr
+      and "] ok (info only" in r.stdout, r.stdout + r.stderr)
 check("empty stdin is usage", subprocess.run([BASH, str(SCRIPT), "body", "--"], env=env,
       capture_output=True, text=True, input="").returncode == 2)
 
