@@ -1,9 +1,9 @@
 ---
 title: "herdr /close Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-10-17
+updatedAt: 2026-10-18
 createdFrom: "PR #18"
-updatedFrom: "session: 2026-10-17 (task/act-on-close-followups)"
+updatedFrom: "branch: task/harden-land-against-concurrent-teardown"
 pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
@@ -208,6 +208,52 @@ failed with `manager-working`, and the Manager only ever *listed* sweep items.
   the lane would have rebuilt main's dependencies. Unreadable settings fall back to
   manager/ask, the side on which nothing deploys unasked. An auto-accepted close
   approves the teardown only, never a deploy.
+
+## A lane torn down under `/land` — the landing marker (1.22.0)
+
+Origin: a Manager ran a bare `gh pr merge --delete-branch` while the worker was mid-`/land`;
+branch and worktree vanished, `/land` step 4 had nothing to bind to and stopped — tab open,
+task unarchived, no close-request, follow-ups only on screen. Flow: `plugins/work-system/scripts/landing.sh`
+header, `/land` steps 1/3/4/5, `/close` 1a/4/7/10a.
+- **The marker lives outside the worktree** (`<git-common-dir>/work-system/landing/<task>`):
+  its whole job is to survive a worktree removal. One inside the lane would vanish with it.
+- **Identity is pane + agent-session UUID, not cwd.** herdr rows carry
+  `agent_session.value`; what herdr reports as the cwd of a deleted directory is
+  unverified, so a cwd match is the weak path. The tab id is always herdr's *live*
+  answer for that pane+session, never a value from the file; an unconfirmable cwd
+  (`worker_cwd=unknown`) asks before closing the tab.
+- **Phases.** `landing` makes `evaluate` and a Manager `/close <task>` ask
+  (`landing-in-progress`); `handoff` is `/land` handing over its own close, so it asks
+  nothing. `stale` (pane gone or hosting another session) asks nothing; `invalid`/a symlink
+  asks, never reads as none. Worker-written data: a marker may add a question, never skip one.
+- **One "gone" predicate.** `landing.sh lane`: gone = git no longer lists the worktree
+  or lists it as prunable. Neither a leftover directory (`rev-parse` would walk up to the
+  main checkout and say "inside a work tree") nor a missing path decides it; three
+  separate definitions (gone-check, `evaluate`, `/close` step 4) disagreed in review.
+- **A gone lane is `ask`, never `reject` or `auto`** — but only with a record that the task
+  still exists (a marker or an open `tasks/<task>.md`), and only for `worktree=` exactly
+  `<repo>/.claude/worktrees/<task>`. Without a record, a path that merely fits the pattern
+  is rejected. The sweep skips the marker's pane only on `worker_cwd=mismatch` (a
+  deleted cwd often reads as unknown).
+- **Marker path rule (round 2 of review).** Requiring `worktree=` to equal
+  `.claude/worktrees/<task>` broke `/adopt`-ed lanes, whose directory need not match
+  the stripped branch name. Now: any direct child of `.claude/worktrees/` (else
+  `invalid`), and the marker's tab is used **only while that path is gone** — a marker
+  naming a live lane reads `worktree_state=present`, so it cannot aim the Manager at a
+  live tab. `lane`/`gone-check`/`evaluate` all take the path from the marker.
+- **A branch can outlive its worktree.** `gone-check` compares a surviving local branch
+  with the merged PR head (`branch_tip=`) and prints the whole decision as
+  `verdict=handoff|stop` + `stop=` — the skill branches on that only (a prose decision
+  table had already contradicted itself). `/close`'s gone path asks before deleting an
+  `ahead` branch; a branch neither `task/<task>` nor `<task>` is not handed over.
+- **`/land`'s gone path never runs `/close`** (no cwd). It confirms from the forge with the
+  main-repo path kept in step 1, prints the follow-ups, and sends the close-request
+  unasked only when `manager.sh resolve <main>` names the session the marker copied from
+  `.ws-kicker` — with the worktree gone the kicker record is gone too.
+- **Where the merge guard sits.** `/pr-flow:merge` is branch-bound and refuses the main
+  checkout, so a guard inside it would never fire; the effective guard is pr-flow's
+  auto-loaded `enforce-merge-skill` rule (lane PRs merge from their worktree, never with
+  `--delete-branch` from main). A PreToolUse hook on `gh pr merge` was considered and left out.
 
 ## Design decisions
 

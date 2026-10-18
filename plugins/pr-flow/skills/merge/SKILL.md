@@ -26,7 +26,7 @@ user_invocable: true
    - `gh auth status >/dev/null 2>&1` — else stop with "gh not authenticated — run: gh auth login"
 
 1. **Identify PR**:
-   - `git branch --show-current` — if on `main`/`master`, stop: "You're on the default branch — nothing to merge."
+   - `git branch --show-current` — if on `main`/`master`, stop: "You're on the default branch — nothing to merge." When the PR you meant has its branch checked out in another worktree (`git worktree list`), add: "Run `/merge` (or work-system's `/land`) in that worktree — never a bare `gh pr merge --delete-branch` from here, which pulls the branch out from under the session there."
    - `gh pr view --json number,title,url,state,isDraft,baseRefName,headRefName,mergeable,mergeStateStatus,mergeCommit`
    - If no PR → stop, suggest `/open`
    - If state ≠ `OPEN` → stop with state info

@@ -15,12 +15,22 @@
 #         task=<name>          once the name is validated
 #         worktree=<path>      once the path is a lane of this repo bound to it
 #         pr=<n> head_sha=<sha> merge_sha=<sha>   when known
-#         lane_agents=<n>|unverified
+#         lane_agents=<n>|unverified|gone
 #         decision=auto|ask|reject
 #         reason=<code> <text> one line per failed condition (none on auto)
+#         lane=gone            when the worktree was torn down already
+#         landing=<state>      when a /land marker exists (landing.sh status)
 #       reject = the request is not about a lane of THIS repo (malformed, bad
 #                name, foreign repo, not a lane, lane of another task): do
 #                nothing, never ask about it.
+#       A worktree that is GONE (removed outside /close, e.g. under a running
+#       /land) is still this task's lane when worktree= is the path
+#       `landing.sh lane` names for the task, that predicate calls it gone, and
+#       something still records the task (a /land marker or an open
+#       tasks/<task>.md): that is always `ask` (reason worktree-gone), never
+#       auto — what is left is the archive, the follow-ups, the branches and
+#       the tab, and the request can no longer be cross-checked against a
+#       checkout. With no such record it is rejected like any non-lane.
 #       ask    = a real lane, but something is open or unknown: the caller asks,
 #                naming every reason.
 #       auto   = every condition holds; nothing the teardown removes is missing
@@ -210,8 +220,21 @@ out(("task", seen["task"]), ("worktree", rp(seen["worktree"])))' "$file" "$TASK_
       return 0 ;;
   esac
 
-  local row="" lane_task lane_branch
-  [ -n "$m_wt" ] && row="$(lane_row "$MAIN" "$m_wt")"
+  local row="" lane_task lane_branch gone=0 lane_out landing_out leftover=no
+  # A torn-down lane: the one predicate landing.sh owns, plus a record that the
+  # task still exists — without one, a path that merely fits the pattern
+  # (a task never kicked off, one closed long ago) is not a lane to ask about.
+  lane_out="$(bash "$SCRIPT_DIR/landing.sh" lane "$m_task" --repo "$MAIN" 2>/dev/null)"
+  landing_out="$(bash "$SCRIPT_DIR/landing.sh" status "$m_task" --repo "$MAIN" 2>/dev/null)"
+  if [ -n "$m_wt" ] && [ "$m_wt" = "$(printf '%s\n' "$lane_out" | sed -n 's/^worktree=//p')" ] \
+     && printf '%s\n' "$lane_out" | grep -qx 'worktree_state=gone'; then
+    if [ -f "$MAIN/tasks/$m_task.md" ] || ! printf '%s\n' "$landing_out" | grep -qx 'landing=none'; then
+      gone=1; row="$m_task	task/$m_task"
+      printf '%s\n' "$lane_out" | grep -qx 'leftover=yes' && leftover=yes
+    fi
+  elif [ -n "$m_wt" ]; then
+    row="$(lane_row "$MAIN" "$m_wt")"
+  fi
   if [ -z "$row" ]; then
     echo "decision=reject"
     echo "reason=not-a-lane worktree= is not a task worktree of this repository"
@@ -227,6 +250,20 @@ out(("task", seen["task"]), ("worktree", rp(seen["worktree"])))' "$file" "$TASK_
 
   # From here on the request is about a real lane: every failure is "ask".
   local reasons=()
+  [ "$gone" = 1 ] && { echo "lane=gone"
+    reasons+=("worktree-gone the lane's worktree was removed outside /close — its state can no longer be checked"); }
+  [ "$leftover" = yes ] && reasons+=("leftover-dir the lane's directory still exists but is no git worktree — /close asks before removing it")
+
+  # A worker mid-/land: closing now tears the lane down under it. `handoff` is
+  # /land itself handing the close over, which is this very request.
+  local landing lphase
+  lphase="$(printf '%s\n' "$landing_out" | sed -n 's/^phase=//p')"
+  landing="$(printf '%s\n' "$landing_out" | sed -n 's/^landing=//p')"
+  [ -n "$landing" ] && [ "$landing" != none ] && echo "landing=$landing"
+  case "$landing/$lphase" in
+    live/landing) reasons+=("landing-in-progress the lane's worker is still running /land") ;;
+    unverified/landing|invalid/*) reasons+=("landing-unverified a /land marker exists for this task and could not be checked") ;;
+  esac
   local assess verdict confidence pr_number branch_scope
   assess="$( (cd "$MAIN" && bash "$SCRIPT_DIR/task-status.sh" assess "$m_task") 2>/dev/null)"
   verdict="$(printf '%s\n' "$assess" | sed -n 's/^verdict=//p')"
@@ -246,7 +283,9 @@ out(("task", seen["task"]), ("worktree", rp(seen["worktree"])))' "$file" "$TASK_
   # IGNORED files count too: `worktree remove --force` deletes a gitignored
   # .env or data dump just the same, and none of it is in the merged PR.
   local status line dirty=0 ignored=0
-  if status="$(git -C "$m_wt" status --porcelain --untracked-files=normal \
+  if [ "$gone" = 1 ]; then
+    :   # nothing left on disk to lose; worktree-gone already asks
+  elif status="$(git -C "$m_wt" status --porcelain --untracked-files=normal \
                  --ignored=traditional --ignore-submodules=none 2>/dev/null)"; then
     # The lane files may show as untracked (??) or, where the repo gitignores
     # them (this one does), as ignored (!!) — both are ephemeral lane state.
@@ -288,7 +327,7 @@ EOF
       reasons+=("pr-head-unreadable gh could not read the PR head (auth, network or API error)")
     else
       if [ -z "$tip" ]; then
-        reasons+=("no-local-branch no local task/$m_task branch to compare")
+        [ "$gone" = 1 ] || reasons+=("no-local-branch no local task/$m_task branch to compare")
       elif [ "$tip" != "$head" ]; then
         reasons+=("post-merge-commits local branch tip ${tip:0:12} differs from the merged PR head ${head:0:12}")
       fi
@@ -302,9 +341,12 @@ EOF
   fi
 
   # Liveness: the requester itself may still be there; anything more is not ours.
-  lane_agents "$m_wt"
+  # A gone lane has no cwd to count agents under (worktree-gone already asks).
+  if [ "$gone" = 1 ]; then LANE_AGENTS=gone; else lane_agents "$m_wt"; fi
   echo "lane_agents=$LANE_AGENTS"
-  if [ "$LANE_AGENTS" = "unverified" ]; then
+  if [ "$LANE_AGENTS" = "gone" ]; then
+    :
+  elif [ "$LANE_AGENTS" = "unverified" ]; then
     reasons+=("liveness-unverified the agents in the lane could not be counted")
   elif [ "$LANE_AGENTS" -gt 1 ]; then
     reasons+=("multiple-agents $LANE_AGENTS agents are live in the lane (only the requester is expected)")
@@ -397,9 +439,29 @@ print(v if v.isdigit() else "")' 2>/dev/null)"
   #    them: each one dies with the teardown, so reading only the first would
   #    report "no follow-ups" while another pane's are lost unread.
   local pane="absent" wt p text read=0
-  wt="$MAIN/.claude/worktrees/$task"
-  if [ "${HERDR_ENV:-}" = "1" ] && [ -d "$wt" ]; then
-    lane_agents "$wt"
+  local have=0 ls_out lane_out
+  lane_out="$(bash "$SCRIPT_DIR/landing.sh" lane "$task" --repo "$MAIN" 2>/dev/null)"
+  wt="$(printf '%s\n' "$lane_out" | sed -n 's/^worktree=//p')"
+  [ -n "$wt" ] || wt="$MAIN/.claude/worktrees/$task"
+  if [ "${HERDR_ENV:-}" = "1" ] && printf '%s\n' "$lane_out" | grep -qx 'worktree_state=present'; then
+    lane_agents "$wt"; have=1
+  elif [ "${HERDR_ENV:-}" = "1" ]; then
+    # The worktree is gone, so no cwd names the lane's panes any more: the
+    # /land marker's worker (pane + session, confirmed live) is the one left.
+    ls_out="$(bash "$SCRIPT_DIR/landing.sh" status "$task" --repo "$MAIN" 2>/dev/null)"
+    case "$(printf '%s\n' "$ls_out" | sed -n 's/^landing=//p')" in
+      # Not a pane that moved on (mismatch): it shows other work. An unknown
+      # cwd is fine — pane + session are confirmed live, and a deleted cwd is
+      # often unreadable.
+      live) if ! printf '%s\n' "$ls_out" | grep -qx 'worker_cwd=mismatch'; then
+              LANE_AGENTS=1; LANE_PANES="$(printf '%s\n' "$ls_out" | sed -n 's/^worker_pane=//p')"; have=1
+            else
+              pane="unverified"
+            fi ;;
+      unverified|invalid) pane="unverified" ;;
+    esac
+  fi
+  if [ "$have" = 1 ]; then
     if [ "$LANE_AGENTS" = "unverified" ]; then
       pane="unverified"
     elif [ -z "$LANE_PANES" ]; then
