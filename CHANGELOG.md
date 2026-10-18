@@ -290,8 +290,6 @@ entries are grouped per plugin, newest first.
 ### 1.1.0 — 2026-03-18
 - Add `/work-adopt` skill; store worktrees under `.claude/worktrees/`.
 
-## pr-flow
-
 ### 1.6.0 — 2026-10-17
 - `/merge` asks work-system who owns a project's post-merge deploy (`mandate-shim.sh deploy-owner`). Inside a lane with `deploy.by = "manager"` it does not deploy and names where the procedure is documented; without work-system, outside a lane or with `by = "worker"` the project's instructions apply; an unresolvable answer asks instead of deploying.
 
