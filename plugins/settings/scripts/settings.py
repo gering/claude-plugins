@@ -10,8 +10,8 @@ Design invariants (see plugins/settings/README.md):
   - Defaults live in the schema, never duplicated into config TOML files.
   - Only user overrides are written; a missing config file is fully valid.
   - `show --resolved` is the merged view consumers should read.
-  - Validation covers syntax (TOML) and semantics (types, enums, unknown keys,
-    related-project paths).
+  - Validation covers syntax (TOML) and semantics (types, enums, numeric
+    bounds, unknown keys, related-project paths).
 
 Runtime deps: Python 3.11+ stdlib only (`tomllib`). No third-party packages, no
 build step — matching the rest of this build-less marketplace repo.
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -270,6 +271,9 @@ def _validate_node(node: dict, value: object, path: str, findings, project_root)
         allowed = ", ".join(json.dumps(v) for v in node["enum"])
         findings.append(("error", f"{path}: {value!r} not in allowed values [{allowed}]"))
 
+    if _matches_type(value, "number"):
+        _validate_bounds(node, value, path, findings)
+
     if typ == "object" and isinstance(value, dict):
         props = node.get("properties", {})
         for key in node.get("required", []):
@@ -285,6 +289,34 @@ def _validate_node(node: dict, value: object, path: str, findings, project_root)
     if typ == "array" and isinstance(value, list) and "items" in node:
         for i, item in enumerate(value):
             _validate_node(node["items"], item, f"{path}[{i}]", findings, project_root)
+
+
+def _validate_bounds(node: dict, value, path: str, findings):
+    bounds = {}
+    for key in ("minimum", "maximum"):
+        if key not in node:
+            continue
+        bound = node[key]
+        # A NaN or infinite bound would silently accept every value.
+        if not _matches_type(bound, "number") or not _is_finite(bound):
+            findings.append(("error", f"{path}: schema {key} {bound!r} is not a finite number"))
+        else:
+            bounds[key] = bound
+    if not bounds:
+        return
+    # NaN compares False against everything, and inf clears a one-sided bound.
+    if not _is_finite(value):
+        findings.append(("error", f"{path}: {value!r} is not a finite number"))
+        return
+    if "minimum" in bounds and value < bounds["minimum"]:
+        findings.append(("error", f"{path}: {value!r} is below minimum {bounds['minimum']!r}"))
+    if "maximum" in bounds and value > bounds["maximum"]:
+        findings.append(("error", f"{path}: {value!r} is above maximum {bounds['maximum']!r}"))
+
+
+def _is_finite(number) -> bool:
+    # Only floats can be non-finite; math.isfinite overflows on a huge int.
+    return not isinstance(number, float) or math.isfinite(number)
 
 
 def _validate_related_projects(value, path, findings, project_root):
