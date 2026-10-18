@@ -40,7 +40,10 @@ tab." and stop: a name that differs from this lane must never merge this lane's 
 ## Instructions
 
 Stop at the first failure — `/land` never closes a lane whose merge it could not
-confirm. Every step names what to report when it stops.
+confirm. Every step names what to report when it stops. Once step 1 recorded the
+landing marker, **every stop** first clears it — `bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/landing.sh" end <task_name> --repo "<main-repo-path>"`
+— so a Manager is not left waiting on a `/land` that is no longer running.
 
 1. **Preconditions** — check all of these before touching anything:
    - **pr-flow installed?** `/land` merges only through `/pr-flow:merge` (soft
@@ -72,14 +75,26 @@ confirm. Every step names what to report when it stops.
        block — step 4's re-assess comes after the merge), with its
        before-merge rule for `OPEN` and its after-merge rule for `MERGED` (the PR is
        found **by branch name**, so it may be an earlier lane's). Any stop ends
-       `/land` here, before the report. When it passes on `MERGED`, write step 2's
-       report and go straight to step 5 — nothing is left to merge or re-confirm.
+       `/land` here, before the report. When it passes on `MERGED`, record the landing
+       (the last bullet below), write step 2's report and go straight to step 5 —
+       nothing is left to merge or re-confirm.
      - `OPEN` only — **an upstream**: `git rev-parse --abbrev-ref '@{u}'` must
        succeed. Without one, `/merge`'s unpushed-commit check passes silently and its
        rebase stays local, so the merged PR head and this worktree part ways. Stop:
        "This branch has no upstream — push it with `git push -u origin HEAD` (or
        `/pr-flow:cycle`) first." (Not for `MERGED`: a merged PR's deleted remote
        branch leaves no upstream, and pushing would only re-create it.)
+   - **Record the landing** once every check above passed. Keep
+     `<main-repo-path>` (`bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path`)
+     and this worktree's path for step 4 — if the lane is torn down under `/land`,
+     nothing here can derive them again. Then:
+     ```sh
+     bash "${CLAUDE_PLUGIN_ROOT}/scripts/landing.sh" begin --pr <pr_number>
+     ```
+     The marker sits in the repo's git common dir, outside the worktree, and names
+     this session by herdr pane + agent session: a Manager-side close then asks
+     instead of tearing the lane down under you, and finds this tab even after the
+     worktree is gone. Best-effort — `recorded=no` is one line, never a stop.
 
 2. **Handoff report with follow-ups** — the Manager's follow-up sweep (`/close` step
    6c) reads the worker's newest `handoff` report alongside its pane output, and this
@@ -130,6 +145,10 @@ confirm. Every step names what to report when it stops.
 3. **Merge** — invoke `/pr-flow:merge` and let it run with all its own gates and
    questions (preflight, rebase, CI, reviews, method, doc warnings). Do not answer its
    questions for the user and do not pass flags that skip them.
+   - **Any `/merge` stop or error** → run step 4's **lane check** first. A lane torn
+     down while `/merge` ran (a Manager merged the PR with `--delete-branch`, a manual
+     `git worktree remove`) surfaces as a `/merge` failure; `worktree_state=gone`
+     goes to step 4's gone path, not to the stop below.
    - `/merge` **stopped before merging** (no PR, draft declined, dirty tree, conflict,
      a ❌ block, the user chose `[a]` or `[f]`) → `/land` stops: "Not merged —
      `/merge` stopped at <reason>. Nothing was closed. Re-run `/land` when ready."
@@ -162,8 +181,56 @@ confirm. Every step names what to report when it stops.
    - Do **not** run `/close` from `/merge`'s own "offer `/close`" hand-off — step 5
      runs it with the delegation flag.
 
-4. **Confirm the merge** — from the forge, not from `/merge`'s message. Assess again —
-   the same bare call as step 1. Its `task_branch` must still equal step 1's:
+4. **Confirm the merge** — from the forge, not from `/merge`'s message.
+
+   **Lane check** first — this worktree may be gone, and with it every command that
+   relies on the cwd (`<main-repo-path>` is the one kept in step 1):
+   ```sh
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/landing.sh" gone-check <task_name> --pr <pr_number> --repo "<main-repo-path>"
+   ```
+   `worktree_state=present` → on with the re-assess below. `worktree_state=gone` →
+   the **gone path**; nothing below it applies:
+   - Branch on the script's `verdict=` — it holds the whole decision (the same PR,
+     merged, from this branch; a surviving local branch holding nothing the PR lacks;
+     a branch `/close` can resolve by name). The worktree's own head check cannot
+     run any more — a commit only the worktree held went with it; say so in one line.
+     `verdict=stop` → clear the marker and stop with what `stop=` names; nothing was
+     closed:
+     - `not-merged` → "The worktree is gone and PR #<pr_number> is not confirmed
+       merged (pr_state=<…>). Check the PR, then run `/close <task_name>` from the
+       main checkout."
+     - `branch-ahead` → "Branch `<branch>` still holds commits merged PR
+       #<pr_number> does not carry — put them on a new branch and PR, then close this
+       lane by hand." (`/close` would delete them.)
+     - `branch-unreadable` → "Could not compare branch `<branch>` with PR
+       #<pr_number>'s head — check it before closing by hand."
+     - `not-by-name` → "This lane's branch `<branch>` cannot be resolved by name from
+       the main checkout — archive the task file and remove the branch by hand."
+   - `verdict=handoff` → mark the hand-over, which keeps the marker for the Manager's
+     close (it names this tab):
+     `bash "${CLAUDE_PLUGIN_ROOT}/scripts/landing.sh" phase <task_name> handoff --repo "<main-repo-path>"`.
+     Print step 5's summary with `Merged: PR #<pr_number> (confirmed; worktree removed
+     outside /land)` and its follow-up list — this tab's screen is now the only place
+     they show unless step 2 stored them.
+   - **Hand the close over; never run `/close` here** — it needs a cwd this session
+     no longer has. In herdr, resolve the Manager from the main checkout:
+     `bash "${CLAUDE_PLUGIN_ROOT}/scripts/manager.sh" resolve "<main-repo-path>"`, and
+     read `kicker_session=` from `landing.sh status <task_name> --repo
+     "<main-repo-path>"`. Only `status=unique` with a non-empty `sendmessage_name=`
+     that `ListAgents` lists exactly once among live sessions is a recipient. Its
+     `herdr_agent_session=` equal to a **non-empty** `kicker_session=` → the session that kicked off
+     this lane: print "Delegating the close to `<name>` (the session that kicked off
+     this task) — matched by name only." and send. Any other candidate → ask once,
+     naming the recipient and its `evidence=` (send / don't send). Send `/close`
+     step 1b's three-field close-request body with `worktree=` this lane's path from
+     step 1, then report: "Close request sent to `<name>` — the worktree is already
+     gone; it archives the task file, sweeps the follow-ups and closes this tab."
+   - No recipient (outside herdr, none, ambiguous, declined) → "Nothing more can run
+     from here: the worktree is gone. In the main checkout run `/close <task_name>` —
+     it archives the task file, reads the follow-ups above and closes this tab."
+   Either way **STOP**: nothing after this line runs in this session.
+
+   **Re-assess** — Assess again, the same bare call as step 1. Its `task_branch` must still equal step 1's:
    `/merge`'s post-merge steps may have checked out the base branch (`on_main=yes`,
    empty `task_branch`) or renamed the branch to a backup name. If it differs, stop:
    "The worktree is no longer on `<task_branch>`, so `/close` cannot resolve this task
@@ -233,7 +300,10 @@ confirm. Every step names what to report when it stops.
    user accepted it during step 3 — the screen is its only copy and a self-close in
    herdr closes this tab: ask "Noted the follow-ups above? Closing may close this
    tab next." Go on only on a yes; on anything else stop: "Run `/land` again when
-   ready — the PR is merged, so it resumes at the report." Then invoke
+   ready — the PR is merged, so it resumes at the report." Then mark the
+   hand-over — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/landing.sh" phase <task_name>
+   handoff --repo "<main-repo-path>"` (the Manager's `evaluate` reads a `landing`
+   marker as "still landing" and asks; `handoff` is this close-request) — and invoke
    `/close --delegate`. That flag skips `/close` step 1b's question when
    its seven-condition gate names a Manager through the live-revalidated kicker
    record and sends the close-request directly; everything else in `/close`

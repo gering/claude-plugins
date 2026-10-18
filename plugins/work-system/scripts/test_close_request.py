@@ -479,6 +479,124 @@ check("sweep: report without PR → match unknown, body kept",
 mat.unlink(missing_ok=True)
 fx.close()
 
+# --- /land marker and a lane torn down under it ----------------------------- #
+SESSION = "11111111-2222-3333-4444-555555555555"
+
+
+def landing_marker(fx, phase="landing", pane="w1:p9"):
+    d = fx.main / ".git" / "work-system" / "landing"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "foo").write_text(
+        f"version=1\ntask=foo\nbranch=task/foo\nworktree={fx.wt}\npr=7\n"
+        f"phase={phase}\nstarted_at=2026-10-18T12:00:00Z\n"
+        f"worker_pane={pane}\nworker_session={SESSION}\n")
+    return d / "foo"
+
+
+def worker(cwd, pane="w1:p9", tab="w1:t9"):
+    a = Fixture.agent(cwd, pane)
+    a.update(tab_id=tab, agent_session={"value": SESSION})
+    return a
+
+
+fx = Fixture()
+mk = landing_marker(fx)
+fx.set_agents([worker(fx.wt)])
+_, o = fx.evaluate()
+check("ask: a live /land marker → landing-in-progress",
+      o.get("decision") == "ask" and o["reason"] == ["landing-in-progress"]
+      and o.get("landing") == "live")
+landing_marker(fx, phase="handoff", pane="w1:p1")
+fx.set_agents([worker(fx.wt, "w1:p1")])
+_, o = fx.evaluate()
+check("auto: a handoff-phase marker is the requester itself",
+      o.get("decision") == "auto" and o.get("landing") == "live")
+fx.set_agents([fx.agent(fx.wt)])             # w1:p1 now hosts no recorded session
+landing_marker(fx, pane="w1:p9")
+_, o = fx.evaluate()
+check("auto: a stale /land marker (worker gone) does not ask",
+      o.get("decision") == "auto" and o.get("landing") == "stale")
+mk.write_text("task=foo\n")
+_, o = fx.evaluate()
+check("ask: an unreadable /land marker asks", o["reason"] == ["landing-unverified"])
+mk.unlink()
+
+# The worktree vanishes (a bare `gh pr merge --delete-branch`, a manual remove).
+landing_marker(fx, phase="handoff")
+git(fx.main, "worktree", "remove", "--force", str(fx.wt))
+git(fx.main, "branch", "-D", "task/foo")
+fx.set_agents([worker(fx.wt)])               # the worker's cwd: a deleted path
+_, o = fx.evaluate()
+check("ask: a gone lane is not rejected", o.get("decision") == "ask"
+      and o.get("lane") == "gone" and o.get("worktree") == str(fx.wt))
+check("ask: a gone lane names worktree-gone only (merged, nothing local left)",
+      o["reason"] == ["worktree-gone"] and o.get("lane_agents") == "gone")
+_, o = fx.evaluate(task="bar", worktree=str(fx.wt))
+check("reject: a gone path under another task's name", o.get("decision") == "reject")
+_, o = fx.evaluate(worktree=str(fx.main / ".claude" / "worktrees" / "foo2"))
+check("reject: a gone path that is not <repo>/.claude/worktrees/<task>",
+      o.get("decision") == "reject" and o["reason"] == ["not-a-lane"])
+fx.set_pr("OPEN")
+_, o = fx.evaluate()
+check("ask: a gone lane with an unmerged PR names both",
+      set(o["reason"]) == {"worktree-gone", "not-merged"})
+fx.set_pr("MERGED")
+
+mk.unlink()
+_, o = fx.evaluate()
+check("reject: a gone path with no marker and no task file is no lane",
+      o.get("decision") == "reject" and o["reason"] == ["not-a-lane"])
+(fx.main / "tasks").mkdir(exist_ok=True)
+(fx.main / "tasks" / "foo.md").write_text("# foo\n")
+_, o = fx.evaluate()
+check("ask: an open task file is record enough for a gone lane",
+      o.get("decision") == "ask" and o.get("lane") == "gone")
+(fx.main / "tasks" / "foo.md").unlink()
+landing_marker(fx, phase="handoff")
+fx.wt.mkdir(parents=True)
+(fx.wt / "stray").write_text("x\n")
+_, o = fx.evaluate()
+check("ask: a leftover directory git no longer lists is still a gone lane",
+      o.get("decision") == "ask" and o.get("lane") == "gone"
+      and set(o["reason"]) == {"worktree-gone", "leftover-dir"})
+_, o = fx.sweep(extra=["--pr", "7"])
+argv = (fx.state / "pane-argv").read_text() if (fx.state / "pane-argv").exists() else ""
+check("sweep: a leftover directory still takes the marker path",
+      o.get("pane") == "read" and "w1:p9" in argv)
+Path(o.get("material", "/x")).unlink(missing_ok=True)
+(fx.state / "pane-argv").unlink(missing_ok=True)
+subprocess.run(["rm", "-rf", str(fx.wt)], check=True)
+
+w = worker(fx.wt)
+w["cwd"] = ""                                # herdr cannot read a deleted cwd
+fx.set_agents([w])
+_, o = fx.sweep(extra=["--pr", "7"])
+check("sweep: an unreadable cwd of the confirmed worker is still read",
+      o.get("pane") == "read")
+Path(o.get("material", "/x")).unlink(missing_ok=True)
+(fx.state / "pane-argv").unlink(missing_ok=True)
+
+fx.set_agents([worker(fx.main)])             # the worker moved on to the repo root
+r, o = fx.sweep(extra=["--pr", "7"])
+argv = (fx.state / "pane-argv").read_text() if (fx.state / "pane-argv").exists() else ""
+check("sweep: a worker pane that left the lane is not read",
+      o.get("pane") == "unverified" and "w1:p9" not in argv)
+Path(o.get("material", "/x")).unlink(missing_ok=True)
+fx.set_agents([worker(fx.wt)])
+
+r, o = fx.sweep(extra=["--pr", "7"])
+mat = Path(o.get("material", "/x"))
+argv = (fx.state / "pane-argv").read_text() if (fx.state / "pane-argv").exists() else ""
+check("sweep: a gone lane reads the /land marker's live worker pane",
+      o.get("pane") == "read" and o.get("panes") == "1/1" and "w1:p9" in argv
+      and mat.is_file() and "deploy the docs site" in mat.read_text())
+mat.unlink(missing_ok=True)
+fx.set_agents([fx.agent(fx.bar)])
+_, o = fx.sweep()
+check("sweep: a gone lane whose worker left → pane absent", o.get("pane") == "absent")
+Path(o.get("material", "/x")).unlink(missing_ok=True)
+fx.close()
+
 r = subprocess.run(["bash", str(SCRIPT), "bogus"], capture_output=True, text=True)
 check("usage: unknown subcommand exits 2", r.returncode == 2)
 

@@ -166,6 +166,20 @@ does not see keystrokes another process types into the pane, so the skill also
 forbids a worker from running it on its own or because another session asked. Needs pr-flow; without
 it `/land` says so and stops.
 
+**A lane torn down under `/land`.** `/land` leaves a *landing marker* outside the
+worktree (`<git-common-dir>/work-system/landing/<task>`, `scripts/landing.sh`) naming
+its PR and its session by herdr pane + agent-session UUID. A Manager-side `/close`
+or close-request then asks instead of closing a lane whose worker is still landing.
+If the worktree vanishes anyway (a bare `gh pr merge --delete-branch` from the main
+checkout, a manual `git worktree remove`), `/land` confirms the merge from the forge,
+prints its follow-ups and hands the close to the Manager instead of stopping silently
+(it stops instead when a surviving branch holds commits the PR lacks, or an
+`/adopt`-ed branch cannot be resolved by name);
+the Manager's `/close <task>` still archives the task file, sweeps the follow-ups and
+closes the worker's tab, found through the marker's pane + session rather than a cwd
+that no longer exists. **The Manager never merges a lane's PR itself** — the user runs
+`/land` in the lane's tab (pr-flow's `/merge` refuses the main checkout anyway).
+
 Instead of deleting the task file, `/close` **archives** it to
 `tasks/archive/<name>.md` with a closed-stamp (date, shipping PR + merge commit,
 branch) and appends a one-line entry to `tasks/archive/_index.md` — a queryable

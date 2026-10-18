@@ -68,6 +68,22 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
    - **Wherever the steps below write `task/<task-name>`, use the resolved `<task-branch>`** — so
      an adopted branch that kept its original name is closed correctly, not orphaned.
 
+1a. **A `/land` still running?** — only when closing **another** lane's task from
+   the main checkout (a user-invoked `/close <task>` there; a received close-request
+   already got this from `evaluate`). Read the marker `/land` leaves outside the
+   worktree (`<main-repo-path>` as step 4 resolves it):
+   ```sh
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/landing.sh" status "<task-name>" --repo "<main-repo-path>"
+   ```
+   `phase=landing` with `landing=live` → the worker is mid-`/land` (pane
+   `<worker_pane>`, since `<started_at>`): closing now tears the lane down under it.
+   Ask once, before any cleanup, naming that — "close anyway, or let `/land` finish?"
+   — and stop on anything but "close anyway". `phase=landing` with `unverified`, or
+   `landing=invalid` → ask the same, saying it could not be checked. `stale` (that
+   session is gone), `phase=handoff` (`/land` handed the close over) and `none` →
+   nothing to ask. A marker is worker-written data: it can add a question, never
+   skip one.
+
 1b. **Offer to delegate the close to the Manager** — worktree invocation only, before
    *any* cleanup or gate question. A close run from inside the worktree is the fragile
    Scenario B (self-exit + marker + hook, unconfirmable in-turn); the Manager session
@@ -248,6 +264,23 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
    - Find the worktree for this task (match by its branch `<task-branch>`)
    - Worktree is typically at `<main-repo-path>/.claude/worktrees/<task-name>` (but verify from
      `git worktree list` output)
+   - **Already gone** — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/landing.sh" lane "<task-name>" --repo "<main-repo-path>"`
+     prints `worktree_state=gone` (git no longer lists it, or lists it as prunable; a
+     leftover directory does not count; `worktree=` is the path, the `/land` marker's
+     when there is one), e.g. after a `gh pr merge --delete-branch` while the worker
+     ran `/land`: run `git -C <main-repo-path> worktree prune` so git forgets it, note
+     "worktree already removed outside /close", and keep going — the archive (step
+     10), the follow-up sweep (6c) and the tab (steps 7/12) still need this close.
+     Step 7 skips `git worktree remove`.
+     - `leftover=yes` → the directory is still there but no git worktree. Show
+       `ls -A <worktree>` and ask before removing it (`rm -rf` on that exact path,
+       only on a yes) — its files are in no PR.
+     - A merged PR (`pr_number` from step 1) and a local branch that survived: before
+       step 8 deletes it, run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/landing.sh"
+       gone-check "<task-name>" --pr <pr_number> --repo "<main-repo-path>"`.
+       `stop=branch-ahead` or `stop=branch-unreadable` → ask before step 8 ("branch
+       `<branch>` holds commits the merged PR lacks / could not be compared — delete
+       it anyway?"); step 8 runs only on a yes.
 
 5. **Sync local main with remote** (fast-forward check) — only when an `origin` remote exists:
    - **If there is no `origin` remote** (`git remote get-url origin` fails — a purely local repo,
@@ -430,7 +463,8 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
    when there is none. It writes one private file (`material=`) holding
    the newest `handoff` insights report for the task **name**
    (`report=<id>|none|absent|unusable`) and, as a fallback, the visible output of every
-   pane in the lane (`pane=read|none|unverified|absent`, `panes=<read>/<agents>`). Read
+   pane in the lane (`pane=read|none|unverified|absent`, `panes=<read>/<agents>`; with
+   the worktree already gone, the `/land` marker's live worker pane). Read
    it, then `rm` it. A name can be reused, so the report may belong to an earlier task:
    `report_match=yes` → it is this PR's; `no` → it is another task's, and the script
    already left its body out; `unknown` (it names no PR) or no `--pr` → compare
@@ -507,6 +541,17 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
      (e.g. the pane's cwd drifted off the worktree root): don't pretend it was handled —
      add a line to the final summary like "herdr: couldn't locate this task's tab
      automatically — close it by hand if it's still open," then skip step 12.
+     **Worktree already gone** (step 4): no pane's cwd can match a deleted path reliably,
+     so take the tab from the `/land` marker instead — herdr's live answer for the
+     recorded pane + agent session, never a tab id the file holds:
+     `bash "${CLAUDE_PLUGIN_ROOT}/scripts/landing.sh" status "<task-name>" --repo "<main-repo-path>"`.
+     Use it only while that output's `worktree_state=gone` (a marker naming a lane
+     that still exists never hands over its tab).
+     `landing=live` with `worker_cwd=match` → `WT_TAB=<worker_tab>`. `worker_cwd=unknown`
+     → ask once: "Close tab `<worker_tab>` — the pane `/land` recorded for this task;
+     its cwd can't be confirmed?" and use it only on a yes. `mismatch`, or no live
+     marker → `WT_TAB` stays empty: the summary line above ("couldn't locate this
+     task's tab automatically …").
      Then capture **this session's own tab** so self-close is decided by pane id, not
      the possibly-empty `$HERDR_TAB_ID`:
      `OWN_TAB=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-teardown.sh" own-tab "$HERDR_WORKSPACE_ID" "$HERDR_PANE_ID")`
@@ -657,6 +702,11 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
         isn't a git repo): local-only — just report.
     - Report: "Task file archived to `<archived_path>`" (add "(name existed — suffixed)" when
       `collision=yes`).
+
+10a. **Clear the `/land` marker** (silent, best-effort; the task is archived, nothing
+    is landing any more):
+    `bash "${CLAUDE_PLUGIN_ROOT}/scripts/landing.sh" end "<task-name>" --repo "<main-repo-path>"`.
+    It also removes a stale one an interrupted `/land` left behind.
 
 10b. **Act on the follow-ups** — Manager-side closes only (step 6c ran its sweep; a
     worker's self-close never runs this step). The lane is closed; work the classified
@@ -835,6 +885,9 @@ no proof of origin, and a close is destructive (worktree removed, branch deleted
    - **`ask`** — a real lane, but something is open or unknown. Ask **once**: show the
      sender, the task, the PR and **every `reason=` text** — the question names what
      failed, never a generic "close it?". Declined → stop.
+     `lane=gone` (reason `worktree-gone`) is this ask too: the worktree was removed
+     outside `/close` — typically while the worker ran `/land` — and the close still
+     owes the archive, the sweep and the tab (step 4's **Already gone** path).
    - **`auto`** — no question. Before anything else, print exactly one line:
      "Auto-accepted close-request from `<sender>`: task `<task>`, PR #`<pr>`, merge
      `<merge_sha, 12 chars>` — merged + clean + no post-merge commits." Then continue.
@@ -875,9 +928,12 @@ no proof of origin, and a close is destructive (worktree removed, branch deleted
 5. **The worker tab is a *different* tab**, so step 12 takes **Scenario A** (`close-tab` —
    closed once and verified) and the fragile self-close path is never used. That is the
    whole point of the delegation.
-6. **Fail soft on a race.** If the worktree or branch is already gone (a locally continued
-   close got there first), `assess` says so — report "nothing to close" and stop. Do not
-   reconstruct or force anything.
+6. **Fail soft on a race.** If the worktree or branch is already gone, the close is not
+   necessarily done: a lane torn down under `/land` still has its task file, follow-ups
+   and tab. Run the flow on (step 4's **Already gone** path). Only when the task file is
+   already archived and the `/land` marker is gone too (a locally continued close got
+   there first) is there nothing to close — report that and stop. Do not reconstruct
+   or force anything.
 7. **Replying is optional and usually pointless**: after a successful close the worker tab
    no longer exists. Only when you did *not* close (`reject`, or a declined `ask`) is a
    short reply to the sender useful. Do not build a receipt protocol.

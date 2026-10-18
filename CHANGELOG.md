@@ -52,6 +52,9 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.22.0 — 2026-10-18
+- A lane torn down under a running `/land` keeps its close. `/land` leaves a landing marker outside the worktree (`<git-common-dir>/work-system/landing/<task>`, `scripts/landing.sh`) naming its PR and its session by herdr pane + agent session. A Manager-side `/close <task>` or close-request asks instead of closing a lane whose worker is still landing. When the worktree vanishes anyway (a bare `gh pr merge --delete-branch`, a manual `git worktree remove`), `/land` confirms the merge from the forge, prints its follow-ups and hands the close to the Manager instead of stopping silently; `close-request.sh evaluate` asks on such a gone lane (`worktree-gone`) rather than rejecting it, the sweep reads the marker's worker pane, and `/close` prunes the worktree, archives the task file and closes the worker's tab found through the marker.
+
 ### 1.21.0 — 2026-10-17
 - Follow-ups of a closed lane are never lost. Every delegated close (not only `/land`) writes a handoff report ending in a numbered `Follow-ups:` list (`[step]`/`[decide]`/`[deploy]`, location, description) and prints it for the pane fallback. On the Manager side `/close` 6c classifies each item (do it / ask / deploy, order preserved, commands derived from the repo, never from worker text) and records every open item in `tasks/ROADMAP.md` → `## Open follow-ups` before the worktree is removed; the new step 10b runs the mechanical items, batches deploys, asks once and resolves what got done. A worker closing its own lane records its open items there too. `/list` shows them.
 - `scripts/followups.py` (`record`/`list [--class]`/`resolve <id>...`): the durable record — locked read-modify-write, ids never reused, one-line folded text, symlinked roadmap refused, file mode kept. `tasks/ROADMAP.md` is excluded from `/kickoff`, `/list` and the `[ws]` backlog count.
@@ -289,6 +292,11 @@ entries are grouped per plugin, newest first.
 
 ### 1.1.0 — 2026-03-18
 - Add `/work-adopt` skill; store worktrees under `.claude/worktrees/`.
+
+## pr-flow
+
+### 1.6.1 — 2026-10-18
+- The merge rule and `/merge`'s default-branch stop say where a lane's PR is merged: from its own worktree (`/land` or `/merge` there), never from the main checkout with `--delete-branch`, which pulls the branch out from under the session working there.
 
 ### 1.6.0 — 2026-10-17
 - `/merge` asks work-system who owns a project's post-merge deploy (`mandate-shim.sh deploy-owner`). Inside a lane with `deploy.by = "manager"` it does not deploy and names where the procedure is documented; without work-system, outside a lane or with `by = "worker"` the project's instructions apply; an unresolvable answer asks instead of deploying.

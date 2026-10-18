@@ -96,8 +96,47 @@ step5 = LAND[close:]
 check("close runs with the delegation flag", "`/close --delegate`" in step5)
 check("the follow-ups are printed, not only stored", "- Follow-ups:" in step5)
 check("the land summary is printed before /close, whose output stays last",
-      at(step5, "Landing task") < at(step5, "Then invoke `/close --delegate`")
+      at(step5, "Landing task") < at(step5, "and invoke `/close --delegate`")
       and "Add nothing after `/close` returns" in step5)
+
+# ------------------------------------------------ landing marker + gone lane
+check("step 1 records the landing marker after every check passed",
+      at(step1, "a merged PR's deleted remote") < at(step1, "landing.sh\" begin --pr <pr_number>"))
+check("the marker is best-effort, never a stop", "`recorded=no` is one line, never a stop" in step1)
+check("step 1 keeps the main-repo path for a vanished lane", "<main-repo-path>" in step1)
+check("every stop clears the marker",
+      "**every stop** first clears it" in LAND and "landing.sh\" end <task_name>" in LAND)
+check("a /merge stop checks the lane before stopping",
+      at(step3, "**Any `/merge` stop or error** → run step 4's **lane check** first")
+      < at(step3, "`/merge` **stopped before merging**"))
+lane = at(step4, "**Lane check** first")
+gone = step4[lane:at(step4, "**Re-assess**")]
+check("the lane check runs before the re-assess", lane < at(step4, "**Re-assess**"))
+check("the lane check uses the kept main-repo path, not the cwd",
+      'gone-check <task_name> --pr <pr_number> --repo "<main-repo-path>"' in gone)
+check("the gone path branches on the script's verdict, not on prose rules",
+      "Branch on the script's `verdict=`" in gone and "`verdict=handoff`" in gone)
+check("every stop= the script emits has its message",
+      all(f"`{c}`" in gone for c in ("not-merged", "branch-ahead", "branch-unreadable", "not-by-name")))
+check("a gone lane without a confirmed merge clears the marker and stops",
+      "clear the marker and stop" in gone and "not confirmed" in gone)
+check("a gone lane never runs /close here", "never run `/close` here" in gone)
+check("a gone lane hands over, keeping the marker for the tab",
+      "phase <task_name> handoff" in gone and "keeps the marker" in gone
+      and at(gone, "`verdict=stop`") < at(gone, "`verdict=handoff`"))
+check("a gone lane prints the follow-ups before the hand-over",
+      at(gone, "follow-up list") < at(gone, "**Hand the close over"))
+check("the gone-lane recipient is sent unasked only as the kicker session",
+      "`herdr_agent_session=` equal to a **non-empty** `kicker_session=`" in gone
+      and "Any other candidate → ask once" in gone)
+check("a gone lane without recipient names the Manager-side /close",
+      "In the main checkout run `/close <task_name>`" in gone)
+check("the MERGED shortcut records the landing too",
+      "record the landing (the last bullet below)" in step1)
+check("an adopted branch is not handed over by name",
+      "cannot be resolved by name" in gone)
+check("step 5 marks the hand-over before /close --delegate",
+      at(step5, "phase <task_name>") < at(step5, "and invoke `/close --delegate`"))
 
 check("the user's invocation is the merge authorization",
       "**The user invoking `/land` IS the merge authorization.**" in LAND)
@@ -131,6 +170,42 @@ check("the re-assess must confirm the same PR", "A confirmed merge must be step 
       and at(step4, "Proceed **only** on") < at(step4, "A confirmed merge must be step 1's PR"))
 check("an unconfirmed merge points back to /land, not to a bare /close",
       "not a plain `/close`, which skips the head check" in step4)
+
+# ------------------------------------- /close: /land marker + a gone worktree
+c1a = at(CLOSE, "1a. **A `/land` still running?**")
+check("1a runs before the delegation offer and the merge gate",
+      c1a < at(CLOSE, "1b. **Offer to delegate") < at(CLOSE, "2. **Verify the task is merged**"))
+step1a = CLOSE[c1a:at(CLOSE, "1b. **Offer to delegate")]
+check("a live landing marker asks before any cleanup",
+      "`phase=landing` with `landing=live`" in step1a and "before any cleanup" in step1a)
+check("an unreadable landing marker asks too, never skips",
+      "`landing=invalid` → ask the same" in step1a and "never skip one" in step1a)
+check("a handoff or stale marker asks nothing",
+      "`stale`" in step1a and "`phase=handoff`" in step1a)
+step4c = CLOSE[at(CLOSE, "4. **Get worktree info**"):at(CLOSE, "5. **Sync local main")]
+check("a gone worktree is pruned and the close goes on",
+      "**Already gone**" in step4c and "worktree prune" in step4c and "keep going" in step4c
+      and 'landing.sh" lane' in step4c and "a leftover directory does not count" in step4c)
+step7c = CLOSE[at(CLOSE, "7. **Remove worktree**"):at(CLOSE, "8. **Delete local branch**")]
+check("a gone worktree's tab comes from herdr's live answer for the marker's pane",
+      "**Worktree already gone**" in step7c and "never a tab id the file holds" in step7c
+      and "`worker_cwd=match` → `WT_TAB=<worker_tab>`" in step7c)
+check("an unconfirmed worker cwd asks before closing the tab",
+      "`worker_cwd=unknown`" in step7c and "only on a yes" in step7c)
+check("a marker's tab is used only while its lane is gone",
+      "Use it only while that output's `worktree_state=gone`" in step7c)
+check("a leftover directory is removed only on a yes", "`leftover=yes`" in step4c
+      and "only on a yes" in step4c)
+check("a surviving branch is checked before step 8 deletes it",
+      "gone-check" in step4c and "`stop=branch-ahead`" in step4c)
+check("the marker is cleared after the archive",
+      at(CLOSE, "10. **Archive the task file**") < at(CLOSE, "10a. **Clear the `/land` marker**")
+      < at(CLOSE, "10b. **Act on the follow-ups**"))
+recv = CLOSE[at(CLOSE, "## Receiving a close-request"):]
+check("a gone lane is an ask that still archives, sweeps and closes the tab",
+      "`lane=gone`" in recv and "**Already gone** path" in recv)
+check("a gone worktree is not 'nothing to close' while the task file is unarchived",
+      "the close is not necessarily done" in recv)
 
 q = at(CLOSE, "1b. **Offer to delegate the close to the Manager**")
 gate2 = at(CLOSE, "2. **Verify the task is merged**")
