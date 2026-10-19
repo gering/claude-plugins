@@ -29,8 +29,9 @@
 #   status <task> [--repo <main>]
 #       Prints landing=none|live|stale|unverified|invalid, and with a marker:
 #       phase=, pr=, branch=, worktree=, worktree_state=present|gone,
-#       started_at=, kicker_session=, kicker_record=absent|present (any
-#       .ws-kicker at begin, even one too broken to copy), and for a live
+#       started_at=, kicker_session=, kicker_source=kickoff|backfill,
+#       kicker_record=absent|present (any .ws-kicker at begin, even one too
+#       broken to copy; empty on a marker from before 1.24.0), and for a live
 #       worker worker_pane=,
 #       worker_tab=, worker_cwd=match|unknown|mismatch.
 #         live       herdr lists the recorded pane with the recorded session
@@ -117,7 +118,8 @@ KEYS = {"version": r"1", "task": r"[A-Za-z0-9_][A-Za-z0-9._-]*",
         "worker_pane": r"[A-Za-z0-9][A-Za-z0-9:_.-]{0,63}",
         "worker_session": r"[0-9a-fA-F-]{8,64}",
         "kicker_session": r"[0-9a-fA-F-]{8,64}",
-        "kicker_record": r"absent|present"}
+        "kicker_record": r"absent|present",
+        "kicker_source": r"kickoff|backfill"}
 REQUIRED = ("version", "task", "branch", "worktree", "pr", "phase", "started_at")
 try:
     raw = open(path, encoding="utf-8").read()
@@ -250,8 +252,6 @@ if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:_.-]{0,63}", p) and re.fullmatch(r"[0-9a
 $who"
     fi
   fi
-  # The Manager that kicked the lane off, so a /land whose worktree vanished
-  # can still recognize it among the agents at the repo root.
   # Whether the lane had a record at all: a gone-worktree hand-over may send
   # unasked to a sole root agent only when it never had one (like /close's
   # delegate_unasked), never when a broken or rejected record existed.
@@ -262,14 +262,21 @@ kicker_record=present"
     body="$body
 kicker_record=absent"
   fi
+  # The Manager that kicked the lane off, so a /land whose worktree vanished
+  # can still recognize it among the agents at the repo root.
   if [ -f "$top/.ws-kicker" ] && [ ! -L "$top/.ws-kicker" ]; then
-    local ks
+    local ks src
     # Exactly one agent_session= line, or nothing is copied (a record manager.sh
     # would reject as malformed must not reach the marker either).
     ks="$(sed -n 's/^agent_session=//p' "$top/.ws-kicker")"
     case "$ks" in *$'\n'*) ks="" ;; esac
-    printf '%s' "$ks" | grep -Eq '^[0-9a-fA-F-]{8,64}$' && body="$body
-kicker_session=$ks"
+    if printf '%s' "$ks" | grep -Eq '^[0-9a-fA-F-]{8,64}$'; then
+      src="$(sed -n 's/^source=//p' "$top/.ws-kicker")"
+      [ "$src" = backfill ] || src=kickoff
+      body="$body
+kicker_session=$ks
+kicker_source=$src"
+    fi
   fi
 
   MARKER_FILE="$(marker_dir)/$task" || no unwritable
@@ -367,7 +374,7 @@ $PY_LIVE" "$pane" "$sess" "$wt" "$REPO" 2>/dev/null)" || out=unverified
   fi
   echo "landing=$state"
   local k
-  for k in phase pr branch worktree started_at kicker_session kicker_record; do
+  for k in phase pr branch worktree started_at kicker_session kicker_source kicker_record; do
     printf '%s=%s\n' "$k" "$(field "$k")"
   done
   echo "worktree_state=$(lane_state "$wt")"

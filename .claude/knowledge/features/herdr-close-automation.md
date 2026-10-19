@@ -160,7 +160,7 @@ from the original detector that still hold:
   after it, `HEAD` may be behind but never ahead. Fail-closed on an unreadable head. The shared
   fix — `assess` itself comparing heads — is a follow-up; `/close` alone is still
   exposed.
-- **`--delegate` preselects when the Manager is clear (1.23.0: `delegate_unasked=`).**
+- **`--delegate` preselects when the Manager is clear (1.24.0: `delegate_unasked=`).**
   The 1b question exists so a person can catch a wrong recipient. The user's flag
   vouches for *delegating*; the resolver decides whether the recipient is clear and
   emits it as one field, so `/close` and `/land` cannot drift apart in prose. Clear =

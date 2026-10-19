@@ -136,7 +136,7 @@ body = fx.marker.read_text()
 check("begin: records the worker by pane + session",
       "worker_pane=w1:p9\n" in body and f"worker_session={SESSION}\n" in body)
 check("begin: copies the kicker's session", f"kicker_session={KICKER}\n" in body
-      and "kicker_record=present\n" in body)
+      and "kicker_record=present\n" in body and "kicker_source=kickoff\n" in body)
 check("begin: phase landing, PR, branch, realpath worktree",
       "phase=landing\n" in body and "pr=7\n" in body and "branch=task/foo\n" in body
       and f"worktree={fx.wt}\n" in body)

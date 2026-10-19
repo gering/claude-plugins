@@ -31,7 +31,7 @@ terminal gate) and `/close` step 1b delegation, which replaced the name-only
   on `delegate_unasked=yes` (kicker, or sole root agent with no record at all),
   after printing the recipient — an accepted residual, see
   [herdr-close-automation](herdr-close-automation.md).
-- **Backfill from the Manager, never over a live record (1.23.0).** Lanes kicked off
+- **Backfill from the Manager, never over a live record (1.24.0).** Lanes kicked off
   before the record existed have none, so with two root sessions `/land` hit the
   leftmost-tab question every time. `manager.sh backfill` (run by `/list` and
   `/kickoff`) writes the *caller* as kicker (`source=backfill`, surfaced as
@@ -43,16 +43,19 @@ terminal gate) and `/close` step 1b delegation, which replaced the name-only
     id, a record refreshed between judging and writing, workspace ids reused across
     servers. Each fix needed another guard; dropping the rewrite removed the class.
     `resolve` already ignores a stale record, so replacing it bought nothing.
-  - **Root is not enough — the caller must be the resolver's pick.** Any root
-    session could stamp itself, turning an advisor's `/list` into a kicker record
-    and an asked tie-break into an unasked send. Backfill resolves *without* a record
-    and writes only when the answer is `unique` and is the caller's own pane; lanes
-    an agent works in from another workspace are left to that workspace's Manager.
-  - **Accepted residual:** a backfilled leftmost-tab winner then delegates unasked —
-    the user wants delegation automatic whenever a Manager is there, and
-    `kicker_source=backfill` keeps the origin visible in the printed recipient line.
-    A worker that deletes its `.ws-kicker` can make its lane look never-recorded;
-    that is no stronger than forging the record, already accepted.
+  - **Only the sole root agent may backfill.** Round 1 let any root session stamp
+    itself; round 2 restricted it to the resolver's pick, which still included a
+    leftmost-tab winner — and a backfilled tie-break became an unasked send,
+    against the task's own rule that `leftmost-tab` keeps asking (round 3). Now
+    backfill resolves without a record, needs `evidence=sole-root-agent` on the
+    caller's own pane and a workspace scope, and skips lanes an agent works in
+    (any subdir) from another workspace.
+  - **A stale backfill record counts as none** (`kicker-backfill-stale`). It only
+    ever said "the sole root agent then"; without this, a Manager restart would
+    turn a lane that delegated unasked into one that asks forever. A backfill
+    record from another workspace is ignored (`kicker-other-workspace`).
+  - **Accepted residual:** a worker that deletes its `.ws-kicker` makes its lane look
+    never-recorded; no stronger than forging the record, already accepted.
   An absent record is created by `link` (no-clobber, so `/kickoff` wins a race);
   the temp file is opened `O_EXCL|O_NOFOLLOW` because the worktree is
   worker-writable.

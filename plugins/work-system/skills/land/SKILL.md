@@ -234,11 +234,13 @@ landing marker, **every stop** first clears it — `bash
      that `ListAgents` lists exactly once among live sessions is a recipient. Its
      `herdr_agent_session=` equal to a **non-empty** `kicker_session=` → the session that kicked off
      this lane: print "Delegating the close to `<name>` (the session that kicked off
-     this task) — matched by name only." and send. `evidence=sole-root-agent` while the marker says `kicker_record=absent`
+     this task — or, with the marker's `kicker_source=backfill`, the repo-root
+     session that recorded itself for this lane) — matched by name only." and send. `evidence=sole-root-agent` while the marker says `kicker_record=absent`
      (the lane never had a record — the case `/close`'s `delegate_unasked=yes`
      covers; the record itself went with the worktree) → print the same line with
      "the only live agent at the repo root" and send. A `kicker_record=present`
-     whose session did not match (broken, rejected or someone else's) asks. Any other candidate → ask once,
+     whose session did not match (broken, rejected or someone else's), or an empty
+     `kicker_record=` (a marker from before 1.24.0), asks. Any other candidate → ask once,
      naming the recipient and its `evidence=` (send / don't send). Send `/close`
      step 1b's three-field close-request body with `worktree=` this lane's path from
      step 1, then report: "Close request sent to `<name>` — the worktree is already
