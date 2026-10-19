@@ -109,7 +109,8 @@ def session_name(a):
     return "" if len(t) > 64 else t'
 
 # ---- shared composer draft check (the "composer prelude") -----------------
-# A python3 program string, run as `python3 -c "$HERDR_COMPOSER_PY"`. Used by
+# A python3 program string, run as `python3 -I -c "$HERDR_COMPOSER_PY"` (-I: the
+# caller's cwd stays off sys.path, so a planted re.py cannot fake "clear"). Used by
 # manager.sh prompt and sessions.sh refresh before typing into a claude pane:
 # only a composer that reads `clear` is typed into.
 # stdin: `herdr agent read --source visible --format ansi`. Prints clear|draft|unknown.

@@ -40,6 +40,7 @@ Generic task and worktree workflow system for Claude Code. Keep tasks as GitHub 
 | `/close` | Clean up after merge (worktree, branches; closes the issue or archives the task file). `--delegate` preselects handing the close to the Manager |
 | `/land` | In the worktree tab: handoff report → `/pr-flow:merge` → confirmed merge → `/close --delegate` |
 | `/list` | Overview of all tasks, worktrees, and status |
+| `/sessions` | Which running herdr sessions still run old plugin code, plus stale/orphaned installs; `refresh` reloads the idle stale ones with `/reload-plugins` |
 | `/statusline` | Add a `[ws …]` task-backlog segment to Claude Code's status line |
 
 ## How It Works
@@ -731,6 +732,38 @@ prints `truncated=yes orig_len=<n>` on stderr (details: the `manager.sh` header)
 ping that cannot be delivered (`sent=no`, e.g. a busy Manager) is not retried: it
 never carries anything to act on — open next steps travel in the handoff report's
 `Follow-ups:` list. `/close`'s delegation offer uses the same resolver.
+
+### `/sessions` — plugin staleness across running sessions
+
+After a plugin update, `/work-system:sessions` lists every agent in herdr with its
+workspace, tab, pane and session age, a verdict and the plugins behind it (`--json`
+adds the cwd, start and reload time and every plugin's effective install for that
+cwd). Verdicts: `current`, `stale` (the install changed
+after the session started, or the install itself lags the marketplace), `unknown`
+(cannot be decided — never shown as `current`), or `n/a` for codex/grok/kimi. The
+effective install follows `claude plugin update`'s scope order (local > project >
+user > managed); a git worktree inherits the main checkout's project and local
+records, and an unreadable `installed_plugins.json` makes every claude session `unknown`. An
+install audit lists installs of any scope that lag the marketplace (with the
+`claude plugin update … --scope` command, run from the project for project/local) and
+records whose `projectPath` is gone. Nothing in the inventory is run or changed.
+
+`/work-system:sessions refresh` types `/reload-plugins` into each stale session of
+this workspace (`--all`: every workspace, after one confirmation listing the
+targets — the confirmed run is bound to exactly those sessions, `pane@pid`, with
+`--only`) — no restart, so background tasks, monitors and crons survive. It waits
+(bounded) for each session to be idle, checks it still runs the inventoried claude
+process, requires a composer without a user draft right before sending, then
+confirms that the pane's last input is the reload with its `Reloaded:` summary and
+records the reload, so the
+next inventory reads `current` (a reply asking for `/reload-plugins --force` is
+reported as `partial` and left to the user). Busy, blocked and drafted sessions are skipped and
+reported, never interrupted; the caller's own pane is never typed into (its row
+says to run `/reload-plugins` there). A session whose install is stale is reported
+as "reload does not help" until that install is updated, which the skill asks
+about first because it changes another repo's config. Logic and verdict rules:
+`scripts/sessions.py`; the composer draft check is shared with `manager.sh prompt`
+(`$HERDR_COMPOSER_PY` in `herdr-agent.sh`).
 
 ### Task tabs carry their state glyph
 

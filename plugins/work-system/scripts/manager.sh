@@ -630,7 +630,7 @@ RES
   body="$(body_line "$lane" "$root" "$text")" || { echo "sent=no"; echo "reason=no-main-repo"; return 0; }
   _ha_check_target "$pane" || { echo "sent=no"; echo "reason=bad-pane"; return 0; }
   visible="$(ha_read "$pane" --source visible --format ansi 2>/dev/null)" || visible=""
-  comp="$(printf '%s' "$visible" | python3 -c "$HERDR_COMPOSER_PY" 2>/dev/null)" || comp=unknown
+  comp="$(printf '%s' "$visible" | python3 -I -c "$HERDR_COMPOSER_PY" 2>/dev/null)" || comp=unknown
   [ -n "$comp" ] || comp=unknown
   if [ "$comp" != "clear" ]; then echo "sent=no"; echo "reason=composer-$comp"; return 0; fi
   _ha_bounded "$HA_CALL_TIMEOUT_SECS" herdr agent prompt "$pane" "$body" >/dev/null 2>&1; rc=$?

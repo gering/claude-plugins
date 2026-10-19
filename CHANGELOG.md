@@ -52,6 +52,11 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.26.0 — 2026-10-20
+- New `/sessions` skill (`scripts/sessions.sh` → `sessions.py`): after a plugin update, lists every herdr agent with a verdict per session — `current`, `stale` (the effective install changed after the session started, or the install itself lags the marketplace), `unknown` (undecidable, never shown as current) or `n/a` (codex/grok/kimi) — plus an install audit of lagging installs and orphaned project/local records, each with the shell-quoted `claude plugin` command that would fix it. Nothing in the inventory is run.
+- `sessions.sh refresh [--workspace <id> | --all [--yes --only <pane@pid,...>]]` types `/reload-plugins` into each stale session only when it is idle, still runs the inventoried claude process, and has no user draft in its composer; it confirms the `Reloaded:` summary in the pane and records the reload (at send time) per pane and pid; a reply asking for `--force` is reported as `partial` and not recorded. `--all` lists its targets first, and the confirmed `--all --yes` run is bound to those sessions (`pane@pid`) with `--only`. Busy, blocked, drafted, non-claude and the own pane are skipped and reported, never interrupted. A session whose install is stale is reported as "reload does not help" until the skill, after asking, updates that install.
+- The composer draft check moved from `manager.sh` into `herdr-agent.sh` (`$HERDR_COMPOSER_PY`) so both callers that type into a claude pane share it.
+
 ### 1.25.0 — 2026-10-20
 - **Behavior change:** the task backlog defaults to GitHub Issues. New setting `[tasks] backend = "auto"|"github"|"local"`; `auto` stays local while `tasks/` holds task files, else uses GitHub Issues when origin is on github.com and `gh` is installed, else local. An installed `gh` that fails is an error (exit 4), never a silent fallback to local files.
 - New `scripts/task-store.py` (`backend`, `list`, `get`, `create`, `close`, `ref`) is the one path from every skill to the backlog. GitHub tasks are issues labelled `work-system:task` with a body marker naming the task; branches stay `task/<name>`. `/kickoff` copies the issue into TASK.md (`issue: #N`); `/close` closes exactly that issue with a comment naming the PR and confirms an unpinned name first; the local backend still archives through `archive-task.sh`.
