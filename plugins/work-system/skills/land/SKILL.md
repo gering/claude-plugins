@@ -234,7 +234,10 @@ landing marker, **every stop** first clears it — `bash
      that `ListAgents` lists exactly once among live sessions is a recipient. Its
      `herdr_agent_session=` equal to a **non-empty** `kicker_session=` → the session that kicked off
      this lane: print "Delegating the close to `<name>` (the session that kicked off
-     this task) — matched by name only." and send. Any other candidate → ask once,
+     this task) — matched by name only." and send. `evidence=sole-root-agent` while `kicker_session=` is empty
+     (the lane never had a record — the case `/close`'s `delegate_unasked=yes`
+     covers; the record itself went with the worktree) → print the same line with
+     "the only live agent at the repo root" and send. Any other candidate → ask once,
      naming the recipient and its `evidence=` (send / don't send). Send `/close`
      step 1b's three-field close-request body with `worktree=` this lane's path from
      step 1, then report: "Close request sent to `<name>` — the worktree is already
@@ -319,15 +322,17 @@ landing marker, **every stop** first clears it — `bash
    handoff --repo "<main-repo-path>"` (the Manager's `evaluate` reads a `landing`
    marker as "still landing" and asks; `handoff` is this close-request) — and invoke
    `/close --delegate`. That flag skips `/close` step 1b's question when
-   its seven-condition gate names a clear Manager (the live-revalidated kicker
-   record, or the sole live agent at the repo root) and sends the close-request
+   its seven-condition gate names a clear Manager (`manager.sh resolve` prints
+   `delegate_unasked=yes`: the live-revalidated kicker record, or the sole live
+   agent at the repo root when the lane has no record) and sends the close-request
    directly; everything else in `/close`
    is unchanged:
    - **Delegated** → `/close` reports "Close request sent …" and stops. The Manager
      re-verifies the merge, sweeps the follow-ups, and tears this tab down.
-   - **Asked** — the gate holds but the Manager is a leftmost-tab tie-break between
-     several live root sessions: `/close` asks step 1b's question, and the user
-     picks the recipient or closes here.
+   - **Asked** — the gate holds but the Manager is not clear (a leftmost-tab
+     tie-break between several root sessions, or a kicker record that failed
+     revalidation): `/close` asks step 1b's question, and the user picks the
+     recipient or closes here.
    - **Gate miss** (any of `/close`'s seven gate conditions — e.g. no herdr, no unique
      Manager, a dirty tree, an `/adopt`-ed branch outside `task/`) → `/close` runs
      today's self-close here (Scenario B) — still the user's close, with every

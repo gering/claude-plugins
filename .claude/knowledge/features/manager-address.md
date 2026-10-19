@@ -27,19 +27,29 @@ terminal gate) and `/close` step 1b delegation, which replaced the name-only
   authorization: it sits in the worker-writable worktree, so a worker could point
   it at any live root agent. `evidence=kicker` is a better guess, not proof — the
   `/close` delegation question names the evidence and the user confirms. The one
-  exception is `/close --delegate` (what `/land` passes): it sends on `kicker` or
-  `sole-root-agent` without asking, after printing the recipient — an accepted
-  residual, see [herdr-close-automation](herdr-close-automation.md).
+  exception is `/close --delegate` (what `/land` passes): it sends without asking
+  on `delegate_unasked=yes` (kicker, or sole root agent with no record at all),
+  after printing the recipient — an accepted residual, see
+  [herdr-close-automation](herdr-close-automation.md).
 - **Backfill from the Manager, never over a live record (1.23.0).** Lanes kicked off
   before the record existed have none, so with two root sessions `/land` hit the
   leftmost-tab question every time. `manager.sh backfill` (run by `/list` and
   `/kickoff`) writes the *caller* as kicker into every lane whose record is absent or
-  names a pane/session missing from the live list. It refuses up front unless the
-  caller sits at the repo root (a worker must never stamp itself as its siblings'
-  Manager), and on an empty/unreadable agent list (nothing proves a pane gone). A
-  record that still names a live session — any session — is kept, as are malformed,
-  linked or other-repo records (nothing to judge them by). An absent record is
-  created with `ln` (no-clobber), so a record written meanwhile by `/kickoff` wins.
+  provably stale. Three lessons from its review (PR #82):
+  - **Judge with the resolver, not a copy.** A first version re-parsed `.ws-kicker`
+    with looser rules and kept records `resolve` rejects. Backfill now runs
+    `PY_RESOLVE` in a `record` mode and rewrites only on `kicker-record-absent`,
+    `kicker-pane-gone`, `kicker-session-changed`; every other verdict keeps.
+  - **Root is not enough — the caller must be the resolver's pick.** Any root
+    session could stamp itself, turning an advisor's `/list` into a kicker record
+    and an asked tie-break into an unasked send. Backfill resolves *without* a record
+    and writes only when the answer is `unique` and is the caller's own pane.
+  - **"Gone" needs proof.** One snapshot of one herdr server proves nothing about a
+    pane in a workspace that server does not show (`kicker-workspace-unseen`, kept),
+    and a row with no readable pane could be the kicker (`record=unverified`).
+  An absent record is created by `link` (no-clobber); the temp file is opened
+  `O_EXCL|O_NOFOLLOW` because the worktree is worker-writable. A record changed
+  between judging and writing is re-judged first; a short window remains.
 - **The live title must still match the recorded name.** The SendMessage name is
   the pane's live title, which any process in the pane can set; a kicker whose
   title differs from the recorded name keeps its pane but gets no SendMessage

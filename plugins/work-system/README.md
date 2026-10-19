@@ -583,9 +583,10 @@ and decides self-close vs. a different-tab close by pane id. Three entry points:
   only root agent, or the leftmost-tab tie-break) — a pane title is settable by any
   process in the pane, so a person seeing the name is the real check. Any doubt (no Manager, an ambiguous name, herdr unreachable)
   silently falls through to the self-close below. `/close --delegate` (what `/land`
-  passes) skips the question whenever the Manager is clear — the live-revalidated
-  kicker record or the only live agent at the repo root — naming the recipient
-  before it sends; only a leftmost-tab tie-break between several root sessions
+  passes) skips the question whenever `manager.sh resolve` says the Manager is
+  clear (`delegate_unasked=yes`: the live-revalidated kicker record, or the only
+  live agent at the repo root when the lane has no record) — naming the recipient
+  before it sends; a leftmost-tab tie-break, or a record that failed revalidation,
   still asks, and a gate miss says in one line why it closes here instead. On the receiving side the Manager
   closes without asking only when nothing can be lost — PR merged, worktree clean
   (gitignored files included), local and remote branch tips equal to the merged head,
@@ -686,9 +687,10 @@ task name to reopen that one's tab from here). The reopen shares the tested
 `/kickoff` and `/adopt` leave the kicking session's address in the worktree
 (`.ws-kicker`, git-excluded like `MANDATE.md`): its herdr pane, agent-session
 UUID, SendMessage name and canonical repo. Lanes that have none (kicked off before
-the record existed, or whose kicker is gone) get one backfilled when the Manager
-runs `/list` or `/kickoff` at the repo root (`manager.sh backfill`); a record that
-still names a live session is never overwritten. The worker (through `/continue`, or
+the record existed, or whose kicker is provably gone) get one backfilled when the
+Manager runs `/list` or `/kickoff` (`manager.sh backfill`) — only from the session
+the resolver itself would pick at the repo root, so an advisor session there never
+stamps itself; any record it cannot prove stale is kept. The worker (through `/continue`, or
 its bootstrap prompt for codex/grok/kimi) then sends the Manager one line at each
 milestone — **PR opened**, **review round started**
 (`/continue` sends the exact forms of its step 9b: `x/y`, just `x` without a
