@@ -67,9 +67,12 @@ terminal gate) and `/close` step 1b delegation, which replaced the name-only
   routes; a cut ends in `…` plus `truncated=yes orig_len=<n>` on stderr (a plain
   300-char slice once lost a gate ping's open decision unnoticed). No shorter
   herdr cap: a measured ~4000-char `herdr agent prompt` (0.8.2) reached a claude
-  composer intact and was answered. Python reads stdin (`PY_STDIN`): one byte
-  past 16 KiB flags a cut (`stdin_clipped=yes`) even when the kept window folds
-  to nothing, and it hands back text already folded to one line. Never let raw
+  composer intact and was answered. Python reads the event (`PY_EVENT`, argv
+  or stdin): one byte past 16 KiB flags a cut (`stdin_clipped=yes`) even when
+  the kept window folds to nothing, and it hands back text already passed
+  through the body's one `clean()`, so the empty check (usage) sees what would
+  be sent: a second, slightly different fold once let `[ ]` through as a blank
+  ping. Never let raw
   bytes cross `$(...)`: substitution drops NULs and trailing newlines, and three
   review rounds found a miscount in each shell-side trick (sentinel, temp file)
   in turn. `orig_len` counts chars before folding, minus a heredoc's final

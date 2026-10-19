@@ -48,14 +48,15 @@
 #       folded to one line; a longer one (or a stdin past STDIN_TEXT_BYTES)
 #       ends in "…" and stderr says truncated=yes orig_len=<n> (chars before
 #       folding; plus stdin_clipped=yes, then a lower bound), so a cut is
-#       never silent.
+#       never silent. An event that folds to nothing is usage (exit 2),
+#       unless stdin was clipped: that is still a cut, sent as "…".
 #   prompt [<lane-dir>] -- [<text>]
 #       The herdr route: resolve again, then `herdr agent prompt` the body to the
 #       Manager pane ONLY when status=unique, the agent is claude, idle/done, and
 #       its composer holds no user draft (a dim CC prompt suggestion is not a
 #       draft). Same body and cap as `body`; the truncation signal can come
 #       with sent=no, so a cut line was delivered only on sent=yes. Prints
-#       sent=yes|no and reason=; always exit 0. Residual: the
+#       sent=yes|no and reason=; exit 0 (usage errors exit 2). Residual: the
 #       composer can change between the read and the send (herdr has no atomic
 #       check-and-prompt), so that window holds only the read and one call.
 #
@@ -379,19 +380,23 @@ $PY_RESOLVE" "$root" "$rec" "$scope" "$tabs" 2>/dev/null)" && [ -n "$res" ] \
 }
 
 # ---- body -------------------------------------------------------------------
-PY_BODY='import sys, os, unicodedata, re
-lane, text, cap, clipped = sys.argv[1], sys.argv[2], int(sys.argv[4]), sys.argv[5] == "1"
-orig_len = int(sys.argv[6]) if sys.argv[6] else len(text)
-root, wtdir = match_roots(sys.argv[3])
-kind, key, resolved = classify_cwd(lane, root, wtdir)
+# The one fold for every field of the body, the event text included (PY_EVENT
+# applies it before the empty check, so what is checked is what is sent).
+PY_CLEAN='import unicodedata, re
 def clean(v, limit=None):
     # One line, no control chars; brackets dropped so a field cannot close the
     # sender prefix early.
     v = "".join(" " if unicodedata.category(c)[0] == "C" else c for c in v)
-    return re.sub(r"\s+", " ", v.replace("[", "").replace("]", "")).strip()[:limit]
+    return re.sub(r"\s+", " ", v.replace("[", "").replace("]", "")).strip()[:limit]'
+
+PY_BODY='import sys, os
+lane, text, cap, clipped = sys.argv[1], sys.argv[2], int(sys.argv[4]), sys.argv[5] == "1"
+orig_len = int(sys.argv[6])
+root, wtdir = match_roots(sys.argv[3])
+kind, key, resolved = classify_cwd(lane, root, wtdir)
 task = clean(key, 80) if kind == "task" else "-"
 where = clean(resolved or os.path.realpath(lane), 300)
-t = clean(text)
+t = text  # already cleaned by PY_EVENT
 if len(t) > cap or clipped:
     # Visible cut: the ellipsis stays inside the cap, stderr names the loss.
     # orig_len counts chars before folding; with stdin_clipped it covers only
@@ -404,7 +409,8 @@ body_line() {
   local lane="$1" root="$2" text="$3"
   [ -n "$root" ] || return 1
   PYTHONUTF8=1 python3 -c "$HERDR_MATCH_PRELUDE
-$PY_BODY" "$lane" "$text" "$root" "$BODY_TEXT_CAP" "$STDIN_CLIPPED" "$STDIN_ORIG_LEN"
+$PY_CLEAN
+$PY_BODY" "$lane" "$text" "$root" "$BODY_TEXT_CAP" "$STDIN_CLIPPED" "$EVENT_LEN"
 }
 
 # ---- prompt -----------------------------------------------------------------
@@ -551,40 +557,49 @@ RES
   else echo "sent=no"; echo "reason=herdr-prompt-failed-$rc"; fi
 }
 
-# stdin event text: read one byte past the limit to detect a cut, keep the
-# limit, fold to one line (the same fold PY_BODY applies, so nothing is lost),
-# and print "<clipped 0|1> <chars before folding>" then the text. Folded text
-# has no NUL and no newline, so the caller's $(...) cannot alter it.
-PY_STDIN='import sys, unicodedata
+# Event text, from argv or stdin: stdin reads one byte past the limit to detect
+# a cut and keeps the limit. Prints "<clipped 0|1> <chars before folding>",
+# then the text through clean() (PY_CLEAN), so both inputs get the same fold
+# and the empty check sees what would be sent. Cleaned text has no NUL and no
+# newline, so the caller's $(...) cannot alter it.
+PY_EVENT='import sys
 n = int(sys.argv[1])
-b = sys.stdin.buffer.read(n + 1)
-t = b[:n].decode("utf-8", "replace")
-folded = " ".join("".join(" " if unicodedata.category(c)[0] == "C" else c for c in t).split())
-clipped = len(b) > n
-# A heredoc ends in a newline that is no part of the event; a clipped window
-# is counted whole.
-print("%d %d" % (clipped, len(t) - (not clipped and t.endswith("\n"))))
-sys.stdout.write(folded)'
+if len(sys.argv) > 2:
+    # argv is complete: never clipped, counted whole.
+    t = sys.argv[2].encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+    clipped, size = False, len(t)
+else:
+    b = sys.stdin.buffer.read(n + 1)
+    t = b[:n].decode("utf-8", "replace")
+    clipped = len(b) > n
+    # A heredoc ends in a newline that is no part of the event; a clipped
+    # window is counted whole.
+    size = len(t) - (not clipped and t.endswith("\n"))
+print("%d %d" % (clipped, size))
+sys.stdout.write(clean(t))'
 
 # ---- dispatch ---------------------------------------------------------------
 # body/prompt: optional lane, then `--`, then the text (a text starting with a
 # dash can never be read as a lane or flag).
 split_text_args() {
-  LANE="."; TEXT=""; STDIN_CLIPPED=0; STDIN_ORIG_LEN=""
+  LANE="."; TEXT=""; STDIN_CLIPPED=0; EVENT_LEN=0
   if [ "${1:-}" != "--" ]; then [ $# -gt 0 ] || usage; LANE="$1"; shift; fi
   [ "${1:-}" = "--" ] || usage
   shift
+  local out
   case $# in
     # stdin, bounded: a terminal is no heredoc (usage, never a hang). Python
-    # reads it (PY_STDIN), so raw bytes never pass through $(...).
+    # reads it (PY_EVENT), so raw bytes never pass through $(...).
     0) [ -t 0 ] && usage
-       local out
-       out="$(PYTHONUTF8=1 python3 -c "$PY_STDIN" "$STDIN_TEXT_BYTES")" || usage
-       read -r STDIN_CLIPPED STDIN_ORIG_LEN <<< "${out%%$'\n'*}"
-       case "$out" in *$'\n'*) TEXT="${out#*$'\n'}" ;; esac ;;
-    1) TEXT="$1" ;;
+       out="$(PYTHONUTF8=1 python3 -c "$PY_CLEAN
+$PY_EVENT" "$STDIN_TEXT_BYTES")" || usage ;;
+    1) out="$(PYTHONUTF8=1 python3 -c "$PY_CLEAN
+$PY_EVENT" "$STDIN_TEXT_BYTES" "$1")" || usage ;;
     *) usage ;;
   esac
+  read -r STDIN_CLIPPED EVENT_LEN <<< "${out%%$'\n'*}"
+  case "$out" in *$'\n'*) TEXT="${out#*$'\n'}" ;; esac
+  # Checked after the fold: an event that cleans to nothing ("[ ]") is usage.
   [ -n "$TEXT" ] || [ "$STDIN_CLIPPED" = 1 ] || usage
 }
 

@@ -52,6 +52,9 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.22.1 — 2026-10-18
+- `manager.sh body`/`prompt`: an event that folds to nothing (`" "`, `"[ ]"`) is now usage (exit 2) on both inputs, instead of a ping with a blank event. argv and stdin text go through one shared `clean()` (`PY_EVENT`), so the empty check sees what would be sent. Test fixes: a vacuous clipped-window assertion, missing subprocess timeouts.
+
 ### 1.22.0 — 2026-10-18
 - A lane torn down under a running `/land` keeps its close. `/land` leaves a landing marker outside the worktree (`<git-common-dir>/work-system/landing/<task>`, `scripts/landing.sh`) naming its PR and its session by herdr pane + agent session. A Manager-side `/close <task>` or close-request asks instead of closing a lane whose worker is still landing. When the worktree vanishes anyway (a bare `gh pr merge --delete-branch`, a manual `git worktree remove`), `/land` confirms the merge from the forge, prints its follow-ups and hands the close to the Manager instead of stopping silently; `close-request.sh evaluate` asks on such a gone lane (`worktree-gone`) rather than rejecting it, the sweep reads the marker's worker pane, and `/close` prunes the worktree, archives the task file and closes the worker's tab found through the marker.
 

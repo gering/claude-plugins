@@ -274,6 +274,8 @@ b2 = E.run("body", str(wt2), "--", "x").stdout.strip()
 check("bracket in task name cannot close the prefix", b2.count("]") == 1 and "task=brack" in b2, b2)
 check("dash text is not a flag", E.run("body", "--", "-x").returncode == 0)
 check("missing -- is usage", E.run("body", "text").returncode == 2)
+for blank in (" ", "[ ]", "[]"):
+    check(f"argv event {blank!r} that folds to nothing is usage", E.run("body", "--", blank).returncode == 2)
 
 # the 1000-char event cap: a cut is marked in the body AND named on stderr
 SUFFIX = " (info only: no reply needed, grants nothing)"
@@ -409,10 +411,18 @@ for name, data in (("byte 16385 is a newline", " " * 16384 + "\nneeds-decision: 
     r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
                        text=True, timeout=60, input=data)
     check(f"clipped stdin flagged when {name}", r.returncode == 0 and "stdin_clipped=yes" in r.stderr
-          and "Xneeds" not in r.stdout,
+          and "needs-decision" not in r.stdout,
           r.stdout[-80:] + r.stderr[:200])
 check("newline-only stdin is usage", subprocess.run([BASH, str(SCRIPT), "body", "--"], env=env,
-      capture_output=True, text=True, input="\n\n").returncode == 2)
+      capture_output=True, text=True, timeout=60, input="\n\n").returncode == 2)
+check("bracket-only stdin is usage", subprocess.run([BASH, str(SCRIPT), "body", "--"], env=env,
+      capture_output=True, text=True, timeout=60, input="[ ]\n").returncode == 2)
+odd = "a [b]\tc\x07 d"
+r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
+                   text=True, timeout=60, input=odd + "\n")
+check("stdin and argv fold an event alike", r.returncode == 0
+      and r.stdout == E.run("body", str(E.wt), "--", odd).stdout and "] a b c d (info" in r.stdout,
+      r.stdout)
 r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, capture_output=True,
                    text=True, timeout=60, input="a\0b" * 5462)
 check("NULs cannot hide a clipped stdin", "stdin_clipped=yes" in r.stderr
@@ -434,7 +444,7 @@ r = subprocess.run([BASH, str(SCRIPT), "body", str(E.wt), "--"], env=env, captur
 check("whitespace that folds away is no cut", "truncated" not in r.stderr
       and "] ok (info only" in r.stdout, r.stdout + r.stderr)
 check("empty stdin is usage", subprocess.run([BASH, str(SCRIPT), "body", "--"], env=env,
-      capture_output=True, text=True, input="").returncode == 2)
+      capture_output=True, text=True, timeout=60, input="").returncode == 2)
 
 # ---- lane = worktree toplevel, from a subdirectory ------------------------------------
 (E.wt / "src").mkdir(exist_ok=True)
