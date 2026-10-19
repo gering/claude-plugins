@@ -26,6 +26,8 @@
 #                               never copied (the "realpath cwd match prelude").
 #        $HERDR_NAME_PRELUDE    a python3 source string defining session_name():
 #                               the sanitized SendMessage name of an agent row.
+#        $HERDR_COMPOSER_PY     a python3 program: ansi pane text on stdin →
+#                               clear|draft|unknown for the claude composer.
 #        ha_have / ha_list / ha_get / ha_read / ha_wait   the shell wrappers.
 #      Sourcing must stay side-effect free (the CLI dispatch at the foot is
 #      guarded by "am I the executed script?") so a consumer can take the
@@ -105,6 +107,127 @@ def session_name(a):
     # title is settable by any process in that pane -- prose there is an injection
     # surface, not an address.
     return "" if len(t) > 64 else t'
+
+# ---- shared composer draft check (the "composer prelude") -----------------
+# A python3 program string, run as `python3 -c "$HERDR_COMPOSER_PY"`. Used by
+# manager.sh prompt and sessions.sh refresh before typing into a claude pane:
+# only a composer that reads `clear` is typed into.
+# stdin: `herdr agent read --source visible --format ansi`. Prints clear|draft|unknown.
+# The CC composer is the region between the LAST two horizontal rules. A user
+# draft is visible text rendered in a normal style; a prompt suggestion is dim/
+# mid-gray and does not count. The cursor is inverse: over the first char of a
+# suggestion it is part of the suggestion, over typed text it is a draft, and
+# over the empty composer it is a space.
+HERDR_COMPOSER_PY='import sys, re
+raw = sys.stdin.read()
+lines = raw.replace("\r", "").split("\n")
+plain = [re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", l) for l in lines]
+# A rule may carry a label (CC prints the session name into the upper one).
+rules = [i for i, p in enumerate(plain) if p.strip().startswith("─" * 10)]
+if len(rules) < 2:
+    print("unknown"); sys.exit(0)
+i, j = rules[-2], rules[-1]
+if j - i < 2:
+    print("unknown"); sys.exit(0)
+
+def apply_sgr(st, nums):
+    # A real SGR state machine: off-codes (22/27/39) remove what they turn off,
+    # a new fg replaces the old one, and the sub-parameters of 38/48 (5;n and
+    # 2;r;g;b) are consumed, never read as codes of their own (38;5;2 is green,
+    # not dim; 38;2;7;.. is a color, not inverse).
+    k = 0
+    while k < len(nums):
+        n = nums[k]
+        if n == 0:
+            st.update(dim=False, inverse=False, fg=None)
+        elif n == 2:
+            st["dim"] = True
+        elif n == 22:
+            st["dim"] = False
+        elif n == 7:
+            st["inverse"] = True
+        elif n == 27:
+            st["inverse"] = False
+        elif 30 <= n <= 37 or 90 <= n <= 97:
+            st["fg"] = ("basic", n)
+        elif n == 39:
+            st["fg"] = None
+        elif n in (38, 48) and k + 1 < len(nums):
+            mode = nums[k + 1]
+            width = 3 if mode == 5 else 5 if mode == 2 else 2
+            if n == 38 and mode == 5 and k + 2 < len(nums):
+                st["fg"] = ("idx", nums[k + 2])
+            elif n == 38 and mode == 2 and k + 4 < len(nums):
+                st["fg"] = ("rgb",) + tuple(nums[k + 2:k + 5])
+            k += width
+            continue
+        k += 1
+
+def muted(st):
+    # How CC renders suggestions and hints: dim, bright-black, or a mid gray
+    # (24-bit near-neutral 90..180, or the 256-color ramp steps 241..249).
+    if st["dim"]:
+        return True
+    fg = st["fg"]
+    if not fg:
+        return False
+    # Mid grays only: near-black is the normal text color of a light theme and
+    # must read as typed text, never as a suggestion. One rule for both
+    # encodings: a 256-color grayscale-ramp step is mapped to its xterm RGB
+    # value (232+n = 8+10n) and judged like a 24-bit color. Color-cube grays
+    # (59/102/145/188) are not mapped and read as typed text (toward draft).
+    if fg[0] == "basic":
+        return fg[1] == 90
+    if fg[0] == "idx":
+        if fg[1] == 8:
+            return True
+        if not 232 <= fg[1] <= 255:
+            return False
+        v = 8 + 10 * (fg[1] - 232)
+        r = g = b = v
+    else:
+        r, g, b = fg[1:]
+    return max(r, g, b) - min(r, g, b) <= 16 and 90 <= max(r, g, b) <= 180
+
+draft = False
+# SGR state carries across lines (a wrapped suggestion keeps its style).
+st = {"dim": False, "inverse": False, "fg": None}
+for line in lines[i + 1:j]:
+    first, cursor = True, False
+    for tok in re.split(r"(\x1b\[[0-9;?]*[A-Za-z])", line):
+        if tok.startswith("\x1b["):
+            if tok.endswith("m"):
+                apply_sgr(st, [int(x) for x in re.findall(r"\d+", tok)] or [0])
+            continue
+        m = muted(st)
+        for ch in tok:
+            # A glyph under the inverse cursor is a suggestion first char only
+            # when the very NEXT cell is a muted glyph; a blank (whatever its
+            # style) or normal text there makes it typed. An empty composer has
+            # an inverse SPACE, which never sets the cursor.
+            if cursor:
+                cursor = False
+                if ch.isspace() or not m:
+                    draft = True
+            if ch.isspace():
+                continue
+            if first and ch in "\u276f>\u203a":
+                first = False
+                continue
+            first = False
+            if m:
+                continue
+            if st["inverse"]:
+                cursor = True
+            else:
+                draft = True
+    if cursor:
+        draft = True
+# Paste and image placeholders are user content whatever their style.
+plain = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", "\n".join(lines[i + 1:j]))
+if re.search(r"\[(Pasted text|Image) #[0-9]", plain):
+    draft = True
+print("draft" if draft else "clear")'
 
 # Default bound for `wait` when the caller passes none — a wrapper must never
 # wait unboundedly (that would be the busy loop this script exists to avoid).
