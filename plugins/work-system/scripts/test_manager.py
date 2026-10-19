@@ -555,6 +555,18 @@ check("stale backfill record → sole root still unasked", r.get("evidence") == 
 r = E.resolve(env_extra={"HERDR_WORKSPACE_ID": "w7"})
 check("backfill record of another workspace is not this lane's",
       "kicker-other-workspace" in r["reasons"] and r.get("evidence") != "kicker", str(r))
+# Its Manager is still live in w6: a sole root agent of w7 is not sent to unasked.
+adv = E.agent(pane="w7:p2", tab="w7:t2", ws="w7", uuid="33333333-4444-5555-6666-777777777777", title="advisor")
+E.serve([E.agent(), adv, worker], tabs=TABS)
+r = E.resolve(env_extra={"HERDR_WORKSPACE_ID": "w7"})
+check("live backfill kicker elsewhere → sole root of w7 asks", r.get("evidence") == "sole-root-agent"
+      and "kicker-other-workspace" in r["reasons"] and "kicker-backfill-stale" not in r["reasons"]
+      and r.get("delegate_unasked") == "no", str(r))
+# The Manager only cd'd into a worktree: moved, not gone.
+E.serve([E.agent(E.wt), worker], tabs=TABS)
+r = E.resolve(env_extra={"HERDR_WORKSPACE_ID": "w6"})
+check("moved backfill kicker is not stale", "kicker-cwd-moved" in r["reasons"]
+      and "kicker-backfill-stale" not in r["reasons"] and r.get("delegate_unasked") == "no", str(r))
 E.serve([E.agent(), worker], tabs=TABS, get=E.agent())
 out, r = backfill()
 check("backfill: nothing to do", r.get("backfilled") == "0" and "alpha present" in lines(out, "kept"), out)

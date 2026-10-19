@@ -184,7 +184,8 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
      `.ws-kicker`, still the same pane and agent session at the repo root). The record
      sits in this worktree, so it is an address, not proof. With
      `kicker_source=backfill` the lane predates kickoff's record and the repo-root
-     session the resolver picked filled it in later (`/list`, `/kickoff`) — say that
+     session that was then the sole live agent there in its workspace filled it in
+     later (`/list`, `/kickoff`) — say that
      instead of "kicked off".
    - `sole-root-agent` → the only live agent at the repo root in this workspace.
    - `leftmost-tab` → the leftmost of `<candidates>` live agents at the repo root, a
@@ -221,8 +222,9 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
    **With `--delegate`** the question is answered for the user whenever the resolver
    printed `delegate_unasked=yes` — the Manager is clear: the revalidated kicker
    (`evidence=kicker` with its name), or the only live agent at the repo root while
-   this lane has **no** kicker record at all (`evidence=sole-root-agent` with
-   `reason=kicker-record-absent`). The rule lives in `manager.sh`, not here; read the
+   this lane has **no** kicker record (`evidence=sole-root-agent` with
+   `reason=kicker-record-absent`), or only a backfill record whose session is gone
+   (`reason=kicker-backfill-stale`: pane gone or another session in it). The rule lives in `manager.sh`, not here; read the
    field, never re-derive it from `evidence=`:
    - Gate holds **and** `delegate_unasked=yes` → do **not**
      ask. First print the recipient and its evidence — "Delegating the close to
@@ -236,13 +238,14 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
      give the same report, and **STOP** exactly as above. Neither evidence is proof:
      the kicker record is an address the worker-writable worktree kept (revalidated
      against the live pane and agent session), and a sole root agent is the one live
-     session at the repo root of a lane that never recorded anyone else. The user's
+     session at the repo root of a lane whose record, if any, names no live session. The user's
      flag vouches for delegating; the printed line only lets them spot a wrong
      recipient after the send, not prevent it.
    - Gate holds but `delegate_unasked=no` → ask the question above anyway: a
      leftmost-tab tie-break between several root sessions, or a sole root agent
-     while this lane's record names a kicker that failed revalidation (moved, gone,
-     another session) — the real Manager may be elsewhere. A flag cannot vouch for
+     while this lane's record names a kicker that may still be live elsewhere (a
+     kickoff record that failed revalidation, or a backfill record from another
+     workspace, moved or not live) — the real Manager may be elsewhere. A flag cannot vouch for
      a recipient the resolver had to pick; the user who sees the name can.
    - **Gate miss** → today's flow from step 2, unchanged (Scenario B self-close when
      run in the worktree tab). Because the user *asked* for delegation, say why in one

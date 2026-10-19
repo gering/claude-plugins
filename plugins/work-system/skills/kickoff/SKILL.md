@@ -410,7 +410,7 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     `unexcluded=<lane>` line):
     `bash "${CLAUDE_PLUGIN_ROOT}/scripts/manager.sh" backfill "<main-repo>"` —
     it records this session only where a lane has no record at all, and only
-    when this session is the sole live agent at the repo root.
+    when this session is the sole live agent at the repo root in its workspace.
 
 14. **Launch the worktree session** — automate it inside herdr, otherwise show
     the manual block.

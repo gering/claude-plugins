@@ -40,7 +40,8 @@
 #       agent_status=, sendmessage_name= (claude targets only), candidates=,
 #       kicker_source=kickoff|backfill (evidence=kicker only),
 #       delegate_unasked=yes|no (the /close --delegate rule: a kicker with its
-#       name, or a sole root agent while the lane has no record at all), plus
+#       name, or a sole root agent while the lane has no record, or only a
+#       backfill record whose session is gone), plus
 #       one reason= line per observation. Precedence:
 #         1. the kicker record, revalidated live (pane exists, cwd == main-repo
 #            root, agent-session UUID unchanged, status live) → evidence=kicker;
@@ -385,15 +386,15 @@ def emit(status, ev="", a=None, n=0, name=None):
         name = session_name(a) if a and a.get("agent") == "claude" else ""
     print("sendmessage_name=" + name)
     print("candidates=" + str(n))
-    # kicker_source=backfill: the record was filled in later by the Manager
-    # resolve picked then, not written by the session that kicked the lane off.
+    # kicker_source=backfill: the record was filled in later by the sole live
+    # root agent of its workspace, not by the session that kicked the lane off.
     src = (rec or {}).get("source", "kickoff")
     print("kicker_source=" + ((src if src in ("kickoff", "backfill") else "unknown") if ev == "kicker" else ""))
     # The one rule for sending a close-request unasked (/close --delegate):
     # the revalidated kicker, or the only root agent when the lane has no
     # record that names anyone else. A kickoff record that failed revalidation
-    # means its Manager may be elsewhere; a failed BACKFILL record only ever
-    # said "the sole root agent then", so it counts as no record.
+    # means its Manager may be elsewhere; a BACKFILL record whose session is
+    # gone only ever said "the sole root agent then", so it counts as none.
     norec = "kicker-record-absent" in reasons or "kicker-backfill-stale" in reasons
     clear = (ev == "kicker" and name) or (ev == "sole-root-agent" and norec)
     print("delegate_unasked=" + ("yes" if clear else "no"))
@@ -470,7 +471,11 @@ if rec is not None:
                 emit("unique", "kicker", a, 1, name="")
             emit("unique", "kicker", a, 1)
 
-if rec is not None and rec.get("source") == "backfill":
+# A backfill record whose session is provably gone (pane gone, or another
+# session in it) counts as none. Any other failure (another workspace, moved
+# cwd, not live) may still name a live Manager elsewhere, so it keeps asking.
+if rec is not None and rec.get("source") == "backfill" and (
+        "kicker-pane-gone" in reasons or "kicker-session-changed" in reasons):
     reasons.append("kicker-backfill-stale")
 
 # 2. live agents at the main-repo root.

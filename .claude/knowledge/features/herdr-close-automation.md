@@ -165,8 +165,9 @@ from the original detector that still hold:
   vouches for *delegating*; the resolver decides whether the recipient is clear and
   emits it as one field, so `/close` and `/land` cannot drift apart in prose. Clear =
   the revalidated kicker (an address the worker-writable worktree kept, not proof), or
-  the only live root agent **when the lane has no record at all**. A sole root agent
-  after a *failed* revalidation still asks: the record named someone, who may have
+  the only live root agent **when the lane has no record**, or only a backfill record
+  whose session is provably gone (pane gone, another session in it). A sole root agent
+  after any other failed revalidation still asks: the record named someone, who may have
   moved into a subdir or another workspace, and the root agent is then a stranger
   (review finding on PR #82). Skipping the question (the printed recipient line is
   seen only after the send) is an **accepted residual** (user decision 2026-10-19:

@@ -271,11 +271,19 @@ kicker_record=absent"
     ks="$(sed -n 's/^agent_session=//p' "$top/.ws-kicker")"
     case "$ks" in *$'\n'*) ks="" ;; esac
     if printf '%s' "$ks" | grep -Eq '^[0-9a-fA-F-]{8,64}$'; then
+      # No source= line is a kickoff record; any value but one backfill (an
+      # unknown or repeated source=) is not vouched for, so nothing is copied.
       src="$(sed -n 's/^source=//p' "$top/.ws-kicker")"
-      [ "$src" = backfill ] || src=kickoff
-      body="$body
+      case "$src" in
+        "") src=kickoff ;;
+        backfill) ;;
+        *) src="" ;;
+      esac
+      if [ -n "$src" ]; then
+        body="$body
 kicker_session=$ks
 kicker_source=$src"
+      fi
     fi
   fi
 

@@ -28,7 +28,7 @@ terminal gate) and `/close` step 1b delegation, which replaced the name-only
   it at any live root agent. `evidence=kicker` is a better guess, not proof — the
   `/close` delegation question names the evidence and the user confirms. The one
   exception is `/close --delegate` (what `/land` passes): it sends without asking
-  on `delegate_unasked=yes` (kicker, or sole root agent with no record at all),
+  on `delegate_unasked=yes` (kicker, or sole root agent with no record or a gone backfill session),
   after printing the recipient — an accepted residual, see
   [herdr-close-automation](herdr-close-automation.md).
 - **Backfill from the Manager, never over a live record (1.24.0).** Lanes kicked off

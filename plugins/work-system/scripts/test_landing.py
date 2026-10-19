@@ -346,6 +346,18 @@ check("begin: a duplicated agent_session is not copied",
 check("begin: a broken record still counts as present",
       "kicker_record=present\n" in fx.marker.read_text())
 fx.marker.unlink()
+for src in ("source=foo\n", "source=backfill\nsource=backfill\n"):
+    (fx.wt / ".ws-kicker").write_text(f"agent_session={KICKER}\n{src}")
+    fx.run("begin", "--pr", "7", cwd=fx.wt)
+    check(f"begin: an unvouched {src.strip()!r} copies no kicker",
+          "kicker_session" not in fx.marker.read_text()
+          and "kicker_record=present\n" in fx.marker.read_text())
+    fx.marker.unlink()
+(fx.wt / ".ws-kicker").write_text(f"agent_session={KICKER}\nsource=backfill\n")
+fx.run("begin", "--pr", "7", cwd=fx.wt)
+check("begin: a backfill record is copied as such",
+      "kicker_source=backfill\n" in fx.marker.read_text())
+fx.marker.unlink()
 saved = (fx.wt / ".ws-kicker").read_text()
 (fx.wt / ".ws-kicker").unlink()
 fx.run("begin", "--pr", "7", cwd=fx.wt)
