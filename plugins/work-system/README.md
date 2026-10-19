@@ -186,7 +186,7 @@ checkout, a manual `git worktree remove`), `/land` confirms the merge from the f
 prints its follow-ups and hands the close to the Manager instead of stopping silently
 (it stops instead when a surviving branch holds commits the PR lacks, or an
 `/adopt`-ed branch cannot be resolved by name);
-the Manager's `/close <task>` still archives the task file, sweeps the follow-ups and
+the Manager's `/close <task>` still closes the task, sweeps the follow-ups and
 closes the worker's tab, found through the marker's pane + session rather than a cwd
 that no longer exists. **The Manager never merges a lane's PR itself** — the user runs
 `/land` in the lane's tab (pr-flow's `/merge` refuses the main checkout anyway).

@@ -2,7 +2,7 @@
 name: statusline
 description: |
   Manages a `[ws …]` task-backlog segment in Claude Code's status line — task
-  counts by state for the repo's tasks/ backlog.
+  counts by state for the repo's task backlog.
   Trigger: "statusline ws", "task status indicator", "show/hide ws".
 user_invocable: true
 ---

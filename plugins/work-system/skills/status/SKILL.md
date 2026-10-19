@@ -37,7 +37,7 @@ user_invocable: true
    as `branch_merged=unknown` (behind-but-reachable, or a possible squash/rebase merge) rather than
    "not merged".
 
-2. **Read the task file** for human context (optional):
+2. **Read the task** for human context (optional):
    - Run: `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" get "$PWD" "<task_name>" --body 2>/dev/null` — use the title/goal to
      label the report (a GitHub task also has its issue number in it).
 
@@ -51,7 +51,7 @@ user_invocable: true
    • PR #<pr_number> — <pr_state> (<pr_url>)              [when pr_state=MERGED]
    • <commits_in_main> commit(s) for "<task_name>" in <main_branch>   [only when commits_in_main>0]
 
-   Recommendation: Delete task file with /close
+   Recommendation: close the task with /close
    ```
    `confidence=likely` means no merged PR proved it (no `gh`, or branch already cleaned up by
    `/close`, with task commits in main) — label it "likely (unconfirmed)". A merged PR is the
@@ -93,7 +93,7 @@ user_invocable: true
    evidence (it failed the helper's specificity gate), not because no matching commits exist.
 
 4. **Offer actions**:
-   - If completed: "Delete task file?"
+   - If completed: "Close it with /close?"
    - If in progress: "Open PR in browser?" / "Continue work?"
    - If not started: "Start this task?"
 

@@ -49,7 +49,13 @@ not in SKILL.md.
   to close and would leave the issue open.
 - **`/close` closes the recorded issue, not a name match.** It reads `#N` from
   TASK.md's `issue:` line before the worktree goes; a name lookup prefers any
-  open issue and would close a newer one that reuses the name.
+  open issue and would close a newer one that reuses the name. `task-store.py
+  ref` owns that read (format written and parsed in one script; local backend
+  ignores the line): `pinned=no` — a gone worktree on GitHub — means the
+  matched issue is shown and confirmed before it is closed, even on an
+  auto-accepted delegated close.
+- **`gh auth status --active`**: without `--active` gh exits 1 when any
+  account on the host has a bad token, though the active one works (gh docs).
 - **`auto` counts every task file, `list` only plain names.** A file named
   `$(…).md` is never handed to a skill, but it still keeps the repo local —
   otherwise a backlog of oddly named files would silently flip to GitHub.

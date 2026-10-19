@@ -1,10 +1,10 @@
 ---
 title: "Task Archiving on /close"
 createdAt: 2026-06-29
-updatedAt: 2026-09-21
+updatedAt: 2026-10-20
 createdFrom: "PR #19"
-updatedFrom: "PR #63"
-pluginVersion: 1.15.0
+updatedFrom: "PR #84"
+pluginVersion: 1.25.0
 prime: false
 reindexedAt: 2026-07-12
 ---

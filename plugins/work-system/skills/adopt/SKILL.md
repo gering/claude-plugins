@@ -1,15 +1,15 @@
 ---
 name: adopt
 description: |
-  Adopts an existing branch: creates a worktree and generates a task
-  file from its commits/diff.
+  Adopts an existing branch: creates a worktree and a task (issue or
+  file) from its commits/diff.
   Trigger: "adopt this branch", "track this branch in the work system".
 user_invocable: true
 ---
 
 # Adopt Existing Branch
 
-> Bring an existing branch into the work system — create a worktree and task file for it
+> Bring an existing branch into the work system — create a worktree and a task for it
 
 ## Arguments
 
@@ -65,8 +65,9 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
 
 4. **Check for conflicts**:
    - Check the backlog: `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" get "<main-repo>" "<task-name>"` — exit 0 with
-     `state=open` is a conflict; exit 3 is free; exit 4 (GitHub backend, `gh` unusable) → show
-     its stderr and stop.
+     `state=open` is a conflict; exit 3 is free; any other exit → show its stderr and stop
+     (4: the GitHub backend's `gh` is unusable; 5: several open issues carry the name; 1: a
+     `gh` call failed).
    - Check if `task/<task-name>` branch already exists
    - Check if worktree path `.claude/worktrees/<task-name>` already exists
    - If any conflict, ask user how to proceed (rename or skip)
@@ -114,7 +115,9 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
 8. **Rename branch** (optional):
    - Ask: "Rename branch `<original-name>` to `task/<task-name>`? (recommended for consistency)"
    - If yes: `git branch -m <original-name> task/<task-name>`
-   - If no: keep original branch name and note it in the task file
+   - If no: keep the original branch name and say so in the step-14 report. The task already
+     exists (step 7); never write a note into a file in `tasks/` — on the GitHub backend that
+     file would pin `auto` to local.
 
 9. **Create worktree**:
    - Create parent directory if needed: `mkdir -p .claude/worktrees`

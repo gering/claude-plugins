@@ -41,7 +41,12 @@ if cmd == ["repo", "view"]:
         print("unknown shorthand flag: 'R' in -R", file=sys.stderr); sys.exit(1)
     print(json.dumps({"visibility": st.get("visibility", "PRIVATE")})); sys.exit(0)
 if cmd == ["label", "create"]:
-    st.setdefault("labels", []); st["labels"].append(args[2]); save(); sys.exit(0)
+    if "--force" in args:
+        print("stub: --force would overwrite the label", file=sys.stderr); sys.exit(2)
+    st.setdefault("labels", [])
+    if args[2] in st["labels"]:
+        print(f"label with name \"{args[2]}\" already exists", file=sys.stderr); sys.exit(1)
+    st["labels"].append(args[2]); save(); sys.exit(0)
 issues = st.setdefault("issues", [])
 def has_label(i, l): return l in [x["name"] for x in i["labels"]]
 if cmd == ["issue", "list"]:
@@ -213,7 +218,7 @@ with tempfile.TemporaryDirectory() as d:
     check("auto + no remote → local", kv(r.stdout, "backend") == ["local"])
     check("no gh call without a GitHub origin", e.calls() == [])
 
-for url in ("https://github.com/o/r", "https://github.com/o/r.git", "ssh://git@github.com/o/r.git"):
+for url in ("https://u@github.com/o/r.git", "https://github.com/o/r", "https://github.com/o/r.git", "ssh://git@github.com/o/r.git"):
     with tempfile.TemporaryDirectory() as d:
         e = Env(d, origin=url)
         check(f"origin form {url} is GitHub", kv(e.run("backend", str(e.repo)).stdout, "repo") == ["o/r"])
@@ -280,7 +285,7 @@ with tempfile.TemporaryDirectory() as d:
           e.run("get", str(e.repo), "add-dark-mode", "--body").stdout == text)
     os.symlink(e.root / "elsewhere", e.root / "LINK.md")
     check("--write refuses a symlink",
-          e.run("get", str(e.repo), "#1", "--write", str(e.root / "LINK.md")).returncode == 2)
+          e.run("get", str(e.repo), "#1", "--write", str(e.root / "LINK.md")).returncode == 1)
 
     # A second open issue with the same marker makes the name ambiguous.
     e.gh_state(issues=e.issues() + [issue(4, "Dup", "<!-- work-system task: add-dark-mode -->")])
@@ -301,6 +306,14 @@ with tempfile.TemporaryDirectory() as d:
     r = e.run("close", str(e.repo), "#3", "--branch", "task/fix-login-flow")
     check("manual close says so", "manually" in [i for i in e.issues() if i["number"] == 3][0]["comment"])
     check("close needs --branch", e.run("close", str(e.repo), "#3").returncode == 2)
+
+    tm = e.root / "LANE-TASK.md"
+    tm.write_text("# Add dark mode\n\nissue: #1\n\nbody\n")
+    r = e.run("ref", str(e.repo), "add-dark-mode", str(tm))
+    check("ref pins the issue TASK.md names", kv(r.stdout, "ref") == ["#1"] and kv(r.stdout, "pinned") == ["yes"])
+    r = e.run("ref", str(e.repo), "add-dark-mode", str(e.root / "gone" / "TASK.md"))
+    check("ref without TASK.md is an unpinned name",
+          kv(r.stdout, "ref") == ["add-dark-mode"] and kv(r.stdout, "pinned") == ["no"])
 
     # A lane resolves the main checkout's backlog.
     git(e.repo, "-c", "user.email=t@e", "-c", "user.name=T", "commit", "-q", "--allow-empty", "-m", "i")
@@ -327,6 +340,10 @@ with tempfile.TemporaryDirectory() as d:
     wt = e.root / "TASK.md"
     e.run("get", str(e.repo), "local-one", "--write", str(wt))
     check("local --write copies the file", wt.read_text() == f.read_text())
+    wt.write_text("# Local one\n\nissue: #12\n")
+    r = e.run("ref", str(e.repo), "local-one", str(wt))
+    check("on the local backend an issue: line is not a ref",
+          kv(r.stdout, "ref") == ["local-one"] and kv(r.stdout, "pinned") == ["yes"])
     r = e.run("close", str(e.repo), "local-one", "--branch", "task/local-one", "--pr", "5")
     check("local close hands over to archive-task.sh",
           r.returncode == 0 and kv(r.stdout, "backend") == ["local"]

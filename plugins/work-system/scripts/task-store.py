@@ -7,6 +7,7 @@ Usage:
   task-store.py get     <dir> <name|#N> [--write <path> | --body]   (an issue ref needs the #)
   task-store.py create  <dir> <name> --body-file <file> [--title <text>]
   task-store.py close   <dir> <name|#N> --branch <task-branch> [--pr <n>] [--sha <sha>]
+  task-store.py ref     <dir> <name> [<TASK.md>]
 
 <dir> is any path inside the repo; the backlog belongs to the MAIN checkout, so a
 lane resolves the same backlog as the main session.
@@ -49,9 +50,11 @@ MARKER_RE = re.compile(r"<!--\s*work-system task:\s*([A-Za-z0-9][A-Za-z0-9._-]*)
 # A local task name may keep an adopted branch's inner slashes (feature/foo/bar →
 # foo/bar); the file flattens them (archive-task.sh does the same). Issue names
 # and new tasks are flat.
-NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-LOCAL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$")
-GH_URL_RE = re.compile(r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
+NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
+LOCAL_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*$")
+# https may carry userinfo (a credential helper's user@): without it such an
+# origin would silently resolve `auto` to local. SSH host aliases stay unknown.
+GH_URL_RE = re.compile(r"^(?:https://(?:[^@/]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/)"
                        r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
 NOT_TASKS = {"_index.md", "README.md", "ROADMAP.md"}
 TASKS_DIR = "tasks"
@@ -90,7 +93,7 @@ def main_checkout(d):
 def setting(main, key):
     r = run([sys.executable, "-I", os.path.join(HERE, "ws-settings.py"), "get", main, key])
     if r is None or r.returncode != 0:
-        raise Fail(2, f"ws-settings.py get {key} failed: {oneline(r.stderr if r else '')}")
+        raise Fail(1, f"ws-settings.py get {key} failed: {oneline(r.stderr if r else '')}")
     kv = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
     if kv.get("note"):  # stderr: stdout may be a task body (get --body)
         print(f"note={kv['note']}", file=sys.stderr)
@@ -120,7 +123,9 @@ def github_repo(main):
 
 def gh_ready():
     """None when gh answers for github.com, else the reason it does not."""
-    r = run(["gh", "auth", "status", "--hostname", "github.com"])
+    # --active: without it gh exits 1 when ANY account on the host has a bad
+    # token, even though the active one (the one every call uses) works.
+    r = run(["gh", "auth", "status", "--active", "--hostname", "github.com"])
     if r is None:
         return "gh is not installed"
     if r.returncode != 0:
@@ -275,7 +280,7 @@ def write_out(path, text):
     try:  # O_NOFOLLOW in the open itself: no window between a check and the write
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
     except OSError as e:
-        raise Fail(2, f"cannot write {path}: {e.strerror}")
+        raise Fail(1, f"cannot write {path}: {e.strerror}")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(text)
     print(f"written={path}")
@@ -308,15 +313,14 @@ def cmd_list(d):
             rows.append((issue_name(i), f"#{i['number']}", oneline(i["title"])))
     else:
         rel = info["tasks_dir"]
-        skipped = len(task_files(main, rel, plain=False)) - len(task_files(main, rel))
-        if skipped:
-            print(f"note={skipped} file(s) in {rel}/ not listed: the name is not a plain task "
-                  "name (letters, digits, . _ -) — rename them", file=sys.stderr)
-        for f in task_files(main, rel):
+        every = task_files(main, rel, plain=False)
+        plain = [f for f in every if NAME_RE.match(f[:-3])]
+        if len(every) > len(plain):
+            print(f"note={len(every) - len(plain)} file(s) in {rel}/ not listed: the name is not "
+                  "a plain task name (letters, digits, . _ -) — rename them", file=sys.stderr)
+        for f in plain:
             rows.append((f[:-3], f"{rel}/{f}", first_title(os.path.join(main, rel, f))))
-    for name, ref, title in rows:
-        if "\t" in name or "\n" in name:
-            continue
+    for name, ref, title in rows:  # names are NAME_RE-clean: no tab or newline
         print(f"task={name}\t{ref}\t{title}")
     print(f"count={len(rows)}")
 
@@ -384,8 +388,12 @@ def cmd_create(d, name, body_file, title):
         raise Fail(2, "no title: pass --title or start the body with a '# ' heading")
     if any(issue_name(i) == name for i in gh_issues(repo, "open")):
         raise Fail(5, f"an open task named {name} already exists in {repo}")
-    gh(["label", "create", LABEL, "--color", "5319e7", "--force",
-        "--description", "A work-system task (managed by task-store.py)"], repo)
+    # Create the label once; never --force, which would reset a maintainer's
+    # colour or description on every create.
+    r = run(["gh", "label", "create", LABEL, "--color", "5319e7", "--description",
+             "A work-system task (managed by task-store.py)", "-R", repo])
+    if r is None or (r.returncode != 0 and "already exists" not in r.stderr.lower()):
+        raise Fail(1, f"gh label create failed: {oneline(r.stderr if r else '')[:300]}")
     body = f"{MARKER_RE.sub('', body).strip()}\n\n<!-- work-system task: {name} -->\n"
     r = run(["gh", "issue", "create", "--title", title, "--label", LABEL, "--body-file", "-",
              "-R", repo], input=body)
@@ -420,10 +428,39 @@ def cmd_close(d, ref, branch, pr, sha):
     print("result=closed")
 
 
+def cmd_ref(d, name, task_md):
+    """The ref /close should close: `#N` from TASK.md's `issue:` line on the github
+    backend (pinned=yes), else the name. On github a name is pinned=no: it may
+    match a newer open issue that reuses it, so the caller confirms the match."""
+    backend, main, info = resolve(d)
+    print(f"backend={backend}")
+    if backend == "local":
+        print(f"ref={check_name(name, local=True)}\npinned=yes")
+        return
+    n = None
+    if task_md:
+        try:
+            fd = os.open(task_md, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, encoding="utf-8", errors="replace") as f:
+                head = [next(f, "") for _ in range(20)]
+            for line in head:
+                m = re.fullmatch(r"issue: #([0-9]+)\n?", line)
+                if m:
+                    n = m.group(1)
+                    break
+        except OSError:
+            pass  # a gone worktree: fall back to the name
+    if n:
+        print(f"ref=#{n}\npinned=yes")
+    else:
+        print(f"ref={check_name(name)}\npinned=no")
+
+
 def usage():
     raise Fail(2, "usage: task-store.py backend|list <dir> · get <dir> <name|#N> [--write <path>|--body]"
                   " · create <dir> <name> --body-file <file> [--title <t>]"
-                  " · close <dir> <name|#N> --branch <b> [--pr <n>] [--sha <s>]")
+                  " · close <dir> <name|#N> --branch <b> [--pr <n>] [--sha <s>]"
+                  " · ref <dir> <name> [<TASK.md>]")
 
 
 def opts(rest, allowed):
@@ -459,6 +496,8 @@ def main(argv):
         if "--body-file" not in o:
             usage()
         cmd_create(d, rest[0], o["--body-file"], o.get("--title"))
+    elif cmd == "ref" and rest and len(rest) <= 2:
+        cmd_ref(d, rest[0], rest[1] if len(rest) == 2 else None)
     elif cmd == "close" and rest:
         o = opts(rest[1:], {"--branch", "--pr", "--sha"})
         if "--branch" not in o or not re.fullmatch(r"[0-9]*", o.get("--pr", "")):

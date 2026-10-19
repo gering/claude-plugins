@@ -219,7 +219,8 @@ landing marker, **every stop** first clears it — `bash
      - `branch-unreadable` → "Could not compare branch `<branch>` with PR
        #<pr_number>'s head — check it before closing by hand."
      - `not-by-name` → "This lane's branch `<branch>` cannot be resolved by name from
-       the main checkout — archive the task file and remove the branch by hand."
+       the main checkout — close the task (the issue, or archive the task file) and remove the
+       branch by hand."
    - `verdict=handoff` → mark the hand-over, which keeps the marker for the Manager's
      close (it names this tab):
      `bash "${CLAUDE_PLUGIN_ROOT}/scripts/landing.sh" phase <task_name> handoff --repo "<main-repo-path>"`.
@@ -245,10 +246,10 @@ landing marker, **every stop** first clears it — `bash
      naming the recipient and its `evidence=` (send / don't send). Send `/close`
      step 1b's three-field close-request body with `worktree=` this lane's path from
      step 1, then report: "Close request sent to `<name>` — the worktree is already
-     gone; it archives the task file, sweeps the follow-ups and closes this tab."
+     gone; it closes the task, sweeps the follow-ups and closes this tab."
    - No recipient (outside herdr, none, ambiguous, declined) → "Nothing more can run
      from here: the worktree is gone. In the main checkout run `/close <task_name>` —
-     it archives the task file, reads the follow-ups above and closes this tab."
+     it closes the task, reads the follow-ups above and closes this tab."
    Either way **STOP**: nothing after this line runs in this session.
 
    **Re-assess** — Assess again, the same bare call as step 1. Its `task_branch` must still equal step 1's:

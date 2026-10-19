@@ -56,7 +56,7 @@ Resolve the main repo path once (step 1) and use it below. Never persist a `cd` 
    - If `gh` is available: `gh pr list --state open --search "<keywords>" --limit 3`
    - If similar tasks exist, show them and ask if user wants to continue
 
-5. **Create task file**:
+5. **Draft the task**:
 
    Template:
    ```markdown

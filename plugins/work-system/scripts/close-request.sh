@@ -240,7 +240,8 @@ out(("task", seen["task"]), ("worktree", rp(seen["worktree"])))' "$file" "$TASK_
   landing_out="$(bash "$SCRIPT_DIR/landing.sh" status "$m_task" --repo "$MAIN" 2>/dev/null)"
   if [ -n "$m_wt" ] && [ "$m_wt" = "$(printf '%s\n' "$lane_out" | sed -n 's/^worktree=//p')" ] \
      && printf '%s\n' "$lane_out" | grep -qx 'worktree_state=gone'; then
-    if task_recorded "$MAIN" "$m_task" || ! printf '%s\n' "$landing_out" | grep -qx 'landing=none'; then
+    # The landing marker first: it is already in hand, the backlog costs a lookup.
+    if ! printf '%s\n' "$landing_out" | grep -qx 'landing=none' || task_recorded "$MAIN" "$m_task"; then
       gone=1; row="$m_task	task/$m_task"
       printf '%s\n' "$lane_out" | grep -qx 'leftover=yes' && leftover=yes
     fi

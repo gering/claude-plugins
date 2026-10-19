@@ -280,12 +280,13 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
    - Find the worktree for this task (match by its branch `<task-branch>`)
    - Worktree is typically at `<main-repo-path>/.claude/worktrees/<task-name>` (but verify from
      `git worktree list` output)
-   - Read the issue this lane was kicked off from, before step 7 removes it (always pass
-     `<task-ref>` **quoted** — an unquoted `#44` starts a shell comment and drops the rest
-     of the command):
-     `sed -n 's/^issue: \(#[0-9][0-9]*\)$/\1/p' <worktree-path>/TASK.md | head -1` → `<task-ref>`
-     (empty for a local task or a gone worktree → `<task-ref>` = `<task-name>`). Step 10 closes
-     exactly that issue; a name lookup could match a newer open issue reusing the name.
+   - Pin the task this lane closes, before step 7 removes the worktree:
+     `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" ref <main-repo-path> "<task-name>" "<worktree-path>/TASK.md"`
+     → `ref=` is `<task-ref>`, `pinned=` is `<task-pinned>`. On the GitHub backend it is the
+     `#N` TASK.md was kicked off from (`pinned=yes`); a gone worktree leaves only the name
+     (`pinned=no`), which may match a newer open issue reusing it. The local backend always
+     answers the name, pinned. Always pass `<task-ref>` **quoted**: an unquoted `#44` starts a
+     shell comment and drops the rest of the command.
    - **Already gone** — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/landing.sh" lane "<task-name>" --repo "<main-repo-path>"`
      prints `worktree_state=gone` (git no longer lists it, or lists it as prunable; a
      leftover directory does not count; `worktree=` is the path, the `/land` marker's
@@ -634,11 +635,18 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
       ```
     - **Manual close** (no merged PR) — the same call without `--pr`/`--sha`; the record says
       "closed manually (no merged PR)".
+    - **`<task-pinned>=no`** (GitHub backend, worktree gone) — before either call, run
+      `task-store.py get <main-repo-path> "<task-ref>"`, show the issue it matched (`issue=`,
+      `title=`, `state=`) and ask whether that is the issue this lane shipped. Close it as
+      `"#N"` only on a yes; otherwise ask for the right `#N`. Never close an unpinned name
+      unasked, also not on an auto-accepted delegated close.
     - **Exit 3** ("no such task"): nothing to close (the task was never recorded) — note it in
       the summary and continue; not a failure.
-    - **Exit 4** (GitHub backend, `gh` unusable) or **1** (a `gh` call failed): the issue is
-      still open. Surface stderr and say "closing the task failed — `<ref>` still open";
-      the rest of the cleanup (worktree/branch) already happened. Never fall back to a file.
+    - **Exit 4** (GitHub backend, `gh` unusable), or **1** on the GitHub backend (a `gh`
+      call failed): the issue is still open. Surface stderr and say "closing the task failed
+      — `<task-ref>` still open"; the rest of the cleanup (worktree/branch) already happened.
+      Never fall back to a file. **1** on the local backend is `archive-task.sh` failing — see
+      `backend=local` below.
     - **Exit 5** (several open issues carry this task name) or **2** (the name was refused):
       nothing was closed. Show stderr and the open candidates, ask which issue this lane
       shipped, and close that one with the same call and `"#N"` (quoted) in place of the name. Never
