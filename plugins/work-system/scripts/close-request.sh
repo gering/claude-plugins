@@ -26,8 +26,9 @@
 #       A worktree that is GONE (removed outside /close, e.g. under a running
 #       /land) is still this task's lane when worktree= is the path
 #       `landing.sh lane` names for the task, that predicate calls it gone, and
-#       something still records the task (a /land marker or an open
-#       tasks/<task>.md): that is always `ask` (reason worktree-gone), never
+#       something still records the task (a /land marker, or an open task in
+#       the backlog per task-store.py — an unreachable backlog counts, since
+#       the outcome is only ever `ask`): that is always `ask` (reason worktree-gone), never
 #       auto — what is left is the archive, the follow-ups, the branches and
 #       the tab, and the request can no longer be cross-checked against a
 #       checkout. With no such record it is rejected like any non-lane.
@@ -74,6 +75,17 @@ own_main() {
 }
 
 valid_task() { printf '%s' "$1" | grep -Eq "$TASK_RE"; }
+
+# Does the backlog still hold <task> open? Exit 3 from the store is the only
+# "no"; a backlog it cannot read (gh down) counts as a record, because a gone
+# lane is only ever `ask` — the user decides, nothing is torn down unasked.
+task_recorded() {
+  local out rc=0
+  out="$(python3 -I "$SCRIPT_DIR/task-store.py" get "$1" "$2" 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 3 ] && return 1
+  [ "$rc" -ne 0 ] && return 0
+  printf '%s\n' "$out" | grep -qx 'state=open'
+}
 
 # lane_row <main> <worktree-realpath> → "task<TAB>branch" of the lane at that
 # path, or nothing. lanes.sh is the authoritative lane set; HERDR_ENV is unset so
@@ -228,7 +240,7 @@ out(("task", seen["task"]), ("worktree", rp(seen["worktree"])))' "$file" "$TASK_
   landing_out="$(bash "$SCRIPT_DIR/landing.sh" status "$m_task" --repo "$MAIN" 2>/dev/null)"
   if [ -n "$m_wt" ] && [ "$m_wt" = "$(printf '%s\n' "$lane_out" | sed -n 's/^worktree=//p')" ] \
      && printf '%s\n' "$lane_out" | grep -qx 'worktree_state=gone'; then
-    if [ -f "$MAIN/tasks/$m_task.md" ] || ! printf '%s\n' "$landing_out" | grep -qx 'landing=none'; then
+    if task_recorded "$MAIN" "$m_task" || ! printf '%s\n' "$landing_out" | grep -qx 'landing=none'; then
       gone=1; row="$m_task	task/$m_task"
       printf '%s\n' "$lane_out" | grep -qx 'leftover=yes' && leftover=yes
     fi

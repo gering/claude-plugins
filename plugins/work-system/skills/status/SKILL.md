@@ -26,7 +26,7 @@ user_invocable: true
      `pr_state` (MERGED / OPEN / CLOSED / none / nogh), `pr_number`, `pr_url`, `commits_in_main`,
      `main_branch`, `on_main`, `detached`.
    - **If `on_main=yes` and `task_name` is empty** (run from the main repo with no argument):
-     list the files in `tasks/`, ask which task to check, then re-run `assess "<chosen-name>"`.
+     list the backlog (`python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" list "$PWD"`), ask which task to check, then re-run `assess "<chosen-name>"`.
    - **If `detached=yes`**: the worktree is on a detached HEAD — there is no task branch to check.
      Report that and stop (check out the `task/<name>` branch, or pass a task name explicitly).
 
@@ -38,7 +38,8 @@ user_invocable: true
    "not merged".
 
 2. **Read the task file** for human context (optional):
-   - Run: `cat tasks/<task_name>.md 2>/dev/null` — use the title/goal to label the report.
+   - Run: `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" get "$PWD" "<task_name>" --body 2>/dev/null` — use the title/goal to
+     label the report (a GitHub task also has its issue number in it).
 
 3. **Report** from `verdict` + `confidence`, quoting the concrete evidence fields:
 

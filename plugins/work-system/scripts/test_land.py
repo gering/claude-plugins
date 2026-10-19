@@ -199,7 +199,7 @@ check("a leftover directory is removed only on a yes", "`leftover=yes`" in step4
 check("a surviving branch is checked before step 8 deletes it",
       "gone-check" in step4c and "`stop=branch-ahead`" in step4c)
 check("the marker is cleared after the archive",
-      at(CLOSE, "10. **Archive the task file**") < at(CLOSE, "10a. **Clear the `/land` marker**")
+      at(CLOSE, "10. **Close the task in the backlog**") < at(CLOSE, "10a. **Clear the `/land` marker**")
       < at(CLOSE, "10b. **Act on the follow-ups**"))
 recv = CLOSE[at(CLOSE, "## Receiving a close-request"):]
 check("a gone lane is an ask that still archives, sweeps and closes the tab",
@@ -273,7 +273,7 @@ check("6c runs nothing but the record before the close", "Nothing else runs here
 
 s10b = CLOSE[at(CLOSE, "10b. **Act on the follow-ups**"):at(CLOSE, "11. **Final summary**")]
 check("10b comes after the archive and before the summary",
-      at(CLOSE, "10. **Archive the task file**") < at(CLOSE, "10b. **Act on the follow-ups**"))
+      at(CLOSE, "10. **Close the task in the backlog**") < at(CLOSE, "10b. **Act on the follow-ups**"))
 check("open items are recorded in 6c, before the worktree is removed",
       "**Record before the removal.**" in s6c and "followups.py\" record" in s6c
       and "<<'WS_FOLLOWUP_END'" in s6c)

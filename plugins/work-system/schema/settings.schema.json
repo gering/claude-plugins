@@ -26,6 +26,18 @@
         }
       }
     },
+    "tasks": {
+      "type": "object",
+      "description": "Where the task backlog lives.",
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": ["auto", "github", "local"],
+          "default": "auto",
+          "description": "github: issues labelled work-system:task in origin's repo. local: markdown files in tasks/. auto: local while task files exist there (until they are moved to issues), else github when origin is on github.com and gh is installed, else local."
+        }
+      }
+    },
     "branches": {
       "type": "object",
       "description": "Branch naming conventions.",

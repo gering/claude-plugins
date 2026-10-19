@@ -64,7 +64,9 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
    - Show proposed task name and ask for confirmation
 
 4. **Check for conflicts**:
-   - Check if `tasks/<task-name>.md` already exists
+   - Check the backlog: `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" get "<main-repo>" "<task-name>"` — exit 0 with
+     `state=open` is a conflict; exit 3 is free; exit 4 (GitHub backend, `gh` unusable) → show
+     its stderr and stop.
    - Check if `task/<task-name>` branch already exists
    - Check if worktree path `.claude/worktrees/<task-name>` already exists
    - If any conflict, ask user how to proceed (rename or skip)
@@ -101,9 +103,13 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
      ```
    - Show to user for review and allow edits
 
-7. **Create task file**:
-   - Write to: `tasks/<task-name>.md`
-   - Create `tasks/` directory if it doesn't exist
+7. **Create the task** through the task store (local file or GitHub issue, per the repo's
+   `tasks.backend`). First run `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" backend "<main-repo>"`
+   and name the target in the step-6 review question — the issue repo (`repo=`), and that the
+   issue will be **publicly visible** when `visibility=public` — or the `tasks/` file. Only on
+   yes: write the reviewed text to a temp file, then
+   `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" create "<main-repo>" "<task-name>" --body-file <tmp>` and delete the temp
+   file. Report `path=` or `issue=`/`url=` from its output; non-zero → show stderr and stop.
 
 8. **Rename branch** (optional):
    - Ask: "Rename branch `<original-name>` to `task/<task-name>`? (recommended for consistency)"
@@ -117,7 +123,7 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
    - If branch kept original name: `git worktree add .claude/worktrees/<task-name> <original-branch-name>`
 
 10. **Copy files to worktree** (run from main-repo CWD — no `cd`):
-    - Copy task file: `cp tasks/<task-name>.md .claude/worktrees/<task-name>/TASK.md`
+    - Copy the task: `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" get "<main-repo>" "<task-name>" --write .claude/worktrees/<task-name>/TASK.md`
     - Keep it out of git, so `/pr-flow:merge`'s clean-tree check (and a `git add -A`)
       never sees it: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" exclude-task .claude/worktrees/<task-name>`.
       `excluded=no` (a tracked or unwritable TASK.md) → say so in one line; never fatal.
@@ -241,7 +247,7 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     Branch adopted into work system!
 
     Original branch: <original-branch-name>
-    Task file:       tasks/<task-name>.md
+    Task:            <path= or #N from step 7>
     Location:        .claude/worktrees/<task-name>
     Branch:          <current-branch-name>
     Commits:         <count> commits ahead of <main-branch>

@@ -11,6 +11,9 @@ reindexedAt: 2026-07-12
 
 # Task Archiving on /close
 
+> Local backend only. On the GitHub backend `/close` closes the issue instead —
+> see `features/github-issues-task-backend.md`.
+
 `/close` **archives** the finished task file instead of deleting it: it moves
 `tasks/<name>.md` into `tasks/archive/<name>.md` with a closed-stamp header and
 appends a one-line entry to an append-only `tasks/archive/_index.md` log. Rationale:

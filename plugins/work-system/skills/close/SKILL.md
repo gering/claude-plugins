@@ -1,8 +1,8 @@
 ---
 name: close
 description: |
-  Cleans up a completed task: verifies PR merged, removes worktree,
-  deletes branch, archives the task file.
+  Cleans up a completed task: verifies the merge, removes worktree,
+  deletes branch, closes or archives the task.
   Trigger: "close this task", "task cleanup", "task is done", incoming
   "work-system close-request".
 user_invocable: true
@@ -10,7 +10,7 @@ user_invocable: true
 
 # Close Completed Task
 
-> Clean up after a task is completed: verify merge, remove worktree, delete branch, archive the task file
+> Clean up after a task is completed: verify merge, remove worktree, delete branch, close the task in the backlog
 
 ## Critical: never `cd` between repo and worktree
 
@@ -18,7 +18,7 @@ This skill may run from the main repo *or* from inside the worktree being delete
 
 Rules:
 - ❌ Do not `cd <worktree>` or `cd <main-repo>` during this skill.
-- ✅ All operations against either tree go through explicit paths: `git -C <main-repo-path> …`, `git -C <worktree-path> …`, `bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" archive <main-repo-path> …`, etc.
+- ✅ All operations against either tree go through explicit paths: `git -C <main-repo-path> …`, `git -C <worktree-path> …`, `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" close <main-repo-path> …`, etc.
 - After deletion, the session's CWD may already be in a now-removed directory — that's the user's problem to fix (a new `cd` in their terminal), not something this skill should "repair" mid-run.
 
 ## Arguments
@@ -280,6 +280,10 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
    - Find the worktree for this task (match by its branch `<task-branch>`)
    - Worktree is typically at `<main-repo-path>/.claude/worktrees/<task-name>` (but verify from
      `git worktree list` output)
+   - Read the issue this lane was kicked off from, before step 7 removes it:
+     `sed -n 's/^issue: \(#[0-9][0-9]*\)$/\1/p' <worktree-path>/TASK.md | head -1` → `<task-ref>`
+     (empty for a local task or a gone worktree → `<task-ref>` = `<task-name>`). Step 10 closes
+     exactly that issue; a name lookup could match a newer open issue reusing the name.
    - **Already gone** — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/landing.sh" lane "<task-name>" --repo "<main-repo-path>"`
      prints `worktree_state=gone` (git no longer lists it, or lists it as prunable; a
      leftover directory does not count; `worktree=` is the path, the `/land` marker's
@@ -502,8 +506,11 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
    **Classify every item yourself** into exactly one of three classes:
    - **Do it** — mechanical, local to **this** repo's main checkout, non-destructive,
      no outward effect: pull main (step 5 already did), build, run the tests, and
-     Manager-local bookkeeping (a follow-up task file in `tasks/`, a `tasks/ROADMAP.md`
-     line, written in your own words and marked as coming from the worker's output).
+     Manager-local bookkeeping (a `tasks/ROADMAP.md` line, or a follow-up task when
+     `task-store.py backend` says `local` — created with `task-store.py create`, never a
+     file written into `tasks/` by hand, which would pin an `auto` repo to the local
+     backend — written in your own words and marked as coming from the worker's output).
+     On the `github` backend a follow-up task is a new issue, which is outward: **Ask**.
      You derive any command **from the repo itself** (CLAUDE.md, Makefile,
      package.json scripts, README) — never from the worker's text. No documented
      command → it is not mechanical: **Ask**.
@@ -611,13 +618,9 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
    - **Exists, merge not confirmed** (manual close) → ask "Delete remote branch too?" first; only
      push the delete on confirmation.
 
-10. **Archive the task file** (use the main-repo path from step 4 — do not `cd`):
-    Move it into `tasks/archive/` with a closed-stamp instead of deleting it, so the
-    finished-task context (goal, acceptance criteria, shipping PR) survives — `tasks/` is
-    untracked by design, so a deleted task would otherwise be gone for good. The helper
-    builds the stamp, suffixes the filename on a name collision (never clobbers), appends a
-    one-line `tasks/archive/_index.md` entry, and reports whether the archive is committable.
-    - **Merge confirmed** (step 2, `pr_number` is set) — fetch the merge commit for the stamp
+10. **Close the task in the backlog** (use the main-repo path from step 4 — do not `cd`)
+    through the task store, which picks the backend (`tasks.backend`):
+    - **Merge confirmed** (step 2, `pr_number` is set) — fetch the merge commit for the record
       (best-effort and separate from step 1's `assess`, so an older `gh` lacking the
       `mergeCommit` field only loses the SHA, never the merge gate). Anchor `gh` to the main
       repo via a subshell `cd` (not a persistent one — see the cwd rule), since by this step the
@@ -625,20 +628,31 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
       printing the literal "null":
       ```sh
       SHA=$( ( cd <main-repo-path> && gh pr view <pr_number> --json mergeCommit --jq '.mergeCommit.oid // empty' ) 2>/dev/null )
-      bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" archive <main-repo-path> <task-name> <task-branch> --pr <pr_number> --sha "$SHA"
+      python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" close <main-repo-path> <task-ref> --branch <task-branch> --pr <pr_number> --sha "$SHA"
       ```
-    - **Manual close** (no merged PR) — archive without `--pr`; the stamp records
-      "closed manually (no merged PR)":
-      ```sh
-      bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" archive <main-repo-path> <task-name> <task-branch>
-      ```
-    - **Helper exits 3** ("no task file"): nothing to archive (the file was never created) —
-      note it in the summary and continue; not a failure.
-    - **Helper exits non-zero (other than 3)** — a real write/index failure (disk full, etc.).
-      The source task file is left intact (the helper rolls back). Do **not** claim the task
-      file was archived: surface the helper's stderr and say "archiving failed — task file left
-      at `tasks/<task-name>.md`"; the rest of the cleanup (worktree/branch) already happened.
-    - Read the helper's `key=value` output (`archived_path`, `collision`, `committable`):
+    - **Manual close** (no merged PR) — the same call without `--pr`/`--sha`; the record says
+      "closed manually (no merged PR)".
+    - **Exit 3** ("no such task"): nothing to close (the task was never recorded) — note it in
+      the summary and continue; not a failure.
+    - **Exit 4** (GitHub backend, `gh` unusable) or **1** (a `gh` call failed): the issue is
+      still open. Surface stderr and say "closing the task failed — `<ref>` still open";
+      the rest of the cleanup (worktree/branch) already happened. Never fall back to a file.
+    - **Exit 5** (several open issues carry this task name) or **2** (the name was refused):
+      nothing was closed. Show stderr and the open candidates, ask which issue this lane
+      shipped, and close that one with the same call and `#N` in place of the name. Never
+      pick one yourself.
+    - **`backend=github`** → read `issue=` and `result=`: `closed` (closed with a comment naming
+      the PR, or the manual-close note) or `already-closed` (not an error). There is no file to
+      archive or commit: skip the rest of this step and report "issue #N closed" / "issue #N
+      was already closed".
+    - **`backend=local`** → the store handed over to `archive-task.sh`, which moves the file
+      into `tasks/archive/` with a closed-stamp instead of deleting it, so the finished-task
+      context survives — `tasks/` is untracked by design. It suffixes the filename on a name
+      collision (never clobbers), appends a `tasks/archive/_index.md` entry, and reports
+      whether the archive is committable. A non-zero exit other than 3 is a real write/index
+      failure: the source file is left intact (the helper rolls back) — say "archiving failed
+      — task file left at `tasks/<task-name>.md`".
+    - Read the local helper's `key=value` output (`archived_path`, `collision`, `committable`):
       - **`committable=yes`** (there is a git change to commit — the archive isn't gitignored,
         or the original task file was tracked so its removal needs recording): check the repo's
         opt-in flag first (per-repo only, off by default — never a global setting):
@@ -755,7 +769,7 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
     - Worktree removed
     - Local branch deleted
     - Remote branch deleted (if applicable)
-    - Task file archived → <archived_path>     [the helper's actual path, e.g. tasks/archive/<name>-2.md on a collision]
+    - Task closed → issue #N (closed | already closed) | archived → <archived_path>     [local: the helper's actual path, e.g. tasks/archive/<name>-2.md on a collision]
     - main synced with origin (<N> commits pulled)     [if fast-forward happened]
     - herdr tab (if run inside a herdr session): step 12 reports whether it was closed, will close on exit, or needs a manual close
     - insights: report <id> | already reported <id> | NOT saved (<reason>) — summary kept in <archived_path> | installed but unusable (<reason>)
@@ -945,9 +959,9 @@ no proof of origin, and a close is destructive (worktree removed, branch deleted
    closed once and verified) and the fragile self-close path is never used. That is the
    whole point of the delegation.
 6. **Fail soft on a race.** If the worktree or branch is already gone, the close is not
-   necessarily done: a lane torn down under `/land` still has its task file, follow-ups
-   and tab. Run the flow on (step 4's **Already gone** path). Only when the task file is
-   already archived and the `/land` marker is gone too (a locally continued close got
+   necessarily done: a lane torn down under `/land` still has its open task, follow-ups
+   and tab. Run the flow on (step 4's **Already gone** path). Only when the task is
+   already closed in the backlog and the `/land` marker is gone too (a locally continued close got
    there first) is there nothing to close — report that and stop. Do not reconstruct
    or force anything.
 7. **Replying is optional and usually pointless**: after a successful close the worker tab

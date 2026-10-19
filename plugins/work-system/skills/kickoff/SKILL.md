@@ -62,21 +62,21 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
    - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path` → `<main-repo>` — capture
      it for the CWD-drift check in step 11.
 
-2. **Show available tasks**:
-   - Run: `find tasks -maxdepth 1 -type f -name '*.md' ! -name '_index.md' ! -name 'README.md' ! -name 'ROADMAP.md' 2>/dev/null`
-     (the set the `[ws]` statusline counts; the roadmap holds the Manager's open
-     follow-ups, not a task) — `find` (not an
-     `ls tasks/*.md` glob, which lists the whole cwd under bash `nullglob` when there are no
-     matches) lists only top-level pending task files and excludes the `tasks/archive/`
-     directory `/close` creates.
-   - **If the output is empty** (note: `find` exits 0 even with no matches, so don't rely on a
-     `||` fallback): there are no pending tasks — suggest creating one with `/define` and stop.
-   - Otherwise list each task with its first line (title); the task name is the basename minus
-     `.md`. Ask the user which task to work on.
+2. **Show available tasks** — the backlog is reached only through the task store
+   (`STORE="${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py"`), never through `tasks/` or `gh`:
+   - Run: `python3 -I "$STORE" list "<main-repo>"`.
+   - **Non-zero exit** → show its stderr and stop. Exit 4 is a GitHub backend whose `gh`
+     is missing, unauthenticated or unreachable; there is no fallback to local files.
+   - A `hint=` line (local tasks keep the local backend until they are migrated) → relay it
+     in one line.
+   - **`count=0`** → there are no pending tasks — suggest creating one with `/define` and stop.
+   - Otherwise list each `task=<name>\t<ref>\t<title>` row (ref is `#N` or the file path) and
+     ask the user which task to work on. A task argument may be a name or `#N`.
 
 3. **Read selected task**:
-   - Read the task file from `tasks/<task-name>.md`
-   - Extract task name from filename (e.g., `fix-calendar-bug.md` → `fix-calendar-bug`)
+   - Run: `python3 -I "$STORE" get "<main-repo>" "<name-or-#N>"` → `task=` is the task
+     name used for the branch and worktree below (for an issue: its name marker, or the
+     slug of its title); `state=closed` → say the task is already closed and stop.
 
 4. **Quick completion check**:
    - If `gh` is available: `gh pr list --state merged --head "task/<task-name>" --limit 1 --json number,title`
@@ -97,7 +97,10 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
    - If branch already exists, use: `git worktree add .claude/worktrees/<task-name> task/<task-name>`
 
 8. **Copy files to worktree** (run from main-repo CWD — relative paths target the main repo):
-   - Copy task file: `cp tasks/<task-name>.md .claude/worktrees/<task-name>/TASK.md`
+   - Copy the task (`<ref>` = `#<issue>` when step 3 printed `issue=`, else `<task-name>`):
+     `python3 -I "$STORE" get "<main-repo>" "<ref>" --write .claude/worktrees/<task-name>/TASK.md`
+     — a local task file as is; an issue as its title, an `issue: #N` line and its body.
+     A copy, not a link: a later issue edit does not change TASK.md.
    - Keep it out of git, so `/pr-flow:merge`'s clean-tree check (and a `git add -A`)
      never sees it: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" exclude-task .claude/worktrees/<task-name>`.
      `excluded=no` (a tracked or unwritable TASK.md) → say so in one line; never fatal.

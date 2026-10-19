@@ -38,7 +38,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/ws-statusline-install.sh" $ARGUMENTS
 - **◇ in review** (amber) — the task's branch has an **open** PR.
 - **✓ merged** (green) — the task's branch has a **merged** PR (ready to `/close`).
 
-State precedence is PR → worktree → not-started (a merged/open PR wins over a still-present worktree). When a project has no `tasks/` backlog (or it's empty), the renderer emits nothing — no ws block appears in unrelated projects.
+State precedence is PR → worktree → not-started (a merged/open PR wins over a still-present worktree). When a project has neither task files in `tasks/` nor `task/<name>` lanes, the renderer emits nothing — no ws block appears in unrelated projects. On the GitHub backend it counts the lanes only: the renderer never calls the network for issues, so not-started issues stay uncounted.
 
 PR state comes from a short-TTL cache (`<git-dir>/ws-statusline-prs`) refreshed by a **detached** background `gh` call — the render itself never blocks on the network, so the first render after a change may show PR columns one refresh late. Without `gh`, the ◇/✓ columns simply don't appear.
 
@@ -65,7 +65,7 @@ Still run `install` once to copy the renderer into place (and keep version updat
 
 ## Notes
 
-- Renderer is read-only — never writes to the project (the PR cache lives in `.git/`, outside the working tree). Counts come from `tasks/*.md`, worktree state from `git worktree list`, PR state from the cached `gh pr list`.
+- Renderer is read-only — never writes to the project (the PR cache lives in `.git/`, outside the working tree). Counts come from `tasks/*.md` plus file-less `task/<name>` lanes, worktree state from `git worktree list`, PR state from the cached `gh pr list`.
 - Convention-based: a task binds to its `task/<name>` branch (the `/kickoff` naming). An `/adopt`-renamed branch that kept a non-`task/` name is not matched by the segment — an accepted blind spot for a glance indicator.
 - `scripts/ws-statusline.sh` is the single source of truth for renderer behaviour and holds the `readonly WS_STATUSLINE_VERSION` line that gates upgrades. When changing renderer behaviour, bump that version **and** the plugin `version` in `plugin.json`.
 - The install script requires `python3` (symlink resolution + atomic file mutation); it preflights and aborts cleanly if missing.
