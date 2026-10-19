@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Pins work-system's insights locator in sync with pr-flow's work-system locator.
+"""Pins the plugin locators in sync: work-system's insights locator and the
+work-system locators pr-flow and swarm each carry.
 
 Two plugins each need to find the other, and they CANNOT share a file: a shared
 library would make one depend on the other, which is the exact coupling the
@@ -28,6 +29,7 @@ REPO = HERE.parent.parent.parent
 SOURCES = {
     "work-system/insights-handoff.sh": HERE / "insights-handoff.sh",
     "pr-flow/lib-work-system.sh": REPO / "plugins" / "pr-flow" / "scripts" / "lib-work-system.sh",
+    "swarm/lib-work-system.sh": REPO / "plugins" / "swarm" / "scripts" / "lib-work-system.sh",
 }
 
 VKEY = re.compile(r"^def vkey\(v\):\n(?:[ \t].*\n|\n)*", re.M)
@@ -61,20 +63,22 @@ for label, path in SOURCES.items():
 
 if len(bodies) == len(SOURCES):
     labels = list(bodies)
-    a, b = bodies[labels[0]], bodies[labels[1]]
-    if a != b:
+    a = bodies[labels[0]]
+    drifted = [l for l in labels[1:] if bodies[l] != a]
+    for other in drifted:
+        b = bodies[other]
         FAILS.append(
-            "the two plugin locators' SemVer comparators have drifted — fix BOTH "
-            f"({labels[0]} and {labels[1]}), they cannot share a file:\n"
+            "the plugin locators' SemVer comparators have drifted — fix ALL "
+            f"({', '.join(labels)}), they cannot share a file:\n"
             + "\n".join(
-                f"  {labels[0]}| {x}\n  {labels[1]}| {y}"
+                f"  {labels[0]}| {x}\n  {other}| {y}"
                 for x, y in zip(a.splitlines(), b.splitlines()) if x != y
             )
         )
     # A comparator that no longer reflects SemVer precedence is the actual bug
     # class; assert the two properties the fix established, so a rewrite that
-    # keeps both copies identical but wrong still fails here.
-    elif "split(\"+\", 1)[0]" not in a or "partition(\"-\")" not in a:
+    # keeps all copies identical but wrong still fails here.
+    if not drifted and ("split(\"+\", 1)[0]" not in a or "partition(\"-\")" not in a):
         FAILS.append("the comparator no longer strips build metadata / splits the "
                      "prerelease — SemVer precedence is not being implemented")
 

@@ -361,6 +361,13 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
        file is not being written is how a resumed session restarts the budget,
        the exact thing the persisted counter exists to prevent. Exit **3** → no
        mandate on file (nothing to bound; ask per milestone as step 3 says).
+       A round books budget only. `/land` and `/pr-flow:merge` refuse a head no
+       *recorded* review covers (`mandate.sh covered`): `/swarm:review` and
+       `/cycle` record a finished review themselves; a project's own review step
+       is recorded with `mandate.sh reviewed --head <commit it reviewed>` once its
+       result is in. Applied that review's agreed fixes and no re-review follows?
+       `mandate.sh fixed --after <that commit>`, once — and only for those fixes.
+       swarm records only a clean tree: commit before you review.
      Either way, check the remaining budget with `show` (which never consumes)
      before starting, and stop when `review_budget_exhausted=yes`: report the state
      and the findings you did not act on, and let the user extend the budget (they

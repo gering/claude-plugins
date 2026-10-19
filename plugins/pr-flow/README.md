@@ -56,6 +56,12 @@ If a clear pattern emerges (e.g. 18 of 20 last PRs were squashed), `/merge` sugg
 
 **Why it matters.** If your team keeps backups, `/merge` respects that. If you don't, it doesn't create clutter. Zero config — detected from repo state.
 
+### Local review gate in a work-system lane
+
+**What it does.** Inside a lane with a mandate, `/merge` asks work-system (`mandate-shim.sh covered`) whether a recorded review — a finished `/swarm:review` or `/cycle` review, or that review's agreed fixes — covers the PR head, stops without one, and merges with `--match-head-commit`. `/cycle` records each finished bot review (`reviewed --head`), and a `--loop` that stopped on fixes no review saw records them (`fixed`); the local route's `/swarm:review --pr` records its own review. Outside a lane, without work-system, or with one older than the gate, the check is N/A.
+
+**Why it matters.** A lane's review is local, not a GitHub approval; this gate is what makes "reviewed" checkable before a merge, rebase and squash included.
+
 ### No deploy from a work-system lane
 
 **What it does.** Before running a deploy the project's instructions call for after a merge, `/merge` asks work-system (through its mandate shim, `deploy-owner`) who owns it. Inside a lane with `deploy.by = "manager"` (work-system's default) it does not deploy; it names where the deploy procedure is documented, and the Manager deploys from the main checkout after the close. Outside a lane, with `deploy.by = "worker"`, or without work-system, the project's instructions apply unchanged.

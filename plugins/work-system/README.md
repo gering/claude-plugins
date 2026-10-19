@@ -158,7 +158,8 @@ list for the Manager's sweep), runs `/pr-flow:merge` with all its own gates,
 confirms the merge with `task-status.sh assess` (`pr_state=MERGED` — a success
 message is not enough) and checks that the merged PR head carries this worktree's
 `HEAD`, then runs `/close --delegate`. Before merging an open PR it requires an
-upstream and a PR head equal to this worktree's `HEAD`; it takes no arguments. Any stop before a confirmed
+upstream, a PR head equal to this worktree's `HEAD`, and a local review covering
+that head (see "Auto mode and the local review gate"); it takes no arguments. Any stop before a confirmed
 merge closes nothing. Typing `/land` is the merge authorization — a mandate's
 `deny: merge` binds the worker's own initiative, not your command — so the skill is
 `disable-model-invocation`, which keeps the Skill tool from starting it. That fence
@@ -403,6 +404,46 @@ mandate keeps `local-review` is read from the registry's `supports=` field, not
 from the CLI's name: an agent that cannot run the review skills gets an allow list
 without it, because recording an authority the worker cannot exercise is worse
 than recording none.
+
+### Auto mode and the local review gate
+
+A lane is reviewed locally (`/swarm:review`, `/cycle`), not through GitHub approvals,
+so `/land` and `/pr-flow:merge` gate the merge on that review instead. A *finished*
+review records what it saw: `/swarm:review` (the whole lane, committed tree, or
+`--pr`) and `/cycle` call `mandate.sh reviewed --head` themselves, storing `reviewed_head` and the lane's diff id — a
+hash of the lane's diff against its main branch with hunk line numbers dropped (function context kept), so a
+rebase or squash keeps it while any change to the code, whitespace included, does
+not. Booking a round (`round`) only spends budget; it records nothing. `mandate.sh
+fixed --after <rev>` records the state after review `<rev>`'s agreed fixes — once per
+review, and refused (`reason=other-review`) when `<rev>` is not the review on record.
+swarm records only a review of a committed, clean tree, so commit before reviewing.
+`mandate.sh covered [--head <rev>]` answers whether a recorded review covers the head
+being merged (exit 0; exit 1 with `reason=no-review|changed-since-review`; exit 3
+without a mandate). On exit 1 both skills stop and name the missing review; there is
+no override, and `/merge` passes `--match-head-commit` so a head pushed after the
+check is refused. A lane without a mandate is not gated. The gate catches a
+forgotten or stale review; it is not a boundary against a worker that wants to
+bypass it (`reviewed` takes no proof that a review ran, and the record lives in
+the lane).
+
+Claude Code's auto-mode classifier can still deny `gh pr merge` as "Merge Without
+Review" — it sees the commands, not the review result. A plugin cannot ship an
+exception: `autoMode` is read only from user or managed settings (never a project's
+`.claude/settings*.json`), and an agent writing one is itself an auto-mode bypass.
+If you want `/land` to merge covered lanes unasked, add a rule yourself, user scope
+(`/permissions` → Auto mode, or `autoMode.allow` in `~/.claude/settings.json`),
+adjusted to your repos:
+
+```text
+Merging a work-system lane PR in github.com/<owner>/<repo> (squash, no --admin/--force)
+is allowed when the user invoked /land or /pr-flow:merge for that PR in this session:
+the lane's local review is the review gate, checked by `mandate.sh covered` before
+the merge.
+```
+
+Without the rule, a denied merge makes `/land` stop with the exact follow-up: type
+`/pr-flow:merge` yourself (an explicit command clears the denial), then `/land` again
+to confirm and close.
 
 ## Insight reports at handoff and close (optional)
 

@@ -84,6 +84,13 @@ landing marker, **every stop** first clears it — `bash
        "This branch has no upstream — push it with `git push -u origin HEAD` (or
        `/pr-flow:cycle`) first." (Not for `MERGED`: a merged PR's deleted remote
        branch leaves no upstream, and pushing would only re-create it.)
+     - `OPEN` only — **a local review covers this head** (the head check made `HEAD`
+       the PR head): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" covered`.
+       Exit 0 → on. Exit 1 → stop before anything is written: "Not merged — no
+       recorded review covers this head (`reason=<…>`). With everything committed and
+       pushed, run `/swarm:review` here (it records a review of a clean tree) or
+       `/pr-flow:cycle`, then `/land` again." Exit 2 → stop and show stderr. Exit 3 (no mandate) → on; `/merge`'s own gate
+       (its step 6b) is the authoritative one, after its rebase.
    - **Record the landing** once every check above passed. Keep
      `<main-repo-path>` (`bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path`)
      and this worktree's path for step 4 — if the lane is torn down under `/land`,
@@ -155,6 +162,13 @@ landing marker, **every stop** first clears it — `bash
      When the dirty tree is only `?? TASK.md` (a lane kicked off before `/kickoff`
      excluded it), run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" exclude-task .`
      and say so — never commit it; on `excluded=yes` the user can re-run `/land`.
+   - **The merge command was denied** (the auto-mode classifier refused `gh pr merge`,
+     e.g. "Merge Without Review") → do not retry, rephrase or merge another way. Run
+     step 4's lane check, then stop with the exact follow-up: "Not merged — auto mode
+     denied the merge. Type `/pr-flow:merge` in this tab (your explicit command clears
+     the denial), then `/land` again: the PR is merged by then, so it confirms and
+     closes." Add that the README's "Auto mode and the local review gate" shows the
+     `autoMode.allow` rule that lets `/land` merge a covered lane.
    - `/merge` reports the merge, **or** reports an error *after* `gh pr merge` ran (its
      post-merge `git checkout <base>` / branch delete fails in a worktree whenever the
      main checkout holds the base branch) → go to step 4. Neither the

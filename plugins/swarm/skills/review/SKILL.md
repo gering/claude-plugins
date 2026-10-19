@@ -103,6 +103,8 @@ Decide what to review from the user's argument, then run the block:
   `git diff <ref>`.
 - **`--staged`** → `git diff --cached`.
 - **a pathspec** → append `-- <pathspec>` to the diff command.
+- For each of these three, also **prefix the block with `SCOPE_DEFAULT=0;`**: such
+  a review does not cover the whole lane, so step 3 must not record it.
 - **`--pr [<number>]`** → the PR diff via `gh`: **prefix the block with**
   `REVIEW_PR=1; PR_ARG=<value>;` in the SAME Bash call (shell state doesn't cross
   calls). **Before building that prefix, validate the `--pr` value in the model
@@ -275,6 +277,9 @@ else
     BASE="$(git merge-base HEAD "$b" 2>/dev/null || git merge-base HEAD "origin/$b" 2>/dev/null || true)"
     if [ -n "$BASE" ]; then break; fi
   done
+  # The commit the diff is taken at, read BEFORE the diff: step 3 records only
+  # this one, and only if nothing moved while the diff was being built.
+  SCOPE_HEAD="$(git rev-parse HEAD)"
   if [ -n "$BASE" ]; then
     git diff "$BASE" > "$DIFF"
   else
@@ -303,6 +308,33 @@ if [ "$INCLUDE_UNTRACKED" = 1 ]; then
 fi
 
 if [ ! -s "$DIFF" ]; then echo "SWARM_EMPTY"; rm -rf "$TMPD" "$WORKDIR"; exit 0; fi
+
+# What a work-system lane may record for this review (step 3): the COMMIT it
+# reviewed, fixed HERE at scope time — never the tree at presentation time,
+# which edits made while the review ran would already have changed. Only a
+# review of the whole lane qualifies: --pr (clean tree at the PR head, checked
+# above) or the default branch-delta scope on a clean tree. A ref, --staged or
+# pathspec review sets SCOPE_DEFAULT=0 in its prefix and records nothing.
+# A --pr review covers the lane only when the PR targets the default branch (a
+# stacked PR's diff omits its base branch's commits, which the gate would then
+# count as reviewed), and only when the head the diff was fetched at (PR_META,
+# read first) is still the head. "Clean" ignores only the UNTRACKED record and
+# staging files work-system's diff id ignores too; any tracked change is dirty.
+RECORD_HEAD=""
+DEFAULT_BR="${DEFBR:-$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||' || true)}"
+if [ "$REVIEW_PR" = 1 ]; then
+  PR_BASE="$(printf '%s' "$PR_META" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("baseRefName",""))' 2>/dev/null || true)"
+  PR_META_OID="$(printf '%s' "$PR_META" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("headRefOid",""))' 2>/dev/null || true)"
+  case "$PR_BASE" in
+    "${DEFAULT_BR:-main}"|main|master)
+      if [ -n "$PR_META_OID" ] && [ "$PR_META_OID" = "$PR_HEAD_OID" ]; then RECORD_HEAD="$PR_HEAD_OID"; fi ;;
+  esac
+elif [ "${SCOPE_DEFAULT:-1}" = 1 ] && [ "$(git rev-parse HEAD)" = "${SCOPE_HEAD:-}" ] \
+     && [ -z "$(git status --porcelain --untracked-files=all \
+       | grep -Ev '^\?\? (TASK\.md|MANDATE\.md|\.MANDATE\.[^/]*|\.swarm-workflow\.[^/]*/.*)$' || true)" ]; then
+  RECORD_HEAD="$SCOPE_HEAD"
+fi
+echo "RECORD_HEAD=$RECORD_HEAD"
 
 # Fence the diff as untrusted DATA with a PER-RUN RANDOM nonce in the delimiter:
 # a fixed marker could be forged by diff content to close the fence early and
@@ -838,6 +870,22 @@ never needs `$TMPD`. Cleaning up here (not deferring across turns) guarantees th
 fetched PR diff can't be stranded on disk by a compaction/decline/error before a
 later prose step runs.
 
+**Record the review for a work-system lane** — when step 1 echoed a non-empty
+`RECORD_HEAD` (the commit this review covered, fixed at scope time), before any
+fix touches the tree:
+```sh
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/review-record.sh" reviewed --head '<RECORD_HEAD>'
+```
+It tells work-system what this review saw, so the lane's `/land` and
+`/pr-flow:merge` can merge it (their gate: `mandate.sh covered`). Exit 3 → not a
+lane with a mandate (or no work-system): say nothing. Exit 0 → one line, "Review
+recorded for this lane's merge gate." Exit 1, 2 or 4 → one line with its stderr;
+the review itself stands. `RECORD_HEAD` empty on a default-scope or `--pr` review
+while `test -f "$(git rev-parse --show-toplevel)/MANDATE.md"` succeeds → one
+line: "Not recorded for the merge gate: <the tree had uncommitted changes —
+commit, then review again | the PR does not target the default branch | the PR
+head moved during the review>."
+
 After presenting:
 - `--pr` given → proceed to **step 5** (offer to publish the report as a PR
   comment). `--pr` never fixes, so step 4 is skipped.
@@ -898,7 +946,11 @@ Work the ✅/🟨 findings, most severe first. For each:
 
 Then report per finding, keyed by its stable `#`: `🔧 applied` ·
 `⏭️ skipped-stale` · `⏭️ skipped-unsafe-path` (step 0) · `❓ needs-decision`.
-❌-disagree findings stay listed, untouched. In `--fix` (no loop): stop here.
+❌-disagree findings stay listed, untouched. In `--fix` (no loop), when step 3
+recorded the review (exit 0) and fixes were applied, record them — no re-review
+follows: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/review-record.sh" fixed --after '<RECORD_HEAD>'`
+(same exit handling as step 3's record). Under `--loop` the close-out records
+instead. In `--fix` (no loop): stop here.
 
 #### `--loop[=N]` — fix → re-review until clean
 
@@ -998,7 +1050,11 @@ Close-out — render the trajectory deterministically (never by hand):
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/loop-closeout.py" box "<OPEN joined by spaces>" --reason <reason>
 ```
 Print the box, then one summary line: rounds run, `FIXES_TOTAL`, and which of the
-4 termination reasons fired. A rise in the box (a fix surfaced new findings) is
+4 termination reasons fired. Each re-review records itself in "### 3. Present the report"
+(not in the loop's own step 3), which it can only do on a committed tree — so
+the loop's uncommitted fixes usually leave round 0 as the last recorded review.
+When fixes were applied after the last recorded review, record them once here:
+`review-record.sh fixed --after '<RECORD_HEAD of the last recorded review>'`. A rise in the box (a fix surfaced new findings) is
 legitimate — the script shows it; don't explain it away.
 
 ### 5. Publish to the PR (`--pr` only)

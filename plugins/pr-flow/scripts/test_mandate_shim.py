@@ -182,6 +182,24 @@ check("a linked worktree is a lane", r.returncode == 0 and "in_lane=yes" in r.st
 check("outside git deploy-owner is unknown (exit 3)",
       run(root, "deploy-owner", tempfile.mkdtemp()).returncode == 3)
 
+# --- covered: /merge's local-review gate passes through ----------------------
+r = run(root, "covered", str(wt))
+check("covered with no mandate is unknown (exit 3)", r.returncode == 3)
+subprocess.run(["bash", str(root / "work-system" / "scripts" / "mandate.sh"), "init", str(wt),
+                "allow=commit", "authorized_by=user", "task=x"], check=True, capture_output=True)
+r = run(root, "covered", "--head", "HEAD", str(wt))
+check("covered before a review is exit 1 with its reason",
+      r.returncode == 1 and "reason=no-review" in r.stdout)
+# A work-system too old to know the verb must read as unknown (3), never as the
+# exit-2 usage error that /merge would hard-stop on.
+old = layout()
+(old / "work-system" / "scripts" / "mandate.sh").write_text(
+    'echo "usage: mandate.sh {path|lane|show|init|allows|round|actions}" >&2; exit 2\n')
+for verb in ("covered", "reviewed", "fixed"):
+    r = run(old, verb, str(wt))
+    check(f"{verb} on an old work-system is unknown (exit 3)",
+          r.returncode == 3 and "verdict=old-work-system" in r.stdout)
+
 # --- usage ------------------------------------------------------------------
 check("unknown verb exits 2", run(root, "bogus").returncode == 2)
 check("the usage line lists lane", "lane" in run(root, "bogus").stderr)

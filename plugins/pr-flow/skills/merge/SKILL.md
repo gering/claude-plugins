@@ -75,6 +75,26 @@ user_invocable: true
    - If any reviewer requested changes and hasn't re-approved → ❌ block
    - Otherwise → ✅
 
+6b. **Local review coverage** (work-system lanes) — a lane's review runs locally
+    (`/swarm:review`, `/cycle`), not as GitHub approvals, so ask work-system whether a
+    recorded review covers the head about to be merged (after step 3's rebase):
+    ```sh
+    OID="$(gh pr view <N> --json headRefOid --jq .headRefOid)"
+    git cat-file -e "$OID^{commit}" 2>/dev/null || git fetch -q origin "$OID"
+    bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" covered --head "$OID" --branch "$(git branch --show-current)"
+    ```
+    - Exit **0** → ✅ `Local review: covers <OID:7> (via=<via>)`.
+    - Exit **1** → ❌ **hard stop, no `[m]` override** — merging an unreviewed lane head
+      is exactly what this gate exists to prevent. Name the missing review by `reason=`:
+      `no-review` → "No finished review is recorded for this lane."; `changed-since-review`
+      → "The PR head changed after the last recorded review." Then: "Commit and push,
+      run `/swarm:review` in this lane (it records a review of a clean tree) or
+      `/cycle`, then re-run `/merge` (or `/land`)."
+    - Exit **3** → ➖ N/A (not a lane with a mandate, or no work-system). With
+      `verdict=old-work-system`, say the installed work-system predates the gate.
+    - Exit **2** → ❌ stop and show stderr (a mandate nobody can vouch for, or a head
+      that could not be read).
+
 7. **Open Claude review issues**:
    - Fetch the latest Claude review comment via the shared helper:
      ```
@@ -147,6 +167,7 @@ user_invocable: true
     ✅ Mergeable: CLEAN
     ✅ CI: 8 passed, 0 failed
     ✅ Reviews: 1 approved, 0 changes requested
+    ✅ Local review: covers 3f2a9c1 (via=review)
     ⚠️  Claude review: 1 blocking issue still open (#3 — src/foo.ts:42)
 
     ── Documentation ──
@@ -191,7 +212,16 @@ user_invocable: true
       - `rebase`: `gh pr merge <N> --rebase [--delete-branch]`
       - `squash`: `gh pr merge <N> --squash [--delete-branch] --subject "<title>" --body "<body>"`
       - `merge`:  `gh pr merge <N> --merge  [--delete-branch] --subject "<title>" --body "<body>"`
+    - When step 6b passed (exit 0), add `--match-head-commit <sha>` with the full SHA
+      from its `head=` line, typed in literally (shell variables do not survive
+      between steps): GitHub then refuses a head pushed after the check instead of
+      merging it unreviewed.
     - **Never pass `--admin`.** If branch protection blocks the merge: stop and surface the error. Root-cause over workaround.
+    - **Permission denied** (the auto-mode classifier refused `gh pr merge`, e.g.
+      "Merge Without Review") → stop; do not retry or rephrase the command. Report the
+      denial and step 6b's verdict, and say: "Type `/pr-flow:merge` yourself — an
+      explicit command clears this denial. To allow it for lanes with a covering local
+      review, see work-system's README, 'Auto mode and the local review gate'."
     - Capture output + exit code
 
 15. **Post-merge actions**:

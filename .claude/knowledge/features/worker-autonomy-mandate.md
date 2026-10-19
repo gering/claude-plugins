@@ -1,9 +1,9 @@
 ---
 title: "Worker Autonomy Mandate (MANDATE.md)"
 createdAt: 2026-09-07
-updatedAt: 2026-10-17
+updatedAt: 2026-10-19
 createdFrom: "branch: task/extend-worker-autonomy"
-updatedFrom: "session: 2026-10-17 (task/add-land-skill)"
+updatedFrom: "branch: task/gate-land-merge-on-local-review"
 pluginVersion: 1.9.0
 prime: false
 ---
@@ -376,3 +376,48 @@ root. The fix is the general one for this shape: resolve into a global
 (`resolve_mandate_path`) and call it directly, so `die` can actually exit. Same
 family as the print-vs-cache trap in
 [swarm-backend-adapter](swarm-backend-adapter.md).
+
+## The local review gate (`reviewed` / `fixed` / `covered`)
+
+`/land` and `/pr-flow:merge` refuse to merge a lane head no recorded review
+covers. Why it is built this way:
+
+- **Deterministic, because the auto-mode classifier cannot see review results.**
+  It reads user messages and the commands Claude runs, not their output, so a
+  clean `/swarm:review` in the transcript does not stop a "Merge Without Review"
+  denial. The gate gives a user-scope `autoMode.allow` rule something checkable
+  to point at; the plugin cannot ship that rule (`autoMode` is read only from
+  user/managed settings, and writing it is itself a bypass).
+- **Recorded when a review FINISHES, not when a round is booked.** The first
+  cut recorded at `round`; review round 1 showed why that is wrong: a booked
+  review that times out still "covered" the head, a user-run `/swarm:review`
+  booked nothing so the gate's own remedy looped, and a spent budget made the
+  gate unpassable. So `round` books budget only, and whoever ran the review
+  calls `reviewed --head <commit>`: swarm records the commit it reviewed,
+  fixed at scope time and only for a clean, whole-lane scope (round 2 showed a
+  tree hashed at presentation time stamps edits made while the review ran);
+  `/cycle` records the pushed commit the bot read. swarm reaches work-system through
+  its own locator copy, pinned by `test_locator_sync.py`.
+- **A normalized diff hash, not a SHA, tree or patch-id.** `/merge` rebases and
+  the global git rules fold fixes into earlier commits, so SHAs move. `git
+  patch-id` was rejected in review: it ignores whitespace and (over `-U0`)
+  position, so a de-indented `delete_all()` read as covered. The id hashes the
+  `-U3` diff against the newest merge-base with local/origin main, keeping
+  context, function context and whitespace and dropping only the `@@` line
+  numbers and `index` lines (keeping numbers would break coverage on every
+  rebase over a busy main); an edit on main inside a lane hunk's context
+  changes it (fail-closed re-review). Accepted residual: one change moved
+  between two blocks with identical context and enclosing function.
+- **`fixed` is an attestation, so once per review, bound by `--after <sha>`**
+  to the review the caller ran. Repeatable or unbound, it would let any later
+  edit be stamped as covered.
+- **Not a boundary against the worker.** `reviewed` takes no proof, and the
+  record lives in the lane; the gate catches a forgotten or stale review.
+- **Version skew is "unknown", not an error.** pr-flow's shim and swarm's
+  recorder probe mandate.sh's usage line for the verbs; an older work-system
+  answers exit 2, which `/merge` would hard-stop on for every PR.
+- **Trap:** an exclude pathspec (`:(exclude)MANDATE.md`) that names an
+  *ignored* path makes `git add -A` fail outright ("paths are ignored"). Exclude
+  only the record files `ls-files --others --exclude-standard` still lists.
+- **Trap:** a helper that reports its error through a global must not run in
+  `$( )` — `lane_base` set `BASE_ERR` in the subshell and the caller saw none.
