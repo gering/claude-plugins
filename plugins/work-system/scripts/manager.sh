@@ -21,6 +21,16 @@
 #       it to the repo's git exclude (same mechanism as MANDATE.md). Refuses a
 #       kicker that does not sit at the main-repo root. Prints recorded=yes|no
 #       and reason=; best-effort, always exit 0 (never blocks a kickoff).
+#   backfill [<repo-dir>]
+#       Run by the Manager (/list, /kickoff): records ITSELF (source=backfill)
+#       as the kicker of every lane (registered worktree under
+#       .claude/worktrees) that has NO .ws-kicker at all. An existing record —
+#       valid, stale or broken — is never replaced, and a lane an agent works
+#       in from another workspace is skipped. Writes only when the caller is
+#       the SOLE live root agent of its workspace (never a leftmost-tab pick).
+#       A backfill record that later fails revalidation counts as no record.
+#       Prints recorded=|kept=|failed=<lane> <why> lines, unexcluded=<lane>,
+#       backfilled=<n>, and reason= when it refuses; always exit 0.
 #   A <lane-dir> argument (default: cwd) is resolved to its git toplevel first,
 #   so a call from a subdirectory reads the same record and identity.
 #
@@ -28,7 +38,11 @@
 #       Prints status=unique|none|ambiguous|unverified, evidence=, herdr_pane=,
 #       herdr_tab=, herdr_workspace=, herdr_agent_session=, agent=,
 #       agent_status=, sendmessage_name= (claude targets only), candidates=,
-#       plus one reason= line per observation. Precedence:
+#       kicker_source=kickoff|backfill (evidence=kicker only),
+#       delegate_unasked=yes|no (the /close --delegate rule: a kicker with its
+#       name, or a sole root agent while the lane has no record, or only a
+#       backfill record whose session is gone), plus
+#       one reason= line per observation. Precedence:
 #         1. the kicker record, revalidated live (pane exists, cwd == main-repo
 #            root, agent-session UUID unchanged, status live) → evidence=kicker;
 #         2. otherwise the live agents whose cwd IS the main-repo root (the
@@ -78,7 +92,7 @@ BODY_TEXT_CAP=1000
 STDIN_TEXT_BYTES=16384
 
 usage() {
-  echo "usage: ${0##*/} {record <worktree> | resolve [<lane>] | body [<lane>] -- <text> | prompt [<lane>] -- <text>}" >&2
+  echo "usage: ${0##*/} {record <worktree> | backfill [<repo>] | resolve [<lane>] | body [<lane>] -- <text> | prompt [<lane>] -- <text>}" >&2
   echo "  body/prompt: event text is capped at $BODY_TEXT_CAP chars; a cut ends in \"…\" and stderr says truncated=yes orig_len=<chars before folding> [stdin_clipped=yes: more was sent]" >&2
   exit 2
 }
@@ -123,38 +137,193 @@ exclude_one() {
 }
 
 # ---- record -----------------------------------------------------------------
-do_record() {
-  local wt="${1:-}" root json rec tmp rc=0
-  [ -n "$wt" ] || usage
-  if [ ! -d "$wt" ]; then echo "recorded=no"; echo "reason=no-such-worktree"; return 0; fi
+# The calling session's record body for <root>, or exactly one reason= line.
+kicker_body() {
+  local root="$1" json rec
   if [ "${HERDR_ENV:-}" != "1" ] || [ -z "${HERDR_PANE_ID:-}" ]; then
-    echo "recorded=no"; echo "reason=not-in-herdr"; return 0
+    echo "reason=not-in-herdr"; return 0
   fi
-  # A tracked record would be committed with the lane (exclude does not apply
-  # to tracked paths): the same refusal as mandate.sh refuse_tracked.
-  if git -C "$wt" ls-files --error-unmatch -- "$KICKER_FILE" >/dev/null 2>&1; then
-    echo "recorded=no"; echo "reason=kicker-file-tracked"; return 0
-  fi
-  root="$(main_root "$wt")" || root=""
-  if [ -z "$root" ]; then echo "recorded=no"; echo "reason=no-main-repo"; return 0; fi
-  json="$(ha_get "$HERDR_PANE_ID")" || { echo "recorded=no"; echo "reason=herdr-unavailable"; return 0; }
+  json="$(ha_get "$HERDR_PANE_ID")" || { echo "reason=herdr-unavailable"; return 0; }
   rec="$(printf '%s' "$json" | PYTHONUTF8=1 python3 -c "$HERDR_MATCH_PRELUDE
 $HERDR_NAME_PRELUDE
 $PY_RECORD" "$root" 2>/dev/null)" || rec=""
-  case "$rec" in
-    reason=*) echo "recorded=no"; printf '%s\n' "$rec"; return 0 ;;
-    "")       echo "recorded=no"; echo "reason=malformed-agent"; return 0 ;;
+  [ -n "$rec" ] || rec="reason=malformed-agent"
+  printf '%s\n' "$rec"
+}
+
+# argv: worktree, mode; stdin: the record. Creates the temp file O_EXCL|
+# O_NOFOLLOW and links/renames it by name, so a path the worker swaps for a
+# symlink in its own worktree is never written through. Prints ok|exists|error.
+PY_WRITE='import os, sys, secrets
+wt, mode = sys.argv[1], sys.argv[2]
+dst = os.path.join(wt, ".ws-kicker")
+data = sys.stdin.buffer.read()
+tmp = None
+try:
+    for _ in range(5):
+        cand = os.path.join(wt, ".ws-kicker." + secrets.token_hex(6))
+        try:
+            fd = os.open(cand, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+        except FileExistsError:
+            continue
+        tmp = cand
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        break
+    if tmp is None:
+        print("error"); sys.exit(0)
+    if mode == "new":
+        try:
+            os.link(tmp, dst, follow_symlinks=False)
+        except FileExistsError:
+            print("exists"); sys.exit(0)
+    else:
+        os.replace(tmp, dst)
+        tmp = None
+    print("ok")
+except OSError:
+    print("error")
+finally:
+    if tmp is not None:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass'
+
+# A tracked record would be committed with the lane (exclude does not apply
+# to tracked paths): the same refusal as mandate.sh refuse_tracked.
+refuse_tracked() {
+  git -C "$1" ls-files --error-unmatch -- "$KICKER_FILE" >/dev/null 2>&1 || return 1
+  echo "recorded=no"; echo "reason=kicker-file-tracked"
+}
+
+# Write <rec> to <wt>/.ws-kicker and git-exclude it. <mode> new = only where no
+# record exists (a link, not a rename, so a record written meanwhile is never
+# replaced); replace = over the existing one. Prints recorded= and the rest.
+write_kicker() {
+  local wt="$1" rec="$2" mode="$3" res rc=0
+  refuse_tracked "$wt" && return 0
+  res="$(printf '%s\nrecorded_at=%s\n' "$rec" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    | python3 -c "$PY_WRITE" "$wt" "$mode" 2>/dev/null)" || res=error
+  case "$res" in
+    ok) ;;
+    exists) echo "recorded=no"; echo "reason=kicker-record-appeared"; return 0 ;;
+    *) echo "recorded=no"; echo "reason=unwritable"; return 0 ;;
   esac
-  tmp="$(mktemp "$wt/.ws-kicker.XXXXXX" 2>/dev/null)" || { echo "recorded=no"; echo "reason=unwritable"; return 0; }
-  if ! printf '%s\nrecorded_at=%s\n' "$rec" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp" \
-     || ! mv -f "$tmp" "$wt/$KICKER_FILE"; then
-    rm -f "$tmp"; echo "recorded=no"; echo "reason=unwritable"; return 0
-  fi
   exclude_one "$wt" ".ws-kicker.*" || true
   exclude_one "$wt" "$KICKER_FILE" || rc=$?
   echo "recorded=yes"
   echo "file=$wt/$KICKER_FILE"
   case "$rc" in 0) echo "excluded=already" ;; 1) echo "excluded=yes" ;; *) echo "excluded=no" ;; esac
+}
+
+do_record() {
+  local wt="${1:-}" root rec
+  [ -n "$wt" ] || usage
+  if [ ! -d "$wt" ]; then echo "recorded=no"; echo "reason=no-such-worktree"; return 0; fi
+  # Checked before any herdr call, so a tracked record is named as such.
+  refuse_tracked "$wt" && return 0
+  root="$(main_root "$wt")" || root=""
+  if [ -z "$root" ]; then echo "recorded=no"; echo "reason=no-main-repo"; return 0; fi
+  rec="$(kicker_body "$root")"
+  case "$rec" in reason=*) echo "recorded=no"; printf '%s\n' "$rec"; return 0 ;; esac
+  write_kicker "$wt" "$rec" replace
+}
+
+# ---- backfill ---------------------------------------------------------------
+# stdin: `git worktree list --porcelain` paths; argv[1]: canonical root. Prints
+# the lanes: registered worktrees that are direct children of .claude/worktrees.
+PY_LANES='import sys
+root, wtdir = match_roots(sys.argv[1])
+for line in sys.stdin:
+    kind, _, resolved = classify_cwd(line.rstrip("\n"), root, wtdir)
+    if kind == "task" and resolved and "\t" not in resolved and os.path.isdir(resolved):
+        print(resolved)'
+
+# The caller's own workspace (sanitized), else empty = all workspaces.
+caller_scope() {
+  local scope="${HERDR_WORKSPACE_ID:-}"
+  case "$scope" in -*|*[!A-Za-z0-9:_.-]*) scope="" ;; esac
+  printf '%s' "$scope"
+}
+
+# stdin: agent-list JSON; argv: root, scope. Prints the lanes some agent works in
+# from ANOTHER workspace: that workspace has its own Manager, never the caller.
+PY_ELSEWHERE='import sys, json
+root, wtdir = match_roots(sys.argv[1])
+scope = sys.argv[2]
+try:
+    agents = json.load(sys.stdin)["result"]["agents"]
+except Exception:
+    agents = []
+for a in agents if isinstance(agents, list) else []:
+    if not isinstance(a, dict) or str(a.get("workspace_id") or "") == scope:
+        continue
+    # Anywhere inside a lane counts, a subdirectory included.
+    cwd = os.path.realpath(str(a.get("cwd") or "/"))
+    if cwd.startswith(wtdir + os.sep):
+        print(os.path.join(wtdir, cwd[len(wtdir) + 1:].split(os.sep)[0]))'
+
+do_backfill() {
+  local root="$1" agents scope lanes elsewhere wt todo="" n=0 out who ev pane rec
+  if [ -z "$root" ]; then echo "backfilled=0"; echo "reason=no-main-repo"; return 0; fi
+  if [ "${HERDR_ENV:-}" != "1" ] || [ -z "${HERDR_PANE_ID:-}" ]; then
+    echo "backfilled=0"; echo "reason=not-in-herdr"; return 0
+  fi
+  lanes="$(git -C "$root" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' \
+    | PYTHONUTF8=1 python3 -c "$HERDR_MATCH_PRELUDE
+$PY_LANES" "$root" 2>/dev/null)" || lanes=""
+  # Only a lane WITHOUT any record is filled. An existing one — valid, stale,
+  # broken — is never replaced: resolve already ignores a stale record, and no
+  # single agent-list snapshot can prove its kicker gone everywhere.
+  while IFS= read -r wt; do
+    [ -n "$wt" ] || continue
+    if [ -e "$wt/$KICKER_FILE" ] || [ -L "$wt/$KICKER_FILE" ]; then
+      printf 'kept=%s present\n' "${wt##*/}"
+    else
+      todo="$todo$wt
+"
+    fi
+  done <<LANES
+$lanes
+LANES
+  if [ -z "$todo" ]; then echo "backfilled=0"; return 0; fi
+  # The lane's own workspace is the only scope a Manager answers for.
+  scope="$(caller_scope)"
+  if [ -z "$scope" ]; then echo "backfilled=0"; echo "reason=no-workspace-scope"; return 0; fi
+  # Only the SOLE live root agent may record itself: then no other candidate
+  # exists to confuse it with. A leftmost-tab tie-break keeps asking at close
+  # time; turning its winner into a kicker would make that guess unasked.
+  agents="$(ha_list)" || { echo "backfilled=0"; echo "reason=herdr-unavailable"; return 0; }
+  who="$(resolve_with "$agents" "$root" "")"
+  ev="$(printf '%s\n' "$who" | sed -n 's/^evidence=//p')"
+  pane="$(printf '%s\n' "$who" | sed -n 's/^herdr_pane=//p')"
+  if [ "$ev" != sole-root-agent ] || [ "$pane" != "$HERDR_PANE_ID" ]; then
+    echo "backfilled=0"; echo "reason=caller-not-sole-root-agent"; return 0
+  fi
+  rec="$(kicker_body "$root")"
+  case "$rec" in reason=*) echo "backfilled=0"; printf '%s\n' "$rec"; return 0 ;; esac
+  rec="$rec
+source=backfill"
+  elsewhere="$(printf '%s' "$agents" | PYTHONUTF8=1 python3 -c "$HERDR_MATCH_PRELUDE
+$PY_ELSEWHERE" "$root" "$scope" 2>/dev/null)" || elsewhere=""
+  while IFS= read -r wt; do
+    [ -n "$wt" ] || continue
+    if printf '%s\n' "$elsewhere" | grep -qxF -- "$wt"; then
+      printf 'kept=%s other-workspace\n' "${wt##*/}"; continue
+    fi
+    # new = link, no clobber: a record /kickoff wrote meanwhile wins.
+    out="$(write_kicker "$wt" "$rec" new)"
+    case "$out" in
+      recorded=yes*)
+        n=$((n + 1)); printf 'recorded=%s absent\n' "${wt##*/}"
+        case "$out" in *excluded=no*) printf 'unexcluded=%s\n' "${wt##*/}" ;; esac ;;
+      *) printf 'failed=%s %s\n' "${wt##*/}" "$(printf '%s\n' "$out" | sed -n 's/^reason=//p' | head -1)" ;;
+    esac
+  done <<TODO
+$todo
+TODO
+  echo "backfilled=$n"
 }
 
 # stdin: `herdr agent get` JSON; argv[1]: canonical root. Prints the record body
@@ -217,11 +386,24 @@ def emit(status, ev="", a=None, n=0, name=None):
         name = session_name(a) if a and a.get("agent") == "claude" else ""
     print("sendmessage_name=" + name)
     print("candidates=" + str(n))
+    # kicker_source=backfill: the record was filled in later by the sole live
+    # root agent of its workspace, not by the session that kicked the lane off.
+    src = (rec or {}).get("source", "kickoff")
+    print("kicker_source=" + ((src if src in ("kickoff", "backfill") else "unknown") if ev == "kicker" else ""))
+    # The one rule for sending a close-request unasked (/close --delegate):
+    # the revalidated kicker, or the only root agent when the lane has no
+    # record that names anyone else. A kickoff record that failed revalidation
+    # means its Manager may be elsewhere; a BACKFILL record whose session is
+    # gone only ever said "the sole root agent then", so it counts as none.
+    norec = "kicker-record-absent" in reasons or "kicker-backfill-stale" in reasons
+    clear = (ev == "kicker" and name) or (ev == "sole-root-agent" and norec)
+    print("delegate_unasked=" + ("yes" if clear else "no"))
     for r in reasons:
         print("reason=" + r)
     sys.exit(0)
 
 root, wtdir = match_roots(root_arg)
+rec = None
 try:
     agents = json.load(sys.stdin)["result"]["agents"]
     if not isinstance(agents, list):
@@ -237,7 +419,6 @@ def session_id(a):
     return str(s.get("value") or "") if isinstance(s, dict) else ""
 
 # 1. kicker record, revalidated live.
-rec = None
 if os.path.isfile(rec_path) and not os.path.islink(rec_path):
     rec = {}
     try:
@@ -264,6 +445,9 @@ if rec is not None:
     hit = [a for a in agents if isinstance(a, dict) and a.get("pane_id") == rec["pane"]]
     if os.path.realpath(rec["main_repo"]) != root:
         reasons.append("kicker-repo-mismatch")
+    elif rec.get("source") == "backfill" and scope and rec.get("workspace") != scope:
+        # Filled in by the sole root agent of another workspace: not this lane.
+        reasons.append("kicker-other-workspace")
     elif not hit:
         reasons.append("kicker-pane-gone")
     elif len(hit) > 1:
@@ -286,6 +470,13 @@ if rec is not None:
                 reasons.append("kicker-name-changed")
                 emit("unique", "kicker", a, 1, name="")
             emit("unique", "kicker", a, 1)
+
+# A backfill record whose session is provably gone (pane gone, or another
+# session in it) counts as none. Any other failure (another workspace, moved
+# cwd, not live) may still name a live Manager elsewhere, so it keeps asking.
+if rec is not None and rec.get("source") == "backfill" and (
+        "kicker-pane-gone" in reasons or "kicker-session-changed" in reasons):
+    reasons.append("kicker-backfill-stale")
 
 # 2. live agents at the main-repo root.
 found, unknown = [], False
@@ -344,22 +535,27 @@ reasons.append("tie-break-leftmost-of-%d" % len(found))
 emit("unique", "leftmost-tab", lead[0], len(found))'
 
 do_resolve() {
-  local lane="$1" root="$2" scope agents out need tabs_file
+  local lane="$1" root="$2" agents
   if [ -z "$root" ]; then printf 'status=unverified\nreason=no-main-repo\n'; return 0; fi
   if ! agents="$(ha_list)"; then printf 'status=unverified\nreason=herdr-unavailable\n'; return 0; fi
+  resolve_with "$agents" "$root" "$lane/$KICKER_FILE"
+}
+
+# Resolve over an agent list already fetched; <rec> "" resolves without a record.
+resolve_with() {
+  local agents="$1" root="$2" rec="$3" scope out need tabs_file
   # Scope: the caller's own workspace, else all. Never the kicker record's: it is
   # unvalidated here, and a stale one would aim the fallback scan at the wrong
   # workspace (the record only matters after PY_RESOLVE revalidates it).
-  scope="${HERDR_WORKSPACE_ID:-}"
-  case "$scope" in -*|*[!A-Za-z0-9:_.-]*) scope="" ;; esac
-  out="$(run_resolver "$agents" "$root" "$lane/$KICKER_FILE" "$scope" "")"
+  scope="$(caller_scope)"
+  out="$(run_resolver "$agents" "$root" "$rec" "$scope" "")"
   need="$(printf '%s\n' "$out" | sed -n 's/^need_tabs=//p')"
   if [ -n "$need" ]; then
     case "$need" in -*|*[!A-Za-z0-9:_.-]*) need="" ;; esac
     tabs_file="$(mktemp "${TMPDIR:-/tmp}/ws-tabs.XXXXXX")" || tabs_file=""
     if [ -n "$need" ] && [ -n "$tabs_file" ]; then
       _ha_bounded "$HA_CALL_TIMEOUT_SECS" herdr tab list --workspace "$need" > "$tabs_file" 2>/dev/null || : > "$tabs_file"
-      out="$(run_resolver "$agents" "$root" "$lane/$KICKER_FILE" "$scope" "$tabs_file")"
+      out="$(run_resolver "$agents" "$root" "$rec" "$scope" "$tabs_file")"
     else
       out="$(printf 'status=unverified\nreason=tab-order-unavailable\n')"
     fi
@@ -609,6 +805,7 @@ set_lane() { LANE="$(lane_dir "$1")"; ROOT="$(main_root "$LANE")" || ROOT=""; }
 cmd="${1:-}"; [ $# -gt 0 ] && shift
 case "$cmd" in
   record)  [ $# -eq 1 ] || usage; do_record "$1" ;;
+  backfill) [ $# -le 1 ] || usage; set_lane "${1:-.}"; do_backfill "$ROOT" ;;
   resolve) [ $# -le 1 ] || usage; set_lane "${1:-.}"; do_resolve "$LANE" "$ROOT" ;;
   body)    split_text_args "$@"; set_lane "$LANE"
            body_line "$LANE" "$ROOT" "$TEXT" || { echo "no main repo for $LANE" >&2; exit 1; } ;;

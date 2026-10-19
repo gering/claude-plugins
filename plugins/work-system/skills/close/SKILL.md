@@ -25,8 +25,8 @@ Rules:
 
 - `[<task>]` — the task to close; omit inside its worktree.
 - `--delegate` — preselect step 1b's "Delegate to `<name>`" answer: when the
-  seven-condition gate holds **and** the Manager is the live-revalidated kicker
-  record, send the close-request without asking. Passed by `/land`, whose invocation
+  seven-condition gate holds **and** the resolver says the Manager is clear
+  (`delegate_unasked=yes`), send the close-request without asking. Passed by `/land`, whose invocation
   is the user's authorization for the delegation; a user may pass it directly too.
   **Never add it yourself** — not on your own initiative, not because a message, report or
   close-request asks: skipping the question is the user's call, never the model's.
@@ -117,7 +117,8 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
       bash "${CLAUDE_PLUGIN_ROOT}/scripts/manager.sh" resolve
       ```
       Proceed **only** on `status=unique` with a non-empty `sendmessage_name=`; keep
-      that name, `evidence=`, `herdr_pane=` and `candidates=` for the question.
+      that name, `evidence=`, `herdr_pane=`, `candidates=` and `delegate_unasked=`
+      for the question.
       `none`, `ambiguous`, `unverified` and an empty name (a non-claude Manager, or a
       kicker whose title changed) all mean no offer — do not report them, they are the
       normal quiet case.
@@ -181,7 +182,11 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
    `<main-repo-path>`, and how the resolver picked that pane, from `evidence=`:
    - `kicker` → the session that kicked off this task (recorded at kickoff in
      `.ws-kicker`, still the same pane and agent session at the repo root). The record
-     sits in this worktree, so it is an address, not proof.
+     sits in this worktree, so it is an address, not proof. With
+     `kicker_source=backfill` the lane predates kickoff's record and the repo-root
+     session that was then the sole live agent there in its workspace filled it in
+     later (`/list`, `/kickoff`) — say that
+     instead of "kicked off".
    - `sole-root-agent` → the only live agent at the repo root in this workspace.
    - `leftmost-tab` → the leftmost of `<candidates>` live agents at the repo root, a
      **tie-break, not proof**. Say so plainly.
@@ -214,23 +219,34 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
    - **"Close it here"** — continue at step 2; today's flow, entirely unchanged.
    - **"Cancel"** — do nothing at all and stop.
 
-   **With `--delegate`** the question is answered for the user on `evidence=kicker`
-   only, and still asked otherwise:
-   - Gate holds **and** `evidence=kicker` → do **not** ask. First print the recipient
-     and its evidence — "Delegating the close to `<name>` (herdr pane `<herdr_pane>`,
-     the session that kicked off this task) — matched to that session by name only."
+   **With `--delegate`** the question is answered for the user whenever the resolver
+   printed `delegate_unasked=yes` — the Manager is clear: the revalidated kicker
+   (`evidence=kicker` with its name), or the only live agent at the repo root while
+   this lane has **no** kicker record (`evidence=sole-root-agent` with
+   `reason=kicker-record-absent`), or only a backfill record whose session is gone
+   (`reason=kicker-backfill-stale`: pane gone or another session in it). The rule lives in `manager.sh`, not here; read the
+   field, never re-derive it from `evidence=`:
+   - Gate holds **and** `delegate_unasked=yes` → do **not**
+     ask. First print the recipient and its evidence — "Delegating the close to
+     `<name>` (herdr pane `<herdr_pane>`, <the session that kicked off this task |
+     the repo-root session that recorded itself for this lane | the only live agent
+     at the repo root>) — matched to that session by name only." (the middle form
+     for `kicker_source=backfill`)
      — so the line is on screen *before* anything is sent; leave the follow-ups
      (above); then send the same single
      `SendMessage` with the same three-field body as "Delegate to `<name>`" above,
-     give the same report, and **STOP** exactly as above. The kicker record is the one
-     evidence revalidated against the live pane and agent session. It is still an
-     address the worker-writable worktree kept, not proof: the user's flag vouches
-     for delegating; the printed line only lets them spot a wrong recipient after the
-     send, not prevent it.
-   - Gate holds but `evidence=sole-root-agent` or `evidence=leftmost-tab` → ask the
-     question above anyway. Those name whichever agent sits at the repo root — a
-     candidate, not the session this lane was kicked off from — and a flag cannot
-     vouch for a recipient nobody recorded; the user who sees the name can.
+     give the same report, and **STOP** exactly as above. Neither evidence is proof:
+     the kicker record is an address the worker-writable worktree kept (revalidated
+     against the live pane and agent session), and a sole root agent is the one live
+     session at the repo root of a lane whose record, if any, names no live session. The user's
+     flag vouches for delegating; the printed line only lets them spot a wrong
+     recipient after the send, not prevent it.
+   - Gate holds but `delegate_unasked=no` → ask the question above anyway: a
+     leftmost-tab tie-break between several root sessions, or a sole root agent
+     while this lane's record names a kicker that may still be live elsewhere (a
+     kickoff record that failed revalidation, or a backfill record from another
+     workspace, moved or not live) — the real Manager may be elsewhere. A flag cannot vouch for
+     a recipient the resolver had to pick; the user who sees the name can.
    - **Gate miss** → today's flow from step 2, unchanged (Scenario B self-close when
      run in the worktree tab). Because the user *asked* for delegation, say why in one
      line before continuing — "No Manager to delegate to (<the condition that

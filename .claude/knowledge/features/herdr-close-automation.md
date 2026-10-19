@@ -1,9 +1,9 @@
 ---
 title: "herdr /close Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-10-18
+updatedAt: 2026-10-19
 createdFrom: "PR #18"
-updatedFrom: "branch: task/harden-land-against-concurrent-teardown"
+updatedFrom: "session: 2026-10-19 (task/auto-delegate-close-without-kicker-prompt)"
 pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
@@ -160,13 +160,24 @@ from the original detector that still hold:
   after it, `HEAD` may be behind but never ahead. Fail-closed on an unreadable head. The shared
   fix — `assess` itself comparing heads — is a follow-up; `/close` alone is still
   exposed.
-- **`--delegate` preselects only on `evidence=kicker`.** The 1b question exists so a
-  person can catch a wrong recipient. The user's flag vouches for *delegating*; only
-  the kicker record is revalidated against the live pane + agent session, yet it sits
-  in the worker-writable worktree — an address, not proof. Skipping the question on it
-  (the printed recipient line is seen only after the send) is an **accepted residual** (user decision): a worker able to forge
-  it could do worse, and the Manager re-verifies the merge before it closes anything.
-  `sole-root-agent`/`leftmost-tab` name whoever sits at the root, so they still ask. The recipient line is printed in the same turn as the send — it lets the user spot, not stop, a wrong recipient. Under the
+- **`--delegate` preselects when the Manager is clear (1.24.0: `delegate_unasked=`).**
+  The 1b question exists so a person can catch a wrong recipient. The user's flag
+  vouches for *delegating*; the resolver decides whether the recipient is clear and
+  emits it as one field, so `/close` and `/land` cannot drift apart in prose. Clear =
+  the revalidated kicker (an address the worker-writable worktree kept, not proof), or
+  the only live root agent **when the lane has no record**, or only a backfill record
+  whose session is provably gone (pane gone, another session in it). A sole root agent
+  after any other failed revalidation still asks: the record named someone, who may have
+  moved into a subdir or another workspace, and the root agent is then a stranger
+  (review finding on PR #82). Skipping the question (the printed recipient line is
+  seen only after the send) is an **accepted residual** (user decision 2026-10-19:
+  delegate automatically whenever a Manager is there): a worker able to forge the
+  record could do worse, and the Manager re-verifies the merge before it closes
+  anything. `leftmost-tab` still asks. `/land`'s gone-worktree path has no record to
+  read (it went with the worktree), so it uses the landing marker instead:
+  `kicker_session` matching sends; `sole-root-agent` sends only with
+  `kicker_record=absent` (an empty `kicker_session` alone also covers a broken or
+  rejected record, which must ask — review round 2 on PR #82). The recipient line is printed in the same turn as the send — it lets the user spot, not stop, a wrong recipient. Under the
   flag a gate miss is reported in one line (the user asked for delegation), unlike the
   silent no-offer of a plain `/close`. Pinned by `plugins/work-system/scripts/test_land.py`.
 

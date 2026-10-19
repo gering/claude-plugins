@@ -1,9 +1,9 @@
 ---
 title: "Manager Address Resolver and Milestone Pings"
 createdAt: 2026-10-02
-updatedAt: 2026-10-17
+updatedAt: 2026-10-19
 createdFrom: "session: 2026-10-02 (task/add-manager-address)"
-updatedFrom: "session: 2026-10-17 (task/fix-manager-ping-truncation)"
+updatedFrom: "session: 2026-10-19 (task/auto-delegate-close-without-kicker-prompt)"
 pluginVersion: 1.9.0
 prime: false
 ---
@@ -27,9 +27,38 @@ terminal gate) and `/close` step 1b delegation, which replaced the name-only
   authorization: it sits in the worker-writable worktree, so a worker could point
   it at any live root agent. `evidence=kicker` is a better guess, not proof — the
   `/close` delegation question names the evidence and the user confirms. The one
-  exception is `/close --delegate` (what `/land` passes): it sends on `kicker`
-  without asking, after printing the recipient — an accepted residual, see
+  exception is `/close --delegate` (what `/land` passes): it sends without asking
+  on `delegate_unasked=yes` (kicker, or sole root agent with no record or a gone backfill session),
+  after printing the recipient — an accepted residual, see
   [herdr-close-automation](herdr-close-automation.md).
+- **Backfill from the Manager, never over a live record (1.24.0).** Lanes kicked off
+  before the record existed have none, so with two root sessions `/land` hit the
+  leftmost-tab question every time. `manager.sh backfill` (run by `/list` and
+  `/kickoff`) writes the *caller* as kicker (`source=backfill`, surfaced as
+  `kicker_source=`) into every lane with **no** record. Lessons from two review
+  rounds on PR #82:
+  - **Fill absent, never replace.** A first version also rewrote "stale" records
+    (pane gone, session changed). Every proof of staleness leaked: one snapshot of
+    one herdr server, a pane briefly missing while claude restarts, an empty session
+    id, a record refreshed between judging and writing, workspace ids reused across
+    servers. Each fix needed another guard; dropping the rewrite removed the class.
+    `resolve` already ignores a stale record, so replacing it bought nothing.
+  - **Only the sole root agent may backfill.** Round 1 let any root session stamp
+    itself; round 2 restricted it to the resolver's pick, which still included a
+    leftmost-tab winner — and a backfilled tie-break became an unasked send,
+    against the task's own rule that `leftmost-tab` keeps asking (round 3). Now
+    backfill resolves without a record, needs `evidence=sole-root-agent` on the
+    caller's own pane and a workspace scope, and skips lanes an agent works in
+    (any subdir) from another workspace.
+  - **A stale backfill record counts as none** (`kicker-backfill-stale`). It only
+    ever said "the sole root agent then"; without this, a Manager restart would
+    turn a lane that delegated unasked into one that asks forever. A backfill
+    record from another workspace is ignored (`kicker-other-workspace`).
+  - **Accepted residual:** a worker that deletes its `.ws-kicker` makes its lane look
+    never-recorded; no stronger than forging the record, already accepted.
+  An absent record is created by `link` (no-clobber, so `/kickoff` wins a race);
+  the temp file is opened `O_EXCL|O_NOFOLLOW` because the worktree is
+  worker-writable.
 - **The live title must still match the recorded name.** The SendMessage name is
   the pane's live title, which any process in the pane can set; a kicker whose
   title differs from the recorded name keeps its pane but gets no SendMessage

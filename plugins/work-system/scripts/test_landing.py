@@ -135,7 +135,8 @@ check("begin: marker is private", stat.S_IMODE(fx.marker.stat().st_mode) == 0o60
 body = fx.marker.read_text()
 check("begin: records the worker by pane + session",
       "worker_pane=w1:p9\n" in body and f"worker_session={SESSION}\n" in body)
-check("begin: copies the kicker's session", f"kicker_session={KICKER}\n" in body)
+check("begin: copies the kicker's session", f"kicker_session={KICKER}\n" in body
+      and "kicker_record=present\n" in body and "kicker_source=kickoff\n" in body)
 check("begin: phase landing, PR, branch, realpath worktree",
       "phase=landing\n" in body and "pr=7\n" in body and "branch=task/foo\n" in body
       and f"worktree={fx.wt}\n" in body)
@@ -342,7 +343,28 @@ fx.marker.unlink()
 fx.run("begin", "--pr", "7", cwd=fx.wt)
 check("begin: a duplicated agent_session is not copied",
       "kicker_session" not in fx.marker.read_text())
+check("begin: a broken record still counts as present",
+      "kicker_record=present\n" in fx.marker.read_text())
 fx.marker.unlink()
+for src in ("source=foo\n", "source=backfill\nsource=backfill\n"):
+    (fx.wt / ".ws-kicker").write_text(f"agent_session={KICKER}\n{src}")
+    fx.run("begin", "--pr", "7", cwd=fx.wt)
+    check(f"begin: an unvouched {src.strip()!r} copies no kicker",
+          "kicker_session" not in fx.marker.read_text()
+          and "kicker_record=present\n" in fx.marker.read_text())
+    fx.marker.unlink()
+(fx.wt / ".ws-kicker").write_text(f"agent_session={KICKER}\nsource=backfill\n")
+fx.run("begin", "--pr", "7", cwd=fx.wt)
+check("begin: a backfill record is copied as such",
+      "kicker_source=backfill\n" in fx.marker.read_text())
+fx.marker.unlink()
+saved = (fx.wt / ".ws-kicker").read_text()
+(fx.wt / ".ws-kicker").unlink()
+fx.run("begin", "--pr", "7", cwd=fx.wt)
+r, o = fx.run("status", "foo")
+check("begin: no record → kicker_record=absent", o.get("kicker_record") == "absent")
+fx.marker.unlink()
+(fx.wt / ".ws-kicker").write_text(saved)
 
 # --- argument guards -------------------------------------------------------------- #
 canary = fx.d / "pwned"

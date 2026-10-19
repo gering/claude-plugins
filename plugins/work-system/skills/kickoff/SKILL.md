@@ -406,6 +406,11 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     `excluded=no` the file could not be git-excluded: tell the user in one line, so
     it is not committed with the lane. The record is an address, never an
     authorization.
+    Then backfill the repo's other lanes the same way (silent; mention only an
+    `unexcluded=<lane>` line):
+    `bash "${CLAUDE_PLUGIN_ROOT}/scripts/manager.sh" backfill "<main-repo>"` —
+    it records this session only where a lane has no record at all, and only
+    when this session is the sole live agent at the repo root in its workspace.
 
 14. **Launch the worktree session** — automate it inside herdr, otherwise show
     the manual block.

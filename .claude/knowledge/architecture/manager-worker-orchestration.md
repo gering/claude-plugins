@@ -71,7 +71,8 @@ What this slice establishes (and what it deliberately does not):
 
 - **One delegation with human confirmation, no watch loop.** The worker asks once, sends
   once, and stops (since 1.20.0 `/close --delegate`, passed by `/land`, skips the
-  question on `evidence=kicker` only — see
+  question when the Manager is clear — since 1.24.0 `manager.sh resolve` emits that
+  as `delegate_unasked=` — see
   [herdr-close-automation](../features/herdr-close-automation.md)) — no polling, no re-send, no receipt protocol. `SendMessage` enqueues
   and the Manager drains it at its next turn, which is fine for a close (not
   time-critical). `ready-to-close` handoff payloads, durable AMQ fallback and the Manager

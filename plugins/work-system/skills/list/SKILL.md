@@ -92,7 +92,7 @@ user_invocable: true
 
    Print the chosen line as its own highlighted block directly below the summary. Pick exactly one — do not print multiple "Next" lines.
 
-7. **Sync herdr tab glyphs** (best-effort, silent):
+7. **Sync herdr tab glyphs and kicker records** (best-effort, silent):
    - Run: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-tab-glyph.sh" refresh --cached "$PWD"`
    - Inside herdr this re-stamps every open task tab's state glyph
      (`○ ● ◇ ◆ ✓`, plus the main-repo tab's `◉` hub mark) to match the surveyed
@@ -101,6 +101,13 @@ user_invocable: true
      do). `--cached`: this is a read-only survey, so
      read the PR cache instead of a blocking `gh` call (a background refresh
      keeps it current). Ignore its output — never block or report on it.
+   - Then: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/manager.sh" backfill "$PWD"` —
+     leaves this session's address (`.ws-kicker`) in every lane of the repo that
+     has none, so a later `/close --delegate` there finds its Manager. It writes
+     only when this session is the sole live agent at the repo root of its
+     workspace (never a leftmost-tab pick), never replaces an existing record,
+     and skips lanes worked from another workspace. Silent; mention only an
+     `unexcluded=<lane>` line (that record could not be git-excluded).
 
 8. **All commands** (reference, always shown):
    ```

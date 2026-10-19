@@ -166,12 +166,15 @@ check("valid kicker wins over leftmost", r.get("status") == "unique" and r.get("
       and r.get("herdr_pane") == "w6:p1", str(r))
 check("kicker emits uuid + name", r.get("herdr_agent_session") == UUID_A
       and r.get("sendmessage_name") == "Manager (repo)", str(r))
+check("kicker → delegate unasked", r.get("delegate_unasked") == "yes"
+      and r.get("kicker_source") == "kickoff", str(r))
 
 # pane reused by another session (UUID changed) → stale; falls back to root scan
 E.serve([E.agent(uuid=UUID_B)], tabs=["w6:t1"])
 r = E.resolve()
 check("uuid changed → stale kicker", "kicker-session-changed" in r["reasons"], str(r))
 check("uuid changed → sole-root fallback", r.get("evidence") == "sole-root-agent", str(r))
+check("failed record → sole root is not unasked", r.get("delegate_unasked") == "no", str(r))
 
 # kicker cwd moved into a worktree
 E.serve([E.agent(E.wt), other], tabs=["w6:t1", "w6:t2"])
@@ -207,6 +210,7 @@ r = E.resolve()
 check("two root agents → leftmost tab", r.get("status") == "unique" and r.get("evidence") == "leftmost-tab"
       and r.get("herdr_pane") == "w6:p2" and r.get("candidates") == "2", str(r))
 check("tie-break is stated", any(x.startswith("tie-break-leftmost") for x in r["reasons"]), str(r))
+check("leftmost-tab → asked", r.get("delegate_unasked") == "no", str(r))
 
 E.serve([E.agent(), other], tabs=None)
 r = E.resolve()
@@ -222,6 +226,7 @@ check("candidates across workspaces → ambiguous", r.get("status") == "ambiguou
 r = E.resolve(env_extra={"HERDR_WORKSPACE_ID": "w6"})
 check("caller workspace scopes candidates", r.get("status") == "unique"
       and r.get("evidence") == "sole-root-agent", str(r))
+check("sole root without a record → unasked", r.get("delegate_unasked") == "yes", str(r))
 
 E.serve([worker], tabs=["w6:t3"])
 r = E.resolve()
@@ -460,6 +465,7 @@ E.serve([E.agent(title="Someone Else")], tabs=["w6:t1"])
 r = E.resolve()
 check("renamed kicker: pane kept, name withheld", r.get("evidence") == "kicker"
       and r.get("sendmessage_name") == "" and "kicker-name-changed" in r["reasons"], str(r))
+check("renamed kicker → asked", r.get("delegate_unasked") == "no", str(r))
 (E.wt / ".ws-kicker").unlink()
 
 # ---- scope: an unreadable row in ANOTHER workspace is irrelevant -------------------------
@@ -480,6 +486,122 @@ r = kv(E.run("record", str(E.wt)).stdout)
 check("tracked record is refused", r.get("recorded") == "no" and "kicker-file-tracked" in r["reasons"], str(r))
 subprocess.run(["git", "-C", str(E.wt), "rm", "-q", "-f", "--cached", ".ws-kicker"], check=True)
 (E.wt / ".ws-kicker").unlink()
+
+# ---- backfill: the Manager records itself for lanes without a valid record ---------------
+beta = E.root / ".claude" / "worktrees" / "beta"
+subprocess.run(["git", "-C", str(E.root), "worktree", "add", "-q", "-b", "task/beta", str(beta)], check=True)
+KA, KB = E.wt / ".ws-kicker", beta / ".ws-kicker"
+
+
+def backfill(env_extra=None):
+    env = {"HERDR_WORKSPACE_ID": "w6"}
+    env.update(env_extra or {})
+    out = E.run("backfill", str(E.root), env_extra=env).stdout
+    return out, kv(out)
+
+
+def lines(out, key):
+    return [ln.split("=", 1)[1] for ln in out.splitlines() if ln.startswith(key + "=")]
+
+
+TABS = ["w6:t1", "w6:t2", "w6:t3"]
+E.serve([E.agent(), other, worker], tabs=TABS, get=E.agent(E.wt))
+out, r = backfill(env_extra={"HERDR_PANE_ID": "w6:p3"})
+check("backfill: refused from a worktree session", r.get("backfilled") == "0"
+      and "caller-not-sole-root-agent" in r["reasons"] and not KA.exists() and not KB.exists(), out)
+E.serve([E.agent(), other, worker], tabs=TABS, get=other)
+out, r = backfill(env_extra={"HERDR_PANE_ID": "w6:p2"})
+check("backfill: a second root session never stamps itself", r.get("backfilled") == "0"
+      and "caller-not-sole-root-agent" in r["reasons"] and not KA.exists(), out)
+E.serve([E.agent(), other, worker], tabs=TABS, get=E.agent())
+out, r = backfill()
+check("backfill: a leftmost-tab winner never stamps itself", r.get("backfilled") == "0"
+      and "caller-not-sole-root-agent" in r["reasons"] and not KA.exists(), out)
+E.serve([E.agent(), worker], tabs=TABS, get=E.agent())
+out, r = backfill(env_extra={"HERDR_WORKSPACE_ID": ""})
+check("backfill: refused without a workspace scope", "no-workspace-scope" in r["reasons"]
+      and not KA.exists(), out)
+out, r = backfill(env_extra={"HERDR_ENV": ""})
+check("backfill: refused outside herdr", "not-in-herdr" in r["reasons"] and not KA.exists(), out)
+
+E.serve([], get=E.agent())
+out, r = backfill()
+check("backfill: empty agent list proves nothing", r.get("backfilled") == "0"
+      and not KA.exists(), out)
+
+# An unregistered directory under .claude/worktrees is no lane.
+scratch = E.root / ".claude" / "worktrees" / "scratch"
+scratch.mkdir()
+(scratch / ".git").write_text("gitdir: /nowhere\n")
+
+E.serve([E.agent(), worker], tabs=TABS, get=E.agent())
+out, r = backfill()
+check("backfill: absent records written by the sole root agent",
+      {"alpha absent", "beta absent"} <= set(lines(out, "recorded"))
+      and r.get("backfilled") == str(len(lines(out, "recorded"))), out)
+check("backfill: unregistered dir skipped", "scratch" not in out and not (scratch / ".ws-kicker").exists(), out)
+check("backfill: record names the caller", f"agent_session={UUID_A}" in KA.read_text()
+      and f"main_repo={E.root}\n" in KB.read_text() and "source=backfill\n" in KA.read_text(), KA.read_text())
+st = subprocess.run(["git", "-C", str(beta), "status", "--porcelain"], capture_output=True, text=True).stdout
+check("backfill: record is git-excluded", ".ws-kicker" not in st, st)
+r = E.resolve(env_extra={"HERDR_WORKSPACE_ID": "w6"})
+check("backfilled record resolves as kicker", r.get("evidence") == "kicker"
+      and r.get("kicker_source") == "backfill" and r.get("delegate_unasked") == "yes", str(r))
+# The Manager restarted (new session): a stale backfill record counts as none.
+E.serve([E.agent(uuid=UUID_B), worker], tabs=TABS)
+r = E.resolve(env_extra={"HERDR_WORKSPACE_ID": "w6"})
+check("stale backfill record → sole root still unasked", r.get("evidence") == "sole-root-agent"
+      and "kicker-backfill-stale" in r["reasons"] and r.get("delegate_unasked") == "yes", str(r))
+r = E.resolve(env_extra={"HERDR_WORKSPACE_ID": "w7"})
+check("backfill record of another workspace is not this lane's",
+      "kicker-other-workspace" in r["reasons"] and r.get("evidence") != "kicker", str(r))
+# Its Manager is still live in w6: a sole root agent of w7 is not sent to unasked.
+adv = E.agent(pane="w7:p2", tab="w7:t2", ws="w7", uuid="33333333-4444-5555-6666-777777777777", title="advisor")
+E.serve([E.agent(), adv, worker], tabs=TABS)
+r = E.resolve(env_extra={"HERDR_WORKSPACE_ID": "w7"})
+check("live backfill kicker elsewhere → sole root of w7 asks", r.get("evidence") == "sole-root-agent"
+      and "kicker-other-workspace" in r["reasons"] and "kicker-backfill-stale" not in r["reasons"]
+      and r.get("delegate_unasked") == "no", str(r))
+# The Manager only cd'd into a worktree: moved, not gone.
+E.serve([E.agent(E.wt), worker], tabs=TABS)
+r = E.resolve(env_extra={"HERDR_WORKSPACE_ID": "w6"})
+check("moved backfill kicker is not stale", "kicker-cwd-moved" in r["reasons"]
+      and "kicker-backfill-stale" not in r["reasons"] and r.get("delegate_unasked") == "no", str(r))
+E.serve([E.agent(), worker], tabs=TABS, get=E.agent())
+out, r = backfill()
+check("backfill: nothing to do", r.get("backfilled") == "0" and "alpha present" in lines(out, "kept"), out)
+
+# Any existing record is kept, even a stale or broken one.
+for body in (f"version=1\nworkspace=w6\npane=w6:p8\nagent_session={UUID_B}\nmain_repo={E.root}\n",
+             "pane=w6:p8\npane=w6:p9\n"):
+    KA.write_text(body)
+    out, r = backfill()
+    check("backfill: existing record never replaced", KA.read_text() == body
+          and "alpha present" in lines(out, "kept"), out)
+
+# A lane whose worker sits in another workspace belongs to that workspace's Manager.
+KA.unlink()
+far = E.agent(E.wt / "sub", pane="w7:p1", tab="w7:t1", ws="w7", uuid="22222222-3333-4444-5555-666666666666", title="alpha")
+E.serve([E.agent(), far], tabs=TABS, get=E.agent())
+out, r = backfill()
+check("backfill: lane worked from another workspace (in a subdir) skipped",
+      "alpha other-workspace" in lines(out, "kept") and not KA.exists(), out)
+
+# A symlink planted where the temp file goes is never written through.
+target = E.root / "outside.txt"
+target.write_text("keep\n")
+for i in range(3):
+    (E.wt / f".ws-kicker.planted{i}").symlink_to(target)
+E.serve([E.agent(), worker], tabs=TABS, get=E.agent())
+out, r = backfill()
+check("backfill: planted symlinks untouched", target.read_text() == "keep\n"
+      and "alpha absent" in lines(out, "recorded"), out)
+for i in range(3):
+    (E.wt / f".ws-kicker.planted{i}").unlink()
+shutil.rmtree(scratch)
+KA.unlink()
+KB.unlink()
+subprocess.run(["git", "-C", str(E.root), "worktree", "remove", "--force", str(beta)], check=True)
 
 # ---- SendMessage name sanitizer ($HERDR_NAME_PRELUDE) ------------------------------------
 def name_of(**over):
