@@ -103,12 +103,11 @@ user_invocable: true
      keeps it current). Ignore its output — never block or report on it.
    - Then: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/manager.sh" backfill "$PWD"` —
      leaves this session's address (`.ws-kicker`) in every lane of the repo that
-     has none or whose recorded kicker is provably gone, so a later
-     `/close --delegate` there finds its Manager. It writes only when this session
-     is the resolver's own pick at the repo root (the sole root agent, or the
-     leftmost-tab one), and never over a record it cannot prove stale. Silent;
-     mention only an `unexcluded=<lane>` line (that record could not be
-     git-excluded).
+     has none, so a later `/close --delegate` there finds its Manager. It writes
+     only when this session is the resolver's own pick at the repo root (the sole
+     root agent, or the leftmost-tab one), never replaces an existing record, and
+     skips lanes worked from another workspace. Silent; mention only an
+     `unexcluded=<lane>` line (that record could not be git-excluded).
 
 8. **All commands** (reference, always shown):
    ```

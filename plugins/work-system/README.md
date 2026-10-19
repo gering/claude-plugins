@@ -687,10 +687,11 @@ task name to reopen that one's tab from here). The reopen shares the tested
 `/kickoff` and `/adopt` leave the kicking session's address in the worktree
 (`.ws-kicker`, git-excluded like `MANDATE.md`): its herdr pane, agent-session
 UUID, SendMessage name and canonical repo. Lanes that have none (kicked off before
-the record existed, or whose kicker is provably gone) get one backfilled when the
-Manager runs `/list` or `/kickoff` (`manager.sh backfill`) — only from the session
-the resolver itself would pick at the repo root, so an advisor session there never
-stamps itself; any record it cannot prove stale is kept. The worker (through `/continue`, or
+the record existed) get one backfilled when the Manager runs `/list` or `/kickoff`
+(`manager.sh backfill`) — only from the session the resolver itself would pick at
+the repo root, so an advisor session there never stamps itself. An existing
+record is never replaced, and a backfilled one is named as such
+(`kicker_source=backfill`). The worker (through `/continue`, or
 its bootstrap prompt for codex/grok/kimi) then sends the Manager one line at each
 milestone — **PR opened**, **review round started**
 (`/continue` sends the exact forms of its step 9b: `x/y`, just `x` without a

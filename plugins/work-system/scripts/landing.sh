@@ -29,7 +29,9 @@
 #   status <task> [--repo <main>]
 #       Prints landing=none|live|stale|unverified|invalid, and with a marker:
 #       phase=, pr=, branch=, worktree=, worktree_state=present|gone,
-#       started_at=, kicker_session=, and for a live worker worker_pane=,
+#       started_at=, kicker_session=, kicker_record=absent|present (any
+#       .ws-kicker at begin, even one too broken to copy), and for a live
+#       worker worker_pane=,
 #       worker_tab=, worker_cwd=match|unknown|mismatch.
 #         live       herdr lists the recorded pane with the recorded session
 #         stale      herdr's populated agent list has no such pane+session
@@ -114,7 +116,8 @@ KEYS = {"version": r"1", "task": r"[A-Za-z0-9_][A-Za-z0-9._-]*",
         "started_at": r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z",
         "worker_pane": r"[A-Za-z0-9][A-Za-z0-9:_.-]{0,63}",
         "worker_session": r"[0-9a-fA-F-]{8,64}",
-        "kicker_session": r"[0-9a-fA-F-]{8,64}"}
+        "kicker_session": r"[0-9a-fA-F-]{8,64}",
+        "kicker_record": r"absent|present"}
 REQUIRED = ("version", "task", "branch", "worktree", "pr", "phase", "started_at")
 try:
     raw = open(path, encoding="utf-8").read()
@@ -249,6 +252,16 @@ $who"
   fi
   # The Manager that kicked the lane off, so a /land whose worktree vanished
   # can still recognize it among the agents at the repo root.
+  # Whether the lane had a record at all: a gone-worktree hand-over may send
+  # unasked to a sole root agent only when it never had one (like /close's
+  # delegate_unasked), never when a broken or rejected record existed.
+  if [ -e "$top/.ws-kicker" ] || [ -L "$top/.ws-kicker" ]; then
+    body="$body
+kicker_record=present"
+  else
+    body="$body
+kicker_record=absent"
+  fi
   if [ -f "$top/.ws-kicker" ] && [ ! -L "$top/.ws-kicker" ]; then
     local ks
     # Exactly one agent_session= line, or nothing is copied (a record manager.sh
@@ -354,7 +367,7 @@ $PY_LIVE" "$pane" "$sess" "$wt" "$REPO" 2>/dev/null)" || out=unverified
   fi
   echo "landing=$state"
   local k
-  for k in phase pr branch worktree started_at kicker_session; do
+  for k in phase pr branch worktree started_at kicker_session kicker_record; do
     printf '%s=%s\n' "$k" "$(field "$k")"
   done
   echo "worktree_state=$(lane_state "$wt")"

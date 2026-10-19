@@ -182,7 +182,10 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
    `<main-repo-path>`, and how the resolver picked that pane, from `evidence=`:
    - `kicker` → the session that kicked off this task (recorded at kickoff in
      `.ws-kicker`, still the same pane and agent session at the repo root). The record
-     sits in this worktree, so it is an address, not proof.
+     sits in this worktree, so it is an address, not proof. With
+     `kicker_source=backfill` the lane predates kickoff's record and the repo-root
+     session the resolver picked filled it in later (`/list`, `/kickoff`) — say that
+     instead of "kicked off".
    - `sole-root-agent` → the only live agent at the repo root in this workspace.
    - `leftmost-tab` → the leftmost of `<candidates>` live agents at the repo root, a
      **tie-break, not proof**. Say so plainly.
@@ -224,7 +227,9 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
    - Gate holds **and** `delegate_unasked=yes` → do **not**
      ask. First print the recipient and its evidence — "Delegating the close to
      `<name>` (herdr pane `<herdr_pane>`, <the session that kicked off this task |
-     the only live agent at the repo root>) — matched to that session by name only."
+     the repo-root session that recorded itself for this lane | the only live agent
+     at the repo root>) — matched to that session by name only." (the middle form
+     for `kicker_source=backfill`)
      — so the line is on screen *before* anything is sent; leave the follow-ups
      (above); then send the same single
      `SendMessage` with the same three-field body as "Delegate to `<name>`" above,

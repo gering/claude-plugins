@@ -34,22 +34,28 @@ terminal gate) and `/close` step 1b delegation, which replaced the name-only
 - **Backfill from the Manager, never over a live record (1.23.0).** Lanes kicked off
   before the record existed have none, so with two root sessions `/land` hit the
   leftmost-tab question every time. `manager.sh backfill` (run by `/list` and
-  `/kickoff`) writes the *caller* as kicker into every lane whose record is absent or
-  provably stale. Three lessons from its review (PR #82):
-  - **Judge with the resolver, not a copy.** A first version re-parsed `.ws-kicker`
-    with looser rules and kept records `resolve` rejects. Backfill now runs
-    `PY_RESOLVE` in a `record` mode and rewrites only on `kicker-record-absent`,
-    `kicker-pane-gone`, `kicker-session-changed`; every other verdict keeps.
+  `/kickoff`) writes the *caller* as kicker (`source=backfill`, surfaced as
+  `kicker_source=`) into every lane with **no** record. Lessons from two review
+  rounds on PR #82:
+  - **Fill absent, never replace.** A first version also rewrote "stale" records
+    (pane gone, session changed). Every proof of staleness leaked: one snapshot of
+    one herdr server, a pane briefly missing while claude restarts, an empty session
+    id, a record refreshed between judging and writing, workspace ids reused across
+    servers. Each fix needed another guard; dropping the rewrite removed the class.
+    `resolve` already ignores a stale record, so replacing it bought nothing.
   - **Root is not enough — the caller must be the resolver's pick.** Any root
     session could stamp itself, turning an advisor's `/list` into a kicker record
     and an asked tie-break into an unasked send. Backfill resolves *without* a record
-    and writes only when the answer is `unique` and is the caller's own pane.
-  - **"Gone" needs proof.** One snapshot of one herdr server proves nothing about a
-    pane in a workspace that server does not show (`kicker-workspace-unseen`, kept),
-    and a row with no readable pane could be the kicker (`record=unverified`).
-  An absent record is created by `link` (no-clobber); the temp file is opened
-  `O_EXCL|O_NOFOLLOW` because the worktree is worker-writable. A record changed
-  between judging and writing is re-judged first; a short window remains.
+    and writes only when the answer is `unique` and is the caller's own pane; lanes
+    an agent works in from another workspace are left to that workspace's Manager.
+  - **Accepted residual:** a backfilled leftmost-tab winner then delegates unasked —
+    the user wants delegation automatic whenever a Manager is there, and
+    `kicker_source=backfill` keeps the origin visible in the printed recipient line.
+    A worker that deletes its `.ws-kicker` can make its lane look never-recorded;
+    that is no stronger than forging the record, already accepted.
+  An absent record is created by `link` (no-clobber, so `/kickoff` wins a race);
+  the temp file is opened `O_EXCL|O_NOFOLLOW` because the worktree is
+  worker-writable.
 - **The live title must still match the recorded name.** The SendMessage name is
   the pane's live title, which any process in the pane can set; a kicker whose
   title differs from the recorded name keeps its pane but gets no SendMessage

@@ -217,7 +217,7 @@ check("delegate preselected on the resolver's own rule",
 check("everything else still asks",
       "but `delegate_unasked=no` → ask the question" in branch)
 check("the gone path sends unasked on the same evidence",
-      "`evidence=sole-root-agent` while `kicker_session=` is empty" in LAND)
+      "`evidence=sole-root-agent` while the marker says `kicker_record=absent`" in LAND)
 check("the recipient is named before the message is sent",
       at(branch, "matched to that session by name only")
       < at(branch, "then send the same single"))

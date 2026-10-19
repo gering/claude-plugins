@@ -173,8 +173,10 @@ from the original detector that still hold:
   delegate automatically whenever a Manager is there): a worker able to forge the
   record could do worse, and the Manager re-verifies the merge before it closes
   anything. `leftmost-tab` still asks. `/land`'s gone-worktree path has no record to
-  read (it went with the worktree), so it uses the landing marker's `kicker_session`
-  instead: empty + `sole-root-agent` sends, a mismatch asks. The recipient line is printed in the same turn as the send — it lets the user spot, not stop, a wrong recipient. Under the
+  read (it went with the worktree), so it uses the landing marker instead:
+  `kicker_session` matching sends; `sole-root-agent` sends only with
+  `kicker_record=absent` (an empty `kicker_session` alone also covers a broken or
+  rejected record, which must ask — review round 2 on PR #82). The recipient line is printed in the same turn as the send — it lets the user spot, not stop, a wrong recipient. Under the
   flag a gate miss is reported in one line (the user asked for delegation), unlike the
   silent no-offer of a plain `/close`. Pinned by `plugins/work-system/scripts/test_land.py`.
 
