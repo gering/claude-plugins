@@ -280,7 +280,9 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
    - Find the worktree for this task (match by its branch `<task-branch>`)
    - Worktree is typically at `<main-repo-path>/.claude/worktrees/<task-name>` (but verify from
      `git worktree list` output)
-   - Read the issue this lane was kicked off from, before step 7 removes it:
+   - Read the issue this lane was kicked off from, before step 7 removes it (always pass
+     `<task-ref>` **quoted** — an unquoted `#44` starts a shell comment and drops the rest
+     of the command):
      `sed -n 's/^issue: \(#[0-9][0-9]*\)$/\1/p' <worktree-path>/TASK.md | head -1` → `<task-ref>`
      (empty for a local task or a gone worktree → `<task-ref>` = `<task-name>`). Step 10 closes
      exactly that issue; a name lookup could match a newer open issue reusing the name.
@@ -628,7 +630,7 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
       printing the literal "null":
       ```sh
       SHA=$( ( cd <main-repo-path> && gh pr view <pr_number> --json mergeCommit --jq '.mergeCommit.oid // empty' ) 2>/dev/null )
-      python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" close <main-repo-path> <task-ref> --branch <task-branch> --pr <pr_number> --sha "$SHA"
+      python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" close <main-repo-path> "<task-ref>" --branch <task-branch> --pr <pr_number> --sha "$SHA"
       ```
     - **Manual close** (no merged PR) — the same call without `--pr`/`--sha`; the record says
       "closed manually (no merged PR)".
@@ -639,7 +641,7 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
       the rest of the cleanup (worktree/branch) already happened. Never fall back to a file.
     - **Exit 5** (several open issues carry this task name) or **2** (the name was refused):
       nothing was closed. Show stderr and the open candidates, ask which issue this lane
-      shipped, and close that one with the same call and `#N` in place of the name. Never
+      shipped, and close that one with the same call and `"#N"` (quoted) in place of the name. Never
       pick one yourself.
     - **`backend=github`** → read `issue=` and `result=`: `closed` (closed with a comment naming
       the PR, or the manual-close note) or `already-closed` (not an error). There is no file to

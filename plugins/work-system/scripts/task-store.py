@@ -290,8 +290,11 @@ def cmd_backend(d):
         if info.get(k):
             print(f"{k}={info[k]}")
     if backend == "github":
-        out = gh(["repo", "view", "--json", "visibility"], info["repo"])
-        print(f"visibility={json.loads(out).get('visibility', '').lower()}")
+        # `gh repo view` takes the repo as an argument and has no -R, so not gh().
+        r = run(["gh", "repo", "view", info["repo"], "--json", "visibility"])
+        if r is None or r.returncode != 0:
+            raise Fail(1, f"gh repo view failed: {oneline(r.stderr if r else '')[:300]}")
+        print(f"visibility={json.loads(r.stdout).get('visibility', '').lower()}")
 
 
 def cmd_list(d):

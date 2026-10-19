@@ -37,6 +37,8 @@ cmd = args[:2]
 if cmd == ["auth", "status"]:
     sys.exit(0 if st.get("auth", True) else 1)
 if cmd == ["repo", "view"]:
+    if "-R" in args:  # the real gh: unknown shorthand flag
+        print("unknown shorthand flag: 'R' in -R", file=sys.stderr); sys.exit(1)
     print(json.dumps({"visibility": st.get("visibility", "PRIVATE")})); sys.exit(0)
 if cmd == ["label", "create"]:
     st.setdefault("labels", []); st["labels"].append(args[2]); save(); sys.exit(0)
