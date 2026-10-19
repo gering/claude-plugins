@@ -27,7 +27,7 @@
 #                            the lane, e.g. /cycle run from the main repo.
 #   show  [<dir>]            Emit key=value lines (always incl. mandate_exists).
 #
-#   show/allows/round also take `--branch <name>` INSTEAD of <dir>: the script
+#   show/allows/round/reviewed/fixed/covered also take `--branch <name>` INSTEAD of <dir>: the script
 #   then resolves the worktree holding that branch itself and reports it as
 #   `lane=`. Consumers used to do this in prose — two commands, a `|| LANE=.`
 #   fallback, and a `"$LANE"` argument — repeated at about ten sites. Every
@@ -48,6 +48,21 @@
 #                            An <action> outside the vocabulary is a usage error
 #                            (exit 2), never a verdict.
 #   round [<dir>]            Consume one review round; emit the new counters.
+#   reviewed [--head <rev>] [<dir>]
+#                            A review FINISHED: record what it saw — <rev>, or
+#                            the working tree when omitted — as reviewed_head +
+#                            reviewed_diff (the lane's diff id, see
+#                            lane_diff_id), and clear fixed_diff. Exit 2 when
+#                            the diff cannot be computed (e.g. no main branch).
+#   fixed --after <rev> [<dir>]
+#                            Record the working tree as review <rev>'s state
+#                            plus its agreed fixes (fixed_diff) — once per
+#                            review, and only when <rev> is the review on
+#                            record; exit 1 with reason= when refused.
+#   covered [--head <rev>] [<dir>]
+#                            Did a recorded review cover <rev> (default HEAD)?
+#                            Exit 0 covered=yes / 1 covered=no + reason= /
+#                            3 no mandate. The merge gate of /land and /merge.
 #   exclude-task <dir>       Add /TASK.md (the lane's task copy) to the repo's git
 #                            exclude, so a clean-tree check never sees it; emits
 #                            excluded=already|yes|no (no: tracked or unwritable).
@@ -71,7 +86,8 @@
 # be persisted (`deploy-owner` uses 3 for "ownership unresolvable",
 # in_lane=unknown). `allows` additionally uses exit 1 for a denied action — callers
 # MUST distinguish 1 (denied: stop) from 3 (unknown: ask the user), never
-# collapsing both into "not allowed".
+# collapsing both into "not allowed". `covered` and `fixed` use exit 1 for a
+# negative answer that is NOT a user decision — their `reason=` names it.
 set -eu
 
 MANDATE_FILE="MANDATE.md"
@@ -79,7 +95,7 @@ MANDATE_VERSION=1
 
 # Keys carried in the frontmatter, in emit order. `allow`/`deny` are
 # comma-separated action lists; everything else is a scalar.
-KEYS="mandate_version task recorded_at recorded_by authorized_by scope terminal_gate allow deny review_budget review_rounds_used"
+KEYS="mandate_version task recorded_at recorded_by authorized_by scope terminal_gate allow deny review_budget review_rounds_used reviewed_head reviewed_diff fixed_diff"
 
 # The canonical action vocabulary. It lives HERE, not in skill prose, because
 # `allows` reports an unknown token as `unlisted` (exit 1) — indistinguishable
@@ -429,7 +445,7 @@ acquire_round_lock() {
 }
 
 do_round() {
-  local budget used tmp verify
+  local budget used
   resolve_mandate_path "${1:-.}"
   refuse_symlink
   [ -f "$MANDATE_PATH" ] || { printf 'verdict=no-mandate\n'; exit 3; }
@@ -456,12 +472,26 @@ do_round() {
     return 0
   fi
   used=$(( used + 1 ))
+  persist_keys "review_rounds_used=$used"
+  rm -rf "$ROUND_LOCK"
+  trap - EXIT
 
+  printf 'round_authorized=yes\n'
+  printf 'review_rounds_used=%s\n' "$used"
+  emit_budget "$budget" "$used"
+}
+
+# Rewrite frontmatter keys in place, keeping prose and any hand-written body;
+# the caller holds the round lock and has parsed the file. Each argument is
+# `key=value` with a key from KEYS and a value without spaces (counters, SHAs,
+# diff ids). Exit 4 when the write cannot be persisted or does not read back.
+persist_keys() {
+  local tmp kv k v got
   # mktemp beside the file, not a fixed "$file.tmp": the fixed name is a
   # predictable target a pre-existing symlink can redirect, and a failed run left
   # it behind for an autonomous `git add -A` to commit.
   tmp="$(mktemp "${MANDATE_PATH%/*}/.MANDATE.XXXXXX")" \
-    || { echo "${0##*/}: could not persist the consumed round — no temp file could be created beside $MANDATE_PATH" >&2; exit 4; }
+    || { echo "${0##*/}: could not persist the record — no temp file could be created beside $MANDATE_PATH" >&2; exit 4; }
   # INT/TERM/HUP as well as EXIT: an untrapped signal skips the EXIT trap, and
   # the orphan `.MANDATE.XXXXXX` is untracked in the worktree root — exactly what
   # a worker authorized to `git add -A` would commit. `ensure_excluded` covers
@@ -469,50 +499,235 @@ do_round() {
   trap 'rm -f "$tmp"; rm -rf "$ROUND_LOCK"' EXIT
   trap 'rm -f "$tmp"; rm -rf "$ROUND_LOCK"; exit 4' INT TERM HUP
 
-  # Rewrite the counter in place, keeping prose and any hand-written body. If the
-  # key is ABSENT (hand-edited away, or a mandate from another tool), insert it
-  # before the closing fence — the previous version substituted only, so the
-  # counter silently never persisted and the review budget became unbounded.
-  # The match is anchored at COLUMN 0, like the reader: an indented
-  # `review_rounds_used:` is nested data the parser deliberately ignores, and
-  # rewriting it unindented promoted it to a second top-level key — after which
-  # every verb died on "duplicate key", bricking the lane on one normal booking.
-  awk -v n="$used" "$FM_NORM_AWK"'
+  # A key that is ABSENT (hand-edited away, a mandate from another tool, or one
+  # recorded before the key existed) is inserted before the closing fence — the
+  # first version substituted only, so the counter silently never persisted and
+  # the review budget became unbounded. The match is anchored at COLUMN 0, like
+  # the reader: an indented `review_rounds_used:` is nested data the parser
+  # deliberately ignores, and rewriting it unindented promoted it to a second
+  # top-level key — after which every verb died on "duplicate key", bricking the
+  # lane on one normal booking.
+  awk -v sets="$*" "$FM_NORM_AWK"'
+    BEGIN {
+      n = split(sets, pairs, " ")
+      for (i = 1; i <= n; i++) {
+        j = index(pairs[i], "="); k = substr(pairs[i], 1, j - 1)
+        val[k] = substr(pairs[i], j + 1); order[i] = k
+      }
+    }
     NR == 1 && $0 == "---" { infm = 1; print; next }
     infm && $0 == "---" {
-      if (!seen) print "review_rounds_used: " n
+      for (i = 1; i <= n; i++) if (!(order[i] in seen)) print order[i] ": " val[order[i]]
       infm = 0; print; next
     }
-    infm && $0 ~ /^review_rounds_used[ \t]*:/ { seen = 1; print "review_rounds_used: " n; next }
+    infm && $0 !~ /^[ \t]/ {
+      i = index($0, ":")
+      if (i > 0) {
+        k = substr($0, 1, i - 1); gsub(/[ \t]+$/, "", k)
+        if (k in val) { seen[k] = 1; print k ": " val[k]; next }
+      }
+    }
     { print }
   ' "$MANDATE_PATH" > "$tmp" && mv "$tmp" "$MANDATE_PATH" || {
     # Report the failure instead of printing a consumed round: the old form put
     # the printfs after an `&&` list, so a read-only worktree produced exit 0 and
     # a round the file never recorded — the one thing the persisted counter exists
     # to prevent.
-    echo "${0##*/}: could not persist the consumed round to $MANDATE_PATH" >&2
+    echo "${0##*/}: could not persist the record to $MANDATE_PATH" >&2
     exit 4
   }
+  trap 'rm -rf "$ROUND_LOCK"' EXIT
+  trap - INT TERM HUP
 
-  # Read the file back and confirm the counter is really there before reporting
+  # Read the file back and confirm every value is really there before reporting
   # it. Reporting a round the file never recorded is the single failure the
   # persisted counter exists to prevent, and it is exactly what a reader/writer
   # desync produces silently — the write succeeds, `mv` succeeds, and nothing
   # notices. `parse_frontmatter` dies (exit 2) if the rewrite corrupted the
   # record, which is also the right answer.
   parse_frontmatter "$MANDATE_PATH"
-  verify="$FM_review_rounds_used"
-  if [ "$verify" != "$used" ]; then
-    echo "${0##*/}: the consumed round was not stored — $MANDATE_PATH still reads review_rounds_used='$verify', expected '$used'" >&2
-    exit 4
-  fi
-  rm -rf "$ROUND_LOCK"
-  trap - EXIT
-  trap - INT TERM HUP
+  for kv in "$@"; do
+    k="${kv%%=*}"; v="${kv#*=}"
+    eval "got=\${FM_$k}"
+    if [ "$got" != "$v" ]; then
+      echo "${0##*/}: the record was not stored — $MANDATE_PATH reads $k='$got', expected '$v'" >&2
+      exit 4
+    fi
+  done
+}
 
-  printf 'round_authorized=yes\n'
-  printf 'review_rounds_used=%s\n' "$used"
-  emit_budget "$budget" "$used"
+# The lane's diff id: a hash of everything the lane changes against its base,
+# so the merge gate can tell whether the head being merged is the one a review
+# saw. Not a SHA or a tree: /merge rebases before it merges, and the global git
+# rules fold fixes into earlier commits — both rewrite every SHA and leave the
+# change itself alone. The diff keeps its context lines, the hunks' function
+# context and every whitespace byte (a re-indented or moved line changes what
+# the code does, so it changes the id); only the `@@` line numbers and `index`
+# lines are dropped, so a rebase over unrelated edits on main keeps the id. An
+# edit on main within the context of a lane hunk changes it — a fail-closed
+# re-review, never a pass. Residual: the same change moved between two blocks
+# whose ±3 context lines and enclosing function are identical keeps the id. The
+# pinned diff options keep a user's diff config from changing the id between
+# the review and the merge. <target> is a commit, or `worktree` for the working
+# tree (tracked + untracked, minus the lane's record files and swarm's staging
+# dirs), snapshotted through a throwaway index so the real one is never touched.
+# Sets DIFF_ID; returns 1 when it cannot be computed (DIFF_ERR says why).
+DIFF_ID=""; DIFF_ERR=""
+lane_diff_id() {
+  local dir="$1" target="$2" out idx rc=0
+  DIFF_ID=""; DIFF_ERR=""
+  if [ "$target" = worktree ]; then
+    idx="$(mktemp -d "${TMPDIR:-/tmp}/mandate-idx.XXXXXX")" || { DIFF_ERR="no temp dir"; return 1; }
+    out="$(git -C "$dir" rev-parse --path-format=absolute --git-path index 2>/dev/null)" || out=""
+    [ -z "$out" ] || [ ! -f "$out" ] || cp "$out" "$idx/index" 2>/dev/null || true
+    # Excluded only where git does not ignore them already: an exclude pathspec
+    # naming an ignored path makes `git add` fail outright.
+    target="$(
+      export GIT_INDEX_FILE="$idx/index"
+      set -- ':(top)'
+      while IFS= read -r f; do
+        [ -z "$f" ] || set -- "$@" ":(top,exclude,literal)$f"
+      done <<EOF
+$(git -C "$dir" ls-files --others --exclude-standard -- ':(top)MANDATE.md' ':(top)TASK.md' \
+  ':(top).MANDATE.*' ':(top).swarm-workflow.*' 2>/dev/null)
+EOF
+      { [ -f "$idx/index" ] || git -C "$dir" read-tree HEAD; } &&
+      git -C "$dir" add -A -- "$@" >/dev/null 2>&1 &&
+      git -C "$dir" write-tree 2>/dev/null
+    )" || rc=1
+    rm -rf "$idx"
+    [ "$rc" = 0 ] && [ -n "$target" ] || { DIFF_ERR="could not snapshot the working tree"; return 1; }
+    lane_base "$dir" HEAD || { DIFF_ERR="$BASE_ERR"; return 1; }
+  else
+    lane_base "$dir" "$target" || { DIFF_ERR="$BASE_ERR"; return 1; }
+  fi
+  out="$(set -o pipefail
+    git -C "$dir" -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.relative=false \
+      diff --no-color --no-ext-diff --no-textconv --no-renames --binary --full-index \
+      --diff-algorithm=myers -U3 --src-prefix=a/ --dst-prefix=b/ "$LANE_BASE" "$target" \
+      | sed -e 's/^@@ -[0-9,]* +[0-9,]* @@/@@/' -e '/^index /d' \
+      | git -C "$dir" hash-object --stdin)" || { DIFF_ERR="git diff failed"; return 1; }
+  DIFF_ID="$out"
+  [ -n "$DIFF_ID" ] || { DIFF_ERR="empty hash"; return 1; }
+}
+
+# The commit the lane branched from: the newest merge-base of <rev> with the
+# main branch, local or origin's — whichever the branch was last rebased onto.
+# A base that cannot be found is an error the caller reports, never an empty
+# record: a review recorded against nothing would block every later merge.
+# Sets LANE_BASE, or BASE_ERR and returns 1 — a global, not stdout: inside
+# `$( )` the error text would die with the subshell.
+LANE_BASE=""; BASE_ERR=""
+# Candidates in swarm's order (origin/HEAD's branch, then main, then master);
+# the first with a merge-base wins, so a review and its gate diff the same way.
+lane_base() {
+  local dir="$1" rev="$2" head cand ref b best
+  head="$(git -C "$dir" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null)" || head=""
+  for cand in "${head#refs/remotes/origin/}" main master; do
+    [ -n "$cand" ] || continue
+    best=""
+    for ref in "refs/remotes/origin/$cand" "refs/heads/$cand"; do
+      b="$(git -C "$dir" merge-base "$rev" "$ref" 2>/dev/null)" || continue
+      if [ -z "$best" ] || git -C "$dir" merge-base --is-ancestor "$best" "$b" 2>/dev/null; then best="$b"; fi
+    done
+    if [ -n "$best" ]; then LANE_BASE="$best"; return 0; fi
+  done
+  BASE_ERR="no main branch found that $rev shares history with (tried origin/HEAD, main, master)"
+  return 1
+}
+
+# Check the record and a revision for the record verbs (no lock taken). Sets REV_COMMIT (empty
+# for `worktree`).
+REV_COMMIT=""
+record_prepare() {
+  local rev="$1"
+  case "$rev" in -*) die "not a revision: '$rev'" ;; esac
+  refuse_symlink
+  [ -f "$MANDATE_PATH" ] || { printf 'verdict=no-mandate\n'; exit 3; }
+  refuse_tracked
+  REV_COMMIT=""
+  if [ "$rev" != worktree ]; then
+    REV_COMMIT="$(git -C "${MANDATE_PATH%/*}" rev-parse --verify -q "$rev^{commit}" 2>/dev/null)" \
+      || die "not a commit in this repo: '$rev' — fetch it first"
+  fi
+}
+
+# `reviewed`: a review FINISHED, and this is what it saw. Called by whoever ran
+# it once its result is in hand — never when it is booked (a booked review that
+# times out or crashes covers nothing). Recording is independent of the review
+# budget: a review the user ran is evidence whether or not a round funded it.
+do_reviewed() {
+  local rev="$1" head
+  resolve_mandate_path "${2:-.}"
+  record_prepare "$rev"
+  lane_diff_id "${MANDATE_PATH%/*}" "${REV_COMMIT:-worktree}" \
+    || die "could not record the review: $DIFF_ERR"
+  head="${REV_COMMIT:-$(git -C "${MANDATE_PATH%/*}" rev-parse --verify -q HEAD 2>/dev/null || true)}"
+  acquire_round_lock
+  trap 'rm -rf "$ROUND_LOCK"' EXIT
+  parse_frontmatter "$MANDATE_PATH"
+  persist_keys "reviewed_head=$head" "reviewed_diff=$DIFF_ID" "fixed_diff="
+  rm -rf "$ROUND_LOCK"; trap - EXIT
+  printf 'reviewed_recorded=yes\nreviewed_head=%s\nreviewed_diff=%s\n' "$head" "$DIFF_ID"
+}
+
+# `fixed`: the agreed fixes of the last review are applied and no re-review
+# follows. Records the working tree as covered, so a merge needs no extra review
+# just for the fixes that review asked for. An attestation, not a check — so it
+# is allowed ONCE per recorded review: anything changed after it needs a review.
+# `--after <rev>` (required) binds it to the review the caller ran: refused
+# unless that review is the one on record — a caller whose own review recorded
+# nothing must not stamp its fixes onto an older one.
+do_fixed() {
+  local after="$1" reason=""
+  [ -n "$after" ] || die "fixed needs --after <rev>: the review whose fixes these are"
+  resolve_mandate_path "${2:-.}"
+  record_prepare worktree
+  case "$after" in -*) die "not a revision: '$after'" ;; esac
+  after="$(git -C "${MANDATE_PATH%/*}" rev-parse --verify -q "$after^{commit}" 2>/dev/null)" \
+    || die "--after names no commit in this repo"
+  acquire_round_lock
+  trap 'rm -rf "$ROUND_LOCK"' EXIT
+  parse_frontmatter "$MANDATE_PATH"
+  if [ -z "$FM_reviewed_diff" ]; then
+    reason=no-review
+    echo "${0##*/}: no finished review is recorded — fixes can only follow a review (mandate.sh reviewed)" >&2
+  elif [ "$after" != "$FM_reviewed_head" ]; then
+    reason=other-review
+    echo "${0##*/}: the review on record is for $FM_reviewed_head, not $after — record that review first" >&2
+  elif [ -n "$FM_fixed_diff" ]; then
+    reason=already-recorded
+    echo "${0##*/}: the last review's fixes are already recorded — further changes need a new review" >&2
+  fi
+  if [ -n "$reason" ]; then
+    rm -rf "$ROUND_LOCK"; trap - EXIT
+    printf 'fixed_recorded=no\nreason=%s\n' "$reason"
+    exit 1
+  fi
+  lane_diff_id "${MANDATE_PATH%/*}" worktree || die "could not record the fixes: $DIFF_ERR"
+  persist_keys "fixed_diff=$DIFF_ID"
+  rm -rf "$ROUND_LOCK"; trap - EXIT
+  printf 'fixed_recorded=yes\nfixed_diff=%s\n' "$DIFF_ID"
+}
+
+# `covered`: may <rev> be merged on the strength of a recorded review? Covered
+# when the lane's diff at <rev> equals what the last review saw, or what `fixed`
+# recorded after it. A gate, so every doubt is a "no" with a reason.
+do_covered() {
+  local rev="$1"
+  resolve_mandate_path "${2:-.}"
+  printf 'lane=%s\n' "${MANDATE_PATH%/*}"
+  record_prepare "$rev"
+  parse_frontmatter "$MANDATE_PATH"
+  printf 'head=%s\nreviewed_head=%s\n' "$REV_COMMIT" "$FM_reviewed_head"
+  [ -n "$FM_reviewed_diff" ] || { printf 'covered=no\nreason=no-review\n'; exit 1; }
+  lane_diff_id "${MANDATE_PATH%/*}" "$REV_COMMIT" || die "could not check coverage: $DIFF_ERR"
+  printf 'diff_id=%s\n' "$DIFF_ID"
+  if [ "$DIFF_ID" = "$FM_reviewed_diff" ]; then printf 'covered=yes\nvia=review\n'; exit 0; fi
+  if [ -n "$FM_fixed_diff" ] && [ "$DIFF_ID" = "$FM_fixed_diff" ]; then
+    printf 'covered=yes\nvia=agreed-fixes\n'; exit 0
+  fi
+  printf 'covered=no\nreason=changed-since-review\n'; exit 1
 }
 
 # The budgets below are the floor for a host where the setting cannot be read
@@ -1017,11 +1232,28 @@ case "${1:-}" in
   init)    shift || true; do_init "$@" ;;
   allows)  shift || true; resolve_lane_dir "$CLI_BRANCH" "${2:-.}"; do_allows "${1:-}" "$LANE_DIR" ;;
   round)   shift || true; resolve_lane_dir "$CLI_BRANCH" "${1:-.}"; do_round "$LANE_DIR" ;;
+  covered|reviewed|fixed)
+           verb="$1"; shift || true
+           # The one optional revision flag: --head for covered/reviewed, --after for fixed.
+           flag=--head; [ "$verb" = fixed ] && flag=--after
+           rec_rev=""
+           case "${1:-}" in
+             "$flag")   [ $# -ge 2 ] || die "$flag needs a revision"; rec_rev="$2"; shift 2
+                        [ -n "$rec_rev" ] && [ "$rec_rev" != worktree ] || die "$flag needs a revision" ;;
+             "$flag"=*) rec_rev="${1#"$flag"=}"; shift
+                        [ -n "$rec_rev" ] && [ "$rec_rev" != worktree ] || die "$flag needs a revision" ;;
+           esac
+           resolve_lane_dir "$CLI_BRANCH" "${1:-.}"
+           case "$verb" in
+             covered)  do_covered "${rec_rev:-HEAD}" "$LANE_DIR" ;;
+             reviewed) do_reviewed "${rec_rev:-worktree}" "$LANE_DIR" ;;
+             fixed)    do_fixed "$rec_rev" "$LANE_DIR" ;;
+           esac ;;
   exclude-task) shift || true; [ $# -eq 1 ] && [ -d "$1" ] || die "usage: ${0##*/} exclude-task <dir>"
            rc=0; exclude_one "$1" TASK.md || rc=$?
            case "$rc" in 0) echo excluded=already ;; 1) echo excluded=yes ;; *) echo excluded=no ;; esac ;;
   actions) printf '%s\n' $KNOWN_ACTIONS ;;
   presets) shift || true; do_presets "${1:-.}" ;;
   deploy-owner) shift || true; do_deploy_owner "${1:-.}" ;;
-  *) echo "usage: ${0##*/} {path|lane|show|init|allows|round|exclude-task|actions|presets|deploy-owner} [--branch <name>] [...]" >&2; exit 2 ;;
+  *) echo "usage: ${0##*/} {path|lane|show|init|allows|round|reviewed|fixed|covered|exclude-task|actions|presets|deploy-owner} [--branch <name>] [...]" >&2; exit 2 ;;
 esac

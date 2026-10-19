@@ -197,6 +197,19 @@ Findings are advisory by default; `--fix` / `--loop` act only on the ones you
 agreed with, and **only Claude** applies edits — external agents stay
 review-only. The full threat model lives in `docs/pipeline-blueprint.md` § Security.
 
+### Work-system lanes: the review is the merge gate
+
+Inside a work-system lane, `/land` and `/pr-flow:merge` merge only a head that a
+recorded review covers. A `/swarm:review` of the whole lane — the branch delta on a
+committed (clean) tree, or `--pr` for a PR that targets the default branch — records the commit it reviewed, fixed when the
+review starts (`scripts/review-record.sh reviewed --head`), so edits made while it
+runs are never stamped as reviewed. Fixes applied after the last recorded review
+(`--fix`, or a `--loop` close-out) are recorded once with `review-record.sh fixed
+--after <that commit>`. A ref, `--staged` or pathspec review, or one of a dirty
+tree, records nothing. Without work-system, a mandate, or a work-system
+new enough for the verbs, recording is a silent no-op. The record itself lives in
+work-system's `mandate.sh`; swarm only locates it (`scripts/lib-work-system.sh`).
+
 ## Architecture
 
 ### Backend adapter (`scripts/agents.sh`)

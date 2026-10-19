@@ -9,31 +9,36 @@
 # plugin would read as a denial. All mandate semantics live in work-system's
 # mandate.sh; this shim only locates it and passes the verdict through.
 #
-# Usage: mandate-shim.sh {show|allows <action>|round|lane <branch>|actions|deploy-owner} [<dir>]
+# Usage: mandate-shim.sh {show|allows <action>|round|reviewed [--head <rev>]|fixed --after <rev>|covered [--head <rev>]|lane <branch>|actions|deploy-owner} [<dir>]
 #
 # <dir> is the LANE, not the cwd: resolve it first with `lane <branch>` (prints
 # the worktree holding that branch), so a /cycle run from the main repo reads the
 # PR's mandate rather than whatever sits at the session root.
 #
 # Exits, passed through from work-system's mandate.sh:
-#   0  allowed (allows) / success (show, round, lane, deploy-owner)
-#   1  denied or unlisted — a decision the user made: stop and ask
+#   0  allowed (allows) / covered (covered) / success (show, round,
+#      reviewed, fixed, lane, deploy-owner)
+#   1  denied or unlisted — a decision the user made: stop and ask. For
+#      `covered`/`fixed` it is NOT a user decision: no recorded review covers
+#      that head, or the fixes could not be recorded — reason= says why
 #   2  usage, or the mandate file itself is unreadable (duplicate key, open
 #      fence, symlink) — show stderr, stop and ask; never read as 1 or 3
 #   3  unknown — no mandate recorded, no worktree for that branch (lane),
-#      deploy ownership unresolvable (deploy-owner: in_lane=unknown), or
-#      work-system not installed (verdict=no-work-system): stop and ask —
+#      deploy ownership unresolvable (deploy-owner: in_lane=unknown),
+#      work-system not installed (verdict=no-work-system), or one too old to
+#      know the review-record verbs (verdict=old-work-system): stop and ask —
 #      except deploy-owner with verdict=no-work-system: no work-system means
 #      no lane and no Manager, so the project's own deploy instructions apply
-#   4  a round could not be persisted (round) — stop; the budget is not being
-#      written, so looping on the in-session count would restart it on resume
+#   4  a round or review record could not be persisted (round, reviewed,
+#      fixed) — stop; looping on an in-session count would restart the budget
+#      on resume, and an unrecorded review covers nothing
 # 1 and 3 are both "don't proceed unasked", but only 1 is a decision the user
 # actually made; never report a missing plugin as a refusal.
 set -u
 
 case "${1:-}" in
-  show|allows|round|lane|actions|deploy-owner) ;;
-  *) echo "usage: ${0##*/} {show|allows <action>|round|lane <branch>|actions|deploy-owner} [<dir>]" >&2; exit 2 ;;
+  show|allows|round|reviewed|fixed|covered|lane|actions|deploy-owner) ;;
+  *) echo "usage: ${0##*/} {show|allows <action>|round|reviewed [--head <rev>]|fixed --after <rev>|covered [--head <rev>]|lane <branch>|actions|deploy-owner} [<dir>]" >&2; exit 2 ;;
 esac
 
 # Source the locator from THIS script's own directory — never from a path built
@@ -54,5 +59,17 @@ if [ -z "$t" ]; then
   echo "verdict=no-work-system"
   exit 3
 fi
+
+# The review-record verbs are newer than the shim's other verbs. An older
+# mandate.sh answers them with its usage error (exit 2), which callers read as
+# "a record nobody can vouch for" and hard-stop on — every /merge blocked by a
+# version skew. Ask its usage line instead; a missing verb is "unknown" (3).
+case "$1" in
+  reviewed|fixed|covered)
+    case "$(bash "$t" 2>&1 </dev/null)" in
+      *"|covered|"*) ;;
+      *) echo "verdict=old-work-system"; exit 3 ;;
+    esac ;;
+esac
 
 exec bash "$t" "$@"

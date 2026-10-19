@@ -819,10 +819,12 @@ conc = make_repo()
 init(conc, "task=conc", "review_budget=20")
 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
     results = list(pool.map(lambda _: run("round", str(conc)), range(8)))
-check("every concurrent booking succeeded", all(r.returncode == 0 for r in results))
+check("every concurrent booking succeeded: " + "; ".join(
+          f"rc={r.returncode} {r.stderr.strip()[:200]}" for r in results if r.returncode != 0),
+      all(r.returncode == 0 for r in results))
 check("no booking was lost to a race",
       kv(run("show", str(conc)).stdout).get("review_rounds_used") == "8")
-counts = sorted(kv(r.stdout).get("review_rounds_used") for r in results)
+counts = sorted(kv(r.stdout).get("review_rounds_used", "") for r in results)
 check("and each caller was told a distinct round number",
       counts == [str(i) for i in range(1, 9)])
 check("the lock directory is cleaned up",
@@ -1186,6 +1188,136 @@ check("manager.sh's exclude_one mirrors mandate.sh's",
 check("and leaves no rule behind",
       "/TASK.md" not in ((tr2 / ".git" / "info" / "exclude").read_text()
                          if (tr2 / ".git" / "info" / "exclude").exists() else ""))
+
+
+# --- reviewed / fixed / covered: the merge gate on a recorded review --------
+# A lane worktree off a local main (no origin). A finished review records what
+# it saw; `covered` matches the head to merge against it by diff, so a rebase or
+# a squash keeps the coverage and any change of the code loses it.
+def git(d, *args):
+    return subprocess.run(["git", "-C", str(d), *args], capture_output=True,
+                          text=True, check=True).stdout.strip()
+
+
+def commit_all(d, msg):
+    git(d, "add", "-A")
+    git(d, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", msg)
+
+
+gm = Path(tempfile.mkdtemp())
+git(gm, "init", "-q", "-b", "main")
+(gm / "a.txt").write_text("".join(f"line {i}\n" for i in range(30)))
+commit_all(gm, "base")
+gl = Path(tempfile.mkdtemp()) / "lane"
+git(gm, "worktree", "add", "-q", "-b", "task/gate", str(gl))
+check("covered: init in the lane",
+      run("init", str(gl), f"allow={BASE_ALLOW}", "authorized_by=user", "task=gate",
+          "review_budget=1").returncode == 0)
+
+
+def cov(*extra):
+    r = run("covered", *extra, str(gl))
+    return r.returncode, kv(r.stdout)
+
+
+rc, c = cov()
+check("covered: no review yet is not covered",
+      rc == 1 and c.get("covered") == "no" and c.get("reason") == "no-review")
+r = run("fixed", "--after", "HEAD", str(gl))
+check("fixed: refused before a review was recorded",
+      r.returncode == 1 and kv(r.stdout).get("reason") == "no-review")
+check("fixed: --after is required", run("fixed", str(gl)).returncode == 2)
+
+run("round", str(gl))
+check("round books the budget and records no review", cov()[1].get("reason") == "no-review")
+
+(gl / "a.txt").write_text((gl / "a.txt").read_text().replace("line 5\n", "line five\n"))
+(gl / "TASK.md").write_text("task\n")  # untracked, not excluded: never part of the diff
+(gl / ".swarm-workflow.abc123").mkdir()
+(gl / ".swarm-workflow.abc123" / "swarm-review.js").write_text("staged\n")
+r = run("reviewed", str(gl))
+reviewed_at = kv(r.stdout).get("reviewed_head", "")
+check("reviewed records the working tree",
+      r.returncode == 0 and reviewed_at == git(gl, "rev-parse", "HEAD"))
+check("covered: an uncommitted change is not the head",
+      cov()[1].get("reason") == "changed-since-review")
+(gl / "TASK.md").unlink()
+import shutil
+shutil.rmtree(gl / ".swarm-workflow.abc123")
+commit_all(gl, "change five")
+rc, c = cov()
+check("covered: the reviewed working tree, once committed, is covered",
+      rc == 0 and c.get("via") == "review")
+git(gl, "config", "diff.noprefix", "true")
+check("covered: a user diff config does not change the diff id", cov()[0] == 0)
+
+(gm / "a.txt").write_text((gm / "a.txt").read_text().replace("line 25\n", "line 25!\n"))
+commit_all(gm, "main moves elsewhere in the file")
+git(gl, "-c", "user.name=t", "-c", "user.email=t@t", "rebase", "-q", "main")
+check("covered: a rebase onto a newer main keeps the coverage", cov()[0] == 0)
+
+(gl / "a.txt").write_text((gl / "a.txt").read_text().replace("line five\n", "  line five\n"))
+commit_all(gl, "re-indent")
+check("covered: a whitespace-only change after the review is not covered",
+      cov()[1].get("reason") == "changed-since-review")
+r = run("fixed", "--after", "main", str(gl))
+check("fixed --after: refused for a review that is not the one on record",
+      r.returncode == 1 and kv(r.stdout).get("reason") == "other-review")
+r = run("fixed", "--after", reviewed_at[:10], str(gl))
+check("fixed: records the agreed fixes", r.returncode == 0 and kv(r.stdout).get("fixed_recorded") == "yes")
+rc, c = cov()
+check("covered: the fixed state is covered", rc == 0 and c.get("via") == "agreed-fixes")
+(gl / "b.txt").write_text("new\n")
+r = run("fixed", "--after", reviewed_at, str(gl))
+check("fixed: only once per review",
+      r.returncode == 1 and kv(r.stdout).get("reason") == "already-recorded")
+(gl / "b.txt").unlink()
+git(gl, "reset", "-q", "--soft", "main")
+commit_all(gl, "squashed")
+check("covered: squashing the lane keeps the coverage", cov()[0] == 0)
+check("covered: --head names the revision to check",
+      cov("--head", git(gl, "rev-parse", "HEAD"))[0] == 0)
+check("covered: an earlier, unreviewed head is not covered",
+      cov("--head", "main")[1].get("reason") == "changed-since-review")
+
+check("round: the budget is spent", kv(run("round", str(gl)).stdout).get("round_authorized") == "no")
+r = run("reviewed", "--head", "HEAD", str(gl))
+check("reviewed records a commit even with the budget spent", r.returncode == 0)
+check("reviewed clears the previous review's fixes",
+      kv(run("show", str(gl)).stdout).get("fixed_diff") == "")
+check("covered: the reviewed commit is covered", cov()[1].get("via") == "review")
+check("covered: an unknown revision is a usage error", cov("--head", "nope")[0] == 2)
+check("covered: an option-like revision is refused", cov("--head", "--all")[0] == 2)
+check("reviewed: --head needs a revision",
+      run("reviewed", "--head", "worktree", str(gl)).returncode == 2)
+check("covered: no mandate is unknown, not uncovered",
+      run("covered", str(make_repo())).returncode == 3)
+check("the record stays one key per name",
+      all((gl / "MANDATE.md").read_text().split("---")[1].count(f"\n{k}:") == 1
+          for k in ("reviewed_head", "reviewed_diff", "fixed_diff", "review_rounds_used")))
+# main exists but shares no history with the lane; master does — the base
+# search moves on to the next candidate instead of giving up.
+fb = Path(tempfile.mkdtemp())
+git(fb, "init", "-q", "-b", "master")
+(fb / "x").write_text("x\n")
+commit_all(fb, "x")
+git(fb, "checkout", "-q", "--orphan", "main")
+commit_all(fb, "unrelated")
+git(fb, "checkout", "-q", "-b", "task/fb", "master")
+(fb / "x").write_text("y\n")
+commit_all(fb, "lane")
+init(fb, "task=fb")
+check("lane_base falls back to the next candidate with shared history",
+      run("reviewed", "--head", "HEAD", str(fb)).returncode == 0)
+nb = Path(tempfile.mkdtemp())
+git(nb, "init", "-q", "-b", "trunk")
+(nb / "x").write_text("x\n")
+commit_all(nb, "x")
+init(nb, "task=nb")
+r = run("reviewed", str(nb))
+check("reviewed fails loudly without a main branch, recording nothing",
+      r.returncode == 2 and "no main branch found" in r.stderr
+      and kv(run("show", str(nb)).stdout).get("reviewed_diff") == "")
 
 
 if FAILS:

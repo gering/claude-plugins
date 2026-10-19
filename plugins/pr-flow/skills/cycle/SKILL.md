@@ -133,6 +133,14 @@ Strip the flags first; whatever is left over is the commit message.
     - **Render the output following the shared format spec** at `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md`. Read that file before presenting. Required sections: header, status line, findings **markdown table** (with the `Status` column on re-reviews), single-line recommendation.
     - **Do NOT deviate from the table format** — no prose cards, no per-finding headings, no nested bullets. See the "Forbidden formatting patterns" section of the spec.
     - **Do NOT immediately start fixing anything** — wait for the user to indicate which items to address.
+    - **Record the review for work-system's merge gate** (bot route — §2's
+      `/swarm:review --pr` records its own): the review read the head this cycle
+      pushed, so record that commit, never the working tree:
+      `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" reviewed --head "$(git rev-parse '@{u}')" --branch "$(git branch --show-current)"`.
+      Only for a finished review that is not stale (never after a timeout). Keep
+      the SHA it recorded (`reviewed_head=`) for the wrap-up's `fixed --after`. Exit
+      3 (no lane mandate, no or too old work-system) → silent; exit 0 → nothing
+      to report; any other → one line with its stderr, never a stop.
     - If findings exist, append one tip line: `💡 /cycle --loop auto-fixes everything you'd agree with and re-cycles until the review is clean.` (Skip the tip if the review is already clean, or if this run is already in loop mode.)
 
 11. **Sync task-tab glyphs** (best-effort, silent):
@@ -192,7 +200,7 @@ When `--loop` (alias `--auto`) is present, `/cycle` stops being a single pass an
   not being written.
 - Initialize counters: `ROUND = 0`, `FIXES_TOTAL = 0`, `FIX_COMMITS = 0`, and an `OPEN` list (findings you disagreed with, deduped across rounds).
 - Initialize `SEEN` — the loop's in-session store of prior findings, keyed by `(file, mechanism)`, each holding its stable `#`, verdict, and disposition (🔧 fixed / ⏭️ skipped / 🔁 recurred / ❌ disagreed). This is the **only** source for the re-review `Status` column and stable `#` (the poll returns just the raw latest review with no memory) — see the format spec's "Status column" section.
-- **Reuse a fresh review if one already exists**: if the latest `@claude` review on the PR is newer than the latest push (not stale) and has findings, skip the initial commit/push/trigger and go straight to "Fix agreed" with that review. Otherwise run one normal cycle (steps 1–10 above) to obtain the first review.
+- **Reuse a fresh review if one already exists**: if the latest `@claude` review on the PR is newer than the latest push (not stale) and has findings, skip the initial commit/push/trigger and go straight to "Fix agreed" with that review. Do **not** record it for the merge gate: a comment's timestamp does not prove which commit the bot read. Otherwise run one normal cycle (steps 1–10 above) to obtain the first review.
 
 ### Each iteration
 
@@ -233,6 +241,17 @@ The review wait is a background Bash poll, so the user can interject at any time
    Still open (disagreed, not changed): <Z>
    ```
    If `OPEN` has entries, render them as a findings table per `${CLAUDE_PLUGIN_ROOT}/docs/REVIEW-OUTPUT-FORMAT.md` so the user can decide what to do with them.
+   - The loop stopped **after applying agreed fixes no review has seen** (max,
+     budget, or stopped by you)? Once they are committed and pushed, record them for
+     work-system's merge gate — `/merge` otherwise finds the head uncovered:
+     `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate-shim.sh" fixed --after <sha> --branch "$(git branch --show-current)"`,
+     with `<sha>` the `reviewed_head=` this loop's last step-10 record printed,
+     typed in literally — no record this session (a reused or timed-out review) →
+     skip the call and say `/merge` will need a fresh review. Exit 0 → recorded.
+     Exit 3 → no lane mandate (or no or too old work-system): say nothing. Exit 1
+     → not recorded, `reason=` says why (`no-review`, `other-review`: a different
+     review is on record, `already-recorded`) — name it in the summary, since
+     `/merge` will stop on this head. Exit 2 or 4 → show stderr.
 2. **Offer to squash** — only if `FIX_COMMITS >= 2`:
    - Ask: "Squash the `<FIX_COMMITS>` review-loop fix commits into one? (Rewrites history + force-pushes.)"
    - On yes: `git reset --soft HEAD~<FIX_COMMITS>`, then a single commit:

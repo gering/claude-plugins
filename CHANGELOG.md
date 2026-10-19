@@ -52,6 +52,11 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.23.0 — 2026-10-19
+- Local review gate for merges. New `mandate.sh reviewed [--head <rev>]` records what a *finished* review saw (`reviewed_head` + a diff id: the lane's diff against its main branch with hunk line numbers dropped — stable across rebase and squash, sensitive to any code, context or whitespace change); `fixed --after <rev>` records review <rev>'s agreed fixes, once per review and only when <rev> is the review on record; `covered [--head <rev>]` answers whether a recorded review covers a head (exit 0 / 1 with `reason=no-review|changed-since-review` / 3 no mandate). `round` still only books budget. A missing main branch is a loud error, never an empty record.
+- `/land` refuses to merge an open PR whose head no recorded review covers, and on an auto-mode denial of the merge prints the exact `/pr-flow:merge` follow-up. `/continue` explains which reviews record themselves.
+- README: "Auto mode and the local review gate", with a user-scope `autoMode.allow` rule to add yourself (a plugin cannot ship one).
+
 ### 1.22.1 — 2026-10-18
 - `manager.sh body`/`prompt`: an event that folds to nothing (`" "`, `"[ ]"`) is now usage (exit 2) on both inputs, instead of a ping with a blank event. argv and stdin text go through one shared `clean()` (`PY_EVENT`), so the empty check sees what would be sent. Test fixes: a vacuous clipped-window assertion, missing subprocess timeouts.
 
@@ -298,6 +303,9 @@ entries are grouped per plugin, newest first.
 
 ## pr-flow
 
+### 1.7.0 — 2026-10-19
+- `/merge` step 6b: inside a work-system lane, a hard stop (no override) when no recorded review covers the PR head (`mandate-shim.sh covered`), and the merge runs with `--match-head-commit`. A permission-denied `gh pr merge` stops with the `/pr-flow:merge` follow-up instead of a retry. `/cycle` records each finished bot review (`reviewed --head`) and, after a loop stopped on unreviewed fixes, `fixed`. The shim passes `reviewed`/`fixed`/`covered` through and reports a work-system too old for them as unknown (exit 3, `verdict=old-work-system`), never as the exit-2 usage error `/merge` would stop on.
+
 ### 1.6.1 — 2026-10-18
 - The merge rule and `/merge`'s default-branch stop say where a lane's PR is merged: from its own worktree (`/land` or `/merge` there), never from the main checkout with `--delete-branch`, which pulls the branch out from under the session working there.
 
@@ -393,6 +401,9 @@ entries are grouped per plugin, newest first.
 - Initial pr-flow plugin with the PR review workflow skills.
 
 ## swarm
+
+### 0.15.0 — 2026-10-19
+- A `/swarm:review` of the whole lane (branch delta on a clean tree, or `--pr`) records the commit it reviewed (default-branch PRs only; the head read before the diff, so edits or pushes made while it runs are never stamped) for work-system's merge gate (`scripts/review-record.sh reviewed --head`, before any fix); fixes applied after the last recorded review are recorded once (`fixed --after`). Soft-coupled: without work-system, a mandate or a new enough work-system it is a silent no-op. Ships its own copy of the work-system locator (`lib-work-system.sh`, comparator pinned by work-system's `test_locator_sync.py`).
 
 ### 0.14.0 — 2026-09-22
 - Codex profiles name a capability **family** (quick/default: Sol, max: Astra; Fable→Astra, Opus→Sol, Sonnet→Terra, Haiku→Luna) instead of a hard-coded model. `codex-select.py` resolves each family to the newest visible `gpt-<major>[.<minor>]-<family>` the native CLI's non-generative `model/list` lists and whose efforts include the profile's — numeric order (`6.10 > 6.9`, bare major = `.0`), no cross-family borrowing, no common major. GPT-6 and later releases need no edit; on the current catalog Astra/Sol/Luna resolve to GPT-6 and Terra to 5.6. Dated/preview/fast/spark/suffixed IDs never qualify.
