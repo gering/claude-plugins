@@ -212,10 +212,10 @@ gate2 = at(CLOSE, "2. **Verify the task is merged**")
 d = at(CLOSE, "**With `--delegate`**")
 check("the delegate branch lives in step 1b, before the merge gate", q < d < gate2)
 branch = CLOSE[d:gate2]
-check("delegate preselected on the kicker record only",
-      "**and** `evidence=kicker` → do **not** ask" in branch)
-check("root-agent evidence still asks",
-      "`evidence=sole-root-agent` or `evidence=leftmost-tab` → ask the question" in branch)
+check("delegate preselected on the kicker record or a sole root agent",
+      "**and** `evidence=kicker` or `evidence=sole-root-agent` → do **not** ask" in branch)
+check("the leftmost-tab tie-break still asks",
+      "but `evidence=leftmost-tab` → ask the question" in branch)
 check("the recipient is named before the message is sent",
       at(branch, "matched to that session by name only")
       < at(branch, "then send the same single"))

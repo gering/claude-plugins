@@ -319,14 +319,15 @@ landing marker, **every stop** first clears it — `bash
    handoff --repo "<main-repo-path>"` (the Manager's `evaluate` reads a `landing`
    marker as "still landing" and asks; `handoff` is this close-request) — and invoke
    `/close --delegate`. That flag skips `/close` step 1b's question when
-   its seven-condition gate names a Manager through the live-revalidated kicker
-   record and sends the close-request directly; everything else in `/close`
+   its seven-condition gate names a clear Manager (the live-revalidated kicker
+   record, or the sole live agent at the repo root) and sends the close-request
+   directly; everything else in `/close`
    is unchanged:
    - **Delegated** → `/close` reports "Close request sent …" and stops. The Manager
      re-verifies the merge, sweeps the follow-ups, and tears this tab down.
-   - **Asked** — the gate holds but the Manager was found without the kicker record
-     (sole root agent or leftmost-tab tie-break): `/close` asks step 1b's question,
-     and the user picks the recipient or closes here.
+   - **Asked** — the gate holds but the Manager is a leftmost-tab tie-break between
+     several live root sessions: `/close` asks step 1b's question, and the user
+     picks the recipient or closes here.
    - **Gate miss** (any of `/close`'s seven gate conditions — e.g. no herdr, no unique
      Manager, a dirty tree, an `/adopt`-ed branch outside `task/`) → `/close` runs
      today's self-close here (Scenario B) — still the user's close, with every

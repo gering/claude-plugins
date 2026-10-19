@@ -52,6 +52,10 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.24.0 — 2026-10-19
+- `/close --delegate` (what `/land` passes) now also hands the close to the Manager without asking when it is the only live agent at the repo root (`evidence=sole-root-agent`), after printing the recipient. Only a `leftmost-tab` tie-break between several root sessions still asks.
+- New `manager.sh backfill`: the Manager, run at the repo root, records itself as the kicker (`.ws-kicker`) of every lane that has no record or whose recorded pane/session is gone — lanes kicked off before kickoff wrote one. A record that still names a live session is never overwritten; a malformed or foreign-repo record is left alone; a worktree session is refused. `/list` and `/kickoff` run it, silently. The record stays an address, not an authorization; the close-request payload and `close-request.sh evaluate` are unchanged.
+
 ### 1.23.0 — 2026-10-19
 - Local review gate for merges. New `mandate.sh reviewed [--head <rev>]` records what a *finished* review saw (`reviewed_head` + a diff id: the lane's diff against its main branch with hunk line numbers dropped — stable across rebase and squash, sensitive to any code, context or whitespace change); `fixed --after <rev>` records review <rev>'s agreed fixes, once per review and only when <rev> is the review on record; `covered [--head <rev>]` answers whether a recorded review covers a head (exit 0 / 1 with `reason=no-review|changed-since-review` / 3 no mandate). `round` still only books budget. A missing main branch is a loud error, never an empty record.
 - `/land` refuses to merge an open PR whose head no recorded review covers, and on an auto-mode denial of the merge prints the exact `/pr-flow:merge` follow-up. `/continue` explains which reviews record themselves.

@@ -1,9 +1,9 @@
 ---
 title: "Manager Address Resolver and Milestone Pings"
 createdAt: 2026-10-02
-updatedAt: 2026-10-17
+updatedAt: 2026-10-19
 createdFrom: "session: 2026-10-02 (task/add-manager-address)"
-updatedFrom: "session: 2026-10-17 (task/fix-manager-ping-truncation)"
+updatedFrom: "session: 2026-10-19 (task/auto-delegate-close-without-kicker-prompt)"
 pluginVersion: 1.9.0
 prime: false
 ---
@@ -27,9 +27,19 @@ terminal gate) and `/close` step 1b delegation, which replaced the name-only
   authorization: it sits in the worker-writable worktree, so a worker could point
   it at any live root agent. `evidence=kicker` is a better guess, not proof — the
   `/close` delegation question names the evidence and the user confirms. The one
-  exception is `/close --delegate` (what `/land` passes): it sends on `kicker`
-  without asking, after printing the recipient — an accepted residual, see
-  [herdr-close-automation](herdr-close-automation.md).
+  exception is `/close --delegate` (what `/land` passes): it sends on `kicker` or
+  `sole-root-agent` without asking, after printing the recipient — an accepted
+  residual, see [herdr-close-automation](herdr-close-automation.md).
+- **Backfill from the Manager, never over a live record (1.23.0).** Lanes kicked off
+  before the record existed have none, so with two root sessions `/land` hit the
+  leftmost-tab question every time. `manager.sh backfill` (run by `/list` and
+  `/kickoff`) writes the *caller* as kicker into every lane whose record is absent or
+  names a pane/session missing from the live list. It refuses up front unless the
+  caller sits at the repo root (a worker must never stamp itself as its siblings'
+  Manager), and on an empty/unreadable agent list (nothing proves a pane gone). A
+  record that still names a live session — any session — is kept, as are malformed,
+  linked or other-repo records (nothing to judge them by). An absent record is
+  created with `ln` (no-clobber), so a record written meanwhile by `/kickoff` wins.
 - **The live title must still match the recorded name.** The SendMessage name is
   the pane's live title, which any process in the pane can set; a kicker whose
   title differs from the recorded name keeps its pane but gets no SendMessage

@@ -481,6 +481,74 @@ check("tracked record is refused", r.get("recorded") == "no" and "kicker-file-tr
 subprocess.run(["git", "-C", str(E.wt), "rm", "-q", "-f", "--cached", ".ws-kicker"], check=True)
 (E.wt / ".ws-kicker").unlink()
 
+# ---- backfill: the Manager records itself for lanes without a valid record ---------------
+beta = E.root / ".claude" / "worktrees" / "beta"
+subprocess.run(["git", "-C", str(E.root), "worktree", "add", "-q", "-b", "task/beta", str(beta)], check=True)
+KA, KB = E.wt / ".ws-kicker", beta / ".ws-kicker"
+
+
+def backfill(**kw):
+    out = E.run("backfill", str(E.root), **kw).stdout
+    return out, kv(out)
+
+
+def lines(out, key):
+    return [ln.split("=", 1)[1] for ln in out.splitlines() if ln.startswith(key + "=")]
+
+
+E.serve([E.agent(), other, worker], get=E.agent(E.wt))
+out, r = backfill()
+check("backfill: refused from a worktree", r.get("backfilled") == "0"
+      and "kicker-not-at-repo-root" in r["reasons"] and not KA.exists() and not KB.exists(), out)
+out, r = backfill(env_extra={"HERDR_ENV": ""})
+check("backfill: refused outside herdr", "not-in-herdr" in r["reasons"] and not KA.exists(), out)
+
+E.serve([], get=E.agent())
+out, r = backfill()
+check("backfill: empty agent list proves nothing", r.get("backfilled") == "0"
+      and "agent-list-unverified" in r["reasons"] and not KA.exists(), out)
+
+E.serve([E.agent(), other, worker], get=E.agent())
+out, r = backfill()
+check("backfill: absent records written", {"alpha absent", "beta absent"} <= set(lines(out, "recorded"))
+      and r.get("backfilled") == str(len(lines(out, "recorded"))), out)
+check("backfill: record names the caller", f"agent_session={UUID_A}" in KA.read_text()
+      and f"main_repo={E.root}\n" in KB.read_text(), KA.read_text())
+st = subprocess.run(["git", "-C", str(beta), "status", "--porcelain"], capture_output=True, text=True).stdout
+check("backfill: record is git-excluded", ".ws-kicker" not in st, st)
+r = E.resolve()
+check("backfilled record resolves as kicker", r.get("evidence") == "kicker", str(r))
+
+# Another live session's record is never overwritten; a gone pane's is.
+E.write_record(pane="w6:p2", tab="w6:t2", agent_session=UUID_B, sendmessage_name="Advisor")
+other_rec = KA.read_text()
+KB.write_text(KB.read_text().replace("pane=w6:p1", "pane=w6:p8"))
+out, r = backfill()
+check("backfill: live record of another session kept", KA.read_text() == other_rec
+      and "alpha valid" in lines(out, "kept"), out)
+check("backfill: gone pane rewritten", "beta pane-gone" in lines(out, "recorded")
+      and "pane=w6:p1\n" in KB.read_text(), out)
+
+# The recorded pane now hosts a different session → stale, rewritten.
+E.write_record(pane="w6:p2", tab="w6:t2", agent_session="99999999-0000-0000-0000-000000000000")
+out, r = backfill()
+check("backfill: changed session rewritten", "alpha session-changed" in lines(out, "recorded")
+      and f"agent_session={UUID_A}" in KA.read_text(), out)
+check("backfill: own valid record kept", "beta valid" in lines(out, "kept"), out)
+
+# Records it cannot judge stay untouched.
+KA.write_text("pane=w6:p8\npane=w6:p9\nagent_session=x\nmain_repo=/x\n")
+out, r = backfill()
+check("backfill: malformed kept", "alpha malformed" in lines(out, "kept")
+      and "pane=w6:p9" in KA.read_text(), out)
+E.write_record(main_repo="/elsewhere", pane="w6:p8")
+out, r = backfill()
+check("backfill: another repo's record kept", "alpha other-repo" in lines(out, "kept")
+      and "main_repo=/elsewhere" in KA.read_text(), out)
+KA.unlink()
+KB.unlink()
+subprocess.run(["git", "-C", str(E.root), "worktree", "remove", "--force", str(beta)], check=True)
+
 # ---- SendMessage name sanitizer ($HERDR_NAME_PRELUDE) ------------------------------------
 def name_of(**over):
     a = E.agent()
