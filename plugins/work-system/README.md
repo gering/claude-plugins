@@ -54,7 +54,7 @@ The backlog is centralized — `/define` adds to it even from inside a linked wo
 | `github` | Issues labelled `work-system:task` in origin's repository. The task name (kebab slug) lives in a hidden body marker `<!-- work-system task: <name> -->`, so ordinary issues are never tasks; refer to a task by name or `#N` |
 | `local` | One markdown file per task in `tasks/` on the main worktree (`paths.tasks_dir` is not wired yet) |
 
-Every skill reaches the backlog through one script, `scripts/task-store.py` (`backend`, `list`, `get`, `create`, `close`). A GitHub backend whose `gh` is missing, unauthenticated or unreachable fails with a clear message — work-system never falls back to local files, which would split the backlog. `/define` names the target repository before creating an issue and says when that repository is public. `tasks/ROADMAP.md` (the Manager's open follow-ups) stays local on both backends.
+Every skill reaches the backlog through one script, `scripts/task-store.py` (`backend`, `list`, `get`, `create`, `close`, and `ref`, which pins the issue `/close` closes). A GitHub backend whose `gh` is missing, unauthenticated or unreachable fails with a clear message — work-system never falls back to local files, which would split the backlog. `/define` names the target repository before creating an issue and says when that repository is public. `tasks/ROADMAP.md` (the Manager's open follow-ups) stays local on both backends.
 
 A task reads the same either way (on GitHub the heading is the issue title):
 

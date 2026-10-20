@@ -35,6 +35,8 @@ def save():
     json.dump(st, open(st_path, "w"))
 cmd = args[:2]
 if cmd == ["auth", "status"]:
+    if st.get("old_gh") and "--active" in args:
+        print("unknown flag: --active", file=sys.stderr); sys.exit(1)
     sys.exit(0 if st.get("auth", True) else 1)
 if cmd == ["repo", "view"]:
     if "-R" in args:  # the real gh: unknown shorthand flag
@@ -91,6 +93,12 @@ def git(repo, *args):
 
 def kv(out, key):
     return [l.split("=", 1)[1] for l in out.splitlines() if l.startswith(key + "=")]
+
+
+def issue_name_of(i):
+    import re
+    m = re.findall(r"<!-- work-system task: (\S+) -->", i.get("body") or "")
+    return m[-1] if m else ""
 
 
 def issue(n, title, body, state="OPEN", label="work-system:task"):
@@ -218,6 +226,11 @@ with tempfile.TemporaryDirectory() as d:
     check("auto + no remote → local", kv(r.stdout, "backend") == ["local"])
     check("no gh call without a GitHub origin", e.calls() == [])
 
+with tempfile.TemporaryDirectory() as d:
+    e = Env(d, origin="https://tracker.example?x@github.com/o/r")
+    check("a userinfo-looking origin on another host is not GitHub",
+          kv(e.run("backend", str(e.repo)).stdout, "backend") == ["local"])
+
 for url in ("https://u@github.com/o/r.git", "https://github.com/o/r", "https://github.com/o/r.git", "ssh://git@github.com/o/r.git"):
     with tempfile.TemporaryDirectory() as d:
         e = Env(d, origin=url)
@@ -249,6 +262,10 @@ with tempfile.TemporaryDirectory() as d:
     check("a marker quoted in the body does not rename the task",
           r.returncode == 0 and kv(e.run("get", str(e.repo), "quote-marker").stdout, "issue") == ["2"])
     e.gh_state(issues=[i for i in e.issues() if i["number"] != 2])
+    r = e.run("create", str(e.repo), "_spike", "--body-file", str(body2))
+    check("a name with a leading _ round-trips through its marker",
+          r.returncode == 0 and kv(e.run("get", str(e.repo), "_spike").stdout, "task") == ["_spike"])
+    e.gh_state(issues=[i for i in e.issues() if issue_name_of(i) != "_spike"])
     check("create refuses a non-plain name",
           e.run("create", str(e.repo), "x$(id)", "--body-file", str(body)).returncode == 2)
 
@@ -314,6 +331,17 @@ with tempfile.TemporaryDirectory() as d:
     r = e.run("ref", str(e.repo), "add-dark-mode", str(e.root / "gone" / "TASK.md"))
     check("ref without TASK.md is an unpinned name",
           kv(r.stdout, "ref") == ["add-dark-mode"] and kv(r.stdout, "pinned") == ["no"])
+    e.gh_state(auth=False)
+    r = e.run("ref", str(e.repo), "add-dark-mode", str(tm))
+    check("ref reads the pin without a working gh", r.returncode == 0 and kv(r.stdout, "ref") == ["#1"])
+    check("... but an unpinned name without gh is exit 4",
+          e.run("ref", str(e.repo), "add-dark-mode").returncode == 4)
+    e.gh_state(auth=True, old_gh=True)
+    check("a gh without --active still counts as ready",
+          kv(e.run("backend", str(e.repo)).stdout, "backend") == ["github"])
+    e.gh_state(old_gh=False)
+    r = e.run("close", str(e.repo), "#3", "--branch", "task/x", "--name", "add-dark-mode")
+    check("close --name refuses a pinned issue of another task", r.returncode == 5)
 
     # A lane resolves the main checkout's backlog.
     git(e.repo, "-c", "user.email=t@e", "-c", "user.name=T", "commit", "-q", "--allow-empty", "-m", "i")
