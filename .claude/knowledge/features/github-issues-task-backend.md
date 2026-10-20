@@ -2,7 +2,7 @@
 title: "GitHub Issues Task Backend (task-store.py)"
 createdAt: 2026-10-19
 updatedAt: 2026-10-19
-createdFrom: "task/github-issues-task-backend"
+createdFrom: "branch: task/github-issues-task-backend"
 pluginVersion: 1.25.0
 prime: false
 ---
@@ -14,7 +14,7 @@ an explicit opt-in and the legacy state a later migration (follow-up task
 `migrate-tasks-to-github-issues`) converts; until then `auto` stays local
 while files exist. Every
 skill reaches the backlog through `scripts/task-store.py` (`backend`, `list`,
-`get`, `create`, `close`) — no skill names `tasks/` or calls `gh issue` for the
+`get`, `create`, `close`, `ref`) — no skill names `tasks/` or calls `gh issue` for the
 backlog. That follows the prose-drift lesson: stateful logic in a tested script,
 not in SKILL.md.
 

@@ -632,7 +632,7 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
       printing the literal "null":
       ```sh
       SHA=$( ( cd <main-repo-path> && gh pr view <pr_number> --json mergeCommit --jq '.mergeCommit.oid // empty' ) 2>/dev/null )
-      python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" close "<main-repo-path>" "<task-ref>" --branch <task-branch> --pr <pr_number> --sha "$SHA" --name "<task-name>"
+      python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" close "<main-repo-path>" "<task-ref>" --branch "<task-branch>" --pr <pr_number> --sha "$SHA" --name "<task-name>"
       ```
     - **Manual close** (no merged PR) — the same call without `--pr`/`--sha`; the record says
       "closed manually (no merged PR)".
@@ -651,7 +651,8 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
     - **Exit 5** (several open issues carry this task name, or the pinned `#N` belongs to
       another task — `--name` checks it) or **2** (the name was refused):
       nothing was closed. Show stderr and the open candidates, ask which issue this lane
-      shipped, and close that one with the same call and `"#N"` (quoted) in place of the name. Never
+      shipped, and close that one with the same call, `"#N"` (quoted) in place of the name
+      and **without** `--name` (the user's confirmation replaces that check). Never
       pick one yourself.
     - **`backend=github`** → read `issue=` and `result=`: `closed` (closed with a comment naming
       the PR, or the manual-close note) or `already-closed` (not an error). There is no file to
@@ -745,7 +746,7 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
     - Report: "Task file archived to `<archived_path>`" (add "(name existed — suffixed)" when
       `collision=yes`).
 
-10a. **Clear the `/land` marker** (silent, best-effort; the task is archived, nothing
+10a. **Clear the `/land` marker** (silent, best-effort; the task is closed, nothing
     is landing any more):
     `bash "${CLAUDE_PLUGIN_ROOT}/scripts/landing.sh" end "<task-name>" --repo "<main-repo-path>"`.
     It also removes a stale one an interrupted `/land` left behind.

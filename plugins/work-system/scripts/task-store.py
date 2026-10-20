@@ -385,6 +385,8 @@ def split_title(text, title):
 
 def cmd_create(d, name, body_file, title):
     check_name(name)
+    if f"{name}.md" in NOT_TASKS:
+        raise Fail(2, f"{name} is a reserved file name in tasks/, not a task name")
     try:
         with open(body_file, encoding="utf-8") as f:
             text = f.read()

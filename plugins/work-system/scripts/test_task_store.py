@@ -266,6 +266,8 @@ with tempfile.TemporaryDirectory() as d:
     check("a name with a leading _ round-trips through its marker",
           r.returncode == 0 and kv(e.run("get", str(e.repo), "_spike").stdout, "task") == ["_spike"])
     e.gh_state(issues=[i for i in e.issues() if issue_name_of(i) != "_spike"])
+    check("create refuses a reserved file name",
+          e.run("create", str(e.repo), "ROADMAP", "--body-file", str(body)).returncode == 2)
     check("create refuses a non-plain name",
           e.run("create", str(e.repo), "x$(id)", "--body-file", str(body)).returncode == 2)
 

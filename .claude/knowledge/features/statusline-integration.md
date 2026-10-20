@@ -1,10 +1,10 @@
 ---
 title: "Status-Line Integration"
 createdAt: 2026-06-18
-updatedAt: 2026-07-15
+updatedAt: 2026-10-20
 createdFrom: "PR #3"
-updatedFrom: "session: 2026-07-15"
-pluginVersion: 1.9.0
+updatedFrom: "PR #84"
+pluginVersion: 1.25.0
 prime: false
 reindexedAt: 2026-07-12
 ---
