@@ -367,6 +367,8 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
        result is in. Applied that review's agreed fixes and no re-review follows?
        `mandate.sh fixed --after <that commit>`, once — and only for those fixes.
        swarm records only a clean tree: commit before you review.
+       Never call `mandate.sh acknowledged`: it records a *user's* answer in
+       `/merge` or `/land`, and no mandate grants it.
      Either way, check the remaining budget with `show` (which never consumes)
      before starting, and stop when `review_budget_exhausted=yes`: report the state
      and the findings you did not act on, and let the user extend the budget (they

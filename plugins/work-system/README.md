@@ -435,12 +435,39 @@ review, and refused (`reason=other-review`) when `<rev>` is not the review on re
 swarm records only a review of a committed, clean tree, so commit before reviewing.
 `mandate.sh covered [--head <rev>]` answers whether a recorded review covers the head
 being merged (exit 0; exit 1 with `reason=no-review|changed-since-review`; exit 3
-without a mandate). On exit 1 both skills stop and name the missing review; there is
-no override, and `/merge` passes `--match-head-commit` so a head pushed after the
-check is refused. A lane without a mandate is not gated. The gate catches a
+without a mandate). On exit 1 both skills stop and name the missing review — the
+only way past is the user's own acknowledgment of a shown delta (below), never a
+blanket override — and `/merge` passes `--match-head-commit` so a head pushed after the
+check is refused. A lane without a mandate is not gated.
+
+Two narrow exceptions keep the gate from blocking a lane nothing unreviewed
+entered. **Version renumbering:** the diff id masks the JSON `"version"` string
+values in the files `[mandate] version_paths` names (`.work-system.toml` on the
+main branch; default `**/.claude-plugin/plugin.json` and
+`.claude-plugin/marketplace.json`; `[]` masks nothing), so a rebase that only
+moves the lane's bump from 1.25.0 to 1.26.0 stays covered — only SemVer values
+are masked, and any other byte of those files still counts. Version text
+elsewhere (a CHANGELOG heading, a README) is not masked: it shows up as a small
+delta to acknowledge. **A delta you read:** on `changed-since-review`,
+`/land` and `/merge` show `mandate.sh delta` (what changed since the review,
+bounded) and ask `[a]cknowledge / [s]top`; `[a]` runs `mandate.sh acknowledged
+--head <oid> --ack-id <id>` for the delta that was shown (`delta` prints
+`ack_id=`, a hash of the shown text, only when it is complete, exact,
+binary-free and readable — no control, zero-width or bidi characters, which
+it shows escaped instead — plus a `fence=` for displaying it; refused once the
+diff moved), and `covered` then answers
+`via=user-ack` for exactly that diff (any later change, or a new review, ends
+it). A review of an uncommitted tree has no exact baseline to measure from, so
+its delta is shown but cannot be acknowledged. Only the `.work-system.toml`
+committed on the main branch (origin's when there is one, never a working tree
+or another checked-out branch) sets `version_paths`; a committed value that
+cannot be read masks nothing. A lane diff holding NUL bytes (a binary file
+`.gitattributes` diffs as text) gets no diff id, so it is never covered. Only your own answer acknowledges:
+no mandate grants it, and no worker, Manager or autonomous run calls it.
+`no-review` has nothing to compare against and stays a hard stop. The gate catches a
 forgotten or stale review; it is not a boundary against a worker that wants to
-bypass it (`reviewed` takes no proof that a review ran, and the record lives in
-the lane).
+bypass it (`reviewed` takes no proof that a review ran, `acknowledged` none of
+who answered, and the record lives in the lane).
 
 Claude Code's auto-mode classifier can still deny `gh pr merge` as "Merge Without
 Review" — it sees the commands, not the review result. A plugin cannot ship an
@@ -454,7 +481,9 @@ adjusted to your repos:
 Merging a work-system lane PR in github.com/<owner>/<repo> (squash, no --admin/--force)
 is allowed when the user invoked /land or /pr-flow:merge for that PR in this session:
 the lane's local review is the review gate, checked by `mandate.sh covered` before
-the merge.
+the merge (or, with `via=user-ack`, the user acknowledged the shown delta in
+`/land` or `/pr-flow:merge`; that record persists in the lane's `MANDATE.md`
+with its `acked_at`).
 ```
 
 Without the rule, a denied merge makes `/land` stop with the exact follow-up: type

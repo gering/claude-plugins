@@ -27,7 +27,7 @@
 #                            the lane, e.g. /cycle run from the main repo.
 #   show  [<dir>]            Emit key=value lines (always incl. mandate_exists).
 #
-#   show/allows/round/reviewed/fixed/covered also take `--branch <name>` INSTEAD of <dir>: the script
+#   show/allows/round/reviewed/fixed/covered/delta/acknowledged also take `--branch <name>` INSTEAD of <dir>: the script
 #   then resolves the worktree holding that branch itself and reports it as
 #   `lane=`. Consumers used to do this in prose — two commands, a `|| LANE=.`
 #   fallback, and a `"$LANE"` argument — repeated at about ten sites. Every
@@ -63,6 +63,24 @@
 #                            Did a recorded review cover <rev> (default HEAD)?
 #                            Exit 0 covered=yes / 1 covered=no + reason= /
 #                            3 no mandate. The merge gate of /land and /merge.
+#                            via=review|agreed-fixes|user-ack; the diff id
+#                            masks manifest version values ([mandate]
+#                            version_paths), and a review recorded before
+#                            that masking still matches (diff_id_form=legacy).
+#   delta [--head <rev>] [--max-lines <n>] [<dir>]
+#                            What changed since the review on record, as a
+#                            diff of the two lane diffs (bounded, truncated=);
+#                            exit 1 + reason=no-review|no-baseline.
+#                            Flags in any order, before <dir>.
+#   acknowledged --head <rev> --ack-id <id> [<dir>]
+#                            The USER read <rev>'s delta and accepts it: record
+#                            acked_diff, so covered says via=user-ack for that
+#                            diff only. Interactive user answers only — never
+#                            called by a worker, a Manager or an autonomous
+#                            path. <id> = the ack_id= delta printed. Exit 1
+#                            + reason=no-review|no-baseline|approximate-
+#                            baseline|diff-changed|binary-delta|unreadable-
+#                            delta|already-covered.
 #   exclude-task <dir>       Add /TASK.md (the lane's task copy) to the repo's git
 #                            exclude, so a clean-tree check never sees it; emits
 #                            excluded=already|yes|no (no: tracked or unwritable).
@@ -95,7 +113,7 @@ MANDATE_VERSION=1
 
 # Keys carried in the frontmatter, in emit order. `allow`/`deny` are
 # comma-separated action lists; everything else is a scalar.
-KEYS="mandate_version task recorded_at recorded_by authorized_by scope terminal_gate allow deny review_budget review_rounds_used reviewed_head reviewed_diff fixed_diff"
+KEYS="mandate_version task recorded_at recorded_by authorized_by scope terminal_gate allow deny review_budget review_rounds_used reviewed_head reviewed_diff fixed_diff acked_head acked_diff acked_by acked_at"
 
 # The canonical action vocabulary. It lives HERE, not in skill prose, because
 # `allows` reports an unknown token as `unlisted` (exit 1) — indistinguishable
@@ -572,10 +590,88 @@ persist_keys() {
 # tree (tracked + untracked, minus the lane's record files and swarm's staging
 # dirs), snapshotted through a throwaway index so the real one is never touched.
 # Sets DIFF_ID; returns 1 when it cannot be computed (DIFF_ERR says why).
-DIFF_ID=""; DIFF_ERR=""
+DIFF_ID=""; DIFF_ERR=""; SNAP_TARGET=""; DIFF_TXT=""; LEGACY_SAME=""
 lane_diff_id() {
+  local dir="$1" p part1 part2=""
+  local -a inc=() exc=()
+  read_version_paths "$dir"
+  lane_snapshot "$dir" "$2" || return 1
+  for p in ${VERSION_PATHS[@]+"${VERSION_PATHS[@]}"}; do
+    inc+=(":(top,glob)$p"); exc+=(":(top,exclude,glob)$p")
+  done
+  part1="$(lane_diff_text "$dir" no ':(top)' ${exc[@]+"${exc[@]}"})" || { lane_diff_err $?; return 1; }
+  part1="${part1%.}"
+  if [ ${#inc[@]} -gt 0 ]; then
+    part2="$(lane_diff_text "$dir" yes "${inc[@]}")" || { lane_diff_err $?; return 1; }
+    part2="${part2%.}"
+  fi
+  # No lane file on VERSION_PATHS: the masked text IS the legacy text.
+  if [ -z "$part2" ]; then LEGACY_SAME=yes; else LEGACY_SAME=no; fi
+  DIFF_TXT="$part1$part2"
+  DIFF_ID="$(hash_text "$dir" "$DIFF_TXT")" || { DIFF_ID=""; DIFF_ERR="git hash-object failed"; return 1; }
+  [ -n "$DIFF_ID" ] || { DIFF_ERR="empty hash"; return 1; }
+  DIFF_TXT_LEGACY=""; DIFF_ID_LEGACY=""
+}
+
+# The normalized diff for <pathspec...>, masked when <mask> is yes, on stdout
+# with a trailing "." that keeps it byte-exact: `$( )` would strip every final
+# newline, and a diff ending in a binary patch ends in two. A diff holding a NUL
+# byte (a file .gitattributes marks `diff` though it is binary) cannot be held
+# in a shell variable at all — bash drops the NULs, so two different contents
+# would share an id — and returns 2: no id, never a wrong one. 1: git failed.
+lane_diff_text() {
+  local dir="$1" mask="$2" tmp rc=0; shift 2
+  set -o pipefail   # only ever run inside `$( )`, so this stays in the subshell
+  tmp="$(mktemp "${TMPDIR:-/tmp}/mandate-diff.XXXXXX")" || return 1
+  lane_git_diff "$dir" "$@" > "$tmp" || rc=1
+  if [ "$rc" = 0 ] && ! LC_ALL=C tr -d '\000' < "$tmp" | cmp -s - "$tmp"; then rc=2; fi
+  if [ "$rc" = 0 ]; then
+    if [ "$mask" = yes ]; then
+      { lane_diff_norm < "$tmp" | lane_version_mask; } || rc=1
+    else
+      lane_diff_norm < "$tmp" || rc=1
+    fi
+  fi
+  rm -f "$tmp"
+  [ "$rc" = 0 ] && printf .
+  return "$rc"
+}
+lane_diff_err() {
+  if [ "$1" = 2 ]; then
+    DIFF_ERR="the lane diff holds NUL bytes (a binary file .gitattributes diffs as text) — no id can be computed for it"
+  else
+    DIFF_ERR="git diff failed"
+  fi
+}
+
+# The id of a normalized diff text, held byte-exact (see the "." above): the
+# bytes hashed are the diff's own, so the legacy form equals the id older
+# work-system versions piped straight into hash-object.
+hash_text() {
+  printf '%s' "$2" | git -C "$1" hash-object --stdin
+}
+
+# The same snapshot hashed the way mandate.sh did before version masking: a
+# review recorded by an older work-system holds this form, and an unchanged lane
+# must keep matching it. Exact, so it can never cover more than the old id did.
+# Call after lane_diff_id. Sets DIFF_TXT_LEGACY + DIFF_ID_LEGACY (empty on
+# failure — a "no", never a pass).
+DIFF_TXT_LEGACY=""; DIFF_ID_LEGACY=""
+lane_legacy_id() {
+  if [ "$LEGACY_SAME" = yes ]; then
+    DIFF_TXT_LEGACY="$DIFF_TXT"; DIFF_ID_LEGACY="$DIFF_ID"; return 0
+  fi
+  DIFF_TXT_LEGACY="$(lane_diff_text "$1" no ':(top)')" \
+    || { DIFF_TXT_LEGACY=""; DIFF_ID_LEGACY=""; return 0; }
+  DIFF_TXT_LEGACY="${DIFF_TXT_LEGACY%.}"
+  DIFF_ID_LEGACY="$(hash_text "$1" "$DIFF_TXT_LEGACY")" || DIFF_ID_LEGACY=""
+}
+
+# Resolve <target> to what the diff compares against LANE_BASE: a commit as
+# given, or `worktree` snapshotted into a tree. Sets SNAP_TARGET + LANE_BASE.
+lane_snapshot() {
   local dir="$1" target="$2" out idx rc=0
-  DIFF_ID=""; DIFF_ERR=""
+  DIFF_ID=""; DIFF_ERR=""; SNAP_TARGET=""
   if [ "$target" = worktree ]; then
     idx="$(mktemp -d "${TMPDIR:-/tmp}/mandate-idx.XXXXXX")" || { DIFF_ERR="no temp dir"; return 1; }
     out="$(git -C "$dir" rev-parse --path-format=absolute --git-path index 2>/dev/null)" || out=""
@@ -601,14 +697,96 @@ EOF
   else
     lane_base "$dir" "$target" || { DIFF_ERR="$BASE_ERR"; return 1; }
   fi
-  out="$(set -o pipefail
-    git -C "$dir" -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.relative=false \
-      diff --no-color --no-ext-diff --no-textconv --no-renames --binary --full-index \
-      --diff-algorithm=myers -U3 --src-prefix=a/ --dst-prefix=b/ "$LANE_BASE" "$target" \
-      | sed -e 's/^@@ -[0-9,]* +[0-9,]* @@/@@/' -e '/^index /d' \
-      | git -C "$dir" hash-object --stdin)" || { DIFF_ERR="git diff failed"; return 1; }
-  DIFF_ID="$out"
-  [ -n "$DIFF_ID" ] || { DIFF_ERR="empty hash"; return 1; }
+  SNAP_TARGET="$target"
+}
+
+# The masked form of the normalized lane diff: the files on VERSION_PATHS go
+# last (a second diff), with every JSON `"version": "<x>"` string value
+# replaced by "*" — so a rebase that only renumbers a plugin version (the
+# lane's bump moved from 1.25.0 to 1.26.0 because main took 1.25.0) keeps the
+# id. Only a strict SemVer 2.0 value is masked (no leading zeros, no empty
+# identifiers) — a version turned into any other string still counts, and is
+# first prefixed with "=" so no lane-written value (a literal "*" included) can
+# read as a masked one — and only that key's value: every other byte of those files, their other keys
+# and the lines around them, still counts. Accepted residual: a "version" key
+# nested deeper in one of those files (a marketplace entry's — the point — but
+# also any other) is masked too, and so is a downgrade: the mask cannot see
+# which way a number moved. With no lane file on VERSION_PATHS, or an
+# empty list, the masked text is the legacy text byte for byte.
+SEMVER_NUM='(0|[1-9][0-9]*)'
+SEMVER_PRE='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+SEMVER_RE="$SEMVER_NUM\\.$SEMVER_NUM\\.$SEMVER_NUM(-$SEMVER_PRE(\\.$SEMVER_PRE)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?"
+lane_version_mask() {
+  sed -E -e '/^(\+\+\+|---) /!s/("version"[[:space:]]*:[[:space:]]*)"/\1"=/g' \
+         -e "/^(\\+\\+\\+|---) /!s/(\"version\"[[:space:]]*:[[:space:]]*)\"=$SEMVER_RE\"/\\1\"*\"/g"
+}
+
+# The diff keeps its context lines, the hunks' function context and every
+# whitespace byte; the pinned options keep a user's diff config from changing
+# the id between the review and the merge.
+lane_git_diff() {
+  local dir="$1"; shift
+  git -C "$dir" -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.relative=false \
+    diff --no-color --no-ext-diff --no-textconv --no-renames --binary --full-index \
+    --diff-algorithm=myers -U3 --src-prefix=a/ --dst-prefix=b/ "$LANE_BASE" "$SNAP_TARGET" -- "$@"
+}
+lane_diff_norm() { sed -e 's/^@@ -[0-9,]* +[0-9,]* @@/@@/' -e '/^index /d'; }
+
+# `[mandate] version_paths`, read from the MAIN branch, never the lane: a
+# lane's own .work-system.toml is a file its worker controls, and a lane that
+# could widen the masking would widen what counts as reviewed. Only the MERGED
+# policy counts — the blob on the main branch lane_base diffs against (origin's
+# ref when there is one, else the local branch), never a checkout's working
+# tree or HEAD: neither an uncommitted edit, a main checkout on another branch,
+# nor an unpushed local commit is a decision anyone merged. No committed file, or one that never sets the key:
+# the schema default (test_mandate.py pins the two equal). A committed key
+# that cannot be read (no python3 >= 3.11, a parse error, a bad value) masks
+# NOTHING — fail closed, never wider than what was committed. Read once per
+# run. Sets VERSION_PATHS.
+VERSION_PATHS=(); VERSION_PATHS_READ="no"
+DEFAULT_VERSION_PATHS=("**/.claude-plugin/plugin.json" ".claude-plugin/marketplace.json")
+read_version_paths() {
+  [ "$VERSION_PATHS_READ" = yes ] && return 0
+  VERSION_PATHS_READ=yes
+  local ref="" head cand r out line tmp sets=no ok=yes
+  VERSION_PATHS=("${DEFAULT_VERSION_PATHS[@]}")
+  head="$(git -C "$1" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null)" || head=""
+  for cand in "${head#refs/remotes/origin/}" main master; do
+    [ -n "$cand" ] || continue
+    # The branch lane_base picks: the first that shares history with the lane.
+    for r in "refs/remotes/origin/$cand" "refs/heads/$cand"; do
+      if git -C "$1" merge-base HEAD "$r" >/dev/null 2>&1; then ref="$r"; break 2; fi
+    done
+  done
+  [ -n "$ref" ] || return 0
+  git -C "$1" cat-file -e "$ref:.work-system.toml" 2>/dev/null || return 0
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/mandate-policy.XXXXXX")" || { VERSION_PATHS=(); return 0; }
+  if git -C "$1" show "$ref:.work-system.toml" > "$tmp/.work-system.toml" 2>/dev/null; then
+    grep -q 'version_paths' "$tmp/.work-system.toml" && sets=yes
+    out="$(SETTINGS_PROJECT_ROOT="$tmp" python3 -I "$SCRIPT_DIR/ws-settings.py" get "$tmp" mandate.version_paths 2>/dev/null)" || ok=no
+  else
+    ok=no; sets=yes
+  fi
+  rm -rf "$tmp"
+  case "$ok:${out:-}" in no:*|*"note="*) ok=no ;; esac
+  case "${out:-}" in *items=*) ;; *) ok=no ;; esac
+  if [ "$ok" = no ]; then
+    [ "$sets" = yes ] || return 0
+    VERSION_PATHS=()
+    echo "${0##*/}: mandate.version_paths: the setting committed on $ref is not readable — masking nothing" >&2
+    return 0
+  fi
+  VERSION_PATHS=()
+  while IFS= read -r line; do
+    case "$line" in
+      # A leading ':' would be read as pathspec magic of its own; never mask on it.
+      item=:*) echo "${0##*/}: mandate.version_paths: '${line#item=}' ignored — plain glob paths only, no ':' pathspec magic" >&2 ;;
+      item=) ;;
+      item=*) VERSION_PATHS+=("${line#item=}") ;;
+    esac
+  done <<EOF
+$out
+EOF
 }
 
 # The commit the lane branched from: the newest merge-base of <rev> with the
@@ -666,7 +844,8 @@ do_reviewed() {
   acquire_round_lock
   trap 'rm -rf "$ROUND_LOCK"' EXIT
   parse_frontmatter "$MANDATE_PATH"
-  persist_keys "reviewed_head=$head" "reviewed_diff=$DIFF_ID" "fixed_diff="
+  persist_keys "reviewed_head=$head" "reviewed_diff=$DIFF_ID" "fixed_diff=" \
+    "acked_head=" "acked_diff=" "acked_by=" "acked_at="
   rm -rf "$ROUND_LOCK"; trap - EXIT
   printf 'reviewed_recorded=yes\nreviewed_head=%s\nreviewed_diff=%s\n' "$head" "$DIFF_ID"
 }
@@ -711,8 +890,9 @@ do_fixed() {
 }
 
 # `covered`: may <rev> be merged on the strength of a recorded review? Covered
-# when the lane's diff at <rev> equals what the last review saw, or what `fixed`
-# recorded after it. A gate, so every doubt is a "no" with a reason.
+# when the lane's diff at <rev> equals what the last review saw, what `fixed`
+# recorded after it, or what the user acknowledged. A gate, so every doubt is
+# a "no" with a reason.
 do_covered() {
   local rev="$1"
   resolve_mandate_path "${2:-.}"
@@ -723,11 +903,237 @@ do_covered() {
   [ -n "$FM_reviewed_diff" ] || { printf 'covered=no\nreason=no-review\n'; exit 1; }
   lane_diff_id "${MANDATE_PATH%/*}" "$REV_COMMIT" || die "could not check coverage: $DIFF_ERR"
   printf 'diff_id=%s\n' "$DIFF_ID"
-  if [ "$DIFF_ID" = "$FM_reviewed_diff" ]; then printf 'covered=yes\nvia=review\n'; exit 0; fi
-  if [ -n "$FM_fixed_diff" ] && [ "$DIFF_ID" = "$FM_fixed_diff" ]; then
-    printf 'covered=yes\nvia=agreed-fixes\n'; exit 0
-  fi
+  covered_verdict "$DIFF_ID" && { emit_covered ""; exit 0; }
+  # The legacy form (lane_legacy_id reuses the masked one when they are equal).
+  lane_legacy_id "${MANDATE_PATH%/*}"
+  if [ "$LEGACY_SAME" != yes ] && covered_verdict "$DIFF_ID_LEGACY"; then emit_covered legacy; exit 0; fi
   printf 'covered=no\nreason=changed-since-review\n'; exit 1
+}
+
+# Does <id> match the review, its agreed fixes or the user's ack on record?
+# Sets COVERED_VIA. An ack is recorded in the form its delta was shown in
+# (see record_form), so it is matched in either form like the review is.
+COVERED_VIA=""
+covered_verdict() {
+  COVERED_VIA=""
+  [ -n "$1" ] || return 1
+  if [ "$1" = "$FM_reviewed_diff" ]; then COVERED_VIA=review; return 0; fi
+  if [ -n "$FM_fixed_diff" ] && [ "$1" = "$FM_fixed_diff" ]; then COVERED_VIA=agreed-fixes; return 0; fi
+  if [ -n "$FM_acked_diff" ] && [ "$1" = "$FM_acked_diff" ]; then COVERED_VIA=user-ack; return 0; fi
+  return 1
+}
+emit_covered() {
+  printf 'covered=yes\nvia=%s\n' "$COVERED_VIA"
+  [ -z "$1" ] || printf 'diff_id_form=%s\n' "$1"
+  [ "$COVERED_VIA" != user-ack ] || printf 'acked_by=%s\nacked_at=%s\n' "$FM_acked_by" "$FM_acked_at"
+}
+
+# The form the review on record was hashed in, rebuilt from reviewed_head —
+# the one baseline `delta` and `acknowledged` compare <rev> against. masked or
+# legacy when reviewed_head's lane diff, in that form, is exactly what the
+# review hashed; `approximate` when neither is (the review saw an uncommitted
+# tree), and the unmasked text then stands in: a delta from a baseline that is
+# not the reviewed state can hide a change as easily as show one, so it is
+# shown but never acknowledged. Then computes <rev> in the same form — a legacy
+# review's delta must show the version renumbering its rule refuses. Sets
+# REC_FORM, HEAD_ID (<rev>'s id in the record's form), and the unmasked
+# BASE_RAW/HEAD_RAW the delta is shown from. Needs reviewed_head to be a commit.
+REC_FORM=""; HEAD_ID=""; BASE_RAW=""; HEAD_RAW=""
+record_form() {
+  local dir="$1" rev="$2"
+  lane_diff_id "$dir" "$FM_reviewed_head" || die "could not compute the reviewed diff: $DIFF_ERR"
+  lane_legacy_id "$dir"
+  [ -n "$DIFF_ID_LEGACY" ] || die "could not compute the reviewed diff"
+  BASE_RAW="$DIFF_TXT_LEGACY"
+  if [ "$DIFF_ID" = "$FM_reviewed_diff" ]; then
+    REC_FORM=masked
+  elif [ "$DIFF_ID_LEGACY" = "$FM_reviewed_diff" ]; then
+    REC_FORM=legacy
+  else
+    REC_FORM=approximate
+  fi
+  lane_diff_id "$dir" "$rev" || die "could not compute the head's diff: $DIFF_ERR"
+  lane_legacy_id "$dir"
+  [ -n "$DIFF_ID_LEGACY" ] || die "could not compute the head's diff"
+  HEAD_RAW="$DIFF_TXT_LEGACY"
+  if [ "$REC_FORM" = masked ]; then HEAD_ID="$DIFF_ID"; else HEAD_ID="$DIFF_ID_LEGACY"; fi
+}
+
+# `delta`: what changed in the lane between the review on record and <rev> —
+# the difference between the two normalized lane diffs (a diff of diffs), so a
+# rebase over unrelated main edits shows nothing and a lane edit shows itself.
+# What a person reads before `acknowledged`; at most <max> lines (default 400),
+# with truncated=yes when cut. Header keys: baseline=exact|approximate,
+# diff_form=, includes_agreed_fixes=, delta_lines=, binary_changes=,
+# unreadable= (then the text follows escaped), truncated=, ack_id= (set only
+# for a complete, exact, binary-free, readable delta: a hash of the shown
+# text), fence=. baseline=exact|approximate and diff_form=
+# masked|legacy|approximate (record_form). Agreed fixes recorded after the
+# review are inside the delta (includes_agreed_fixes=yes). Key=value lines,
+# then a `delta_begin` line, then the text. Exit 1 + reason= when there is
+# nothing to compare against: no-review, or no-baseline (reviewed_head is no
+# commit here any more). A failed diff is exit 2, never an empty delta.
+do_delta() {
+  local rev="$1" max="$2" dir d total exact=exact bin unread
+  case "$max" in ''|*[!0-9]*) die "--max-lines needs a number" ;; esac
+  resolve_mandate_path "${3:-.}"
+  dir="${MANDATE_PATH%/*}"
+  printf 'lane=%s\n' "$dir"
+  record_prepare "$rev"
+  parse_frontmatter "$MANDATE_PATH"
+  [ -n "$FM_reviewed_diff" ] || { printf 'delta=none\nreason=no-review\n'; exit 1; }
+  git -C "$dir" cat-file -e "${FM_reviewed_head:-none}^{commit}" 2>/dev/null \
+    || { printf 'delta=none\nreason=no-baseline\n'; exit 1; }
+  record_form "$dir" "$REV_COMMIT"
+  [ "$REC_FORM" != approximate ] || exact=approximate
+  delta_text "$dir" || die "could not compute the delta ($DELTA_ERR)"
+  d="$DELTA"
+  total=0; [ -z "$d" ] || total="$(printf '%s\n' "$d" | wc -l | tr -d ' ')"
+  printf 'head=%s\nreviewed_head=%s\nbaseline=%s\ndiff_form=%s\n' \
+    "$REV_COMMIT" "$FM_reviewed_head" "$exact" "$REC_FORM"
+  if [ -n "$FM_fixed_diff" ]; then echo includes_agreed_fixes=yes; else echo includes_agreed_fixes=no; fi
+  printf 'delta_lines=%s\n' "$total"
+  if binaries_changed "$dir" "$FM_reviewed_head" "$REV_COMMIT"; then bin=yes; else bin=no; fi
+  echo "binary_changes=$bin"
+  if delta_unreadable "$d"; then unread=yes; else unread=no; fi
+  echo "unreadable=$unread"
+  if [ "$total" -gt "$max" ]; then echo truncated=yes; else echo truncated=no; fi
+  # The id `acknowledged` needs, printed only for a delta a person can have
+  # read in full: complete, from an exact baseline, with no binary and no
+  # control or bidi characters in it — bound to the shown text itself, so no
+  # other output (covered's diff_id=) can stand in for it.
+  if [ "$total" -le "$max" ] && [ "$exact" = exact ] && [ "$bin" = no ] && [ "$unread" = no ]; then
+    printf 'ack_id=%s\n' "$(ack_id_of "$dir" "$d")"
+  else
+    echo ack_id=
+  fi
+  # A fence longer than any backtick run in the text, so lane content cannot
+  # close it early.
+  printf 'fence=%s\n' "$(printf '%s\n' "$d" | awk '
+    { n = 0; for (i = 1; i <= length($0); i++) { if (substr($0, i, 1) == "`") { n++; if (n > m) m = n } else n = 0 } }
+    END { m = (m < 3 ? 3 : m + 1); s = ""; for (i = 0; i < m; i++) s = s "`"; print s }')"
+  echo delta_begin
+  # An unreadable delta is shown escaped (cat -v), never raw: the terminal
+  # would otherwise act on the very bytes that made it unreadable.
+  if [ "$unread" = yes ]; then
+    printf '%s\n' "$d" | head -n "$max" | LC_ALL=C cat -v
+  else
+    [ -z "$d" ] || printf '%s\n' "$d" | head -n "$max"
+  fi
+}
+
+# A changed binary shows up in the delta as base85 nobody can read, so it is
+# never something a person acknowledged having read. Decided from the blobs,
+# not the delta text: a binary the review already saw, changed in place,
+# keeps its "GIT binary patch" header as an unchanged context line. Every
+# binary the lane changes, as "<base blob> <tip blob> <path>" (the base too: a
+# rebase that moves it changes the binary patch), the path %q-quoted so a name
+# holding a newline cannot forge a line; a lane whose binaries differ
+# between the review and <rev> — or that cannot be listed — has binary changes.
+lane_binaries() {
+  local dir="$1" rev="$2" rec p base blob
+  lane_base "$dir" "$rev" || return 1
+  git -C "$dir" diff --numstat -z --no-renames --no-ext-diff --no-textconv "$LANE_BASE" "$rev" |
+  while IFS= read -r -d '' rec; do
+    case "$rec" in
+      -$'\t'-$'\t'*)
+        p="${rec#-$'\t'-$'\t'}"
+        base="$(git -C "$dir" rev-parse -q --verify "$LANE_BASE:$p" 2>/dev/null)" || base=absent
+        blob="$(git -C "$dir" rev-parse -q --verify "$rev:$p" 2>/dev/null)" || blob=deleted
+        printf '%s %s %q\n' "$base" "$blob" "$p" ;;
+    esac
+  done | LC_ALL=C sort
+}
+binaries_changed() {
+  local a b
+  a="$(set -o pipefail; lane_binaries "$1" "$2")" || return 0
+  b="$(set -o pipefail; lane_binaries "$1" "$3")" || return 0
+  [ "$a" != "$b" ]
+}
+
+# The delta a person reads: the diff between the reviewed and the current lane
+# diff, both UNMASKED, so a version bump shows its real numbers even when the
+# record (and the ack) is in the masked form. Call after record_form. Sets
+# DELTA, or DELTA_ERR and returns 1 — a failed diff is never an empty delta.
+DELTA=""; DELTA_ERR=""
+delta_text() {
+  local rc=0
+  DELTA="$(diff -u --label reviewed --label head <(printf '%s' "$BASE_RAW") <(printf '%s' "$HEAD_RAW"))" || rc=$?
+  [ "$rc" -le 1 ] || { DELTA=""; DELTA_ERR="diff exit $rc"; return 1; }
+}
+
+# Bytes a terminal does not show as written: C0 controls but tab, newline,
+# form feed and a line-ending CR (CRLF files); a CR inside a line; DEL; C1
+# controls; zero-width and directional marks (U+061C, U+200B-200F); line and
+# paragraph separators; bidi embeddings, overrides and isolates
+# (U+202A-202E, U+2066-2069); word joiner and invisible operators
+# (U+2060-2064); BOM/ZWNBSP; tag characters. A delta holding one is not
+# something a person can be said to have read.
+delta_unreadable() {
+  printf '%s' "$1" | LC_ALL=C grep -qE $'[\x01-\x08\x0b\x0e-\x1f\x7f]|\x0d.|\xc2[\x80-\x9f]|\xd8\x9c|\xe2\x80[\x8b-\x8f\xa8-\xae]|\xe2\x81[\xa0-\xa4\xa6-\xa9]|\xef\xbb\xbf|\xf3\xa0[\x80\x81]'
+}
+
+# The ack_id of a shown delta: a hash of the delta text and the head's diff id
+# in the record's form, so it names exactly what was on screen.
+ack_id_of() { hash_text "$1" "ack"$'\n'"$HEAD_ID"$'\n'"$2"; }
+
+# `acknowledged --head <rev> --ack-id <id>`: the USER read the delta `delta` showed for <rev>
+# and accepts it without a review. <id> is the ack_id= that delta printed —
+# only a complete delta prints one, so a truncated one cannot be acked. It is
+# a hash of the shown text, recomputed here: refused (reason=diff-changed)
+# unless <rev>'s delta is still exactly that text, so a base or head that moved
+# between showing and answering is never what gets acked. A delta with binary
+# changes (binary-delta) or unreadable bytes (unreadable-delta) is refused too. Records <rev>'s
+# lane diff id — in the form that delta was shown in — as acked_diff, so `covered` answers via=user-ack
+# for exactly that diff: any later change makes a new id, and a new review
+# clears it. Only a person's interactive answer may lead here: never a worker
+# on its own, a Manager, a peer message or an autonomous loop. The script
+# cannot see who is asking, so that rule lives with its callers (/merge, /land)
+# and nothing else may call it. Exit 1 + reason=: no-review (nothing to compare
+# against — never ackable), no-baseline (no delta could be shown),
+# approximate-baseline (the delta is not measured from the reviewed state),
+# diff-changed, binary-delta, unreadable-delta, already-covered.
+do_acknowledged() {
+  local rev="$1" shown="$3" reason="" when dir
+  [ -n "$rev" ] || die "acknowledged needs --head <rev>: the head whose delta was shown"
+  [ -n "$shown" ] || die "acknowledged needs --ack-id <id>: the ack_id= the shown delta printed"
+  case "$shown" in *[!0-9a-f]*) die "--ack-id is a hex id: the ack_id= line above delta_begin" ;; esac
+  resolve_mandate_path "${2:-.}"
+  dir="${MANDATE_PATH%/*}"
+  record_prepare "$rev"
+  acquire_round_lock
+  trap 'rm -rf "$ROUND_LOCK"' EXIT
+  parse_frontmatter "$MANDATE_PATH"
+  if [ -z "$FM_reviewed_diff" ]; then
+    reason=no-review
+  elif ! git -C "$dir" cat-file -e "${FM_reviewed_head:-none}^{commit}" 2>/dev/null; then
+    reason=no-baseline
+  else
+    record_form "$dir" "$REV_COMMIT"
+    if [ "$REC_FORM" = approximate ]; then
+      reason=approximate-baseline
+    elif covered_verdict "$DIFF_ID" || covered_verdict "$HEAD_ID"; then
+      reason=already-covered
+    elif binaries_changed "$dir" "$FM_reviewed_head" "$REV_COMMIT"; then
+      reason=binary-delta
+    else
+      delta_text "$dir" || die "could not compute the delta ($DELTA_ERR)"
+      if delta_unreadable "$DELTA"; then
+        reason=unreadable-delta
+      elif [ "$(ack_id_of "$dir" "$DELTA")" != "$shown" ]; then
+        reason=diff-changed
+      fi
+    fi
+  fi
+  if [ -n "$reason" ]; then
+    rm -rf "$ROUND_LOCK"; trap - EXIT
+    printf 'acked_recorded=no\nreason=%s\n' "$reason"
+    exit 1
+  fi
+  when="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  persist_keys "acked_head=$REV_COMMIT" "acked_diff=$HEAD_ID" "acked_by=user" "acked_at=$when"
+  rm -rf "$ROUND_LOCK"; trap - EXIT
+  printf 'acked_recorded=yes\nacked_head=%s\nacked_diff=%s\nacked_at=%s\n' "$REV_COMMIT" "$HEAD_ID" "$when"
 }
 
 # The budgets below are the floor for a host where the setting cannot be read
@@ -1232,22 +1638,36 @@ case "${1:-}" in
   init)    shift || true; do_init "$@" ;;
   allows)  shift || true; resolve_lane_dir "$CLI_BRANCH" "${2:-.}"; do_allows "${1:-}" "$LANE_DIR" ;;
   round)   shift || true; resolve_lane_dir "$CLI_BRANCH" "${1:-.}"; do_round "$LANE_DIR" ;;
-  covered|reviewed|fixed)
+  covered|reviewed|fixed|delta|acknowledged)
            verb="$1"; shift || true
-           # The one optional revision flag: --head for covered/reviewed, --after for fixed.
+           # The one optional revision flag: --head for covered/reviewed/delta/
+           # acknowledged, --after for fixed. delta also takes --max-lines <n>.
            flag=--head; [ "$verb" = fixed ] && flag=--after
-           rec_rev=""
-           case "${1:-}" in
-             "$flag")   [ $# -ge 2 ] || die "$flag needs a revision"; rec_rev="$2"; shift 2
-                        [ -n "$rec_rev" ] && [ "$rec_rev" != worktree ] || die "$flag needs a revision" ;;
-             "$flag"=*) rec_rev="${1#"$flag"=}"; shift
-                        [ -n "$rec_rev" ] && [ "$rec_rev" != worktree ] || die "$flag needs a revision" ;;
-           esac
+           rec_rev=""; max_lines=400; ack_id=""
+           while [ $# -gt 0 ]; do
+             case "$1" in
+               "$flag")   [ $# -ge 2 ] || die "$flag needs a revision"; rec_rev="$2"; shift 2
+                          [ -n "$rec_rev" ] && [ "$rec_rev" != worktree ] || die "$flag needs a revision" ;;
+               "$flag"=*) rec_rev="${1#"$flag"=}"; shift
+                          [ -n "$rec_rev" ] && [ "$rec_rev" != worktree ] || die "$flag needs a revision" ;;
+               --max-lines)   [ "$verb" = delta ] && [ $# -ge 2 ] || die "--max-lines is a delta option: --max-lines <n>"
+                              max_lines="$2"; shift 2 ;;
+               --max-lines=*) [ "$verb" = delta ] || die "--max-lines is a delta option"
+                              max_lines="${1#--max-lines=}"; shift ;;
+               --ack-id)   [ "$verb" = acknowledged ] && [ $# -ge 2 ] || die "--ack-id is an acknowledged option: --ack-id <id>"
+                            ack_id="$2"; shift 2 ;;
+               --ack-id=*) [ "$verb" = acknowledged ] || die "--ack-id is an acknowledged option"
+                            ack_id="${1#--ack-id=}"; shift ;;
+               *) break ;;
+             esac
+           done
            resolve_lane_dir "$CLI_BRANCH" "${1:-.}"
            case "$verb" in
              covered)  do_covered "${rec_rev:-HEAD}" "$LANE_DIR" ;;
              reviewed) do_reviewed "${rec_rev:-worktree}" "$LANE_DIR" ;;
              fixed)    do_fixed "$rec_rev" "$LANE_DIR" ;;
+             delta)    do_delta "${rec_rev:-HEAD}" "$max_lines" "$LANE_DIR" ;;
+             acknowledged) do_acknowledged "$rec_rev" "$LANE_DIR" "$ack_id" ;;
            esac ;;
   exclude-task) shift || true; [ $# -eq 1 ] && [ -d "$1" ] || die "usage: ${0##*/} exclude-task <dir>"
            rc=0; exclude_one "$1" TASK.md || rc=$?
@@ -1255,5 +1675,5 @@ case "${1:-}" in
   actions) printf '%s\n' $KNOWN_ACTIONS ;;
   presets) shift || true; do_presets "${1:-.}" ;;
   deploy-owner) shift || true; do_deploy_owner "${1:-.}" ;;
-  *) echo "usage: ${0##*/} {path|lane|show|init|allows|round|reviewed|fixed|covered|exclude-task|actions|presets|deploy-owner} [--branch <name>] [...]" >&2; exit 2 ;;
+  *) echo "usage: ${0##*/} {path|lane|show|init|allows|round|reviewed|fixed|covered|delta|acknowledged|exclude-task|actions|presets|deploy-owner} [--branch <name>] [...]" >&2; exit 2 ;;
 esac

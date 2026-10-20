@@ -1,9 +1,9 @@
 ---
 title: "Worker Autonomy Mandate (MANDATE.md)"
 createdAt: 2026-09-07
-updatedAt: 2026-10-19
+updatedAt: 2026-10-20
 createdFrom: "branch: task/extend-worker-autonomy"
-updatedFrom: "branch: task/gate-land-merge-on-local-review"
+updatedFrom: "branch: task/keep-review-coverage-across-version-rebase"
 pluginVersion: 1.9.0
 prime: false
 ---
@@ -408,6 +408,64 @@ covers. Why it is built this way:
   rebase over a busy main); an edit on main inside a lane hunk's context
   changes it (fail-closed re-review). Accepted residual: one change moved
   between two blocks with identical context and enclosing function.
+- **Version values are masked, nothing else** (`[mandate] version_paths`). #85
+  hit the gap: a rebase moved the lane's bump 1.25.0 → 1.26.0, the id changed,
+  and the only way through was a bare `gh pr merge` around the gate — worse than
+  a narrow rule. So the `"version": "<x>"` string values on those paths become
+  `"*"` (those files hashed last, in a second diff); every other byte still
+  counts, and descriptions/CHANGELOG deltas go through the ack instead. Read
+  from the MAIN branch, never the lane (like `deploy.by`): a lane's own toml could widen what
+  counts as reviewed, and only the toml committed on the main branch counts
+  (origin's ref, else local — never a checkout's HEAD, which may be another
+  branch or an unpushed commit; round 6). Round 7: only strict SemVer is
+  masked, and every other version value is prefixed with `=` first, so a lane
+  writing the literal mask token `"*"` cannot pass as a masked renumber.
+  Accepted residual: a deeper-nested `"version"` in those files is masked too.
+  Old unmasked records: `covered` also hashes the legacy form and accepts an
+  exact match (`diff_id_form=legacy`) — it can never cover more than the old id
+  did; with no manifest touched both forms are byte-identical (a test pins the
+  pre-masking pipeline's hash).
+- **A user ack, never a worker one** (`delta` + `acknowledged`). For a small
+  real delta, `/merge`/`/land` show `delta` (a diff of the reviewed lane diff
+  against the head's — so unrelated main edits show nothing) and ask. The ack
+  binds that exact id (`acked_diff`), dies with the next change, and a new
+  review clears it. `no-review` and a reviewed head that was gc'd
+  (`no-baseline`) cannot be acked — no delta could be shown. Review round 1
+  found two ways the delta could hide what it should show, both now refused or
+  fixed: a review of an uncommitted tree has no exact baseline (reviewed_head's
+  diff is not what was hashed), so a restored line could vanish from the delta
+  (`approximate-baseline`, never ackable); and a legacy record's delta must be
+  shown unmasked, in the form the record is in, or a masked-empty delta would
+  ack a version change the legacy rule refuses. Also: a diff failure is exit 2,
+  never an empty delta; and the acked SHA is the one the delta was shown for.
+  Round 2/3: `acknowledged` takes the `ack_id=` the delta printed — printed
+  only for a complete, exact, binary-free delta, so truncation is enforced in
+  code, not prose — and refuses a diff that moved since (a base or head change
+  between showing and answering). Binary changes are decided from per-path
+  blobs, not the delta text: a reviewed binary changed in place keeps its
+  `GIT binary patch` header as an unchanged context line. Only SemVer values
+  are masked (a downgrade still is — residual). Round 4: the `ack_id` is a
+  hash of the shown delta text + head id (covered's `diff_id=` was the same
+  value and could stand in for it); the delta shows versions unmasked; a delta
+  with control/bidi characters is unreadable, never ackable; binaries compare
+  base+tip blobs, `%q`-quoted. Round 5 corrected round 4's policy rule: "a
+  dirty file masks nothing" made any unrelated main edit (or python3 < 3.11)
+  turn every masked review into an unackable `approximate`. Now the policy is
+  read from a committed blob, so the working tree cannot change it at all
+  (round 6 moved it from main's `HEAD` to the main branch ref);
+  a key the committed file never sets keeps the default, and only a committed
+  key that cannot be read masks nothing (fail closed means narrowest, not
+  "default", and only where a decision was actually written). Unreadable also
+  covers C1, zero-width, separators, BOM and tag characters, but not a
+  line-ending CR (CRLF files); an unreadable delta is printed via `cat -v`. And a trap: `$( )` strips EVERY
+  trailing newline — a diff ending in a binary patch ends in two — so the text
+  is captured with a trailing `.` sentinel and hashed byte-exact, or the legacy
+  id silently stops matching what the old pipe hashed. Round 6 found the
+  sentinel's twin: bash drops NUL bytes from `$( )`, so a text-diffed binary
+  with NULs hashed as if they were not there; such a diff now gets no id at all
+  (checked on a temp file with `tr -d '\000' | cmp`). The script cannot
+  see who asks, so "interactive user only" lives in the callers' prose; like
+  `reviewed`, it is not a boundary against a worker determined to bypass it.
 - **`fixed` is an attestation, so once per review, bound by `--after <sha>`**
   to the review the caller ran. Repeatable or unbound, it would let any later
   edit be stamped as covered.

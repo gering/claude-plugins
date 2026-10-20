@@ -131,10 +131,13 @@ When a plugin adopts settings, it should:
    on a symlinked or invalid file. pr-flow's `review.route` does this
    (`claude-review.sh route_setting`), and so does work-system through one
    reusable reader (`scripts/ws-settings.py get <dir> <key>`, first consumer
-   `mandate.review_budget`, then `deploy.by`/`deploy.confirm` and `tasks.backend`
-   (via `task-store.py`) — read from the main
+   `mandate.review_budget`, then `deploy.by`/`deploy.confirm`, `tasks.backend`
+   (via `task-store.py`) and the string list `mandate.version_paths` (one
+   `item=` line per entry) — read from the main
    checkout, never the lane's own file). Both resolve the file at the same root as
    `settings.py` — the git toplevel — so `/settings set` edits what they read.
+   One exception: `mandate.version_paths` is read only as committed on the main
+   branch, so a `/settings set` takes effect once it is committed and merged.
 2. **Fall back to the default, always.** The resolver guarantees a value even
    with no config file. A consumer must not require the file to exist.
 3. **Don't hardcode the old constant beside the lookup.** Replace
