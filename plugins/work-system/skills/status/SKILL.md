@@ -26,7 +26,7 @@ user_invocable: true
      `pr_state` (MERGED / OPEN / CLOSED / none / nogh), `pr_number`, `pr_url`, `commits_in_main`,
      `main_branch`, `on_main`, `detached`.
    - **If `on_main=yes` and `task_name` is empty** (run from the main repo with no argument):
-     list the files in `tasks/`, ask which task to check, then re-run `assess "<chosen-name>"`.
+     list the backlog (`python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" list "$PWD"`), ask which task to check, then re-run `assess "<chosen-name>"`.
    - **If `detached=yes`**: the worktree is on a detached HEAD — there is no task branch to check.
      Report that and stop (check out the `task/<name>` branch, or pass a task name explicitly).
 
@@ -37,8 +37,9 @@ user_invocable: true
    as `branch_merged=unknown` (behind-but-reachable, or a possible squash/rebase merge) rather than
    "not merged".
 
-2. **Read the task file** for human context (optional):
-   - Run: `cat tasks/<task_name>.md 2>/dev/null` — use the title/goal to label the report.
+2. **Read the task** for human context (optional):
+   - Run: `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" get "$PWD" "<task_name>" --body 2>/dev/null` — use the title/goal to
+     label the report (a GitHub task also has its issue number in it).
 
 3. **Report** from `verdict` + `confidence`, quoting the concrete evidence fields:
 
@@ -50,7 +51,7 @@ user_invocable: true
    • PR #<pr_number> — <pr_state> (<pr_url>)              [when pr_state=MERGED]
    • <commits_in_main> commit(s) for "<task_name>" in <main_branch>   [only when commits_in_main>0]
 
-   Recommendation: Delete task file with /close
+   Recommendation: close the task with /close
    ```
    `confidence=likely` means no merged PR proved it (no `gh`, or branch already cleaned up by
    `/close`, with task commits in main) — label it "likely (unconfirmed)". A merged PR is the
@@ -92,7 +93,7 @@ user_invocable: true
    evidence (it failed the helper's specificity gate), not because no matching commits exist.
 
 4. **Offer actions**:
-   - If completed: "Delete task file?"
+   - If completed: "Close it with /close?"
    - If in progress: "Open PR in browser?" / "Continue work?"
    - If not started: "Start this task?"
 

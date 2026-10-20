@@ -242,7 +242,8 @@ header, `/land` steps 1/3/4/5, `/close` 1a/4/7/10a.
   main checkout and say "inside a work tree") nor a missing path decides it; three
   separate definitions (gone-check, `evaluate`, `/close` step 4) disagreed in review.
 - **A gone lane is `ask`, never `reject` or `auto`** — but only with a record that the task
-  still exists (a marker or an open `tasks/<task>.md`), and only for `worktree=` exactly
+  still exists (a marker, or an open task per `task-store.py get`; a backlog it cannot
+  read counts as a record, since the outcome is only `ask`), and only for `worktree=` exactly
   `<repo>/.claude/worktrees/<task>`. Without a record, a path that merely fits the pattern
   is rejected. The sweep skips the marker's pane only on `worker_cwd=mismatch` (a
   deleted cwd often reads as unknown).

@@ -476,7 +476,7 @@ cmd_install() {
   printf -- '- %s\n' "$RENDERER_MSG"
   printf -- '- Marker block: %s in %s\n' "$PLACEMENT_MSG" "$STATUSLINE_TARGET"
   printf -- '- Backup: %s\n' "$BACKUP"
-  printf 'Restart Claude Code (or reload the status line) to see [ws ...] in projects with a tasks/ backlog.\n'
+  printf 'Restart Claude Code (or reload the status line) to see [ws ...] in projects with a tasks/ backlog or task/<name> lanes.\n'
   printf 'Tip: silence ws in a noisy project with `/work-system:statusline disable` (run from inside it).\n'
 }
 

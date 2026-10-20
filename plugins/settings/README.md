@@ -131,7 +131,8 @@ When a plugin adopts settings, it should:
    on a symlinked or invalid file. pr-flow's `review.route` does this
    (`claude-review.sh route_setting`), and so does work-system through one
    reusable reader (`scripts/ws-settings.py get <dir> <key>`, first consumer
-   `mandate.review_budget`, then `deploy.by`/`deploy.confirm` — read from the main
+   `mandate.review_budget`, then `deploy.by`/`deploy.confirm` and `tasks.backend`
+   (via `task-store.py`) — read from the main
    checkout, never the lane's own file). Both resolve the file at the same root as
    `settings.py` — the git toplevel — so `/settings set` edits what they read.
 2. **Fall back to the default, always.** The resolver guarantees a value even

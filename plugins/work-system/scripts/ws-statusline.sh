@@ -7,8 +7,8 @@
 #           ○ not-started · ● active (has a worktree) · ◇ in review (open PR) ·
 #           ◆ approved (open PR, review APPROVED — ready to /merge) ·
 #           ✓ merged (ready to /close).
-#         Empty when DIR is not a git repo, has no tasks/ backlog, an empty
-#         backlog, or the <DIR>/.claude/.ws-statusline-off sentinel is present.
+#         Empty when DIR is not a git repo, has neither task files nor task
+#         lanes, or the <DIR>/.claude/.ws-statusline-off sentinel is present.
 #
 # Second mode (used by herdr-tab-glyph.sh, NOT by the status line):
 #   ws-statusline.sh states [--cached] <workspace-dir>
@@ -27,7 +27,7 @@
 
 # Parsed by /work-system:statusline install — bump in lockstep with plugin.json.
 # Format must stay `readonly WS_STATUSLINE_VERSION="X.Y.Z"`.
-readonly WS_STATUSLINE_VERSION="1.2.0"
+readonly WS_STATUSLINE_VERSION="1.3.0"
 
 MODE=render
 [ "${1:-}" = "states" ] && { MODE=states; shift; }
@@ -49,12 +49,16 @@ git -C "$DIR" rev-parse --git-dir >/dev/null 2>&1 || exit 0
 # "worktree " prefix without field-splitting so paths with spaces survive.
 MAIN="$(git -C "$DIR" worktree list --porcelain 2>/dev/null | head -1)"
 MAIN="${MAIN#worktree }"
-[ -n "$MAIN" ] && [ -d "$MAIN/tasks" ] || exit 0
+[ -n "$MAIN" ] || exit 0
 
 # Branches that currently have a linked worktree → the "active" set. `sed -n`
 # extracts the short branch name from each `branch refs/heads/<name>` line.
 WORKTREE_BRANCHES="$(git -C "$DIR" worktree list --porcelain 2>/dev/null \
   | sed -n 's#^branch refs/heads/##p')"
+
+# No backlog here at all (no tasks/ dir, no task/<name> lane) → nothing to show,
+# and nothing below may run: the PR refresh would spawn gh in every repo.
+[ -d "$MAIN/tasks" ] || printf '%s\n' "$WORKTREE_BRANCHES" | grep -q '^task/.' || exit 0
 
 # ---- PR cache (never blocks render) -----------------------------------------
 # Render reads ONLY a cache file (headRef<TAB>state); a stale/missing cache
@@ -214,17 +218,33 @@ glyph_of() {
 }
 
 # ---- walk the backlog -------------------------------------------------------
-# Non-recursive tasks/*.md, excluding index/readme and the Manager's ROADMAP.md
-# (followups.py writes it); tasks/archive/ is a subdir
-# and so is naturally excluded by -maxdepth 1.
+# Local task files: non-recursive tasks/*.md, excluding index/readme and the
+# Manager's ROADMAP.md (followups.py writes it); tasks/archive/ is a subdir and
+# so is naturally excluded by -maxdepth 1. Plus every task/<name> lane without
+# such a file: on the GitHub backend (task-store.py) the backlog is issues, and
+# a render never calls the network for them — so there the segment shows the
+# tasks in flight, and not-started issues stay uncounted.
+
+backlog_names() {  # NUL-separated task names: files first, then file-less lanes
+  local f n
+  while IFS= read -r -d '' f; do
+    printf '%s\0' "$(basename "$f" .md)"
+  done < <(find "$MAIN/tasks" -maxdepth 1 -type f -name '*.md' \
+      ! -name '_index.md' ! -name 'README.md' ! -name 'ROADMAP.md' -print0 2>/dev/null)
+  while IFS= read -r n; do
+    case "$n" in task/?*) n="${n#task/}" ;; *) continue ;; esac
+    # Kept unflattened, so task_state finds the branch task/foo/bar; only the
+    # dedup against the file uses the flat name an adopted foo/bar is stored as.
+    [ -f "$MAIN/tasks/${n//\//-}.md" ] || printf '%s\0' "$n"
+  done <<< "$WORKTREE_BRANCHES"
+}
 
 TOTAL=0; NS=0; ACT=0; PR=0; APP=0; DONE=0
-# -print0 + `read -d ''` so a task filename with an embedded newline can't split
-# into two iterations; process substitution (not a pipe) keeps the counters in
-# THIS shell.
-while IFS= read -r -d '' f; do
+# NUL-separated + `read -d ''` so a task filename with an embedded newline can't
+# split into two iterations; process substitution (not a pipe) keeps the
+# counters in THIS shell.
+while IFS= read -r -d '' name; do
   TOTAL=$((TOTAL + 1))
-  name="$(basename "$f" .md)"
   state="$(task_state "$name")"
   if [ "$MODE" = states ]; then
     # A name embedding a tab/newline would forge or split rows in the TSV this
@@ -241,8 +261,7 @@ while IFS= read -r -d '' f; do
     active)   ACT=$((ACT + 1)) ;;
     *)        NS=$((NS + 1)) ;;
   esac
-done < <(find "$MAIN/tasks" -maxdepth 1 -type f -name '*.md' \
-    ! -name '_index.md' ! -name 'README.md' ! -name 'ROADMAP.md' -print0 2>/dev/null)
+done < <(backlog_names)
 
 [ "$MODE" = states ] && exit 0
 [ "$TOTAL" -eq 0 ] && exit 0

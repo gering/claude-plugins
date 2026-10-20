@@ -1,15 +1,18 @@
 ---
 title: "Task Archiving on /close"
 createdAt: 2026-06-29
-updatedAt: 2026-09-21
+updatedAt: 2026-10-20
 createdFrom: "PR #19"
-updatedFrom: "PR #63"
-pluginVersion: 1.15.0
+updatedFrom: "PR #84"
+pluginVersion: 1.25.0
 prime: false
 reindexedAt: 2026-07-12
 ---
 
 # Task Archiving on /close
+
+> Local backend only. On the GitHub backend `/close` closes the issue instead —
+> see `features/github-issues-task-backend.md`.
 
 `/close` **archives** the finished task file instead of deleting it: it moves
 `tasks/<name>.md` into `tasks/archive/<name>.md` with a closed-stamp header and

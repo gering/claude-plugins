@@ -1,6 +1,6 @@
 # Work System Plugin
 
-Generic task and worktree workflow system for Claude Code. Manage tasks as markdown files, work in isolated git worktrees, and track progress through the full lifecycle.
+Generic task and worktree workflow system for Claude Code. Keep tasks as GitHub issues (default) or local markdown files, work in isolated git worktrees, and track progress through the full lifecycle.
 
 ## Workflow
 
@@ -25,19 +25,19 @@ Generic task and worktree workflow system for Claude Code. Manage tasks as markd
 
 ```
 📋 Not Started  →  🔄 In Progress  →  🔍 In Review  →  ✅ Merged
-  (task file)      (worktree)         (PR open)        (ready to close)
+  (issue / file)   (worktree)         (PR open)        (ready to close)
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `/define` | Create a new task (markdown file with Goal/Context/Requirements) |
+| `/define` | Create a new task (GitHub issue or markdown file with Goal/Context/Requirements) |
 | `/kickoff` | Start a task in an isolated git worktree, with a choice of worker agent (Claude/codex/grok/kimi, or a PATH-detected cc-harness agent) |
 | `/adopt` | Adopt an existing branch into the work system |
 | `/continue` | Resume the current task (in a worktree); or `/continue <task>` from the main session reopens the task's herdr tab and resumes it |
 | `/status` | Check task status (PRs, branches, commits) |
-| `/close` | Clean up after merge (worktree, branches; archives the task file). `--delegate` preselects handing the close to the Manager |
+| `/close` | Clean up after merge (worktree, branches; closes the issue or archives the task file). `--delegate` preselects handing the close to the Manager |
 | `/land` | In the worktree tab: handoff report → `/pr-flow:merge` → confirmed merge → `/close --delegate` |
 | `/list` | Overview of all tasks, worktrees, and status |
 | `/statusline` | Add a `[ws …]` task-backlog segment to Claude Code's status line |
@@ -46,7 +46,17 @@ Generic task and worktree workflow system for Claude Code. Manage tasks as markd
 
 ### Tasks
 
-Each task is a markdown file in your project's `tasks/` directory. This is a centralized backlog on the main worktree — `/define` always writes there, even when invoked from inside a linked worktree, so tasks stay visible to `/kickoff` and `/list` and survive `/close`:
+The backlog is centralized — `/define` adds to it even from inside a linked worktree, so tasks stay visible to `/kickoff` and `/list` and survive `/close`. Where it lives is the `tasks.backend` setting in `.work-system.toml`:
+
+| `tasks.backend` | Backlog |
+|-----------------|---------|
+| `auto` (default) | `local` while the repo still has task files in `tasks/` (move them to issues and archive the files, or pin `github`); else `github` when `origin` is on github.com and `gh` is installed; else `local` |
+| `github` | Issues labelled `work-system:task` in origin's repository. The task name (kebab slug) lives in a hidden body marker `<!-- work-system task: <name> -->`, so ordinary issues are never tasks; `/kickoff` takes a name or `#N`, the other skills a name |
+| `local` | One markdown file per task in `tasks/` on the main worktree (`paths.tasks_dir` is not wired yet) |
+
+Every skill reaches the backlog through one script, `scripts/task-store.py` (`backend`, `list`, `get`, `create`, `close`, and `ref`, which pins the issue `/close` closes). A GitHub backend whose `gh` is missing, unauthenticated or unreachable fails with a clear message — work-system never falls back to local files, which would split the backlog. `/define` names the target repository before creating an issue and says when that repository is public. `tasks/ROADMAP.md` (the Manager's open follow-ups) stays local on both backends.
+
+A task reads the same either way (on GitHub the heading is the issue title):
 
 ```markdown
 # Add Dark Mode Support
@@ -87,8 +97,8 @@ This is consistent with where Claude Desktop/Web creates worktrees. Multiple Cla
 
 ### Branch Naming
 
-Branches follow the pattern `task/<task-name>`:
-- Task file: `tasks/add-dark-mode.md`
+Branches follow the pattern `task/<task-name>`, on both backends:
+- Task: issue `#44` with marker `add-dark-mode`, or `tasks/add-dark-mode.md`
 - Branch: `task/add-dark-mode`
 - Worktree: `.claude/worktrees/add-dark-mode`
 
@@ -176,12 +186,17 @@ checkout, a manual `git worktree remove`), `/land` confirms the merge from the f
 prints its follow-ups and hands the close to the Manager instead of stopping silently
 (it stops instead when a surviving branch holds commits the PR lacks, or an
 `/adopt`-ed branch cannot be resolved by name);
-the Manager's `/close <task>` still archives the task file, sweeps the follow-ups and
+the Manager's `/close <task>` still closes the task, sweeps the follow-ups and
 closes the worker's tab, found through the marker's pane + session rather than a cwd
 that no longer exists. **The Manager never merges a lane's PR itself** — the user runs
 `/land` in the lane's tab (pr-flow's `/merge` refuses the main checkout anyway).
 
-Instead of deleting the task file, `/close` **archives** it to
+On the GitHub backend `/close` closes the issue with a comment naming the merged PR
+(or a manual-close note); an issue that is already closed is not an error. `/kickoff`
+copies the issue into the worktree's `TASK.md` (title, an `issue: #N` line, body) — a
+copy, so a later issue edit does not change it.
+
+On the local backend, instead of deleting the task file, `/close` **archives** it to
 `tasks/archive/<name>.md` with a closed-stamp (date, shipping PR + merge commit,
 branch) and appends a one-line entry to `tasks/archive/_index.md` — a queryable
 record of finished work. The archive inherits whatever `tasks/` does: gitignored

@@ -1,7 +1,7 @@
 ---
 name: list
 description: |
-  Overview of all tasks: files, worktrees, branch state, PR status.
+  Overview of all tasks: backlog, worktrees, branch state, PR status.
   Trigger: "list tasks", "what's open", "tasks overview".
 user_invocable: true
 ---
@@ -25,10 +25,12 @@ user_invocable: true
 2. **List pending tasks**:
    - Resolve the main checkout once — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path`
      → `<main-repo-path>` — the backlog lives there even when `/list` runs in a worktree.
-   - Run: `find "<main-repo-path>/tasks" -maxdepth 1 -type f -name '*.md' ! -name '_index.md' ! -name 'README.md' ! -name 'ROADMAP.md' 2>/dev/null`
-     — the same set the `[ws]` statusline counts (`ROADMAP.md` holds the Manager's open
-     follow-ups, not a task)
-   - For each task file: read its first line (title) and resolve its real branch via the shared
+   - Run: `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" list "<main-repo-path>"` — the one read path for the backlog (GitHub
+     issues labelled `work-system:task`, or the local task files). Each `task=` line is
+     `<name>\t<ref>\t<title>` (ref = `#N` or the file path). Non-zero exit → show its stderr
+     instead of the table (exit 4: the GitHub backend's `gh` is unusable — no local fallback);
+     relay a `hint=` line in one line.
+   - For each task: resolve its real branch via the shared
      helper — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/task-status.sh" resolve "<task-name>"` — then
      read `task_branch` and `branch_exists`:
      - `branch_exists=yes` → the helper matched a real branch (an exact `task/<name>`, or the
@@ -41,11 +43,11 @@ user_invocable: true
      surfaces via its worktree in steps 1/4.)
    - Render as a markdown table under a `## 📋 Tasks` heading:
 
-   | # | Task | Title | Status |
-   |---|------|-------|--------|
-   | 1 | `fix-calendar-bug` | Fix DST-related date shift in calendar view | 🔄 In Progress |
-   | 2 | `add-dark-mode` | Add dark mode toggle to settings | 📋 Not Started |
-   | 3 | `refactor-notifications` | Refactor notification scheduling | 🔍 In Review (PR #45) |
+   | # | Task | Ref | Title | Status |
+   |---|------|-----|-------|--------|
+   | 1 | `fix-calendar-bug` | #41 | Fix DST-related date shift in calendar view | 🔄 In Progress |
+   | 2 | `add-dark-mode` | #44 | Add dark mode toggle to settings | 📋 Not Started |
+   | 3 | `refactor-notifications` | #39 | Refactor notification scheduling | 🔍 In Review (PR #45) |
 
 3. **Check for open PRs** (if `gh` is available):
    - Run once: `gh pr list --state open --json number,title,headRefName --limit 30`
@@ -55,7 +57,7 @@ user_invocable: true
    - Show PR status for each task
 
 4. **Check for orphaned worktrees**:
-   - Worktrees without matching task file
+   - Worktrees without a matching task in the backlog
    - Worktrees with merged PRs (can be cleaned up)
    ```
    ⚠️ Cleanup Suggested:
@@ -63,9 +65,9 @@ user_invocable: true
    ```
 
 5. **Summary statistics**:
-   - Archived count: `find "<main-repo-path>/tasks/archive" -maxdepth 1 -type f -name '*.md' ! -name '_index.md' 2>/dev/null | wc -l | tr -d ' '`
-     — closed tasks moved aside by `/close` (the non-recursive `find` in step 2
-     already excludes them). Omit the line when the count is 0.
+   - Archived count (local backend only — on GitHub a closed task is a closed issue):
+     `find "<main-repo-path>/tasks/archive" -maxdepth 1 -type f -name '*.md' ! -name '_index.md' 2>/dev/null | wc -l | tr -d ' '`
+     — closed tasks moved aside by `/close`. Omit the line when the count is 0.
    - Open follow-ups — items a closed lane left that the Manager neither ran nor got a
      yes for (`/close` steps 6c/10b): `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/followups.py" list "<main-repo-path>"`.
      When `open=` is above 0, print each `item=` under the summary as
