@@ -193,6 +193,7 @@ def main():
     signal.setitimer(signal.ITIMER_REAL, args.timeout)
     try:
         process = subprocess.Popen(
+            # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args -- argv list without a shell; the executable is the caller's own --codex flag (default "codex") of this local CLI.
             [args.codex, "app-server", "--listen", "stdio://"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             start_new_session=True,

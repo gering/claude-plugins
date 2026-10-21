@@ -1,0 +1,171 @@
+name: Security
+# Static analysis (Semgrep CE) and secret scanning (gitleaks, full history) on a GitHub-hosted runner.
+# Everything runs on the runner: no Semgrep login, no app token, no cloud upload, no SARIF.
+# Semgrep only downloads the public rule packs from the registry.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+# Only pull request runs cancel superseded runs; push and manual runs on main each finish.
+concurrency:
+  group: security-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+      # uv only installs the hash-pinned Semgrep from .github/semgrep-requirements.txt.
+      UV_VERSION: 0.13.4
+      UV_SHA256: 28d4385f9f9d1d1c7654d85b3855e0e2615b2f6cc13136a2edff858bbdc16ff1
+      SEMGREP_CONFIGS: p/python p/javascript p/secrets
+      SEMGREP_ENABLE_VERSION_CHECK: '0'
+      SEMGREP_SEND_METRICS: 'off'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl --fail --silent --show-error --location --output "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          printf '%s  %s\n' "$GITLEAKS_SHA256" "$archive" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/gitleaks-bin"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/gitleaks-bin" gitleaks
+          printf '%s\n' "$RUNNER_TEMP/gitleaks-bin" >> "$GITHUB_PATH"
+      # The runner is ephemeral, so the venv lives in RUNNER_TEMP (no cache to poison or go stale).
+      - name: Install Semgrep
+        id: install-semgrep
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/uv.tar.gz"
+          curl --fail --silent --show-error --location --output "$archive" \
+            "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-musl.tar.gz"
+          printf '%s  %s\n' "$UV_SHA256" "$archive" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          uv="$RUNNER_TEMP/uv-x86_64-unknown-linux-musl/uv"
+          venv="$RUNNER_TEMP/semgrep-venv"
+          export UV_CACHE_DIR="$RUNNER_TEMP/uv-cache" UV_PYTHON_INSTALL_DIR="$RUNNER_TEMP/uv-python"
+          "$uv" venv --quiet --python 3.12 --managed-python "$venv"
+          "$uv" pip install --quiet --python "$venv/bin/python" --require-hashes --only-binary :all: \
+            -r .github/semgrep-requirements.txt
+          "$venv/bin/semgrep" --version
+          printf '%s\n' "$venv/bin" >> "$GITHUB_PATH"
+      # Fails on ERROR-severity findings and on every scan error, including rule timeouts and parse errors:
+      # without that, a timed-out or skipped file would pass unchecked (Semgrep exits 0 on those unless
+      # --strict). --strict additionally makes Semgrep itself exit non-zero on them and rejects invalid
+      # rule configs early. --timeout 60 is per rule and file: the slowest pair takes ~4 s on a dev box
+      # (about 3x that on a slow CI runner), so a slow but complete scan stays green; --timeout-threshold 3 skips a file after
+      # three timeouts, which fails the job anyway. WARNING/INFO findings are listed in the summary only.
+      # Semgrep's default ignores apply
+      # (.gitignore, node_modules, vendor, test/, tests/, *_test.go, build, dist, minified JS).
+      # Suppress a reviewed false positive with `nosemgrep: <rule-id> -- <reason>` in a comment on the line
+      # (or the line above for code languages).
+      - name: Semgrep
+        if: ${{ !cancelled() && steps.install-semgrep.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          configs=()
+          for config in $SEMGREP_CONFIGS; do configs+=(--config "$config"); done
+          report="$RUNNER_TEMP/semgrep.json"
+          start=$SECONDS
+          status=0
+          semgrep scan "${configs[@]}" --metrics off --strict --timeout 60 --timeout-threshold 3 --quiet --json --output "$report" . || status=$?
+          if [ ! -s "$report" ]; then
+            echo "::error::Semgrep exited with $status and wrote no report"
+            exit 1
+          fi
+          # Summary table, annotations and the verdict use only python3 and its stdlib.
+          # Exit 0 = clean run (findings are judged here); anything else from Semgrep is a failed scan.
+          python3 - "$report" "$status" "$((SECONDS - start))" "$(semgrep --version)" <<'PY'
+          import json, os, re, sys
+
+          report, status, seconds, version = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+          with open(report, encoding="utf-8") as f:
+              data = json.load(f)
+          results = data.get("results") or []
+          scan_errors = data.get("errors") or []
+          rank = {"ERROR": 0, "WARNING": 1, "INFO": 2}
+
+
+          def severity(result):
+              return result.get("extra", {}).get("severity", "")
+
+
+          def cell(value, limit):
+              text = value if isinstance(value, str) else json.dumps(value)
+              return re.sub(r"[\r\n|]+", " ", text)[:limit]
+
+
+          errors = [r for r in results if severity(r) == "ERROR"]
+          lines = [
+              f"### Semgrep ({version}): {len(errors)} error, {len(results)} total findings, {seconds} s",
+              "",
+              f"Rules: `{os.environ['SEMGREP_CONFIGS']}`. ERROR findings and any scan error (including timeouts) fail the job. Scan errors: {len(scan_errors)}.",
+              "",
+          ]
+          if results:
+              lines += ["| Severity | Rule | Location | Message |", "| --- | --- | --- | --- |"]
+              for r in sorted(results, key=lambda r: (rank.get(severity(r), 3), r["path"], r["start"]["line"])):
+                  message = cell(r.get("extra", {}).get("message", ""), 160)
+                  lines.append(f"| {severity(r)} | {r['check_id']} | {r['path']}:{r['start']['line']} | {message} |")
+          if scan_errors:
+              lines += ["", "| Scan error | Level | Rule | Location | Message |", "| --- | --- | --- | --- | --- |"]
+              for e in scan_errors:
+                  lines.append(
+                      f"| {cell(e.get('type'), 80)} | {e.get('level', '-')} | {e.get('rule_id') or '-'}"
+                      f" | {e.get('path') or '-'} | {cell(e.get('message', ''), 160)} |"
+                  )
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+              f.write("\n".join(lines) + "\n")
+          for r in errors:
+              message = re.sub(r"[\r\n]+", " ", r.get("extra", {}).get("message", ""))
+              print(f"::error file={r['path']},line={r['start']['line']},title={r['check_id']}::{message}")
+          for e in scan_errors:
+              where = e.get("path") or "-"
+              print(f"::error title=Semgrep scan error::{cell(e.get('type'), 80)} in {where} ({e.get('rule_id') or 'no rule'})")
+          print(f"Semgrep: {len(errors)} error, {len(results)} total findings, {len(scan_errors)} scan errors (exit {status})")
+          sys.exit(1 if status != 0 or errors or scan_errors else 0)
+          PY
+      # Full history on every event. Pull requests scan the history of the PR merge commit; pushes and
+      # manual runs scan all fetched refs. Output is fully redacted; no report leaves the runner.
+      - name: Secret scan (gitleaks, full history)
+        if: ${{ !cancelled() }}
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          refs=--all
+          [ "$EVENT_NAME" = pull_request ] && refs=HEAD
+          report="$RUNNER_TEMP/gitleaks.json"
+          start=$SECONDS
+          status=0
+          gitleaks git --redact=100 --config .gitleaks.toml --exit-code 1 --report-format json \
+            --report-path "$report" --log-opts="$refs --diff-merges=first-parent" . || status=$?
+          python3 - "$report" "$refs" "$((SECONDS - start))" <<'PY' || echo "::warning::Could not write the gitleaks job summary"
+          import json, os, sys
+
+          report, refs, seconds = sys.argv[1:4]
+          try:
+              with open(report, encoding="utf-8") as f:
+                  leaks = json.load(f)
+          except (OSError, ValueError):
+              leaks = None
+          count = "?" if leaks is None else len(leaks)
+          lines = ["", f"### gitleaks {os.environ['GITLEAKS_VERSION']} (full history, {refs}): {count} leaks, {seconds} s"]
+          if leaks:
+              lines += ["", "| Rule | Location | Commit |", "| --- | --- | --- |"]
+              for leak in leaks:
+                  lines.append(f"| {leak.get('RuleID')} | {leak.get('File')}:{leak.get('StartLine')} | {str(leak.get('Commit', ''))[:12]} |")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+              f.write("\n".join(lines) + "\n")
+          PY
+          exit "$status"
