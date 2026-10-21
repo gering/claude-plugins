@@ -6,7 +6,11 @@ useDefault = true
 [[rules]]
 id = "private-key"
 
-# The scrubber test feeds a bare key header and a key block with the 4-byte body "MIIE"; no key material.
+# The scrubber test feeds a bare RSA key header followed by prose ("headers\nbecause of X"); no key material.
+# Scoped to that exact stub string in that one file, so a real key anywhere (including this file) is still caught.
 [[rules.allowlists]]
-description = "Synthetic private-key markers in the insights scrubber test"
+description = "Synthetic private-key header stub in the insights scrubber test"
+condition = "AND"
 paths = ['''^plugins/insights/scripts/test_insights\.py$''']
+regexTarget = "match"
+regexes = ['''^-----BEGIN RSA PRIVATE KEY----- headers\\nbecause of X''']
