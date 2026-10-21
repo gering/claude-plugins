@@ -1,0 +1,12 @@
+title = "claude-plugins secret scan"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "private-key"
+
+# The scrubber test feeds a bare key header and a key block with the 4-byte body "MIIE"; no key material.
+[[rules.allowlists]]
+description = "Synthetic private-key markers in the insights scrubber test"
+paths = ['''^plugins/insights/scripts/test_insights\.py$''']
