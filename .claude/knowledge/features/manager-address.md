@@ -1,9 +1,9 @@
 ---
 title: "Manager Address Resolver and Milestone Pings"
 createdAt: 2026-10-02
-updatedAt: 2026-10-19
+updatedAt: 2026-10-20
 createdFrom: "session: 2026-10-02 (task/add-manager-address)"
-updatedFrom: "session: 2026-10-19 (task/auto-delegate-close-without-kicker-prompt)"
+updatedFrom: "branch: task/add-session-plugin-refresh"
 pluginVersion: 1.9.0
 prime: false
 ---
@@ -112,7 +112,8 @@ terminal gate) and `/close` step 1b delegation, which replaced the name-only
 
 ## Gotchas
 
-- **Composer draft detection** reads `herdr agent read --source visible --format
+- **Composer draft detection** (`$HERDR_COMPOSER_PY` in `herdr-agent.sh` since
+  work-system 1.26.0, shared with `sessions.sh refresh`) reads `herdr agent read --source visible --format
   ansi` and inspects the region between the last two horizontal rules. The UPPER
   rule carries a label (CC prints the session name into it), so a rule is "starts
   with ten `─`", not "consists only of `─`". Dim and **mid**-gray cells are not a

@@ -121,6 +121,7 @@ user_invocable: true
    • /status <name>  — Check specific task status
    • /close <name>   — Clean up completed task
    • /land           — Merge and close, from the task's tab
+   • /sessions       — Stale plugin code in running sessions; reload idle ones
    ```
 
 ## Output Format
