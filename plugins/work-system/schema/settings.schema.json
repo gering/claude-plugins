@@ -86,6 +86,12 @@
           "minimum": 0,
           "maximum": 100,
           "description": "Review rounds new lanes in this repo record for every preset that authorizes a review (standard, merge-delegated); draft-only always records 0; an explicit review_budget= at init wins. Existing lanes keep their recorded budget."
+        },
+        "version_paths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["**/.claude-plugin/plugin.json", ".claude-plugin/marketplace.json"],
+          "description": "Files (plain git glob paths from the repo root, no ':' pathspec magic) whose JSON \"version\" SemVer values the merge gate's lane diff id masks, so a rebase that only renumbers versions keeps a recorded review's coverage. Only that key's value is masked; any other change still needs a review. Read from the file committed on the main branch (origin's when there is one), never a working tree; a committed value that cannot be read masks nothing. Empty list: no masking."
         }
       }
     },

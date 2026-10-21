@@ -9,7 +9,7 @@
 # plugin would read as a denial. All mandate semantics live in work-system's
 # mandate.sh; this shim only locates it and passes the verdict through.
 #
-# Usage: mandate-shim.sh {show|allows <action>|round|reviewed [--head <rev>]|fixed --after <rev>|covered [--head <rev>]|lane <branch>|actions|deploy-owner} [<dir>]
+# Usage: mandate-shim.sh {show|allows <action>|round|reviewed [--head <rev>]|fixed --after <rev>|covered [--head <rev>]|delta [--head <rev>] [--max-lines <n>]|acknowledged --head <rev> --ack-id <id>|lane <branch>|actions|deploy-owner} [<dir>]
 #
 # <dir> is the LANE, not the cwd: resolve it first with `lane <branch>` (prints
 # the worktree holding that branch), so a /cycle run from the main repo reads the
@@ -17,10 +17,11 @@
 #
 # Exits, passed through from work-system's mandate.sh:
 #   0  allowed (allows) / covered (covered) / success (show, round,
-#      reviewed, fixed, lane, deploy-owner)
+#      reviewed, fixed, delta, acknowledged, lane, deploy-owner)
 #   1  denied or unlisted — a decision the user made: stop and ask. For
-#      `covered`/`fixed` it is NOT a user decision: no recorded review covers
-#      that head, or the fixes could not be recorded — reason= says why
+#      `covered`/`fixed`/`delta`/`acknowledged` it is NOT a user decision: no
+#      recorded review covers that head, the fixes or the ack could not be
+#      recorded, or there is no delta to show — reason= says why
 #   2  usage, or the mandate file itself is unreadable (duplicate key, open
 #      fence, symlink) — show stderr, stop and ask; never read as 1 or 3
 #   3  unknown — no mandate recorded, no worktree for that branch (lane),
@@ -37,8 +38,8 @@
 set -u
 
 case "${1:-}" in
-  show|allows|round|reviewed|fixed|covered|lane|actions|deploy-owner) ;;
-  *) echo "usage: ${0##*/} {show|allows <action>|round|reviewed [--head <rev>]|fixed --after <rev>|covered [--head <rev>]|lane <branch>|actions|deploy-owner} [<dir>]" >&2; exit 2 ;;
+  show|allows|round|reviewed|fixed|covered|delta|acknowledged|lane|actions|deploy-owner) ;;
+  *) echo "usage: ${0##*/} {show|allows <action>|round|reviewed [--head <rev>]|fixed --after <rev>|covered [--head <rev>]|delta [--head <rev>] [--max-lines <n>]|acknowledged --head <rev> --ack-id <id>|lane <branch>|actions|deploy-owner} [<dir>]" >&2; exit 2 ;;
 esac
 
 # Source the locator from THIS script's own directory — never from a path built
@@ -64,12 +65,16 @@ fi
 # mandate.sh answers them with its usage error (exit 2), which callers read as
 # "a record nobody can vouch for" and hard-stop on — every /merge blocked by a
 # version skew. Ask its usage line instead; a missing verb is "unknown" (3).
+needle=""
 case "$1" in
-  reviewed|fixed|covered)
-    case "$(bash "$t" 2>&1 </dev/null)" in
-      *"|covered|"*) ;;
-      *) echo "verdict=old-work-system"; exit 3 ;;
-    esac ;;
+  reviewed|fixed|covered) needle="|covered|" ;;
+  delta|acknowledged)     needle="|acknowledged|" ;;
 esac
+if [ -n "$needle" ]; then
+  case "$(bash "$t" 2>&1 </dev/null)" in
+    *"$needle"*) ;;
+    *) echo "verdict=old-work-system"; exit 3 ;;
+  esac
+fi
 
 exec bash "$t" "$@"

@@ -52,6 +52,11 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.28.0 — 2026-10-21
+- The merge gate's lane diff id masks JSON `"version"` string values on `[mandate] version_paths` (`.work-system.toml` on the main branch; default: every `.claude-plugin/plugin.json` and the root `marketplace.json`; `[]` turns it off), so a rebase that only renumbers a plugin version keeps `covered=yes` (strict SemVer values only — any other value, the literal mask token included, still counts; a renumbered CHANGELOG heading is a delta to acknowledge). Only the policy committed on the main branch counts (origin's ref when there is one, never a working tree or another checked-out branch); a committed value that cannot be read masks nothing. Any other change in those files still needs a review. A review recorded before the masking keeps matching its unchanged lane (`diff_id_form=legacy`). A lane diff holding NUL bytes gets no id (never covered): bash drops NULs, so two contents would share one.
+- New `mandate.sh delta [--head <rev>] [--max-lines <n>]` shows what changed since the review on record (a bounded diff of the two lane diffs), and `acknowledged --head <rev> --ack-id <id>` records the user's acknowledgment of that delta as `acked_diff`, `acked_by` and `acked_at`. `delta` shows versions unmasked and prints `ack_id=` (a hash of the shown text) only for a complete, exact, binary-free, readable delta, and the ack is refused once the diff is no longer the one shown. `covered` answers `via=user-ack` for exactly that diff, and a new review clears it. `no-review` stays unackable, and so does a delta measured from an uncommitted review (`approximate-baseline`); a legacy review's delta is shown unmasked. `/land` asks `[a]cknowledge / [s]top` on `changed-since-review`; only the user's own answer counts, and `/continue` never acknowledges.
+- `ws-settings.py` reads string-list settings (`items=` + `item=` lines).
+
 ### 1.27.0 — 2026-10-21
 - New `scripts/herdr-shell.sh`: drive screen-based programs in temporary `tmp-` herdr tabs and hand user-only flows (logins, 2FA) over to the user. `open` refuses a relative cwd and waits for ~1 s of continuous shell foreground (closing the tab on timeout); `prompt` matches the last non-empty visible line after a quiet window; `state` reads `echo`/`icanon` from the pane's tty; `handover` focuses the tab and waits on process state without reading the pane. `send-secret` sends a Keychain/file secret through the socket API only (never in an argv) and only at an `echo=off ∧ icanon=on` prompt — raw-mode prompts are refused. Tabs are driven only when this caller recorded them and the live tab still looks like a temp tab (prefixed label, no agent); `close` and `sweep` never close a tab another live caller recorded or one an agent runs in, while `sweep` also closes unrecorded `tmp-` tabs in the workspace. When to use `expect`, `handover` or the helper: `docs/herdr-shell.md`.
 
@@ -320,6 +325,9 @@ entries are grouped per plugin, newest first.
 - Add `/work-adopt` skill; store worktrees under `.claude/worktrees/`.
 
 ## pr-flow
+
+### 1.8.0 — 2026-10-20
+- `/merge` step 6b: on `changed-since-review`, show the delta since the last recorded review (`mandate-shim.sh delta`, truncation named) and ask the user `[a]cknowledge / [s]top`; `[a]` records it (`acknowledged --head --ack-id`) and the gate passes `via=user-ack` for that exact diff. Only an interactive user answer acknowledges — never a mandate, a Manager, a peer or an autonomous run. `no-review` stays a hard stop. The shim passes `delta`/`acknowledged` through and reports a work-system without them as unknown (`verdict=old-work-system`).
 
 ### 1.7.0 — 2026-10-19
 - `/merge` step 6b: inside a work-system lane, a hard stop (no override) when no recorded review covers the PR head (`mandate-shim.sh covered`), and the merge runs with `--match-head-commit`. A permission-denied `gh pr merge` stops with the `/pr-flow:merge` follow-up instead of a retry. `/cycle` records each finished bot review (`reviewed --head`) and, after a loop stopped on unreviewed fixes, `fixed`. The shim passes `reviewed`/`fixed`/`covered` through and reports a work-system too old for them as unknown (exit 3, `verdict=old-work-system`), never as the exit-2 usage error `/merge` would stop on.

@@ -18,6 +18,9 @@ mean the same file. For a lane that is the worktree's own checkout: a branch
 Output (stdout, key=value):
   value=<v>    the resolved value; empty when the key has no default and the
                repo does not set it (the caller's own default applies)
+  items=<n>    for a list-of-strings setting, instead of value=: the count,
+  item=<s>     then one item= line per entry, in order (no item may hold a
+               line break, so each fits its line)
   source=file|default|unset
   note=<text>  only when the file could not be used — the value is then the
                schema default (or unset). A setting never blocks the caller.
@@ -81,6 +84,13 @@ def read_regular(path):
 def check(spec, val):
     """None if val satisfies the schema leaf, else a one-line reason."""
     typ = spec.get("type")
+    if typ == "array":
+        if not isinstance(val, list):
+            return f"must be array, got {type(val).__name__}"
+        for v in val:
+            if not isinstance(v, str) or "\n" in v or "\r" in v:
+                return "must be a list of one-line strings"
+        return None
     ok = {
         "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
         "boolean": lambda v: isinstance(v, bool),
@@ -98,8 +108,14 @@ def check(spec, val):
 
 
 def emit(value, source, note=""):
-    v = "" if value is None else (str(value).lower() if isinstance(value, bool) else str(value))
-    print(f"value={v}\nsource={source}")
+    if isinstance(value, list):
+        print(f"items={len(value)}")
+        for item in value:
+            print(f"item={item}")
+        print(f"source={source}")
+    else:
+        v = "" if value is None else (str(value).lower() if isinstance(value, bool) else str(value))
+        print(f"value={v}\nsource={source}")
     if note:
         print(f"note={note}")
     sys.exit(0)
@@ -116,9 +132,11 @@ def main(argv):
         spec = spec.get("properties", {}).get(part)
         if spec is None:
             die(f"unknown setting: {key}")
-    # value= is one line of text: only scalars have a faithful rendering.
-    if spec.get("type") not in ("integer", "boolean", "string"):
-        die(f"{key} is not a scalar setting (type {spec.get('type')})")
+    # value= is one line of text: only scalars have a faithful rendering; a
+    # list of strings goes out as one item= line per entry.
+    is_list = spec.get("type") == "array" and spec.get("items", {}).get("type") == "string"
+    if spec.get("type") not in ("integer", "boolean", "string") and not is_list:
+        die(f"{key} is not a scalar or string-list setting (type {spec.get('type')})")
     default = spec.get("default")
     fallback = "default" if "default" in spec else "unset"
 

@@ -195,10 +195,25 @@ check("covered before a review is exit 1 with its reason",
 old = layout()
 (old / "work-system" / "scripts" / "mandate.sh").write_text(
     'echo "usage: mandate.sh {path|lane|show|init|allows|round|actions}" >&2; exit 2\n')
-for verb in ("covered", "reviewed", "fixed"):
+for verb in ("covered", "reviewed", "fixed", "delta", "acknowledged"):
     r = run(old, verb, str(wt))
     check(f"{verb} on an old work-system is unknown (exit 3)",
           r.returncode == 3 and "verdict=old-work-system" in r.stdout)
+
+# A work-system with the gate but without the ack verbs: unknown for those two.
+mid = layout()
+(mid / "work-system" / "scripts" / "mandate.sh").write_text(
+    'echo "usage: mandate.sh {path|lane|show|init|allows|round|reviewed|fixed|covered|actions}" >&2; exit 2\n')
+for verb in ("delta", "acknowledged"):
+    r = run(mid, verb, str(wt))
+    check(f"{verb} on a work-system without it is unknown (exit 3)",
+          r.returncode == 3 and "verdict=old-work-system" in r.stdout)
+r = run(root, "acknowledged", "--head", "HEAD", "--ack-id", "0" * 40, str(wt))
+check("acknowledged without a review passes its refusal through",
+      r.returncode == 1 and "reason=no-review" in r.stdout)
+r = run(root, "delta", str(wt))
+check("delta without a review passes its refusal through",
+      r.returncode == 1 and "reason=no-review" in r.stdout)
 
 # --- usage ------------------------------------------------------------------
 check("unknown verb exits 2", run(root, "bogus").returncode == 2)

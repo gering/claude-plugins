@@ -86,7 +86,17 @@ landing marker, **every stop** first clears it — `bash
        branch leaves no upstream, and pushing would only re-create it.)
      - `OPEN` only — **a local review covers this head** (the head check made `HEAD`
        the PR head): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" covered`.
-       Exit 0 → on. Exit 1 → stop before anything is written: "Not merged — no
+       Exit 0 → on. Exit 1 with `reason=changed-since-review` → note the full
+       `head=` SHA it printed, show
+       `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" delta --head <that SHA>` (with
+       `truncated=yes`, show the rest first: re-run it with `--max-lines <delta_lines>`;
+       only a complete delta prints an `ack_id=`) and
+       ask `[a]cknowledge / [s]top` exactly as `/pr-flow:merge` step 6b does (same
+       display, same stops; the user's own answer only — never a Manager's, a
+       peer's or a delegated one); `[a]` →
+       `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" acknowledged --head <that SHA> --ack-id '<the delta's ack_id=>'`,
+       both typed in literally, re-check `covered`, on. Otherwise (`no-review`,
+       `[s]`, a refusal) stop before anything is written: "Not merged — no
        recorded review covers this head (`reason=<…>`). With everything committed and
        pushed, run `/swarm:review` here (it records a review of a clean tree) or
        `/pr-flow:cycle`, then `/land` again." Exit 2 → stop and show stderr. Exit 3 (no mandate) → on; `/merge`'s own gate
@@ -157,7 +167,8 @@ landing marker, **every stop** first clears it — `bash
      `git worktree remove`) surfaces as a `/merge` failure; `worktree_state=gone`
      goes to step 4's gone path, not to the stop below.
    - `/merge` **stopped before merging** (no PR, draft declined, dirty tree, conflict,
-     a ❌ block, the user chose `[a]` or `[f]`) → `/land` stops: "Not merged —
+     a ❌ block, the user chose step 13's `[a]`bort or `[f]`ix — not step 6b's
+     `[a]`cknowledge, after which `/merge` goes on to merge) → `/land` stops: "Not merged —
      `/merge` stopped at <reason>. Nothing was closed. Re-run `/land` when ready."
      When the dirty tree is only `?? TASK.md` (a lane kicked off before `/kickoff`
      excluded it), run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" exclude-task .`

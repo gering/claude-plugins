@@ -1320,6 +1320,437 @@ check("reviewed fails loudly without a main branch, recording nothing",
       and kv(run("show", str(nb)).stdout).get("reviewed_diff") == "")
 
 
+# --- version-only rebases keep the coverage; a user can ack a read delta -----
+# The observed case: the lane bumps a plugin 1.1.0 -> 1.2.0, main ships 1.2.0
+# meanwhile, the rebased lane now bumps 1.2.0 -> 1.3.0. Only the version
+# values on [mandate] version_paths are masked — nothing else in those files.
+PJ = ".claude-plugin/plugin.json"
+MP = ".claude-plugin/marketplace.json"
+
+
+def manifest(v, extra=""):
+    return '{\n  "name": "x",\n  "version": "%s",%s\n  "description": "d"\n}\n' % (v, extra)
+
+
+def market(v):
+    return ('{\n  "plugins": [\n    { "name": "x", "version": "%s" },\n'
+            '    { "name": "y", "version": "0.1.0" }\n  ]\n}\n' % v)
+
+
+def version_lane(toml=None):
+    m = Path(tempfile.mkdtemp())
+    git(m, "init", "-q", "-b", "main")
+    (m / "plugins/x/.claude-plugin").mkdir(parents=True)
+    (m / ".claude-plugin").mkdir()
+    (m / "plugins/x" / PJ).write_text(manifest("1.1.0"))
+    (m / MP).write_text(market("1.1.0"))
+    (m / "code.sh").write_text("".join(f"echo {i}\n" for i in range(20)))
+    if toml is not None:
+        (m / ".work-system.toml").write_text(toml)
+    commit_all(m, "base")
+    lane = Path(tempfile.mkdtemp()) / "lane"
+    git(m, "worktree", "add", "-q", "-b", "task/v", str(lane))
+    run("init", str(lane), f"allow={BASE_ALLOW}", "authorized_by=user", "task=v")
+    return m, lane
+
+
+def lane_change(lane, v, code="echo 5 changed\n", extra=""):
+    (lane / "plugins/x" / PJ).write_text(manifest(v, extra))
+    (lane / MP).write_text(market(v))
+    (lane / "code.sh").write_text((lane / "code.sh").read_text().replace("echo 5\n", code))
+    commit_all(lane, f"bump {v}")
+
+
+def main_ships(m, lane, v):
+    """main releases <v> elsewhere; the lane is rebuilt on it (a resolved rebase)."""
+    (m / "plugins/x" / PJ).write_text(manifest(v))
+    (m / MP).write_text(market(v))
+    (m / "other.txt").write_text("main\n")
+    commit_all(m, f"main ships {v}")
+    git(lane, "reset", "-q", "--hard", "main")
+
+
+def ack(lane, rev="HEAD", ack_id=None):
+    """acknowledged with the ack_id the delta for <rev> printed (or a given one)."""
+    if ack_id is None:
+        ack_id = kv(run("delta", "--head", rev, "--max-lines", "100000", str(lane))
+                    .stdout.split("delta_begin\n")[0]).get("ack_id") or "0" * 40
+    return run("acknowledged", "--head", rev, "--ack-id", ack_id, str(lane))
+
+
+def vcov(lane, *extra):
+    r = run("covered", *extra, str(lane))
+    return r.returncode, kv(r.stdout)
+
+
+m, lane = version_lane()
+lane_change(lane, "1.2.0")
+check("version: the review is recorded", run("reviewed", "--head", "HEAD", str(lane)).returncode == 0)
+reviewed_oid = git(lane, "rev-parse", "HEAD")
+main_ships(m, lane, "1.2.0")
+lane_change(lane, "1.3.0")
+rc, c = vcov(lane)
+check("version: a version-only rebase keeps the coverage",
+      rc == 0 and c.get("via") == "review" and "diff_id_form" not in c)
+
+r = run("delta", str(lane))
+body = r.stdout.split("delta_begin\n", 1)[1]
+check("delta: a version-only rebase shows only the renumbering, unmasked",
+      r.returncode == 0 and kv(r.stdout).get("baseline") == "exact"
+      and "1.3.0" in body and "echo" not in body)
+
+(lane / "code.sh").write_text((lane / "code.sh").read_text().replace("echo 9\n", "echo 9 too\n"))
+commit_all(lane, "one more code line")
+rc, c = vcov(lane)
+check("version: a version change plus one code line is not covered",
+      rc == 1 and c.get("reason") == "changed-since-review")
+
+r = run("delta", "--max-lines", "100", str(lane))
+d = kv(r.stdout.split("delta_begin\n")[0])
+body = r.stdout.split("delta_begin\n", 1)[1]
+check("delta: shows the unreviewed line",
+      r.returncode == 0 and "echo 9 too" in body and d.get("truncated") == "no"
+      and d.get("reviewed_head") == reviewed_oid)
+check("delta: ...with the version numbers as they are", "1.3.0" in body)
+r = run("delta", "--max-lines", "2", str(lane))
+check("delta: bounded, and says so",
+      kv(r.stdout.split("delta_begin\n")[0]).get("truncated") == "yes"
+      and len(r.stdout.split("delta_begin\n", 1)[1].splitlines()) == 2)
+r = run("delta", "--head", "HEAD", "--max-lines", "2", str(lane))
+check("delta: --max-lines after --head (the documented order)",
+      r.returncode == 0 and kv(r.stdout.split("delta_begin\n")[0]).get("truncated") == "yes")
+check("delta: --max-lines needs a number",
+      run("delta", "--max-lines", "x", str(lane)).returncode == 2)
+check("--max-lines belongs to delta only",
+      run("covered", "--max-lines", "3", str(lane)).returncode == 2)
+
+head = git(lane, "rev-parse", "HEAD")
+r = ack(lane, head)
+check("acknowledged: records the user's ack",
+      r.returncode == 0 and kv(r.stdout).get("acked_recorded") == "yes")
+rec = kv(run("show", str(lane)).stdout)
+check("acknowledged: who and when are on record",
+      rec.get("acked_by") == "user" and rec.get("acked_at", "").endswith("Z")
+      and rec.get("acked_head") == head)
+rc, c = vcov(lane)
+check("covered: the acked diff is covered via user-ack", rc == 0 and c.get("via") == "user-ack")
+check("acknowledged: needs the --ack-id the delta showed",
+      run("acknowledged", "--head", head, str(lane)).returncode == 2)
+check("acknowledged: needs --head", run("acknowledged", str(lane)).returncode == 2)
+(lane / "code.sh").write_text((lane / "code.sh").read_text().replace("echo 12\n", "echo 12!\n"))
+commit_all(lane, "after the ack")
+check("covered: the next change invalidates the ack",
+      vcov(lane)[1].get("reason") == "changed-since-review")
+git(lane, "reset", "-q", "--hard", "HEAD~1")
+check("covered: the ack still binds its own diff", vcov(lane)[1].get("via") == "user-ack")
+r = ack(lane, "HEAD")
+check("acknowledged: a covered head needs no ack",
+      r.returncode == 1 and kv(r.stdout).get("reason") == "already-covered")
+run("reviewed", "--head", "HEAD~1", str(lane))
+check("reviewed clears a previous ack", kv(run("show", str(lane)).stdout).get("acked_diff") == "")
+check("covered: ...so the acked head is no longer covered",
+      vcov(lane)[1].get("reason") == "changed-since-review")
+
+m, lane = version_lane()
+lane_change(lane, "1.2.0")
+r = ack(lane, "HEAD")
+check("acknowledged: no-review cannot be acked",
+      r.returncode == 1 and kv(r.stdout).get("reason") == "no-review"
+      and kv(run("show", str(lane)).stdout).get("acked_diff") == "")
+r = run("delta", str(lane))
+check("delta: no review, nothing to compare",
+      r.returncode == 1 and kv(r.stdout).get("reason") == "no-review")
+check("covered: still no-review", vcov(lane)[1].get("reason") == "no-review")
+
+m, lane = version_lane()
+lane_change(lane, "1.2.0")
+run("reviewed", "--head", "HEAD", str(lane))
+main_ships(m, lane, "1.2.0")
+lane_change(lane, "1.3.0", extra='\n  "homepage": "h",')
+check("version: a non-version key changed in plugin.json is not covered",
+      vcov(lane)[1].get("reason") == "changed-since-review")
+m, lane = version_lane()
+lane_change(lane, "1.2.0")
+run("reviewed", "--head", "HEAD", str(lane))
+main_ships(m, lane, "1.2.0")
+lane_change(lane, "$(evil)")
+check("version: a non-SemVer version value is not masked",
+      vcov(lane)[1].get("reason") == "changed-since-review")
+# Neither the mask token itself nor a malformed SemVer can pass as a renumber.
+for bad in ("*", "01.3.0", "1.3.0-01"):
+    m, lane = version_lane()
+    lane_change(lane, "1.2.0")
+    run("reviewed", "--head", "HEAD", str(lane))
+    main_ships(m, lane, "1.2.0")
+    lane_change(lane, bad)
+    check(f"version: {bad!r} is not masked like a SemVer renumber",
+          vcov(lane)[1].get("reason") == "changed-since-review")
+
+m, lane = version_lane()
+lane_change(lane, "1.2.0")
+r = run("reviewed", str(lane))  # a working-tree review: reviewed_head is a commit
+git(lane, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--amend", "--no-edit", "-m", "amended")
+r = ack(lane, "HEAD")
+check("acknowledged: an amended but unchanged lane is already covered",
+      kv(r.stdout).get("reason") == "already-covered")
+git(lane, "reflog", "expire", "--expire=now", "--all")
+git(lane, "gc", "-q", "--prune=now")
+(lane / "code.sh").write_text((lane / "code.sh").read_text().replace("echo 3\n", "echo three\n"))
+commit_all(lane, "more")
+r = run("delta", str(lane))
+check("delta: a reviewed head that is gone is no baseline",
+      r.returncode == 1 and kv(r.stdout).get("reason") == "no-baseline")
+r = ack(lane, "HEAD")
+check("acknowledged: no delta to show, no ack",
+      r.returncode == 1 and kv(r.stdout).get("reason") == "no-baseline")
+
+# Empty version_paths on the main checkout: today's behavior, nothing masked.
+m, lane = version_lane("[mandate]\nversion_paths = []\n")
+lane_change(lane, "1.2.0")
+run("reviewed", "--head", "HEAD", str(lane))
+main_ships(m, lane, "1.2.0")
+lane_change(lane, "1.3.0")
+check("version_paths = []: a version-only rebase is not covered",
+      vcov(lane)[1].get("reason") == "changed-since-review")
+
+# A lane's own .work-system.toml does not widen the masking: main's counts.
+m, lane = version_lane("[mandate]\nversion_paths = []\n")
+(lane / ".work-system.toml").write_text('[mandate]\nversion_paths = ["**/*.json"]\n')
+lane_change(lane, "1.2.0")
+run("reviewed", "--head", "HEAD", str(lane))
+main_ships(m, lane, "1.2.0")
+(lane / ".work-system.toml").write_text('[mandate]\nversion_paths = ["**/*.json"]\n')
+lane_change(lane, "1.3.0")
+check("version_paths: read from the main checkout, never the lane",
+      vcov(lane)[1].get("reason") == "changed-since-review")
+
+# A review recorded before the masking existed (the legacy, unmasked id) keeps
+# matching the unchanged lane it was recorded for.
+m, lane = version_lane("[mandate]\nversion_paths = []\n")
+lane_change(lane, "1.2.0")
+run("reviewed", "--head", "HEAD", str(lane))
+(m / ".work-system.toml").unlink()
+commit_all(m, "drop the policy: the default applies")
+rc, c = vcov(lane)
+check("legacy: an old unmasked review still covers its unchanged lane",
+      rc == 0 and c.get("via") == "review" and c.get("diff_id_form") == "legacy")
+main_ships(m, lane, "1.2.0")
+lane_change(lane, "1.3.0")
+check("legacy: ...but grants no version masking it never recorded",
+      vcov(lane)[1].get("reason") == "changed-since-review")
+r = run("delta", str(lane))
+check("legacy: the delta is unmasked, so it shows the renumbering",
+      r.returncode == 0 and kv(r.stdout.split("delta_begin\n")[0]).get("diff_form") == "legacy"
+      and "1.3.0" in r.stdout.split("delta_begin\n", 1)[1])
+check("legacy: the user can ack that shown delta",
+      ack(lane, "HEAD").returncode == 0)
+check("legacy: ...and the ack covers exactly it", vcov(lane)[1].get("via") == "user-ack")
+
+# The legacy form is the id older work-system versions computed, byte for byte.
+m, lane = version_lane()
+(lane / "code.sh").write_text((lane / "code.sh").read_text().replace("echo 5\n", "echo five\n"))
+commit_all(lane, "code only")
+rid = kv(run("reviewed", "--head", "HEAD", str(lane)).stdout).get("reviewed_diff")
+def pre_masking_id(lane):
+    """The diff id work-system 1.23-1.27 computed, piped straight into hash-object."""
+    return subprocess.run(
+        "set -o pipefail; git -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.relative=false "
+        "diff --no-color --no-ext-diff --no-textconv --no-renames --binary --full-index "
+        "--diff-algorithm=myers -U3 --src-prefix=a/ --dst-prefix=b/ \"$(git merge-base HEAD main)\" HEAD "
+        "| sed -e 's/^@@ -[0-9,]* +[0-9,]* @@/@@/' -e '/^index /d' | git hash-object --stdin",
+        shell=True, cwd=lane, capture_output=True, text=True, executable="/bin/bash").stdout.strip()
+
+
+old = pre_masking_id(lane)
+check("legacy: with no manifest touched the id equals the pre-masking algorithm's", rid == old and rid)
+
+# The ack binds the diff the user was shown: a head that moved since is refused,
+# and so is a delta no one can read (a binary patch).
+m, lane = version_lane()
+lane_change(lane, "1.2.0")
+run("reviewed", "--head", "HEAD", str(lane))
+(lane / "code.sh").write_text((lane / "code.sh").read_text().replace("echo 8\n", "echo eight\n"))
+commit_all(lane, "shown")
+shown = kv(run("delta", str(lane)).stdout.split("delta_begin\n")[0]).get("ack_id")
+check("delta: a complete, exact, text-only delta carries an ack_id", bool(shown))
+r = run("delta", "--max-lines", "1", str(lane))
+check("delta: a truncated delta carries no ack_id",
+      kv(r.stdout.split("delta_begin\n")[0]).get("ack_id") == "")
+(lane / "code.sh").write_text((lane / "code.sh").read_text().replace("echo 2\n", "echo two\n"))
+commit_all(lane, "moved on before the answer")
+r = ack(lane, "HEAD", shown)
+check("acknowledged: refused when the diff is not the one shown",
+      r.returncode == 1 and kv(r.stdout).get("reason") == "diff-changed")
+(lane / "zz.bin").write_bytes(bytes(range(256)) * 4)
+commit_all(lane, "a binary")
+r = run("delta", str(lane))
+check("delta: flags binary changes", kv(r.stdout.split("delta_begin\n")[0]).get("binary_changes") == "yes")
+r = ack(lane, "HEAD", "0" * 40)
+check("acknowledged: a binary delta cannot be acked",
+      r.returncode == 1 and kv(r.stdout).get("reason") in ("binary-delta", "diff-changed"))
+check("delta: a binary delta carries no ack_id",
+      kv(run("delta", str(lane)).stdout.split("delta_begin\n")[0]).get("ack_id") == "")
+# A binary the review already saw, changed in place: its patch header stays a
+# context line of the delta, so only the blobs can tell.
+run("reviewed", "--head", "HEAD", str(lane))
+b = bytearray((lane / "zz.bin").read_bytes()); b[100:103] = b"\xff\xfe\xfd"
+(lane / "zz.bin").write_bytes(bytes(b))
+commit_all(lane, "binary changed in place")
+check("delta: a reviewed binary changed in place is a binary change",
+      kv(run("delta", str(lane)).stdout.split("delta_begin\n")[0]).get("binary_changes") == "yes")
+rid = kv(run("covered", str(lane)).stdout).get("diff_id")
+r = run("acknowledged", "--head", "HEAD", "--ack-id", rid or "0" * 40, str(lane))
+check("acknowledged: ...and cannot be acked even with the right id",
+      r.returncode == 1 and kv(r.stdout).get("reason") == "binary-delta")
+old = pre_masking_id(lane)
+(m / ".work-system.toml").write_text("[mandate]\nversion_paths = []\n")
+commit_all(m, "no masking")
+rid = kv(run("reviewed", "--head", "HEAD", str(lane)).stdout).get("reviewed_diff")
+check("legacy: a diff ending in a binary patch keeps the pre-masking id", rid and rid == old)
+
+# A working-tree review whose tree is not its HEAD: the delta is approximate,
+# so it is shown but cannot be acknowledged.
+m, lane = version_lane()
+lane_change(lane, "1.2.0")
+(lane / "code.sh").write_text((lane / "code.sh").read_text().replace("echo 7\n", ""))
+run("reviewed", str(lane))
+git(lane, "checkout", "-q", "--", "code.sh")
+(lane / "code.sh").write_text((lane / "code.sh").read_text().replace("echo 9\n", "echo nine\n"))
+commit_all(lane, "other change")
+r = run("delta", str(lane))
+check("delta: an uncommitted review is an approximate baseline",
+      kv(r.stdout.split("delta_begin\n")[0]).get("baseline") == "approximate")
+r = ack(lane, "HEAD")
+check("acknowledged: refused on an approximate baseline",
+      r.returncode == 1 and kv(r.stdout).get("reason") == "approximate-baseline")
+
+# Only main's COMMITTED policy counts: a committed `[]` stays `[]` whatever
+# the working tree holds — an unrelated edit, or a widened list.
+m, lane = version_lane("[mandate]\nversion_paths = []\n")
+lane_change(lane, "1.2.0")
+run("reviewed", "--head", "HEAD", str(lane))
+main_ships(m, lane, "1.2.0")
+lane_change(lane, "1.3.0")
+(m / ".work-system.toml").write_text("[mandate]\nversion_paths = []\nreview_budget = 4\n")
+check("version_paths: an unrelated dirty edit keeps the committed `[]`",
+      vcov(lane)[1].get("reason") == "changed-since-review")
+(m / ".work-system.toml").write_text('[mandate]\nversion_paths = ["**/*.json"]\n')
+check("version_paths: a widened working-tree list is not read",
+      vcov(lane)[1].get("reason") == "changed-since-review")
+# ...and a committed default stays the default under an unrelated dirty edit.
+m, lane = version_lane("[mandate]\nreview_budget = 4\n")
+lane_change(lane, "1.2.0")
+run("reviewed", "--head", "HEAD", str(lane))
+main_ships(m, lane, "1.2.0")
+lane_change(lane, "1.3.0")
+(m / ".work-system.toml").write_text("[mandate]\nreview_budget = 5\n")
+check("version_paths: a dirty main file does not drop the committed default",
+      vcov(lane)[1].get("via") == "review")
+# A committed key nobody can read masks nothing (fail closed).
+m, lane = version_lane('[mandate]\nversion_paths = "not-a-list"\n')
+lane_change(lane, "1.2.0")
+r = run("reviewed", "--head", "HEAD", str(lane))
+check("version_paths: an unreadable committed key masks nothing, and says so",
+      "masking nothing" in r.stderr)
+main_ships(m, lane, "1.2.0")
+lane_change(lane, "1.3.0")
+check("version_paths: ...so a version-only rebase is not covered",
+      vcov(lane)[1].get("reason") == "changed-since-review")
+
+# The policy is the main BRANCH's, not whatever the main checkout has checked
+# out: a widening commit on another branch there is not a merged decision.
+m, lane = version_lane("[mandate]\nversion_paths = []\n")
+lane_change(lane, "1.2.0")
+run("reviewed", "--head", "HEAD", str(lane))
+main_ships(m, lane, "1.2.0")
+lane_change(lane, "1.3.0")
+git(m, "checkout", "-q", "-b", "wide")
+(m / ".work-system.toml").write_text("[mandate]\nreview_budget = 4\n")
+commit_all(m, "drop the [] on a side branch")
+check("version_paths: read from the main branch, not the main checkout's HEAD",
+      vcov(lane)[1].get("reason") == "changed-since-review")
+
+# A diff holding NUL bytes (a binary file .gitattributes diffs as text) cannot
+# be hashed byte-exact in the shell, so it gets no id at all — never one that
+# two different contents share.
+m, lane = version_lane()
+(lane / ".gitattributes").write_text("*.dat diff\n")
+(lane / "fixture.dat").write_bytes(b"a\0b\n")
+commit_all(lane, "a NUL fixture")
+r = run("reviewed", "--head", "HEAD", str(lane))
+check("reviewed: a diff with NUL bytes is refused, not hashed",
+      r.returncode != 0 and "NUL" in r.stderr)
+r = run("covered", str(lane))
+check("covered: a diff with NUL bytes is never covered",
+      r.returncode != 0 and kv(r.stdout).get("covered") != "yes")
+
+# The ack_id names the shown delta: covered's diff_id cannot stand in for it,
+# a delta with control characters gets none, and versions show unmasked.
+m, lane = version_lane()
+lane_change(lane, "1.2.0")
+run("reviewed", "--head", "HEAD", str(lane))
+(lane / "plugins/x" / PJ).write_text(manifest("9.0.0"))
+(lane / "code.sh").write_text((lane / "code.sh").read_text().replace("echo 3\n", "echo three\n"))
+commit_all(lane, "bump and a code line after the review")
+r = run("delta", str(lane))
+hdr, body = r.stdout.split("delta_begin\n", 1)
+check("delta: shows a masked-form version change with its real numbers", "9.0.0" in body)
+check("delta: prints a fence for the text", kv(hdr).get("fence", "").startswith("```"))
+cid = kv(run("covered", str(lane)).stdout).get("diff_id")
+r = run("acknowledged", "--head", "HEAD", "--ack-id", cid, str(lane))
+check("acknowledged: covered's diff_id is not an ack_id",
+      r.returncode == 1 and kv(r.stdout).get("reason") == "diff-changed")
+check("acknowledged: --ack-id must be hex",
+      run("acknowledged", "--head", "HEAD", "--ack-id", "$(x)", str(lane)).returncode == 2)
+(lane / "code.sh").write_text((lane / "code.sh").read_text().replace("echo 4\n", "echo \x1b[8mhidden\n"))
+commit_all(lane, "an escape sequence")
+r = run("delta", str(lane))
+check("delta: control characters make it unreadable, with no ack_id",
+      kv(r.stdout.split("delta_begin\n")[0]).get("unreadable") == "yes"
+      and kv(r.stdout.split("delta_begin\n")[0]).get("ack_id") == "")
+check("delta: an unreadable delta is shown escaped, never raw",
+      "\x1b" not in r.stdout.split("delta_begin\n", 1)[1] and "^[" in r.stdout)
+for name, seq in (("a zero-width space", "\u200b"), ("a C1 CSI", "\u009b"), ("a tag character", "\U000e0041")):
+    (lane / "code.sh").write_text((lane / "code.sh").read_text().replace("echo 6\n", f"echo 6{seq}\n", 1))
+    commit_all(lane, name)
+    check(f"delta: {name} makes it unreadable",
+          kv(run("delta", str(lane)).stdout.split("delta_begin\n")[0]).get("unreadable") == "yes")
+    git(lane, "reset", "-q", "--hard", "HEAD~1")
+git(lane, "reset", "-q", "--hard", "HEAD~1")  # drop the escape sequence
+(lane / "crlf.bat").write_bytes(b"one\r\ntwo\r\n")
+commit_all(lane, "a CRLF file")
+check("delta: line-ending CRs (a CRLF file) stay readable",
+      kv(run("delta", str(lane)).stdout.split("delta_begin\n")[0]).get("unreadable") == "no")
+
+m, lane = version_lane('[mandate]\nversion_paths = [":(glob)x.json", ".claude-plugin/marketplace.json"]\n')
+r = run("reviewed", str(lane))
+check("version_paths: a ':' entry is ignored, and said so", "no ':' pathspec magic" in r.stderr)
+
+
+
+def ws_list(toml=None):
+    d = budget_repo(toml)
+    r = subprocess.run([sys.executable, "-I", str(HERE / "ws-settings.py"), "get", str(d),
+                        "mandate.version_paths"], capture_output=True, text=True, env=ENV)
+    return r.returncode, r.stdout.splitlines()
+
+
+rc, out = ws_list()
+check("ws-settings: a string list goes out as items= + item= lines",
+      rc == 0 and out[0] == "items=2" and out[1].startswith("item=") and "source=default" in out)
+rc, out = ws_list('[mandate]\nversion_paths = ["a.json"]\n')
+check("ws-settings: a list from the file", out == ["items=1", "item=a.json", "source=file"])
+rc, out = ws_list('[mandate]\nversion_paths = "a.json"\n')
+check("ws-settings: a non-list falls back to the default, with a note",
+      rc == 0 and out[0] == "items=2" and any(l.startswith("note=") for l in out))
+
+schema = json.loads((HERE.parent / "schema" / "settings.schema.json").read_text())
+default_paths = schema["properties"]["mandate"]["properties"]["version_paths"]["default"]
+src = SCRIPT.read_text()
+check("the no-python3 version_paths floor equals the schema default",
+      'DEFAULT_VERSION_PATHS=(' + " ".join(f'"{p}"' for p in default_paths) + ")" in src)
+
+
 if FAILS:
     print("FAIL:")
     for f in FAILS:
