@@ -59,8 +59,13 @@ jobs:
             -r .github/semgrep-requirements.txt
           "$venv/bin/semgrep" --version
           printf '%s\n' "$venv/bin" >> "$GITHUB_PATH"
-      # Fails on ERROR-severity findings and on a failed scan (non-zero Semgrep exit); WARNING/INFO findings
-      # and per-file parse errors are listed in the job summary only. Semgrep's default ignores apply
+      # Fails on ERROR-severity findings and on every scan error, including rule timeouts and parse errors:
+      # without that, a timed-out or skipped file would pass unchecked (Semgrep exits 0 on those unless
+      # --strict). --strict additionally makes Semgrep itself exit non-zero on them and rejects invalid
+      # rule configs early. --timeout 60 is per rule and file: the slowest pair takes ~4 s on a dev box
+      # (about 3x that on a slow CI runner), so a slow but complete scan stays green; --timeout-threshold 3 skips a file after
+      # three timeouts, which fails the job anyway. WARNING/INFO findings are listed in the summary only.
+      # Semgrep's default ignores apply
       # (.gitignore, node_modules, vendor, test/, tests/, *_test.go, build, dist, minified JS).
       # Suppress a reviewed false positive with `nosemgrep: <rule-id> -- <reason>` in a comment on the line
       # (or the line above for code languages).
@@ -73,7 +78,7 @@ jobs:
           report="$RUNNER_TEMP/semgrep.json"
           start=$SECONDS
           status=0
-          semgrep scan "${configs[@]}" --metrics off --timeout 30 --quiet --json --output "$report" . || status=$?
+          semgrep scan "${configs[@]}" --metrics off --strict --timeout 60 --timeout-threshold 3 --quiet --json --output "$report" . || status=$?
           if [ ! -s "$report" ]; then
             echo "::error::Semgrep exited with $status and wrote no report"
             exit 1
@@ -104,7 +109,7 @@ jobs:
           lines = [
               f"### Semgrep ({version}): {len(errors)} error, {len(results)} total findings, {seconds} s",
               "",
-              f"Rules: `{os.environ['SEMGREP_CONFIGS']}`. Only ERROR fails the job. Scan errors: {len(scan_errors)}.",
+              f"Rules: `{os.environ['SEMGREP_CONFIGS']}`. ERROR findings and any scan error (including timeouts) fail the job. Scan errors: {len(scan_errors)}.",
               "",
           ]
           if results:
@@ -113,16 +118,22 @@ jobs:
                   message = cell(r.get("extra", {}).get("message", ""), 160)
                   lines.append(f"| {severity(r)} | {r['check_id']} | {r['path']}:{r['start']['line']} | {message} |")
           if scan_errors:
-              lines += ["", "| Scan error | Location |", "| --- | --- |"]
+              lines += ["", "| Scan error | Level | Rule | Location | Message |", "| --- | --- | --- | --- | --- |"]
               for e in scan_errors:
-                  lines.append(f"| {cell(e.get('type'), 80)} | {e.get('path') or '-'} |")
+                  lines.append(
+                      f"| {cell(e.get('type'), 80)} | {e.get('level', '-')} | {e.get('rule_id') or '-'}"
+                      f" | {e.get('path') or '-'} | {cell(e.get('message', ''), 160)} |"
+                  )
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
               f.write("\n".join(lines) + "\n")
           for r in errors:
               message = re.sub(r"[\r\n]+", " ", r.get("extra", {}).get("message", ""))
               print(f"::error file={r['path']},line={r['start']['line']},title={r['check_id']}::{message}")
+          for e in scan_errors:
+              where = e.get("path") or "-"
+              print(f"::error title=Semgrep scan error::{cell(e.get('type'), 80)} in {where} ({e.get('rule_id') or 'no rule'})")
           print(f"Semgrep: {len(errors)} error, {len(results)} total findings, {len(scan_errors)} scan errors (exit {status})")
-          sys.exit(1 if status != 0 or errors else 0)
+          sys.exit(1 if status != 0 or errors or scan_errors else 0)
           PY
       # Full history on every event. Pull requests scan the history of the PR merge commit; pushes and
       # manual runs scan all fetched refs. Output is fully redacted; no report leaves the runner.
