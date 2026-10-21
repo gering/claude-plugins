@@ -802,6 +802,19 @@ and outside herdr everything is a silent no-op. The glyph lives in the **tab
 label** and nowhere else — the herdr agent name and the `claude -n` session name
 keep the plain label, since those are stable identities.
 
+### Interactive programs in temporary tabs
+
+`scripts/herdr-shell.sh` lets an agent drive what its own shell tool cannot: a
+screen-based program (vim, `git rebase -i`, a TUI) in a temporary `tmp-` tab, or a
+login the user must complete themselves (`handover`: focus the tab, wait until the
+program ends, never read the pane meanwhile). An agent-held secret is sent only
+through herdr's socket, never in an argv, and only at a canonical no-echo
+password prompt (`echo=off ∧ icanon=on`); raw-mode prompts go to the user. The
+helper drives only tabs it opened, and `sweep` cleans up after a killed caller
+(including any unrecorded `tmp-` tab in the workspace).
+Line-based prompts stay with `expect`. When to use which, and the measured rules
+behind them: [docs/herdr-shell.md](docs/herdr-shell.md).
+
 ## Adopting Existing Branches
 
 Already started work on a branch outside the work system? Use `/adopt` to bring it in:
