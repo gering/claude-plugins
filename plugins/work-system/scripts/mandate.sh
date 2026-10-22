@@ -436,14 +436,23 @@ lock_is_stale() {
 }
 
 acquire_round_lock() {
-  local lock="${MANDATE_PATH%/*}/.MANDATE.lock" i=0 broke=no
-  while ! mkdir "$lock" 2>/dev/null; do
-    # mkdir can fail for two very different reasons. If the lock is NOT there,
-    # the failure was not contention (a read-only worktree, a full disk) and
-    # retrying cannot help — report it in the same words as a failed write, at
-    # once, instead of sleeping five seconds first.
-    if [ ! -d "$lock" ]; then
-      echo "${0##*/}: could not persist the consumed round — no lock could be created beside $MANDATE_PATH" >&2
+  local lock="${MANDATE_PATH%/*}/.MANDATE.lock" i=0 broke=no err
+  while ! err="$(LC_ALL=C mkdir "$lock" 2>&1)"; do
+    # mkdir can fail for two very different reasons. Anything but "File exists"
+    # is not contention (a read-only worktree, a full disk) and retrying cannot
+    # help — report it in the same words as a failed write, at once, instead of
+    # sleeping five seconds first. Decided from mkdir's own error, not from
+    # whether the lock is there now: a holder can release it between the
+    # failed mkdir and any check, and that is contention like any other.
+    case "$err" in
+      *"File exists"*) ;;
+      *) echo "${0##*/}: could not persist the consumed round — no lock could be created beside $MANDATE_PATH: ${err#mkdir: }" >&2
+         exit 4 ;;
+    esac
+    # A file or a symlink there is no lock anyone holds: waiting on it would
+    # only end in blaming a process that does not exist.
+    if [ -L "$lock" ] || { [ -e "$lock" ] && [ ! -d "$lock" ]; }; then
+      echo "${0##*/}: could not persist the consumed round — $lock is not a lock directory; remove it and retry: rm -f '$lock'" >&2
       exit 4
     fi
     if [ "$broke" = no ] && lock_is_stale "$lock"; then
@@ -460,7 +469,11 @@ acquire_round_lock() {
     fi
     sleep 0.1
   done
-  printf '%s\n' "$$" > "$lock/pid" 2>/dev/null || true
+  # Written aside and renamed in, so lock_is_stale never reads a partial pid
+  # (`12` of `12345` names another, likely dead, process). Until it lands the
+  # lock has no pid, and a young lock without one is never stale (the age
+  # backstop), so the mkdir-to-pid gap cannot get a live lock broken.
+  printf '%s\n' "$$" > "$lock/pid.$$" 2>/dev/null && mv -f "$lock/pid.$$" "$lock/pid" 2>/dev/null || true
   ROUND_LOCK="$lock"
 }
 

@@ -26,6 +26,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -474,8 +475,10 @@ if os.geteuid() != 0:   # root ignores the write bit; skip rather than assert wr
     mode = ro.stat().st_mode
     os.chmod(ro, 0o555)
     try:
+        t0 = time.monotonic()
         r = run("round", str(ro))
         check("an unpersistable round exits non-zero", r.returncode == 4)
+        check("...at once, not after the contention wait", time.monotonic() - t0 < 3)
         check("an unpersistable round reports no counters",
               "review_rounds_used=" not in r.stdout)
         check("an unpersistable round says so", "could not persist" in r.stderr)
@@ -836,6 +839,30 @@ check("and each caller was told a distinct round number",
       counts == [str(i) for i in range(1, 9)])
 check("the lock directory is cleaned up",
       not (conc / ".MANDATE.lock").exists())
+# The CI flake: mkdir fails because another booker holds the lock, and that
+# booker releases it before anyone looks. "File exists" is contention however
+# the lock looks a moment later, so the booking waits its turn, never exit 4.
+shim = Path(tempfile.mkdtemp())
+(shim / "mkdir").write_text(
+    '#!/bin/sh\n'
+    'case "$1" in *.MANDATE.lock) if [ ! -e "$0.raced" ]; then : > "$0.raced"\n'
+    '  echo "mkdir: $1: File exists" >&2; exit 1; fi ;; esac\n'
+    'exec /bin/mkdir "$@"\n')
+(shim / "mkdir").chmod(0o755)
+raced = make_repo()
+init(raced, "task=raced", "review_budget=3")
+r = subprocess.run(["bash", str(SCRIPT), "round", str(raced)], capture_output=True, text=True,
+                   timeout=120, env={**ENV, "PATH": f"{shim}:{ENV.get('PATH', '')}"})
+check("a lock released between a failed mkdir and the check is contention, not exit 4",
+      r.returncode == 0 and (shim / "mkdir.raced").exists()
+      and kv(r.stdout).get("review_rounds_used") == "1")
+stray = make_repo()
+init(stray, "task=stray", "review_budget=3")
+(stray / ".MANDATE.lock").write_text("")
+t0 = time.monotonic()
+r = run("round", str(stray))
+check("a file where the lock goes is refused at once, and named",
+      r.returncode == 4 and time.monotonic() - t0 < 3 and "not a lock directory" in r.stderr)
 check("a held lock is refused rather than ignored",
       (conc / ".MANDATE.lock").mkdir() or run("round", str(conc)).returncode == 4)
 check("and the refusal names the lock", ".MANDATE.lock" in run("round", str(conc)).stderr)

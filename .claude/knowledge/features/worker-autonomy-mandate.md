@@ -243,6 +243,17 @@ of reviews. The lock is eight lines of `mkdir`. Worth re-reading a standing
 rejection whenever the surrounding design moves under it — the argument was sound
 when first made and quietly stopped being true.
 
+Its first version had a TOCTOU of its own (CI flake, rc=4, 1.28.1): after a
+failed `mkdir` it tested `[ ! -d "$lock" ]` to tell "cannot create" from
+contention — but the holder can release the lock in between, so contention
+read as a read-only tree. Decide from `mkdir`'s own error (`LC_ALL=C`, "File
+exists" = contention) instead of from the lock's state a moment later.
+Reproduce such races by running many copies of the concurrent test at once
+(16/72 runs failed); pin the fix with a PATH `mkdir` shim that fails once with
+"File exists" and no lock left behind. The pid is written aside and renamed
+in, so `lock_is_stale` never reads a partial pid; a young lock without one is
+never stale, which covers the `mkdir`-to-pid gap.
+
 ## Indentation is structure too
 
 The same pass that taught `has-bot` to skip block scalars found the mandate
