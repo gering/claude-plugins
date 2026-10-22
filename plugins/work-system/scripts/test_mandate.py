@@ -41,6 +41,13 @@ def check(name, cond):
         FAILS.append(name)
 
 
+# A CI runner has no git identity, and a local global one hides every call
+# that needs it (a rebase, an amend). Set once, for every git this process and
+# the script under test start.
+for _k in ("GIT_AUTHOR", "GIT_COMMITTER"):
+    os.environ[f"{_k}_NAME"] = "t"
+    os.environ[f"{_k}_EMAIL"] = "t@t"
+
 # An inherited SETTINGS_PROJECT_ROOT would point every budget case at the
 # caller's repo; the one test that wants it sets it here, then removes it.
 ENV = {k: v for k, v in os.environ.items() if k != "SETTINGS_PROJECT_ROOT"}
@@ -1524,13 +1531,113 @@ lane_change(lane, "1.3.0")
 check("version_paths: read from the main checkout, never the lane",
       vcov(lane)[1].get("reason") == "changed-since-review")
 
-# A review recorded before the masking existed (the legacy, unmasked id) keeps
-# matching the unchanged lane it was recorded for.
-m, lane = version_lane("[mandate]\nversion_paths = []\n")
+# The id hashes the lane's own lines, not main's context around them (#89: a
+# rebase over main edits to the lines next to a lane hunk asked for a review of
+# lines the lane never touched).
+def doc(b="v1", lane_line="- **c** (v1)", top="", extra=""):
+    return (f"Plugins are listed below.\n{top}\n- **a** (v1)\n- **b** ({b})\n{lane_line}\n"
+            f"- **d** ({b})\n- **e** (v1)\n\nSecond section\n\n- x\n- y\n{extra}- z\n")
+
+
+cm = Path(tempfile.mkdtemp())
+git(cm, "init", "-q", "-b", "main")
+(cm / "doc.md").write_text(doc())
+commit_all(cm, "base")
+cl = Path(tempfile.mkdtemp()) / "lane"
+git(cm, "worktree", "add", "-q", "-b", "task/c", str(cl))
+run("init", str(cl), f"allow={BASE_ALLOW}", "authorized_by=user", "task=c")
+(cl / "doc.md").write_text(doc(lane_line="- **c** (v2, the lane)"))
+commit_all(cl, "lane")
+run("reviewed", "--head", "HEAD", str(cl))
+(cm / "doc.md").write_text(doc(b="v9", top="- **0** (new on main)"))
+commit_all(cm, "main edits the lines next to the lane hunk, and above it")
+git(cl, "reset", "-q", "--hard", "main")
+(cl / "doc.md").write_text(doc(b="v9", top="- **0** (new on main)", lane_line="- **c** (v2, the lane)"))
+commit_all(cl, "lane, rebased")
+rc, c = vcov(cl)
+check("context-free: main's edits next to a lane hunk keep the coverage",
+      rc == 0 and c.get("via") == "review" and "diff_id_form" not in c)
+r = run("delta", str(cl))
+body = r.stdout.split("delta_begin\n", 1)[1]
+check("context-free: the delta still shows main's changed neighbours to a person",
+      r.returncode == 0 and "(v9)" in body and "the lane" in body)
+lane_head = git(cl, "rev-parse", "HEAD")
+(cm / "doc.md").write_text((cm / "doc.md").read_text().replace("Plugins are listed", "Plugins are kept"))
+commit_all(cm, "main edits the hunk's header line")
+git(cl, "rebase", "-q", "main")
+check("context-free: a main edit to the hunk's header line fails closed",
+      vcov(cl)[1].get("reason") == "changed-since-review")
+git(cl, "reset", "-q", "--hard", lane_head)
+(cl / "doc.md").write_text(doc(b="v9", top="- **0** (new on main)", lane_line="- **c** (v3, the lane)"))
+commit_all(cl, "the lane changes its own line")
+check("context-free: the lane changing its own line is not covered",
+      vcov(cl)[1].get("reason") == "changed-since-review")
+(cl / "doc.md").write_text(doc(b="v9", top="- **0** (new on main)", extra="- **c** (v2, the lane)\n")
+                           .replace("- **c** (v1)\n", "", 1))
+commit_all(cl, "the lane moves its hunk under another header")
+check("context-free: the lane moving its hunk is not covered",
+      vcov(cl)[1].get("reason") == "changed-since-review")
+# A move that stays under the same header but passes another lane hunk.
+(cl / "doc.md").write_text(doc(b="v9", top="- **0** (new on main)", lane_line="- **c** (v2, the lane)")
+                           .replace("- **e** (v1)", "- **e** (lane too)"))
+commit_all(cl, "a second lane hunk below")
+run("reviewed", "--head", "HEAD", str(cl))
+(cl / "doc.md").write_text(doc(b="v9", top="- **0** (new on main)")
+                           .replace("- **e** (v1)", "- **e** (lane too)\n- **c** (v2, the lane)")
+                           .replace("- **c** (v1)\n", "", 1))
+commit_all(cl, "the first lane hunk now follows the second")
+check("context-free: a lane hunk moved past another one is not covered",
+      vcov(cl)[1].get("reason") == "changed-since-review")
+
+# Reviews recorded by older work-system versions, in the form each hashed:
+# `legacy` (1.23-1.27: the -U3 diff) and `context` (1.28: the -U3 diff with
+# manifest versions masked). Recomputed here from the old algorithms, so a
+# change to mandate.sh's own forms cannot move the reference along with it.
+OLD_DIFF = ["-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "-c",
+            "diff.relative=false", "diff", "--no-color", "--no-ext-diff", "--no-textconv",
+            "--no-renames", "--binary", "--full-index", "--diff-algorithm=myers", "-U3",
+            "--src-prefix=a/", "--dst-prefix=b/"]
+OLD_VERSION_PATHS = [":(top,glob)**/.claude-plugin/plugin.json",
+                     ":(top,glob).claude-plugin/marketplace.json"]
+
+
+def old_diff(lane, *spec, mask=False):
+    base = git(lane, "merge-base", "HEAD", "main")
+    raw = subprocess.run(["git", *OLD_DIFF, base, "HEAD", "--", *spec], cwd=lane,
+                         capture_output=True, check=True).stdout
+    raw = re.sub(rb"(?m)^index .*\n", b"", raw)
+    raw = re.sub(rb"(?m)^@@ -[0-9,]* \+[0-9,]* @@", b"@@", raw)
+    if mask:
+        raw = b"".join(
+            ln if ln.startswith((b"+++ ", b"--- ")) else
+            re.sub(rb'("version"\s*:\s*)"=[0-9]+\.[0-9]+\.[0-9]+"', rb'\1"*"',
+                   re.sub(rb'("version"\s*:\s*)"', rb'\1"=', ln))
+            for ln in raw.splitlines(keepends=True))
+    return raw
+
+
+def old_id(lane, form):
+    """The diff id work-system 1.23-1.27 (legacy) or 1.28 (context) recorded for HEAD."""
+    if form == "legacy":
+        text = old_diff(lane, ":(top)")
+    else:
+        text = (old_diff(lane, ":(top)", *[":(top,exclude," + p[6:] for p in OLD_VERSION_PATHS])
+                + old_diff(lane, *OLD_VERSION_PATHS, mask=True))
+    return subprocess.run(["git", "hash-object", "--stdin"], cwd=lane, input=text,
+                          capture_output=True, check=True).stdout.decode().strip()
+
+
+def old_review(lane, form):
+    """A review of HEAD as an older work-system recorded it."""
+    run("reviewed", "--head", "HEAD", str(lane))
+    f = lane / "MANDATE.md"
+    f.write_text(re.sub(r"(?m)^reviewed_diff: .*$", "reviewed_diff: " + old_id(lane, form),
+                        f.read_text(), count=1))
+
+
+m, lane = version_lane()
 lane_change(lane, "1.2.0")
-run("reviewed", "--head", "HEAD", str(lane))
-(m / ".work-system.toml").unlink()
-commit_all(m, "drop the policy: the default applies")
+old_review(lane, "legacy")
 rc, c = vcov(lane)
 check("legacy: an old unmasked review still covers its unchanged lane",
       rc == 0 and c.get("via") == "review" and c.get("diff_id_form") == "legacy")
@@ -1546,23 +1653,50 @@ check("legacy: the user can ack that shown delta",
       ack(lane, "HEAD").returncode == 0)
 check("legacy: ...and the ack covers exactly it", vcov(lane)[1].get("via") == "user-ack")
 
-# The legacy form is the id older work-system versions computed, byte for byte.
+# A 1.28 review (masked, with context) keeps what 1.28 granted it: its
+# unchanged lane, and a version-only rebase.
+m, lane = version_lane()
+lane_change(lane, "1.2.0")
+old_review(lane, "context")
+rc, c = vcov(lane)
+check("context: a 1.28 review still covers its unchanged lane",
+      rc == 0 and c.get("via") == "review" and c.get("diff_id_form") == "context")
+main_ships(m, lane, "1.2.0")
+lane_change(lane, "1.3.0")
+rc, c = vcov(lane)
+check("context: ...and its version-only rebase",
+      rc == 0 and c.get("via") == "review" and c.get("diff_id_form") == "context")
+check("context: the delta is shown in that form",
+      kv(run("delta", str(lane)).stdout.split("delta_begin\n")[0]).get("diff_form") == "context")
+(lane / "code.sh").write_text((lane / "code.sh").read_text().replace("echo 9\n", "echo nine\n"))
+commit_all(lane, "a lane line")
+check("context: ...but not a lane change after it",
+      vcov(lane)[1].get("reason") == "changed-since-review")
+check("context: the user can ack that delta", ack(lane, "HEAD").returncode == 0)
+check("context: ...and the ack covers exactly it", vcov(lane)[1].get("via") == "user-ack")
+
+# Old versions ran the -U3 diff under the user's diff config; the compat forms
+# must too, or an unchanged lane stops matching its record.
+m, lane = version_lane()
+git(lane, "config", "diff.interHunkContext", "10")
+(lane / "code.sh").write_text((lane / "code.sh").read_text()
+                              .replace("echo 3\n", "echo three\n").replace("echo 15\n", "echo fifteen\n"))
+commit_all(lane, "two hunks a non-default inter-hunk context merges")
+old_review(lane, "legacy")
+rc, c = vcov(lane)
+check("legacy: a record made under a non-default diff config still covers",
+      rc == 0 and c.get("via") == "review")
+git(lane, "config", "--unset", "diff.interHunkContext")
+
+# With no manifest touched, 1.27 and 1.28 hashed the same text.
 m, lane = version_lane()
 (lane / "code.sh").write_text((lane / "code.sh").read_text().replace("echo 5\n", "echo five\n"))
 commit_all(lane, "code only")
-rid = kv(run("reviewed", "--head", "HEAD", str(lane)).stdout).get("reviewed_diff")
-def pre_masking_id(lane):
-    """The diff id work-system 1.23-1.27 computed, piped straight into hash-object."""
-    return subprocess.run(
-        "set -o pipefail; git -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.relative=false "
-        "diff --no-color --no-ext-diff --no-textconv --no-renames --binary --full-index "
-        "--diff-algorithm=myers -U3 --src-prefix=a/ --dst-prefix=b/ \"$(git merge-base HEAD main)\" HEAD "
-        "| sed -e 's/^@@ -[0-9,]* +[0-9,]* @@/@@/' -e '/^index /d' | git hash-object --stdin",
-        shell=True, cwd=lane, capture_output=True, text=True, executable="/bin/bash").stdout.strip()
-
-
-old = pre_masking_id(lane)
-check("legacy: with no manifest touched the id equals the pre-masking algorithm's", rid == old and rid)
+old_review(lane, "legacy")
+rc, c = vcov(lane)
+check("legacy: with no manifest touched an old review covers via the -U3 form",
+      rc == 0 and old_id(lane, "legacy") == old_id(lane, "context")
+      and c.get("diff_id_form") == "context")
 
 # The ack binds the diff the user was shown: a head that moved since is refused,
 # and so is a delta no one can read (a binary patch).
@@ -1602,11 +1736,10 @@ rid = kv(run("covered", str(lane)).stdout).get("diff_id")
 r = run("acknowledged", "--head", "HEAD", "--ack-id", rid or "0" * 40, str(lane))
 check("acknowledged: ...and cannot be acked even with the right id",
       r.returncode == 1 and kv(r.stdout).get("reason") == "binary-delta")
-old = pre_masking_id(lane)
-(m / ".work-system.toml").write_text("[mandate]\nversion_paths = []\n")
-commit_all(m, "no masking")
-rid = kv(run("reviewed", "--head", "HEAD", str(lane)).stdout).get("reviewed_diff")
-check("legacy: a diff ending in a binary patch keeps the pre-masking id", rid and rid == old)
+old_review(lane, "legacy")
+rc, c = vcov(lane)
+check("legacy: a diff ending in a binary patch keeps its old id",
+      rc == 0 and c.get("via") == "review" and c.get("diff_id_form") in ("context", "legacy"))
 
 # A working-tree review whose tree is not its HEAD: the delta is approximate,
 # so it is shown but cannot be acknowledged.

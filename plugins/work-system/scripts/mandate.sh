@@ -64,9 +64,11 @@
 #                            Exit 0 covered=yes / 1 covered=no + reason= /
 #                            3 no mandate. The merge gate of /land and /merge.
 #                            via=review|agreed-fixes|user-ack; the diff id
-#                            masks manifest version values ([mandate]
-#                            version_paths), and a review recorded before
-#                            that masking still matches (diff_id_form=legacy).
+#                            ignores main's context lines and masks manifest
+#                            version values ([mandate] version_paths); a
+#                            review recorded by an older work-system still
+#                            matches its unchanged lane
+#                            (diff_id_form=context|legacy).
 #   delta [--head <rev>] [--max-lines <n>] [<dir>]
 #                            What changed since the review on record, as a
 #                            diff of the two lane diffs (bounded, truncated=);
@@ -578,39 +580,54 @@ persist_keys() {
 # so the merge gate can tell whether the head being merged is the one a review
 # saw. Not a SHA or a tree: /merge rebases before it merges, and the global git
 # rules fold fixes into earlier commits — both rewrite every SHA and leave the
-# change itself alone. The diff keeps its context lines, the hunks' function
-# context and every whitespace byte (a re-indented or moved line changes what
-# the code does, so it changes the id); only the `@@` line numbers and `index`
-# lines are dropped, so a rebase over unrelated edits on main keeps the id. An
-# edit on main within the context of a lane hunk changes it — a fail-closed
-# re-review, never a pass. Residual: the same change moved between two blocks
-# whose ±3 context lines and enclosing function are identical keeps the id. The
-# pinned diff options keep a user's diff config from changing the id between
-# the review and the merge. <target> is a commit, or `worktree` for the working
-# tree (tracked + untracked, minus the lane's record files and swarm's staging
-# dirs), snapshotted through a throwaway index so the real one is never touched.
-# Sets DIFF_ID; returns 1 when it cannot be computed (DIFF_ERR says why).
-DIFF_ID=""; DIFF_ERR=""; SNAP_TARGET=""; DIFF_TXT=""; LEGACY_SAME=""
+# change itself alone. The id hashes the lane's own lines only: a -U0 diff, so
+# no context line from main is in it, and a rebase over main edits right next
+# to a lane hunk keeps the id. Every `+`/`-` line keeps every whitespace byte (a
+# re-indented line changes what the code does, so it changes the id). A hunk's
+# PLACE is its file, its order among the file's hunks, and the function context
+# git prints after its `@@` (the nearest line above it that the file's diff
+# driver takes as a header; with none, a line starting with a letter, `_` or
+# `$`): moving a lane line past another lane hunk or under another header
+# changes the id. Line numbers are not part of it — any main insertion above
+# would shift them. A main edit to that header line changes the id — a
+# fail-closed re-review, never a pass. Residual: a lane line moved within the
+# same header's region, past no other lane hunk, keeps the id. The pinned diff
+# options keep a user's diff config from changing the id between the review and
+# the merge. <target> is a commit, or `worktree` for the working tree (tracked +
+# untracked, minus the lane's record files and swarm's staging dirs),
+# snapshotted through a throwaway index so the real one is never touched. Sets
+# DIFF_ID, and clears the compat ids (lane_compat_ids); returns 1
+# when it cannot be computed (DIFF_ERR says why).
+DIFF_ID=""; DIFF_ERR=""; SNAP_TARGET=""
 lane_diff_id() {
+  read_version_paths "$1"
+  lane_snapshot "$1" "$2" || return 1
+  lane_form_text "$1" 0 || { lane_diff_err $?; return 1; }
+  DIFF_ID="$(hash_text "$1" "$FORM_TXT")" || { DIFF_ID=""; DIFF_ERR="git hash-object failed"; return 1; }
+  [ -n "$DIFF_ID" ] || { DIFF_ERR="empty hash"; return 1; }
+  DIFF_ID_CTX=""; DIFF_TXT_LEGACY=""; DIFF_ID_LEGACY=""
+}
+
+# The masked lane diff at -U<context> into FORM_TXT: the files on VERSION_PATHS
+# go last (a second diff) with their version values masked. FORM_SPLIT=no when
+# no lane file is on VERSION_PATHS — the masked text is then the unmasked one.
+# Returns lane_diff_text's code. Needs lane_snapshot.
+FORM_TXT=""; FORM_SPLIT=""
+lane_form_text() {
   local dir="$1" p part1 part2=""
   local -a inc=() exc=()
-  read_version_paths "$dir"
-  lane_snapshot "$dir" "$2" || return 1
+  DIFF_U="$2"
   for p in ${VERSION_PATHS[@]+"${VERSION_PATHS[@]}"}; do
     inc+=(":(top,glob)$p"); exc+=(":(top,exclude,glob)$p")
   done
-  part1="$(lane_diff_text "$dir" no ':(top)' ${exc[@]+"${exc[@]}"})" || { lane_diff_err $?; return 1; }
+  part1="$(lane_diff_text "$dir" no ':(top)' ${exc[@]+"${exc[@]}"})" || return $?
   part1="${part1%.}"
   if [ ${#inc[@]} -gt 0 ]; then
-    part2="$(lane_diff_text "$dir" yes "${inc[@]}")" || { lane_diff_err $?; return 1; }
+    part2="$(lane_diff_text "$dir" yes "${inc[@]}")" || return $?
     part2="${part2%.}"
   fi
-  # No lane file on VERSION_PATHS: the masked text IS the legacy text.
-  if [ -z "$part2" ]; then LEGACY_SAME=yes; else LEGACY_SAME=no; fi
-  DIFF_TXT="$part1$part2"
-  DIFF_ID="$(hash_text "$dir" "$DIFF_TXT")" || { DIFF_ID=""; DIFF_ERR="git hash-object failed"; return 1; }
-  [ -n "$DIFF_ID" ] || { DIFF_ERR="empty hash"; return 1; }
-  DIFF_TXT_LEGACY=""; DIFF_ID_LEGACY=""
+  if [ -z "$part2" ]; then FORM_SPLIT=no; else FORM_SPLIT=yes; fi
+  FORM_TXT="$part1$part2"
 }
 
 # The normalized diff for <pathspec...>, masked when <mask> is yes, on stdout
@@ -651,18 +668,27 @@ hash_text() {
   printf '%s' "$2" | git -C "$1" hash-object --stdin
 }
 
-# The same snapshot hashed the way mandate.sh did before version masking: a
-# review recorded by an older work-system holds this form, and an unchanged lane
-# must keep matching it. Exact, so it can never cover more than the old id did.
-# Call after lane_diff_id. Sets DIFF_TXT_LEGACY + DIFF_ID_LEGACY (empty on
-# failure — a "no", never a pass).
-DIFF_TXT_LEGACY=""; DIFF_ID_LEGACY=""
-lane_legacy_id() {
-  if [ "$LEGACY_SAME" = yes ]; then
-    DIFF_TXT_LEGACY="$DIFF_TXT"; DIFF_ID_LEGACY="$DIFF_ID"; return 0
+# The same snapshot hashed the ways older work-system versions did, so a review
+# recorded by one keeps matching its unchanged lane: DIFF_ID_CTX is the -U3
+# masked form (`context`, recorded by 1.28.0), DIFF_ID_LEGACY the -U3 unmasked
+# one (`legacy`, 1.23-1.27). With no lane file on VERSION_PATHS the two are the
+# same text, so a 1.23-1.27 record then reports `context`: the label names the
+# form that matched, not the version that wrote it. Both are exact, so neither can cover more than its old id did;
+# a recorded id in one of them still changes on a main edit next to a lane
+# hunk — such a review is re-done once, then the context-free id applies.
+# DIFF_TXT_LEGACY is also the text `delta` shows a person: with context, so the
+# lines around a change can be read. Call after lane_diff_id. Empty on failure
+# — a "no", never a pass.
+DIFF_ID_CTX=""; DIFF_TXT_LEGACY=""; DIFF_ID_LEGACY=""
+lane_compat_ids() {
+  DIFF_ID_CTX=""; DIFF_TXT_LEGACY=""; DIFF_ID_LEGACY=""
+  lane_form_text "$1" 3 || return 0
+  DIFF_ID_CTX="$(hash_text "$1" "$FORM_TXT")" || DIFF_ID_CTX=""
+  if [ "$FORM_SPLIT" = no ]; then
+    DIFF_TXT_LEGACY="$FORM_TXT"; DIFF_ID_LEGACY="$DIFF_ID_CTX"; return 0
   fi
   DIFF_TXT_LEGACY="$(lane_diff_text "$1" no ':(top)')" \
-    || { DIFF_TXT_LEGACY=""; DIFF_ID_LEGACY=""; return 0; }
+    || { DIFF_TXT_LEGACY=""; return 0; }
   DIFF_TXT_LEGACY="${DIFF_TXT_LEGACY%.}"
   DIFF_ID_LEGACY="$(hash_text "$1" "$DIFF_TXT_LEGACY")" || DIFF_ID_LEGACY=""
 }
@@ -721,14 +747,22 @@ lane_version_mask() {
          -e "/^(\\+\\+\\+|---) /!s/(\"version\"[[:space:]]*:[[:space:]]*)\"=$SEMVER_RE\"/\\1\"*\"/g"
 }
 
-# The diff keeps its context lines, the hunks' function context and every
-# whitespace byte; the pinned options keep a user's diff config from changing
-# the id between the review and the merge.
+# The diff at -U$DIFF_U (0 for the id, 3 for the compat forms and the delta
+# text) keeps the hunks' function context and every whitespace byte; the
+# pinned options keep a user's diff config from changing the id between the
+# review and the merge. The -U0 id also pins the indent heuristic and a zero
+# inter-hunk context (which would pull main's lines back in between two
+# hunks). The -U3 forms keep the argv older versions ran, unpinned there, or
+# they would stop matching a record made under a non-default diff config.
+DIFF_U=0
 lane_git_diff() {
   local dir="$1"; shift
+  local -a pin=()
+  [ "$DIFF_U" != 0 ] || pin=(--indent-heuristic --inter-hunk-context=0)
   git -C "$dir" -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.relative=false \
     diff --no-color --no-ext-diff --no-textconv --no-renames --binary --full-index \
-    --diff-algorithm=myers -U3 --src-prefix=a/ --dst-prefix=b/ "$LANE_BASE" "$SNAP_TARGET" -- "$@"
+    --diff-algorithm=myers ${pin[@]+"${pin[@]}"} -U"$DIFF_U" \
+    --src-prefix=a/ --dst-prefix=b/ "$LANE_BASE" "$SNAP_TARGET" -- "$@"
 }
 lane_diff_norm() { sed -e 's/^@@ -[0-9,]* +[0-9,]* @@/@@/' -e '/^index /d'; }
 
@@ -904,9 +938,10 @@ do_covered() {
   lane_diff_id "${MANDATE_PATH%/*}" "$REV_COMMIT" || die "could not check coverage: $DIFF_ERR"
   printf 'diff_id=%s\n' "$DIFF_ID"
   covered_verdict "$DIFF_ID" && { emit_covered ""; exit 0; }
-  # The legacy form (lane_legacy_id reuses the masked one when they are equal).
-  lane_legacy_id "${MANDATE_PATH%/*}"
-  if [ "$LEGACY_SAME" != yes ] && covered_verdict "$DIFF_ID_LEGACY"; then emit_covered legacy; exit 0; fi
+  # A record from an older work-system, in the form it was hashed in.
+  lane_compat_ids "${MANDATE_PATH%/*}"
+  covered_verdict "$DIFF_ID_CTX" && { emit_covered context; exit 0; }
+  covered_verdict "$DIFF_ID_LEGACY" && { emit_covered legacy; exit 0; }
   printf 'covered=no\nreason=changed-since-review\n'; exit 1
 }
 
@@ -929,10 +964,11 @@ emit_covered() {
 }
 
 # The form the review on record was hashed in, rebuilt from reviewed_head —
-# the one baseline `delta` and `acknowledged` compare <rev> against. masked or
-# legacy when reviewed_head's lane diff, in that form, is exactly what the
-# review hashed; `approximate` when neither is (the review saw an uncommitted
-# tree), and the unmasked text then stands in: a delta from a baseline that is
+# the one baseline `delta` and `acknowledged` compare <rev> against.
+# context-free, context or legacy (lane_compat_ids) when reviewed_head's lane
+# diff, in that form, is exactly what the review hashed; `approximate` when no
+# form is (the review saw an uncommitted tree), and the unmasked text then
+# stands in: a delta from a baseline that is
 # not the reviewed state can hide a change as easily as show one, so it is
 # shown but never acknowledged. Then computes <rev> in the same form — a legacy
 # review's delta must show the version renumbering its rule refuses. Sets
@@ -942,21 +978,27 @@ REC_FORM=""; HEAD_ID=""; BASE_RAW=""; HEAD_RAW=""
 record_form() {
   local dir="$1" rev="$2"
   lane_diff_id "$dir" "$FM_reviewed_head" || die "could not compute the reviewed diff: $DIFF_ERR"
-  lane_legacy_id "$dir"
+  lane_compat_ids "$dir"
   [ -n "$DIFF_ID_LEGACY" ] || die "could not compute the reviewed diff"
   BASE_RAW="$DIFF_TXT_LEGACY"
   if [ "$DIFF_ID" = "$FM_reviewed_diff" ]; then
-    REC_FORM=masked
+    REC_FORM=context-free
+  elif [ "$DIFF_ID_CTX" = "$FM_reviewed_diff" ]; then
+    REC_FORM=context
   elif [ "$DIFF_ID_LEGACY" = "$FM_reviewed_diff" ]; then
     REC_FORM=legacy
   else
     REC_FORM=approximate
   fi
   lane_diff_id "$dir" "$rev" || die "could not compute the head's diff: $DIFF_ERR"
-  lane_legacy_id "$dir"
+  lane_compat_ids "$dir"
   [ -n "$DIFF_ID_LEGACY" ] || die "could not compute the head's diff"
   HEAD_RAW="$DIFF_TXT_LEGACY"
-  if [ "$REC_FORM" = masked ]; then HEAD_ID="$DIFF_ID"; else HEAD_ID="$DIFF_ID_LEGACY"; fi
+  case "$REC_FORM" in
+    context-free) HEAD_ID="$DIFF_ID" ;;
+    context) HEAD_ID="$DIFF_ID_CTX" ;;
+    *) HEAD_ID="$DIFF_ID_LEGACY" ;;
+  esac
 }
 
 # `delta`: what changed in the lane between the review on record and <rev> —
@@ -968,8 +1010,8 @@ record_form() {
 # unreadable= (then the text follows escaped), truncated=, ack_id= (set only
 # for a complete, exact, binary-free, readable delta: a hash of the shown
 # text), fence=. baseline=exact|approximate and diff_form=
-# masked|legacy|approximate (record_form). Agreed fixes recorded after the
-# review are inside the delta (includes_agreed_fixes=yes). Key=value lines,
+# context-free|context|legacy|approximate (record_form). Agreed fixes recorded
+# after the review are inside the delta (includes_agreed_fixes=yes). Key=value lines,
 # then a `delta_begin` line, then the text. Exit 1 + reason= when there is
 # nothing to compare against: no-review, or no-baseline (reviewed_head is no
 # commit here any more). A failed diff is exit 2, never an empty delta.

@@ -1,9 +1,9 @@
 ---
 title: "Worker Autonomy Mandate (MANDATE.md)"
 createdAt: 2026-09-07
-updatedAt: 2026-10-20
+updatedAt: 2026-10-22
 createdFrom: "branch: task/extend-worker-autonomy"
-updatedFrom: "branch: task/keep-review-coverage-across-version-rebase"
+updatedFrom: "branch: task/harden-mandate-diff-id-and-round-lock"
 pluginVersion: 1.9.0
 prime: false
 ---
@@ -402,12 +402,29 @@ covers. Why it is built this way:
   the global git rules fold fixes into earlier commits, so SHAs move. `git
   patch-id` was rejected in review: it ignores whitespace and (over `-U0`)
   position, so a de-indented `delete_all()` read as covered. The id hashes the
-  `-U3` diff against the newest merge-base with local/origin main, keeping
-  context, function context and whitespace and dropping only the `@@` line
-  numbers and `index` lines (keeping numbers would break coverage on every
-  rebase over a busy main); an edit on main inside a lane hunk's context
-  changes it (fail-closed re-review). Accepted residual: one change moved
-  between two blocks with identical context and enclosing function.
+  diff against the newest merge-base with local/origin main, keeping
+  function context and whitespace and dropping the `@@` line numbers and
+  `index` lines (keeping numbers would break coverage on every rebase over a
+  busy main). Since 1.28.1 it is a `-U0` diff: 1.28's `-U3` carried three of
+  MAIN's lines around each hunk, so #89's rebase over neighbouring CLAUDE.md
+  edits asked to re-review lines the lane never touched. `-U0` alone is enough
+  (stripping context after `-U3` would keep `-U3`'s hunk merging, which main
+  insertions between two close lane hunks change); inter-hunk context is
+  pinned to 0 so a user's config cannot pull main's lines back in. A hunk's
+  *place* = file, hunk order, and git's function-context line — the only
+  position left once line numbers go (they move on any main insertion above).
+  Trap: with no diff driver the function context is the nearest line above
+  starting with a letter, `_` or `$` — in a top-level shell script that is
+  often the adjacent line, so a main edit to it still fails closed. Accepted
+  residuals (named in review round 1): a lane line moved within one header's
+  region, past no other lane hunk, keeps the id (e.g. above a guard in the
+  same function; `-U3` caught that); and a main edit that changes what a
+  lane hunk means — deleting a guard right above it — keeps the id too. The
+  latter is the point of the change, and such a rebase usually stops on a
+  conflict a person resolves. Older records (`context` = 1.28's masked `-U3`,
+  `legacy` = unmasked `-U3`) are matched exactly by `lane_compat_ids`; the
+  tests recompute both from the old algorithms rather than through
+  mandate.sh, so a change to its forms cannot move the reference too.
 - **Version values are masked, nothing else** (`[mandate] version_paths`). #85
   hit the gap: a rebase moved the lane's bump 1.25.0 → 1.26.0, the id changed,
   and the only way through was a bare `gh pr merge` around the gate — worse than
@@ -421,10 +438,13 @@ covers. Why it is built this way:
   masked, and every other version value is prefixed with `=` first, so a lane
   writing the literal mask token `"*"` cannot pass as a masked renumber.
   Accepted residual: a deeper-nested `"version"` in those files is masked too.
-  Old unmasked records: `covered` also hashes the legacy form and accepts an
-  exact match (`diff_id_form=legacy`) — it can never cover more than the old id
-  did; with no manifest touched both forms are byte-identical (a test pins the
-  pre-masking pipeline's hash).
+  Old records: `covered` also hashes the older forms and accepts an exact
+  match — `context` (1.28.0's masked `-U3`) or `legacy` (unmasked `-U3`); it
+  can never cover more than the old id did. With no manifest touched the two
+  are the same text, so a 1.23-1.27 record then reports `context` (the label
+  names the form, not the version). The `-U3` forms keep the old argv,
+  unpinned: pinning the inter-hunk context there broke records made under a
+  user's non-default diff config (review round 1).
 - **A user ack, never a worker one** (`delta` + `acknowledged`). For a small
   real delta, `/merge`/`/land` show `delta` (a diff of the reviewed lane diff
   against the head's — so unrelated main edits show nothing) and ask. The ack
