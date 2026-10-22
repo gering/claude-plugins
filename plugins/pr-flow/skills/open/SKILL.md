@@ -1,8 +1,7 @@
 ---
 name: open
 description: |
-  Creates a PR after readiness checks (tests, lint, build, README,
-  version, changelog, knowledge, rebase), then polls CI + first @claude review.
+  Creates a PR after readiness checks, then polls CI and the first @claude review.
   Trigger: "create a PR", "open a pull request", "ready for review".
 user_invocable: true
 ---

@@ -326,6 +326,9 @@ entries are grouped per plugin, newest first.
 
 ## pr-flow
 
+### 1.8.1 — 2026-10-22
+- Trim the `/open` skill description to the word budget; the readiness-check list lives in the skill body.
+
 ### 1.8.0 — 2026-10-20
 - `/merge` step 6b: on `changed-since-review`, show the delta since the last recorded review (`mandate-shim.sh delta`, truncation named) and ask the user `[a]cknowledge / [s]top`; `[a]` records it (`acknowledged --head --ack-id`) and the gate passes `via=user-ack` for that exact diff. Only an interactive user answer acknowledges — never a mandate, a Manager, a peer or an autonomous run. `no-review` stays a hard stop. The shim passes `delta`/`acknowledged` through and reports a work-system without them as unknown (`verdict=old-work-system`).
 
