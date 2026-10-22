@@ -18,6 +18,8 @@ EFFORTS = {
     "kimi": {"low", "high", "max"},
 }
 MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]*\Z")
+# Cluster names only; the workflow checks them against LENS_CLUSTERS at load.
+CLUSTER = re.compile(r"[a-z][a-z-]*\Z")
 # Codex names a capability family, resolved to a concrete model once per run.
 CODEX_FAMILIES = ("astra", "sol", "terra", "luna")
 
@@ -60,6 +62,13 @@ def load_profiles(workflow: Path) -> dict:
             keys = {"model", "effort"} if backend == "stage" else {"model", "effort", "tools", "toolBudget"}
             if backend == "codex":
                 keys.add("family")
+            if backend != "stage" and isinstance(config, dict) and "clusterEffort" in config:
+                keys.add("clusterEffort")
+                overrides = config["clusterEffort"]
+                if not isinstance(overrides, dict) or not overrides or not all(
+                        isinstance(k, str) and CLUSTER.fullmatch(k) and isinstance(v, str) and v in EFFORTS[backend]
+                        for k, v in overrides.items()):
+                    raise ValueError(f"invalid clusterEffort in {name}/{backend}")
             _keys(config, keys)
             if backend == "codex" and config["family"] not in CODEX_FAMILIES:
                 raise ValueError(f"invalid codex family in {name}")

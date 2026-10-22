@@ -1,9 +1,9 @@
 ---
 title: "Swarm Backend Adapter Layer"
 createdAt: 2026-07-03
-updatedAt: 2026-09-22
+updatedAt: 2026-10-22
 createdFrom: "PR #21"
-updatedFrom: "auto-select-latest-grok + add-swarm-review-profiles + auto-select-latest-codex-families"
+updatedFrom: "grok-turn-telemetry-and-effort"
 pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
@@ -776,6 +776,45 @@ is recorded too. `scripts/telemetry-report.py` renders it and flags any
 **surviving** call at ≥60% of its wall — the case `backendErrors` structurally
 cannot show, because a voice that finished at 550 s and one that finished at
 20 s are both just "ok".
+
+### Grok stream telemetry and cluster effort (swarm 0.16.0)
+
+grok 1.0.46 accepts `--output-format streaming-json` together with
+`--json-schema` (verified, despite "implies json"). Its closing `end` event
+carries the same fields as the old json envelope, so `grok-stream.py envelope`
+hands the unchanged validator a byte-identical result. Errors come as a
+`{"type":"error"}` line. One `usage` event closes each model turn, so a killed
+call still has a turn count. Web search reports `toolName: "Web search:"`
+with ACP kind `search`, the same kind grep may use, so tools are classified
+by name first and by kind only as a fallback.
+
+- **Support is feature-detected** from the cached `grok --help` probe
+  (`_grok_stream_json`). Without it the adapter takes the old `$(…)` path, and
+  telemetry falls back to the envelope fields.
+- **Latency needs arrival stamps.** The stream has no timestamps, so
+  `grok-stream.py stamp` records them. The `_bounded_bg` watchdog (used when
+  there is no coreutils `timeout`) buffers stdout and replays it at exit, so
+  the record says `turn_s_unavailable: "buffered"` instead of reporting
+  invented numbers.
+- **Transcript lifetime:** a mktemp file beside the prompt in the run's temp
+  dir. It is deleted on success and kept (mode 600, `transcript=` on stderr) on
+  a timeout or a rejected result, for inspection while the review's temp dir
+  lives: findings over speed, and a run that already did the work is not thrown
+  away. No consumer parses `transcript=` yet. A prompt that is the adapter's own
+  scratch directly in `$TMPDIR` (stdin, read-only prompt dir) has no run dir to
+  clean up after it, so its transcript is never kept. The arrival-stamp file is
+  a separate mktemp beside it, not in grok's writable HOME.
+- **Tool names come from `toolName` only**, never the ACP `title`, which often
+  holds the command line or URL.
+- **Telemetry forgery guard:** `TELEMETRY_GROK` is re-initialized in the script
+  and shape-checked (≤4 KiB, `{[[:print:]]*}`) before it reaches the JSONL.
+- **Effort per cluster:** profiles can set `clusterEffort` on an external
+  (`profiles.py` validates the cluster names and the backend's effort set). grok
+  runs `low` for breakage and threat in default and max. The A/B on a fixed
+  diff lost no findings and was 3–4× faster (`plugins/swarm/docs/profile-measurements.md`).
+  There, the long runs were the multi-turn read explorations, and none of them
+  produced findings. The evidence is thin, so the advisory TOOL BUDGET stays and
+  there is still no turn cap (see above).
 
 ## One parser for the numeric knobs (`agents.sh config`, 0.10.x)
 

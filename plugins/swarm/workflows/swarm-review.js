@@ -298,6 +298,11 @@ const fenceDegraded = !FINDING_NONCE  // no structural fence at merge/verify —
 // the newest listed model of `family` (Codex: astra|sol|terra|luna, resolved once
 // per run by the prep step; a non-null Codex model is an exact pin instead).
 // Positive tool budgets are advisory, not execution deadlines.
+// `clusterEffort` (optional, externals) overrides `effort` for the units of the
+// named lens clusters — by lens membership, so it holds under --max's per-lens
+// units too. grok runs breakage/threat at low: measured equal findings in about
+// a third of the time (docs/profile-measurements.md). A turn cap is deliberately NOT
+// how grok is sped up: 10 turns found nothing, and findings outrank speed.
 // BEGIN SWARM PROFILES JSON
 const PROFILES = {
   "quick": {
@@ -326,7 +331,7 @@ const PROFILES = {
     },
     "externals": {
       "codex": { "model": null, "family": "sol", "effort": "medium", "tools": true, "toolBudget": 8 },
-      "grok": { "model": null, "effort": "medium", "tools": true, "toolBudget": 8 },
+      "grok": { "model": null, "effort": "medium", "tools": true, "toolBudget": 8, "clusterEffort": { "breakage": "low", "threat": "low" } },
       "kimi": { "model": "kimi-code/k3-256k", "effort": "low", "tools": true, "toolBudget": 8 }
     }
   },
@@ -341,7 +346,7 @@ const PROFILES = {
     },
     "externals": {
       "codex": { "model": null, "family": "astra", "effort": "medium", "tools": true, "toolBudget": 8 },
-      "grok": { "model": null, "effort": "medium", "tools": true, "toolBudget": 8 },
+      "grok": { "model": null, "effort": "medium", "tools": true, "toolBudget": 8, "clusterEffort": { "breakage": "low", "threat": "low" } },
       "kimi": { "model": "kimi-code/k3-256k", "effort": "high", "tools": true, "toolBudget": 8 }
     }
   }
@@ -855,7 +860,23 @@ const lensInstr = (u) =>
 // Compile each voice once; never cache backend-specific policy by unit alone.
 // The exact scope instruction feeds BOTH argv and its checksum. The adapter
 // appends the backend tool contract from the explicit policy flags below.
-const externalFlags = (b) => {
+// The effort a backend runs ONE unit at: its profile `effort`, unless a
+// `clusterEffort` entry names a cluster this unit's lenses belong to.
+const effortFor = (b, u) => {
+  for (const [cluster, effort] of Object.entries(b.clusterEffort || {})) {
+    if (u.lenses.some((l) => LENS_CLUSTERS[cluster].includes(l))) return effort
+  }
+  return b.effort
+}
+// A cluster name that matches nothing would silently keep the backend effort.
+for (const [name, p] of Object.entries(PROFILES)) {
+  for (const [backend, b] of Object.entries(p.externals)) {
+    for (const cluster of Object.keys(b.clusterEffort || {})) {
+      if (!LENS_CLUSTERS[cluster]) throw new Error(`profile ${name}: ${backend}.clusterEffort names unknown cluster "${cluster}"`)
+    }
+  }
+}
+const externalFlags = (b, effort) => {
   if (b.model !== null && (typeof b.model !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:/+-]*$/.test(b.model))) {
     throw new Error(`Invalid ${b.backend} profile model`)
   }
@@ -864,7 +885,7 @@ const externalFlags = (b) => {
     throw new Error(`Invalid ${b.backend} profile tool policy`)
   }
   return (b.model === null ? '' : `--model ${shQuote(b.model)} `) +
-    `--effort ${shQuote(b.effort)} --tools ${b.tools} --tool-budget ${b.toolBudget}`
+    `--effort ${shQuote(effort)} --tools ${b.tools} --tool-budget ${b.toolBudget}`
 }
 // FNV-1a/32 over the instruction's UTF-8 bytes. A LENGTH check was the first
 // attempt and is not enough: `security` → `altitude` and `ONLY` → `ALSO` are
@@ -1003,10 +1024,11 @@ const reviewSources = [...(runClaude ? ['claude'] : []), ...liveBackends].join('
 const externalVoiceSpecs = liveExternals
   .flatMap((b) => unitsForBackend(b, externalUnits).map((u) => {
     const instruction = lensInstr(u)
-    const flags = externalFlags(b)
+    const effort = effortFor(b, u)
+    const flags = externalFlags(b, effort)
     return {
     backend: b.backend, unit: u.name, lenses: u.lenses, label: `${b.backend}:${u.name}`,
-    model: b.model, effort: b.effort, tools: b.tools, toolBudget: b.toolBudget,
+    model: b.model, effort, tools: b.tools, toolBudget: b.toolBudget,
     // --lens-instr-sum is an INTEGRITY check on the retype: an empty value is
     // already refused, but a transport that shortened, paraphrased or reworded
     // the instruction would otherwise run and have its findings attributed to

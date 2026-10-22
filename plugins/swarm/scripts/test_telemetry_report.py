@@ -188,6 +188,39 @@ for value in (None, -1, True, False, 1.5, "3", [], {}):
           tr.render([dict(legacy, tool_calls=value)], 600)[0] == legacy_line)
 check("legacy records with no count keep their existing rendering", "tools" not in legacy_line)
 
+# --- grok turns vs findings --------------------------------------------------
+def grok_rec(unit, turns, findings, secs, **extra):
+    g = {"source": "stream", "complete": True, "num_turns": turns, "findings": findings,
+         "structured_output": findings is not None, "stop_reason": "end_turn",
+         "tool_calls": 5, "tool_kinds": {"read": 3, "shell": 1, "web": 1, "other": 0},
+         "turn_s": {"min": 4.0, "median": 14.2, "max": 31.0}, **extra}
+    return json.dumps({"backend": "grok", "unit": unit, "effort": "low", "model": "grok-4.7",
+                       "prompt_bytes": 9000, "seconds": secs, "backend_rc": 0, "adapter_rc": 0,
+                       "timed_out": False, "grok": g})
+
+r = run([write([grok_rec("breakage", 20, 4, 280)]), write([grok_rec("threat", 8, 2, 112), REC_FAST])])
+check("several files are read as one report", "grok:breakage" in r.stdout and "grok:threat" in r.stdout
+      and "codex:threat" in r.stdout and r.returncode == 0)
+section = r.stdout.split("grok turns vs findings:", 1)[-1]
+check("the grok turns view is rendered", "grok turns vs findings:" in r.stdout)
+rows = [line for line in section.splitlines() if line.strip().startswith("grok:")]
+check("most turns first", len(rows) == 2 and "breakage" in rows[0])
+check("turns, tool kinds and turn time are shown",
+      " 20 " in rows[0] and "5 3/1/1" in rows[0] and "14.2/31.0" in rows[0])
+check("aggregate counts findings per turn over reporting calls",
+      "2 grok call(s): median 14 turns" in r.stdout and "0.21 findings per turn" in r.stdout)
+r = run([write([grok_rec("reach", 3, None, 60, structured_output=False, complete=False,
+                         stop_reason=None, turn_s=None, turn_s_unavailable="buffered")])])
+check("a missing structuredOutput and a cut stream are named",
+      "no structuredOutput" in r.stdout and "stream cut" in r.stdout)
+check("unavailable turn time says why, never 0", "buffered" in r.stdout)
+check("a single call prints no aggregate line", "grok call(s)" not in r.stdout)
+r = run([write([REC_NEAR, REC_FAST])])
+check("records without grok metrics add no grok view", "grok turns vs findings" not in r.stdout)
+for bad in (None, [], "x", 3):
+    check(f"a malformed grok field {bad!r} is skipped",
+          tr.render_grok_turns([dict(json.loads(REC_NEAR), grok=bad)]) == [])
+
 # --- usage ------------------------------------------------------------------
 check("no args is a usage error", run([]).returncode == 2)
 check("bad --timeout-seconds is a usage error",
