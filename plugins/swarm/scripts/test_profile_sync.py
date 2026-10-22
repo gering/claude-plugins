@@ -113,13 +113,14 @@ class ProfileTests(unittest.TestCase):
             self.assertNotIn(path, rows)
             rows[path] = [json.loads(value) for value in values]
         expected = {"unit"} | {f"stages.{stage}" for stage in STAGES} | {f"externals.{b}" for b in ("codex", "grok", "kimi")}
+        expected.add("externals.grok.clusterEffort")
         self.assertEqual(set(rows), expected)
         for index, name in enumerate(NAMES):
             for path, values in rows.items():
                 actual = PROFILES[name]
                 for key in path.split("."):
-                    actual = actual[key]
-                if isinstance(actual, dict):
+                    actual = actual.get(key)
+                if isinstance(actual, dict) and not path.endswith(".clusterEffort"):
                     first = "family" if path == "externals.codex" else "model"
                     fields = ("model", "effort") if path.startswith("stages.") else (first, "effort", "tools", "toolBudget")
                     actual = [actual[key] for key in fields]
@@ -220,7 +221,14 @@ class ProfileTests(unittest.TestCase):
                     self.assertNotIn("--model", argv)
                 else:
                     self.assertEqual(flag(argv, "--model"), expected)
-                self.assertEqual(flag(argv, "--effort"), spec["effort"])
+                # clusterEffort applies by lens membership: a cluster unit by
+                # name, a --max lens unit through the cluster it belongs to.
+                lenses = {"breakage": ["correctness", "removed-behavior"], "threat": ["security", "adversarial"]}
+                override = next((e for c, e in spec.get("clusterEffort", {}).items()
+                                 if unit == c or unit in lenses[c]), None)
+                self.assertEqual(flag(argv, "--effort"), override or spec["effort"], (name, backend, unit))
+                if backend == "grok" and name != "quick":
+                    self.assertEqual(flag(argv, "--effort"), "low" if override else "medium", (name, unit))
                 self.assertEqual(flag(argv, "--tools"), str(spec["tools"]).lower())
                 self.assertEqual(flag(argv, "--tool-budget"), str(spec["toolBudget"]))
                 self.assertIn(args()["adapter"], argv)
@@ -254,6 +262,13 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual(flag(argv, "--tool-budget"), str(budget))
             self.assertEqual(flag(argv, "--tools"), str(externals[backend]["tools"]).lower())
             self.assertEqual(flag(argv, "--lens-instr-sum"), checksum(instruction))
+
+    def test_cluster_effort_naming_an_unknown_cluster_fails_the_run(self):
+        # A misspelt cluster would otherwise keep the backend effort unnoticed.
+        externals = copy.deepcopy(PROFILES["default"]["externals"])
+        externals["grok"]["clusterEffort"] = {"breakge": "low"}
+        with self.assertRaisesRegex(AssertionError, 'unknown cluster "breakge"'):
+            run_workflows([{"args": args(externalVoices=["grok"]), "patch": {"externals": externals}}])
 
     def test_model_id_grammar_agrees_across_layers(self):
         # One model id crosses four validators: the staged-map accessor, the
@@ -304,6 +319,9 @@ class ProfileTests(unittest.TestCase):
             "Transport wrappers": lambda p: pair(p["stages"]["transport"], "session model"),
             "Codex": lambda p: (p["externals"]["codex"]["model"] or f"newest {p['externals']['codex']['family'].capitalize()}") + f" / {p['externals']['codex']['effort']}",
             "Grok": lambda p: pair(p["externals"]["grok"], "discovered"),
+            "Grok breakage / threat": lambda p: " / ".join(sorted({
+                p["externals"]["grok"].get("clusterEffort", {}).get(c, p["externals"]["grok"]["effort"])
+                for c in ("breakage", "threat")})),
             "Kimi (opt-in)": lambda p: pair(p["externals"]["kimi"], "default"),
             "Fan-out unit": lambda p: p["unit"],
             "Kimi tools / budget": lambda p: f"{str(p['externals']['kimi']['tools']).lower()} / {p['externals']['kimi']['toolBudget']}",
@@ -333,6 +351,12 @@ class ProfileTests(unittest.TestCase):
                 changed["max"]["externals"]["codex"][key] = value
                 write(changed)
                 with self.assertRaises(ValueError, msg=f"{key}={value}"):
+                    load_profiles(staged)
+            for value in ({}, [], "low", {"breakage": "max"}, {"Breakage": "low"}, {"breakage": None}):
+                changed = copy.deepcopy(data)
+                changed["default"]["externals"]["grok"]["clusterEffort"] = value
+                write(changed)
+                with self.assertRaises(ValueError, msg=f"clusterEffort={value}"):
                     load_profiles(staged)
             for source in (BEGIN + 'const PROFILES = {"quick":{},"quick":{}}\n' + END,
                            BEGIN + 'const PROFILES = (()=>({}))()\n' + END,

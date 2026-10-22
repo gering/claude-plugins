@@ -58,6 +58,7 @@ profile; direct workflow callers use `profile`, not the retired `max` boolean.
 | Transport wrappers | haiku / low | haiku / low | haiku / low |
 | Codex | newest Sol / low | newest Sol / medium | newest Astra / medium |
 | Grok | discovered / low | discovered / medium | discovered / medium |
+| Grok breakage / threat | low | low | low |
 | Kimi (opt-in) | kimi-code/k3-256k / low | kimi-code/k3-256k / low | kimi-code/k3-256k / high |
 | Fan-out unit | cluster | cluster | lens |
 | Kimi tools / budget | false / 0 | true / 8 | true / 8 |
@@ -351,6 +352,18 @@ Kimi also records distinct observed `tool_calls` and `tool_calls_complete`;
 missing observations stay null and incomplete streams are marked partial.
 `prompt_bytes` measures the final assembled prompt including the schema contract.
 These are not billed tokens or provider quota measurements.
+Grok calls add a `grok` object, read from grok's `--output-format streaming-json`
+(used when `grok --help` offers it, else the old json envelope with fewer
+fields): `num_turns`, tool calls by name and class (read/shell/web), per-turn
+seconds (min/median/max; `turn_s_unavailable: "buffered"` when the watchdog
+without coreutils `timeout` buffers stdout), token usage, cost, `stop_reason`,
+whether `structuredOutput` came back, and the finding count. The stream is kept
+in the run's temp dir only while the call runs; a call that timed out or
+returned no valid result keeps it (mode 600) until the review's temp dir is
+removed and prints `transcript=<path>` on stderr for inspection (a stdin prompt
+has no such dir, so nothing is kept). It is never fed into another prompt.
+`telemetry-report.py a.jsonl [b.jsonl …]` adds a "grok turns vs findings" view
+across the given runs.
 The report flags any voice that spent most of the wall **that call actually ran under** —
 recorded per record, not assumed from `SWARM_TIMEOUT`, which is overridable and
 which the workflow shrinks by its probe margin. A call that *survives* near the

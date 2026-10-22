@@ -2,7 +2,7 @@
 """Render the per-call telemetry an external review run wrote.
 
 `agents.sh run --telemetry <file> --unit <name>` appends one JSON line per
-external call. This turns those lines into the two facts an operator needs and
+external call. This turns those lines into the facts an operator needs and
 cannot get from `backendErrors`:
 
   1. Which backend x cluster is approaching the wall. A voice that DIED at 600s
@@ -11,11 +11,14 @@ cannot get from `backendErrors`:
      invisible until the run it finally crosses it.
   2. Whether a timeout is systemic or noise. "grok timed out" reads as bad luck;
      "grok x breakage, 3 runs, always at the wall" is a different bug.
+  3. For grok: how many agentic turns each call took, what they spent them on,
+     and whether more turns bought more findings ("grok turns vs findings").
+     Pass several runs' files to compare across runs.
 
 Deterministic shell-level rendering on purpose (same contract as the rest of the
 pipeline: assembly is never an LLM step) — the presenter prints what this emits.
 
-Usage: telemetry-report.py <telemetry.jsonl> [--timeout-seconds N]
+Usage: telemetry-report.py <telemetry.jsonl> [<more.jsonl> ...] [--timeout-seconds N]
 Each record carries the wall it actually ran under (SWARM_TIMEOUT is
 overridable); --timeout-seconds is only the fallback for records without one.
 Exit 0 always when the file is readable or absent: telemetry is diagnostics, and
@@ -162,15 +165,81 @@ def _secs(rec):
         return 0
 
 
+def _grok(rec):
+    g = rec.get("grok")
+    return g if isinstance(g, dict) else None
+
+
+def _n(value):
+    """A count from a record, or None — never a guessed 0."""
+    return value if type(value) is int and value >= 0 else None
+
+
+def render_grok_turns(records):
+    """One row per grok call that recorded run metrics, most turns first.
+
+    The question this answers is whether grok's runtime is its turn count and
+    whether those turns pay off in findings — the measurement behind "no turn
+    cap" (findings outrank speed) and behind any later change to the advisory
+    tool budget. Records from before the stream capture have no `grok` field and
+    are skipped, not shown as zeros."""
+    rows = [(rec, _grok(rec)) for rec in records if rec.get("backend") == "grok" and _grok(rec)]
+    if not rows:
+        return []
+    rows.sort(key=lambda rg: (_n(rg[1].get("num_turns")) or -1), reverse=True)
+    lines = ["grok turns vs findings:",
+             f"  {'unit':<28} {'effort':<6} {'turns':>5} {'tools r/s/w':>12} "
+             f"{'s/turn med/max':>15} {'findings':>8}  stop"]
+    per_turn = []
+    for rec, g in rows:
+        turns = _n(g.get("num_turns"))
+        kinds = g.get("tool_kinds") if isinstance(g.get("tool_kinds"), dict) else {}
+        calls = _n(g.get("tool_calls"))
+        tools = "-" if calls is None else (
+            f"{calls} {kinds.get('read', 0)}/{kinds.get('shell', 0)}/{kinds.get('web', 0)}")
+        ts = g.get("turn_s") if isinstance(g.get("turn_s"), dict) else None
+        if ts:
+            timing = f"{ts.get('median', '?')}/{ts.get('max', '?')}"
+        else:
+            timing = g.get("turn_s_unavailable") or "-"
+        if turns:
+            per_turn.append(_secs(rec) / turns)
+        found = _n(g.get("findings"))
+        stop = g.get("stop_reason") or "-"
+        if not g.get("structured_output"):
+            stop += ", no structuredOutput"
+        if g.get("complete") is False and g.get("source") == "stream":
+            stop += ", stream cut"
+        lines.append(
+            f"  {label(rec):<28} {rec.get('effort') or '?':<6} "
+            f"{turns if turns is not None else '?':>5} {tools:>12} {timing:>15} "
+            f"{found if found is not None else '-':>8}  {stop}")
+    # Aggregates only over calls that actually reported the number.
+    turns_all = [t for t in (_n(g.get("num_turns")) for _, g in rows) if t]
+    found_all = [(t, f) for t, f in ((_n(g.get("num_turns")), _n(g.get("findings"))) for _, g in rows)
+                 if t and f is not None]
+    if len(turns_all) > 1:
+        import statistics
+        summary = (f"  {len(rows)} grok call(s): median {statistics.median(turns_all):g} turns, "
+                   f"{statistics.median(per_turn):.0f} s/turn")
+        if found_all:
+            summary += (f", {sum(f for _, f in found_all) / sum(t for t, _ in found_all):.2f} "
+                        f"findings per turn")
+        lines.append(summary)
+    return lines
+
+
 def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         sys.stderr.write(__doc__)
         return 2
-    path = argv[0]
+    paths = []
     timeout_seconds = 600
-    rest = argv[1:]
+    rest = list(argv)
     while rest:
-        if rest[0] == "--timeout-seconds" and len(rest) > 1:
+        if not rest[0].startswith("--"):
+            paths.append(rest.pop(0))
+        elif rest[0] == "--timeout-seconds" and len(rest) > 1:
             try:
                 timeout_seconds = int(rest[1])
             except ValueError:
@@ -188,7 +257,16 @@ def main(argv):
             sys.stderr.write(f"unknown argument: {rest[0]}\n")
             return 2
 
-    records, note = load(path)
+    if not paths:
+        sys.stderr.write(__doc__)
+        return 2
+    records, notes = [], []
+    for path in paths:
+        got, why = load(path)
+        records += got
+        if why:
+            notes.append(why if len(paths) == 1 else f"{path}: {why}")
+    note = "; ".join(notes) or None
     if not records:
         # Say nothing renderable rather than printing an empty header: the
         # presenter drops the whole section when there is no output.
@@ -210,6 +288,11 @@ def main(argv):
             _where = f"the {_w}s wall" if _w else "the outer window (adapter cap disabled)"
             print(f"  ⚠️  {label(rec)} hit {_where} — that cluster "
                   f"reviewed without {rec.get('backend', '?')}.")
+    grok_lines = render_grok_turns(records)
+    if grok_lines:
+        print()
+        for line in grok_lines:
+            print(line)
     if note:
         print(f"  ({note})")
     return 0

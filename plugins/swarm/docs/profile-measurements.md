@@ -144,3 +144,48 @@ below 600 seconds after the existing probe/cleanup margin. The
 with `fix-swarm-review-runtime-handoff` so there is only one runner. More actual
 Grok execution time—not merely a lower effort or tool budget—remains an open
 integration requirement.
+
+## Grok effort A/B: breakage and threat — 2026-10-22
+
+Question: does grok `effort="low"` lose findings for the breakage and threat
+clusters? Fixed diff: `git show --format= e707464 -- '*.sh' '*.py' ':!*test_*'`
+(manager.sh, 6.6 KB). grok 1.0.46, model `grok-4.7`, tools on, advisory tool
+budget 8, jail on, 600 s wall, the cluster's lens text as the SKILL builds it.
+Two reps per cell, the four cells of a rep run in parallel. Numbers come from the
+new `grok` telemetry field (`telemetry-report.py` "grok turns vs findings").
+
+| cluster  | effort | rep   | wall  | turns | tools (read) | reasoning tok | cost $ | findings |
+|----------|--------|-------|-------|-------|--------------|---------------|--------|----------|
+| breakage | low    | smoke | 85 s  | 1     | 0            | 5.0k          | 0.06   | 2        |
+| breakage | low    | r1    | 170 s | 7     | 12 (12)      | 9.0k          | 0.31   | 0        |
+| breakage | low    | r2    | 89 s  | 1     | 0            | 5.6k          | 0.06   | 2        |
+| breakage | medium | r1    | 452 s | 10    | 16 (16)      | 31.8k         | 0.55   | 0        |
+| breakage | medium | r2    | 513 s | 11    | 17 (16)      | 34.1k         | 0.60   | 0        |
+| threat   | low    | r1    | 33 s  | 1     | 0            | 1.3k          | 0.04   | 3        |
+| threat   | low    | r2    | 50 s  | 1     | 0            | 2.4k          | 0.05   | 3        |
+| threat   | medium | r1    | 132 s | 1     | 0            | 8.8k          | 0.08   | 3        |
+| threat   | medium | r2    | 602 s | 9+    | 11 (11)      | —             | —      | timed out |
+
+Result: **low keeps both clusters.** Low lost no findings in either cluster.
+Breakage medium returned nothing in both reps, and low returned two (the argv
+fold path and the removed in-body fold, the same issues the smoke run found).
+Threat low and medium agree on the same three issues. Low ran 3–4× faster, and
+the one wall timeout was a medium run.
+
+What the turn telemetry shows:
+
+- **Turns, not reasoning per turn, drive the long runs.** Every run over 150 s
+  explored the repo with reads (7–11 turns, 30–40 s per turn median, max turn
+  ~2 min). One-turn runs answered from the diff alone. Medium explores more often
+  and longer; low does too, once (breakage r1).
+- **Exploring did not buy findings here.** All three runs that explored and
+  finished returned zero findings; every run that answered from the diff
+  returned 2–3. One fixed diff is not enough to call this a rule, so the
+  advisory TOOL BUDGET text stays as it is (no evidence that a tighter text, or a
+  cap, would help or hurt). With `--telemetry` on real reviews, the report's
+  turns-vs-findings view keeps collecting this evidence.
+- Small diff, so the hours-long cases are not reproduced here. Effort is a
+  cost/latency lever on top of the separate runtime issue above, not a fix for it.
+- The timed-out medium run kept its stream transcript (mode 600, `transcript=`
+  on stderr) with the partial turn and tool counts, which is the recovery path
+  this change adds.

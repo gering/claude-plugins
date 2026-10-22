@@ -46,8 +46,10 @@
 #       --telemetry <file>  Append one JSON line per call (backend, unit, effort,
 #                           model, prompt_bytes, tool_calls, tool_calls_complete,
 #                           seconds, timeout_seconds, backend_rc, adapter_rc,
-#                           timed_out). Tool counts may be null. Written on EVERY
-#                           exit path, so a timeout is recorded too.
+#                           timed_out, grok). Tool counts may be null; `grok` is
+#                           an object of turns/tools/latency/usage for grok calls,
+#                           else null. Written on EVERY exit path, so a timeout
+#                           is recorded too.
 #       --unit <name>       Cluster/lens label recorded in the telemetry line
 #
 # The prompt reaches the backend OUT-OF-BAND (codex: stdin · grok:
@@ -157,6 +159,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_SCHEMA="$SCRIPT_DIR/schema/finding.schema.json"
 KIMI_ACP_CLIENT="$SCRIPT_DIR/kimi-acp.py"
+GROK_STREAM_HELPER="$SCRIPT_DIR/grok-stream.py"
 # Family for a bare `ready`/`list`/`run codex` with no model: the default
 # profile's (test_profile_sync guards the match). Prep passes its own family.
 CODEX_DEFAULT_FAMILY="sol"
@@ -242,6 +245,16 @@ TMP_PROMPT=""
 TMP_BOUNDED=""
 TMP_KIMI_HOME=""
 TMP_GROK_HOME=""
+# grok's captured event stream (streaming-json). Lives NEXT TO the prompt, in
+# the review's own temp dir, not in the ephemeral HOME: a failed or timed-out
+# voice keeps it for inspection or recovery within the run (`transcript=<path>`
+# on stderr), and the skill's `rm -rf "$TMPD"` is its lifetime. A voice that
+# succeeded deletes it. When the prompt is the adapter's own scratch directly in
+# $TMPDIR (stdin prompt, read-only prompt dir), no run dir will ever remove it,
+# so it is never kept (TMP_GROK_TRANSCRIPT_KEEP stays empty).
+TMP_GROK_TRANSCRIPT=""
+TMP_GROK_TRANSCRIPT_KEEP=""
+TMP_GROK_TIMES=""
 
 # Per-call telemetry (opt-in via --telemetry). WHY it exists: an external voice
 # that dies at the wall is reported, but a voice that *survived* at 550s looks
@@ -266,6 +279,10 @@ TELEMETRY_RC=""
 # reach the raw JSON below on every codex/grok record. null = not observed.
 TELEMETRY_TOOL_CALLS=null
 TELEMETRY_TOOL_CALLS_COMPLETE=false
+# grok run metrics (turns, tools by name/kind, per-turn wall, usage, stop
+# reason, structuredOutput presence, findings) — one compact JSON object from
+# grok-stream.py, or null. Initialized here for the same reason as above.
+TELEMETRY_GROK=null
 
 _json_escape() {
   # Minimal JSON string escaping: backslash first (or it would double-escape the
@@ -353,9 +370,16 @@ _write_telemetry() {
   local _tc="$TELEMETRY_TOOL_CALLS" _tcc="$TELEMETRY_TOOL_CALLS_COMPLETE"
   [[ "$_tc" =~ ^(null|[0-9]{1,16})$ ]] || _tc=null
   [[ "$_tcc" == true ]] || _tcc=false
-  printf '{"backend":"%s","unit":"%s","effort":"%s","model":"%s","prompt_bytes":%s,"tool_calls":%s,"tool_calls_complete":%s,"seconds":%s,"timeout_seconds":%s,"backend_rc":%s,"adapter_rc":%s,"timed_out":%s}\n' \
+  # Embedded raw too. grok-stream.py builds it with json.dumps(ensure_ascii) and
+  # reduces every grok-supplied name to a fixed charset, so the shape check here
+  # only has to keep a foreign value (an inherited variable, a truncated capture)
+  # out: one object, no control characters, bounded. A POSIX class, not a
+  # `[ -~]` range: ranges compare by locale collation (see _json_escape).
+  local _g="$TELEMETRY_GROK"
+  [[ ${#_g} -le 4096 && "$_g" =~ ^\{[[:print:]]*\}$ ]] || _g=null
+  printf '{"backend":"%s","unit":"%s","effort":"%s","model":"%s","prompt_bytes":%s,"tool_calls":%s,"tool_calls_complete":%s,"grok":%s,"seconds":%s,"timeout_seconds":%s,"backend_rc":%s,"adapter_rc":%s,"timed_out":%s}\n' \
     "$_b" "$_u" "$_e" "$_m" \
-    "$(( ${TELEMETRY_BYTES:-0} + 0 ))" "$_tc" "$_tcc" \
+    "$(( ${TELEMETRY_BYTES:-0} + 0 ))" "$_tc" "$_tcc" "$_g" \
     "$secs" "$(( ${_enforced_wall:-0} + 0 ))" "${TELEMETRY_RC:-null}" "${adapter_rc:-null}" \
     "$( _is_timeout_rc "${TELEMETRY_RC:-0}" && echo true || echo false )" \
     >> "$TELEMETRY_FILE" 2>/dev/null || true
@@ -371,6 +395,17 @@ cleanup() {
   if [[ -n "${TMP_BOUNDED:-}" ]]; then rm -f "$TMP_BOUNDED"; fi
   if [[ -n "${TMP_KIMI_HOME:-}" ]]; then rm -rf "$TMP_KIMI_HOME"; fi
   if [[ -n "${TMP_GROK_HOME:-}" ]]; then rm -rf "$TMP_GROK_HOME"; fi
+  if [[ -n "${TMP_GROK_TIMES:-}" ]]; then rm -f "$TMP_GROK_TIMES"; fi
+  # Kept unless run_grok cleared it after a validated result: a timeout or a
+  # rejected answer is exactly the run worth inspecting. Empty = grok produced
+  # nothing worth keeping; no owning run dir = nothing would ever remove it.
+  if [[ -n "${TMP_GROK_TRANSCRIPT:-}" ]]; then
+    if [[ -s "$TMP_GROK_TRANSCRIPT" && "${TMP_GROK_TRANSCRIPT_KEEP:-}" == yes ]]; then
+      printf 'transcript=%s\n' "$TMP_GROK_TRANSCRIPT" >&2 || true
+    else
+      rm -f "$TMP_GROK_TRANSCRIPT" 2>/dev/null || true
+    fi
+  fi
   _write_telemetry "$rc"
 }
 trap cleanup EXIT
@@ -2924,6 +2959,10 @@ if not (isinstance(d, dict) and isinstance(d.get("findings"), list)):
 _grok_help_done=""
 _grok_help_rc=0
 _grok_shell_policy=""
+# yes = the CLI offers `--output-format streaming-json` (verified on 1.0.46,
+# also together with --json-schema). Anything else — unset because the probe
+# was stubbed or never ran, or `no` — keeps the plain json envelope path.
+_grok_stream_json=""
 _grok_has_prompt_file() {
   # Preflight for the out-of-band prompt flag. `--prompt-file` is what keeps the
   # diff off argv (see the transport note in `run`); an older CLI without it
@@ -2975,6 +3014,7 @@ _grok_has_prompt_file() {
     # "ran unbounded, cannot have timed out" case the old $_timeout_bin gate
     # silenced.
     _grok_shell_policy=no
+    _grok_stream_json=no
     echo "warning: \`grok --help\` probe did not complete (rc=$rc) — assuming --prompt-file is supported; the shell tool and its --permission-mode/--deny flags stay off until the probe answers" >&2
     return 0
   fi
@@ -2989,6 +3029,7 @@ _grok_has_prompt_file() {
   if [[ -z "$help" ]]; then
     _grok_help_rc=0
     _grok_shell_policy=no
+    _grok_stream_json=no
     echo "warning: \`grok --help\` produced no output — assuming --prompt-file is supported; the shell tool and its --permission-mode/--deny flags stay off until the probe answers" >&2
     return 0
   fi
@@ -3001,6 +3042,11 @@ _grok_has_prompt_file() {
   case "$help" in
     *--permission-mode*) _grok_shell_policy=yes ;;
     *) _grok_shell_policy=no ;;
+  esac
+  # The value, not just the flag: --output-format predates streaming-json.
+  case "$help" in
+    *streaming-json*) _grok_stream_json=yes ;;
+    *) _grok_stream_json=no ;;
   esac
   return "$_grok_help_rc"
 }
@@ -3101,18 +3147,73 @@ run_grok() {
   # `--cwd <repo>`, so a relative path would be compared as-is here and match no
   # deny prefix while the backend reads a different file entirely.
   _assert_prompt_readable_in_jail "$prompt_path" grok
-  local raw rc=0
+  local raw="" rc=0
   _grok_prepare_runtime "$prompt_path"
-  raw="$(HOME="$TMP_GROK_HOME" GROK_HOME="$TMP_GROK_HOME/grok" \
-      sandboxed grok grok -m "$grok_model" --effort "$effort" \
-      ${tool_args[@]+"${tool_args[@]}"} \
-      ${cwd_args[@]+"${cwd_args[@]}"} \
-      --json-schema "$(cat "$schema")" \
-      --prompt-file "$prompt_path" </dev/null 2>"${SWARM_GROK_TRACE:-/dev/null}")" || rc=$?
+  local grok_argv=(grok -m "$grok_model" --effort "$effort"
+      ${tool_args[@]+"${tool_args[@]}"}
+      ${cwd_args[@]+"${cwd_args[@]}"}
+      --json-schema "$(cat "$schema")")
+  # STREAM, when the CLI has it: same call, same flags, plus
+  # `--output-format streaming-json` (it overrides the json that --json-schema
+  # implies; the closing `end` event still carries structuredOutput). The stream
+  # is what makes turns, tools and per-turn time observable — the json envelope
+  # had only the totals, and the adapter kept nothing but structuredOutput.
+  # The transcript sits beside the prompt (see TMP_GROK_TRANSCRIPT). Without it
+  # (old CLI, probe inconclusive, mktemp failed) the call is exactly today's.
+  local grok_metrics="" stream_times="" ps=(0 0) no_latency=()
+  if [[ "$_grok_stream_json" == yes ]]; then
+    TMP_GROK_TRANSCRIPT="$(mktemp "$(dirname -- "$prompt_path")/swarm-grok-transcript.XXXXXX" 2>/dev/null)" \
+      && chmod 600 "$TMP_GROK_TRANSCRIPT" \
+      || { echo "warning: could not create the grok transcript file beside the prompt — running without the event stream (no turn telemetry, nothing to recover from)" >&2; TMP_GROK_TRANSCRIPT=""; }
+    # Arrival stamps get their own exclusive file: grok can write its HOME, so
+    # an adapter file there could be pre-planted as a symlink.
+    if [[ -n "$TMP_GROK_TRANSCRIPT" ]]; then
+      TMP_GROK_TIMES="$(mktemp "$(dirname -- "$TMP_GROK_TRANSCRIPT")/swarm-grok-times.XXXXXX" 2>/dev/null)" \
+        || { rm -f "$TMP_GROK_TRANSCRIPT"; TMP_GROK_TRANSCRIPT=""; echo "warning: could not create the grok timing file — running without the event stream" >&2; }
+    fi
+    local tmp_root="${TMPDIR:-/tmp}"
+    [[ -n "$TMP_GROK_TRANSCRIPT" && "$(dirname -- "$TMP_GROK_TRANSCRIPT")" != "${tmp_root%/}" ]] \
+      && TMP_GROK_TRANSCRIPT_KEEP=yes
+  fi
+  if [[ -n "$TMP_GROK_TRANSCRIPT" ]]; then
+    stream_times="$TMP_GROK_TIMES"
+    # Per-turn time only exists if lines are stamped AS THEY ARRIVE. Without a
+    # coreutils timeout the watchdog (_bounded_bg) buffers stdout and replays it
+    # at exit, so every stamp would read "the end": say unavailable instead.
+    timeout_bin
+    if [[ "${_enforced_wall:-0}" != 0 && -z "$_timeout_bin" ]]; then no_latency=(--no-latency); fi
+    # A pipeline, so PIPESTATUS, not $?: pipefail would report the stamper's rc
+    # where grok's own is the one telemetry and the error branches need.
+    HOME="$TMP_GROK_HOME" GROK_HOME="$TMP_GROK_HOME/grok" \
+      sandboxed grok "${grok_argv[@]}" --output-format streaming-json \
+      --prompt-file "$prompt_path" </dev/null 2>"${SWARM_GROK_TRACE:-/dev/null}" \
+      | python3 "$GROK_STREAM_HELPER" stamp "$TMP_GROK_TRANSCRIPT" "$stream_times" \
+      || ps=("${PIPESTATUS[@]}")
+    rc="${ps[0]}"
+    # A dead stamper SIGPIPEs grok (rc 141): name the capture, not the model.
+    [[ "${ps[1]:-0}" == 0 ]] \
+      || echo "warning: capturing the grok stream failed (rc ${ps[1]}) — grok's result below reflects the broken capture" >&2
+    raw="$(python3 "$GROK_STREAM_HELPER" envelope "$TMP_GROK_TRANSCRIPT")" || raw=""
+    grok_metrics="$(python3 "$GROK_STREAM_HELPER" metrics --stream "$TMP_GROK_TRANSCRIPT" \
+      --times "$stream_times" ${no_latency[@]+"${no_latency[@]}"} 2>/dev/null)" || grok_metrics=""
+  else
+    raw="$(HOME="$TMP_GROK_HOME" GROK_HOME="$TMP_GROK_HOME/grok" \
+        sandboxed grok "${grok_argv[@]}" \
+        --prompt-file "$prompt_path" </dev/null 2>"${SWARM_GROK_TRACE:-/dev/null}")" || rc=$?
+    grok_metrics="$(printf '%s' "$raw" | python3 "$GROK_STREAM_HELPER" metrics --envelope - 2>/dev/null)" || grok_metrics=""
+  fi
   TELEMETRY_RC="$rc"
+  # Captured synchronously and read from a here-string (same reason as Kimi's
+  # metrics): an empty or partial capture leaves values the trap rejects as null.
+  { read -r TELEMETRY_TOOL_CALLS TELEMETRY_TOOL_CALLS_COMPLETE; IFS= read -r TELEMETRY_GROK; } \
+    <<<"$grok_metrics" || true
   # Diagnostics only: SWARM_GROK_TRACE=<file> keeps grok's stderr (above) and
-  # its raw stdout (here). Off by default — the raw output is untrusted text.
-  if [[ -n "${SWARM_GROK_TRACE:-}" ]]; then printf '%s\n' "$raw" >>"$SWARM_GROK_TRACE" 2>/dev/null || true; fi
+  # its raw stdout (here: the whole stream when there is one). Off by default —
+  # the raw output is untrusted text.
+  if [[ -n "${SWARM_GROK_TRACE:-}" ]]; then
+    if [[ -n "$TMP_GROK_TRANSCRIPT" ]]; then cat "$TMP_GROK_TRANSCRIPT" >>"$SWARM_GROK_TRACE" 2>/dev/null || true
+    else printf '%s\n' "$raw" >>"$SWARM_GROK_TRACE" 2>/dev/null || true; fi
+  fi
   # auth.json is linked as a FILE (GROK_HOME must hold it by that name). A
   # refresh that writes a temp file and renames it over the link replaces the
   # link with a regular file — copy that rotated token back to the host before
@@ -3135,6 +3236,7 @@ run_grok() {
     fi
     exit 1
   fi
+  local out_rc=0
   printf '%s' "$raw" | python3 -c '
 import json, sys
 data = sys.stdin.read()
@@ -3160,7 +3262,13 @@ if not (isinstance(out, dict) and isinstance(out.get("findings"), list)):
     sys.exit(1)
 json.dump(out, sys.stdout)
 print()
-' | scrub_secrets
+' | scrub_secrets || out_rc=$?
+  # Validated and delivered: nothing left to recover, so the transcript goes.
+  # On every other path cleanup() keeps it and names it.
+  if (( out_rc == 0 )) && [[ -n "$TMP_GROK_TRANSCRIPT" ]]; then
+    rm -f "$TMP_GROK_TRANSCRIPT"; TMP_GROK_TRANSCRIPT=""
+  fi
+  return "$out_rc"
 }
 
 _kimi_output_contract() {

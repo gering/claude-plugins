@@ -80,6 +80,7 @@ called "session" or "discovered" is sent.
 | stages.verify | `[null,"medium"]` | `[null,"medium"]` | `[null,"xhigh"]` |
 | externals.codex | `["sol","low",true,8]` | `["sol","medium",true,8]` | `["astra","medium",true,8]` |
 | externals.grok | `[null,"low",true,8]` | `[null,"medium",true,8]` | `[null,"medium",true,8]` |
+| externals.grok.clusterEffort | `null` | `{"breakage":"low","threat":"low"}` | `{"breakage":"low","threat":"low"}` |
 | externals.kimi | `["kimi-code/k3-256k","low",false,0]` | `["kimi-code/k3-256k","low",true,8]` | `["kimi-code/k3-256k","high",true,8]` |
 <!-- END SWARM PROFILE TABLE -->
 
