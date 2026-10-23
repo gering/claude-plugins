@@ -427,9 +427,13 @@ A lane is reviewed locally (`/swarm:review`, `/cycle`), not through GitHub appro
 so `/land` and `/pr-flow:merge` gate the merge on that review instead. A *finished*
 review records what it saw: `/swarm:review` (the whole lane, committed tree, or
 `--pr`) and `/cycle` call `mandate.sh reviewed --head` themselves, storing `reviewed_head` and the lane's diff id — a
-hash of the lane's diff against its main branch with hunk line numbers dropped (function context kept), so a
-rebase or squash keeps it while any change to the code, whitespace included, does
-not. Booking a round (`round`) only spends budget; it records nothing. `mandate.sh
+hash of the lane's own changed lines against its main branch (a `-U0` diff; no
+line numbers, no context lines from main, function context kept), so a rebase or
+squash keeps it, main edits right next to a lane hunk included, while any change
+to the lane's code, whitespace included, does not. Moving a lane line under
+another function-context header or past another lane hunk changes it too;
+moving it within one function, or a main edit that changes what a lane hunk
+means (a guard deleted right above it), does not. Booking a round (`round`) only spends budget; it records nothing. `mandate.sh
 fixed --after <rev>` records the state after review `<rev>`'s agreed fixes — once per
 review, and refused (`reason=other-review`) when `<rev>` is not the review on record.
 swarm records only a review of a committed, clean tree, so commit before reviewing.
