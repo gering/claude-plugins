@@ -22,7 +22,10 @@ Covers:
     bounded expected-kind detection, the idle-pane death signal (process state, not
     terminal text), wrong-kind and timeout → blocked=unverified with no retry;
   * rollback — exactly-once tab close on definitive failures, no rollback on
-    ambiguous ones, and an unconfirmed rollback downgrading to unverified.
+    ambiguous ones, and an unconfirmed rollback downgrading to unverified;
+  * herdr 0.8.2 readiness timeouts: the worker detected in the pane → moved=yes
+    + named (a refused name → named=no), nothing/wrong kind detected → still
+    unverified.
 """
 import json as jsonlib
 import os
@@ -616,6 +619,67 @@ check("ambiguous start: no moved= key (callers must branch on blocked first)",
 check("ambiguous start: the tab is LEFT ALONE", "tab close" not in [n for n, _ in e.calls()])
 check("ambiguous start: tried exactly once (no retry)",
       len(e.call_args("agent start")) == 1)
+e.close()
+
+# --- herdr 0.8.2: a readiness TIMEOUT with the worker detected is a launch -- #
+# `agent start` waits for an IDLE agent; a claude worker handed /work-system:continue
+# is busy from the first second, so the call times out while the worker runs — and
+# herdr never registers the name. Confirmed from process state, then named.
+TIMEOUT_ERR = jsonlib.dumps({"error": {
+    "code": "timeout", "message": "timed out waiting for agent startup"}})
+RENAMED = jsonlib.dumps({"result": {"agent": {"pane_id": "w1:p7", "name": "t"}}})
+e = Env(modern_cases(**{
+    "agent start": ("", TIMEOUT_ERR, 1),
+    "pane get": [(pane_get(), "", 0), (pane_get("claude"), "", 0)],
+    "agent rename": (RENAMED, "", 0)}), log_argv=True, api="modern")
+r = e.run("launch", "t", str(e.worktree), "w1")
+check("timeout, worker detected: exit 0", r.returncode == 0)
+check("timeout, worker detected: moved=yes with the stable contract",
+      r.stdout == "pane=w1:p7\ntab=w1:t7\nmoved=yes\nagent=claude\n")
+check("timeout, worker detected: polled until detected", len(e.call_args("pane get")) == 2)
+check("timeout, worker detected: the agent is named after the label, by pane",
+      e.call_args("agent rename") == [["agent", "rename", "w1:p7", "t"]])
+check("timeout, worker detected: started exactly once",
+      len(e.call_args("agent start")) == 1)
+check("timeout, worker detected: tab left alone", "tab close" not in [n for n, _ in e.calls()])
+check("timeout, worker detected: no error on a confirmed launch", "timed out" not in r.stderr)
+e.close()
+
+# --- ...a rename herdr refuses does not unconfirm the worker --------------- #
+taken = jsonlib.dumps({"error": {"code": "agent_name_taken", "message": "agent name t is already used"}})
+e = Env(modern_cases(**{
+    "agent start": ("", TIMEOUT_ERR, 1),
+    "pane get": (pane_get("claude"), "", 0),
+    "agent rename": ("", taken, 1)}), log_argv=True, api="modern")
+r = e.run("launch", "t", str(e.worktree), "w1")
+check("timeout, name taken: still moved=yes", r.returncode == 0 and kv(r.stdout).get("moved") == "yes")
+check("timeout, name taken: named=no on stdout", kv(r.stdout).get("named") == "no")
+check("timeout, name taken: herdr's error and the pane fallback are reported",
+      "agent_name_taken" in r.stderr and "address it by pane" in r.stderr)
+e.close()
+
+# --- ...but a timeout with NOTHING detected stays unverified --------------- #
+e = Env(modern_cases(**{
+    "agent start": ("", TIMEOUT_ERR, 1),
+    "pane get": (pane_get(), "", 0)}), log_argv=True, api="modern")
+r = e.run("launch", "t", str(e.worktree), "w1")
+check("timeout, nothing detected: blocked=unverified",
+      r.returncode == 0 and r.stdout.startswith("blocked=unverified\n"))
+check("timeout, nothing detected: herdr's error is relayed", "timed out waiting" in r.stderr)
+check("timeout, nothing detected: bounded polling", len(e.call_args("pane get")) == 3)
+check("timeout, nothing detected: no rename, no second start, tab left alone",
+      not e.call_args("agent rename") and len(e.call_args("agent start")) == 1
+      and "tab close" not in [n for n, _ in e.calls()])
+e.close()
+
+# --- ...and so does a timeout with the WRONG kind in the pane --------------- #
+e = Env(modern_cases(**{
+    "agent start": ("", TIMEOUT_ERR, 1),
+    "pane get": (pane_get("codex"), "", 0)}), log_argv=True, api="modern")
+r = e.run("launch", "t", str(e.worktree), "w1")
+check("timeout, wrong kind: blocked=unverified", r.stdout.startswith("blocked=unverified\n"))
+check("timeout, wrong kind: names what herdr detected", "'codex'" in r.stderr)
+check("timeout, wrong kind: no rename", not e.call_args("agent rename"))
 e.close()
 
 # --- pane-id mismatch on a "successful" start is unverified, not rollback -- #

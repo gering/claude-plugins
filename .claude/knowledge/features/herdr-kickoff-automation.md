@@ -185,6 +185,34 @@ decisions from the fix:
   "the verified worker is in its dedicated tab", and changing the key would break
   every caller for a cosmetic gain.
 
+### herdr 0.8.2: `agent start` waits for an IDLE agent (work-system 1.28.2)
+
+From 0.8.2, `agent start` succeeds only once the agent is *ready for input* — idle.
+A claude worker handed `/work-system:continue` starts working immediately and stays
+busy for the whole task, so every native `claude:*` start ran into its `--timeout`
+(`code=timeout`; so would any `agent start` kind that is busy at once) while the worker ran fine, and herdr then **never registers the
+requested name** — not even once the agent later goes idle (`agent get <label>` →
+`agent_not_found`). Measured live: `pane get` reports `agent=claude` 0.6s in, the
+start times out at 10.4s; a start whose turn finished in 16s returned at 17s. The
+pane-run path (cc-harness, kimi) never hit this: it confirms by detection, not by
+`agent start`'s readiness.
+
+- **A `timeout` — that code only — is confirmed from process state.** A bounded poll
+  (`CONFIRM_SECONDS`, 10s) for `pane get`'s `agent` in that exact pane: the expected
+  kind → `moved=yes`; a different kind or nothing → `blocked=unverified` as before.
+  Nothing is retried. A timeout is genuinely two-sided: live, a 3s start into a pane
+  whose shell was still busy typed **nothing** and left a bare prompt.
+- **Then name it**: `agent rename <pane> <label>` (idempotent, so bounded unlike the
+  launch mutations). Best-effort — `agent_name_taken` (a stale tab holding the label)
+  is reported on stderr plus a `named=no` stdout line `/kickoff` relays (the
+  caller must not advertise a name herdr gave someone else); the launch stays
+  confirmed.
+- **Not every startup error is the busy case.** `agent_not_ready` ("blocked during
+  startup") is CC's trust dialog in an untrusted cwd — the agent is stuck, not
+  working, so it stays ambiguous → `unverified`.
+- herdr's own error line is withheld on a confirmed launch and printed only when
+  confirmation fails.
+
 ### Gotcha: a supervisor cannot take its signal from terminal text
 
 Deciding "did this worker die?" from what the pane SHOWS was attempted three times
