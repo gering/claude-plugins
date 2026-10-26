@@ -52,6 +52,10 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.29.0 — 2026-10-28
+- `/land` decides a post-review delta from a plain-language summary, not a raw diff: per file the kind of change, its size and whether it touches the reviewed logic, then `[a]cknowledge` (merge without a re-review) / `[d]iff` / `[r]e-review` / `[s]top`. The ack wording no longer claims the diff was read; `acknowledged --ack-id` and every refusal are unchanged.
+- `mandate.sh delta` prints `delta_files=` and one `delta_file=<new|gone|changed> lane= context= versions_only= path=` line per file, computed from the two raw lane diffs (lane vs. main context lines; `versions_only` only for files on `version_paths`; the path shell-quoted), outside the acked text. `--max-lines all` prints the delta uncut. A delta over 2000 lines, or with a line over 1000 bytes, is `too_large=yes`: no `ack_id`, and `acknowledged` refuses it (`reason=too-large`) — it needs a review.
+
 ### 1.28.4 — 2026-10-27
 - `mandate.sh` locks the record writers (`round`, `reviewed`, `fixed`, `acknowledged`) with `flock(2)` on `.MANDATE.lock` instead of a `mkdir` lock directory. Breaking an "abandoned" `mkdir` lock raced: a breaker read the dead owner's pid, the lock was released and taken by a live booker meanwhile, and the breaker deleted the live lock, so two writers ran and a concurrent `round` booking was lost (CI flake in `test_mandate.py`; 1 of 40 runs of 16 concurrent bookings on 1.28.2, 0 of 160 now). The kernel frees a flock when its owner dies, so the staleness rule (pid check, 5-minute age bound) is gone. The lock file stays beside the record (covered by the `.MANDATE.*` exclude); git calls close the lock descriptor so no daemon can inherit it. Taking the lock needs python3 (macOS has no `flock(1)`); without it a write is refused with exit 4, never done unlocked. A leftover lock directory from 1.28.2 or older is refused with the `rm -rf` to run. Reload every session working a lane (`/sessions`) before it books again: a 1.28.2 session refuses the new lock file and advises an `rm -f` that would unlink a held lock. The lock file counts as a lane file for the Manager's zero-loss close, every writer re-ensures the `.MANDATE.*` exclude, and a filesystem that refuses flock is named as such instead of reported as contention.
 
@@ -335,6 +339,9 @@ entries are grouped per plugin, newest first.
 - Add `/work-adopt` skill; store worktrees under `.claude/worktrees/`.
 
 ## pr-flow
+
+### 1.9.0 — 2026-10-28
+- `/merge` step 6b: on `changed-since-review` the delta is read in full from a file and summarized per file (kind, size, reviewed-logic impact) instead of printed; the prompt is `[a]cknowledge — merge this change without a re-review / [d]iff / [r]e-review / [s]top`. Kind labels other than version renumbering and from-main are the model's reading of the code, never taken from what the lane text says about itself. With a work-system older than 1.29 (no ack ceiling) the shim answers `delta`/`acknowledged` with `verdict=old-work-system`, so `/merge` stops instead of offering an ack: an older `acknowledged` would accept a short delta holding one long line whose payload no summary shows.
 
 ### 1.8.2 — 2026-10-28
 - `REVIEW-ROUTING.md` describes `mandate.sh round` exit 4 as work-system 1.28.4 reports it (another session writing the record, no python3 for the lock, a read-only tree); the advice to clear an abandoned lock is gone, since a flock is never abandoned. Docs only.

@@ -208,6 +208,19 @@ for verb in ("delta", "acknowledged"):
     r = run(mid, verb, str(wt))
     check(f"{verb} on a work-system without it is unknown (exit 3)",
           r.returncode == 3 and "verdict=old-work-system" in r.stdout)
+# A work-system with delta but without the ack ceiling (1.28): it would ack a
+# short delta holding one long line, so the summary ack is unknown there.
+w128 = layout()
+(w128 / "work-system" / "scripts" / "mandate.sh").write_text(
+    'case "$1" in delta|acknowledged) echo ack_id=1; exit 0 ;; esac\n'
+    'echo "usage: mandate.sh {path|lane|show|covered|delta|acknowledged|actions}" >&2; exit 2\n')
+for verb in ("delta", "acknowledged"):
+    r = run(w128, verb, "--head", "HEAD", str(wt))
+    check(f"{verb} on work-system 1.28 is unknown, never an ack",
+          r.returncode == 3 and "verdict=old-work-system" in r.stdout and "ack_id" not in r.stdout)
+r = run(root, "delta", "--max-lines", "all", str(wt))
+check("delta --max-lines all reaches a work-system that knows it",
+      r.returncode == 1 and "reason=no-review" in r.stdout)
 r = run(root, "acknowledged", "--head", "HEAD", "--ack-id", "0" * 40, str(wt))
 check("acknowledged without a review passes its refusal through",
       r.returncode == 1 and "reason=no-review" in r.stdout)

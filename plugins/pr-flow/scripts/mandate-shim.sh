@@ -9,7 +9,7 @@
 # plugin would read as a denial. All mandate semantics live in work-system's
 # mandate.sh; this shim only locates it and passes the verdict through.
 #
-# Usage: mandate-shim.sh {show|allows <action>|round|reviewed [--head <rev>]|fixed --after <rev>|covered [--head <rev>]|delta [--head <rev>] [--max-lines <n>]|acknowledged --head <rev> --ack-id <id>|lane <branch>|actions|deploy-owner} [<dir>]
+# Usage: mandate-shim.sh {show|allows <action>|round|reviewed [--head <rev>]|fixed --after <rev>|covered [--head <rev>]|delta [--head <rev>] [--max-lines <n>|all]|acknowledged --head <rev> --ack-id <id>|lane <branch>|actions|deploy-owner} [<dir>]
 #
 # <dir> is the LANE, not the cwd: resolve it first with `lane <branch>` (prints
 # the worktree holding that branch), so a /cycle run from the main repo reads the
@@ -39,7 +39,7 @@ set -u
 
 case "${1:-}" in
   show|allows|round|reviewed|fixed|covered|delta|acknowledged|lane|actions|deploy-owner) ;;
-  *) echo "usage: ${0##*/} {show|allows <action>|round|reviewed [--head <rev>]|fixed --after <rev>|covered [--head <rev>]|delta [--head <rev>] [--max-lines <n>]|acknowledged --head <rev> --ack-id <id>|lane <branch>|actions|deploy-owner} [<dir>]" >&2; exit 2 ;;
+  *) echo "usage: ${0##*/} {show|allows <action>|round|reviewed [--head <rev>]|fixed --after <rev>|covered [--head <rev>]|delta [--head <rev>] [--max-lines <n>|all]|acknowledged --head <rev> --ack-id <id>|lane <branch>|actions|deploy-owner} [<dir>]" >&2; exit 2 ;;
 esac
 
 # Source the locator from THIS script's own directory — never from a path built
@@ -76,5 +76,16 @@ if [ -n "$needle" ]; then
     *) echo "verdict=old-work-system"; exit 3 ;;
   esac
 fi
+
+# The summary ack needs work-system 1.29: its delta refuses an ack_id past the
+# ceiling (too_large=, 2000 lines or a line over 1000 bytes), and its
+# acknowledged refuses the same. An older one would ack a short delta with one
+# long line whose payload no summary shows, so both verbs are unknown there —
+# /merge stops on that instead of offering [a]. `--max-lines <n>|all` names the
+# release that brought the ceiling.
+case "$1" in
+  delta|acknowledged)
+    grep -qF -- '--max-lines <n>|all' "$t" || { echo "verdict=old-work-system"; exit 3; } ;;
+esac
 
 exec bash "$t" "$@"

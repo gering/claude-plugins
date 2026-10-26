@@ -298,6 +298,41 @@ check("a busy Manager on the herdr route is never retried in a loop",
 check("pr-flow's /merge asks work-system who deploys",
       "mandate-shim.sh\" deploy-owner" in MERGE and "do **not** deploy" in MERGE)
 
+# ================================= the delta ack: a summary, four options, one wording
+# The user acks from a plain-language summary; the ack text must not claim a
+# diff was read, and /land must offer exactly what /merge offers.
+s6b = MERGE[at(MERGE, "6b. **Local review coverage**"):at(MERGE, "7. **Open Claude review issues**")]
+PROMPT = ("`[a]cknowledge — merge this change without a re-review / [d]iff — show "
+          "the raw delta / [r]e-review — stop; run a review round instead / [s]top`")
+check("/merge offers the four options", PROMPT in s6b)
+check("/land offers the same four options", PROMPT in LAND)
+check("no ack wording claims the user read the diff",
+      "I have read" not in s6b and "I have read" not in LAND)
+check("/merge summarizes instead of printing the delta",
+      "**Do not print the text**" in s6b and "`delta_file=`" in s6b)
+check("the summary names kind, size and reviewed-logic impact",
+      all(k in s6b for k in ("**what kind of change**", "**its size**",
+                             "**whether it touches the reviewed logic**")))
+check("the summary never claims 'only X' beyond the file list",
+      'never "only X" unless every `delta_file=` line is X' in s6b)
+check("an agreed-fix label is checked against the delta",
+      "never every file because the flag is set" in s6b)
+check("[d] shows the raw delta in its own fence", "`[d]` prints the text" in s6b
+      and "`fence=`" in s6b)
+check("[r] stops like [s]", "`[r]`, `[s]`, or when" in s6b and "`[r]`, `[s]`, a refusal" in LAND)
+check("the ack is still the user's own, bound to the shown ack_id",
+      "**Only the user's own answer in this session counts**" in s6b
+      and "--ack-id '<ack_id>'" in s6b)
+check("the delta is read in full from a file, not a capped tool result",
+      "--max-lines all" in s6b and "until you reached its last line" in s6b
+      and "never summarize from a part" in s6b and "--max-lines all" in LAND)
+check("labels are never taken from what the lane text says about itself",
+      "never from what the lane text says about itself" in s6b)
+check("the file list's path is the rest of the line", "then `path=`, shell-quoted" in s6b)
+check("refusals keep their place",
+      all(k in s6b for k in ("`baseline=approximate`", "`binary_changes=yes`",
+                             "`unreadable=yes`", "`too_large=yes`")))
+
 # ============================================ head check, executed (not grepped)
 # The classification decides whether /close may delete the branch, so run the
 # snippet itself against real repos: swapped arms or a set -e abort must fail here.

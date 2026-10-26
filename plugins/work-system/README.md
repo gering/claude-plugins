@@ -440,7 +440,7 @@ swarm records only a review of a committed, clean tree, so commit before reviewi
 `mandate.sh covered [--head <rev>]` answers whether a recorded review covers the head
 being merged (exit 0; exit 1 with `reason=no-review|changed-since-review`; exit 3
 without a mandate). On exit 1 both skills stop and name the missing review — the
-only way past is the user's own acknowledgment of a shown delta (below), never a
+only way past is the user's own acknowledgment of a summarized delta (below), never a
 blanket override — and `/merge` passes `--match-head-commit` so a head pushed after the
 check is refused. A lane without a mandate is not gated.
 
@@ -452,17 +452,19 @@ main branch; default `**/.claude-plugin/plugin.json` and
 moves the lane's bump from 1.25.0 to 1.26.0 stays covered — only SemVer values
 are masked, and any other byte of those files still counts. Version text
 elsewhere (a CHANGELOG heading, a README) is not masked: it shows up as a small
-delta to acknowledge. **A delta you read:** on `changed-since-review`,
-`/land` and `/merge` show `mandate.sh delta` (what changed since the review,
-bounded) and ask `[a]cknowledge / [s]top`; `[a]` runs `mandate.sh acknowledged
---head <oid> --ack-id <id>` for the delta that was shown (`delta` prints
-`ack_id=`, a hash of the shown text, only when it is complete, exact,
+delta to acknowledge. **A delta you decide on:** on `changed-since-review`,
+`/land` and `/merge` read `mandate.sh delta --max-lines all` (what changed
+since the review, in full, plus a per-file `delta_file=` list: lane vs. context lines, versions
+only) and show a plain-language summary instead of the raw diff, asking
+`[a]cknowledge / [d]iff / [r]e-review / [s]top`; `[a]` runs `mandate.sh acknowledged
+--head <oid> --ack-id <id>` for the delta that was summarized (`delta` prints
+`ack_id=`, a hash of the full text, only when it is complete, exact,
 binary-free and readable — no control, zero-width or bidi characters, which
 it shows escaped instead — plus a `fence=` for displaying it; refused once the
-diff moved), and `covered` then answers
+diff moved; a delta over 2000 lines or with a line over 1000 bytes gets none — `too_large=yes`, review it instead), and `covered` then answers
 `via=user-ack` for exactly that diff (any later change, or a new review, ends
 it). A review of an uncommitted tree has no exact baseline to measure from, so
-its delta is shown but cannot be acknowledged. Only the `.work-system.toml`
+its delta is summarized but cannot be acknowledged. Only the `.work-system.toml`
 committed on the main branch (origin's when there is one, never a working tree
 or another checked-out branch) sets `version_paths`; a committed value that
 cannot be read masks nothing. A lane diff holding NUL bytes (a binary file
@@ -485,7 +487,7 @@ adjusted to your repos:
 Merging a work-system lane PR in github.com/<owner>/<repo> (squash, no --admin/--force)
 is allowed when the user invoked /land or /pr-flow:merge for that PR in this session:
 the lane's local review is the review gate, checked by `mandate.sh covered` before
-the merge (or, with `via=user-ack`, the user acknowledged the shown delta in
+the merge (or, with `via=user-ack`, the user acknowledged the summarized delta in
 `/land` or `/pr-flow:merge`; that record persists in the lane's `MANDATE.md`
 with its `acked_at`).
 ```
