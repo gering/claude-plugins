@@ -75,11 +75,11 @@ NO_PANE_ERR = jsonlib.dumps({"error": {
     "code": "agent_pane_not_found", "message": "agent target pane w1:p7 not found"}})
 
 
-def pane_get(agent=None):
+def pane_get(agent=None, status="idle"):
     p = {"pane_id": "w1:p7", "tab_id": "w1:t7", "agent_status": "unknown"}
     if agent:
         p["agent"] = agent
-        p["agent_status"] = "idle"
+        p["agent_status"] = status
     return jsonlib.dumps({"result": {"pane": p}})
 
 
@@ -213,6 +213,20 @@ class Env:
         self.env["WORK_SYSTEM_HERDR_IDLE_MIN_SECONDS"] = "0"
         self.env["WORK_SYSTEM_HERDR_UNKNOWN_TRIES"] = "2"
         self.env["WORK_SYSTEM_HERDR_ALIVE_TRIES"] = "2"
+        # Pin the TIME the tries run under, too. Every stub answers in milliseconds,
+        # so these bounds never fire here — unless a loaded runner stalls one call
+        # past the production 10s. The bounded call is then killed after the stub
+        # already logged it and advanced its per-call sequence, so every later
+        # answer shifts by one: a "stops immediately" counts 2 polls, a ready→busy
+        # shell reads busy from the start. That is how one slow fork surfaced as a
+        # different assertion each run. Nothing here waits on them firing.
+        # The poll WINDOWS too: a stalled-but-not-killed read can otherwise run a
+        # window out after one poll, which is the same flake by another route.
+        for bound in ("WORK_SYSTEM_HERDR_PROBE_SECONDS", "WORK_SYSTEM_AGENT_PROBE_SECONDS",
+                      "HA_CALL_TIMEOUT_SECS", "WORK_SYSTEM_HERDR_CONFIRM_SECONDS",
+                      "WORK_SYSTEM_HERDR_DETECT_SECONDS", "WORK_SYSTEM_HERDR_READY_SECONDS",
+                      "WORK_SYSTEM_HERDR_ALIVE_SECONDS", "WORK_SYSTEM_HERDR_BUSY_SECONDS"):
+            self.env[bound] = "120"
         if api is not None:
             self.env["WORK_SYSTEM_HERDR_API"] = api
         else:
@@ -656,6 +670,39 @@ check("timeout, name taken: still moved=yes", r.returncode == 0 and kv(r.stdout)
 check("timeout, name taken: named=no on stdout", kv(r.stdout).get("named") == "no")
 check("timeout, name taken: herdr's error and the pane fallback are reported",
       "agent_name_taken" in r.stderr and "address it by pane" in r.stderr)
+e.close()
+
+# --- ...detection's first `unknown` seconds are polled through ------------- #
+e = Env(modern_cases(**{
+    "agent start": ("", TIMEOUT_ERR, 1),
+    "pane get": [(pane_get("claude", "unknown"), "", 0), (pane_get("claude", "working"), "", 0)],
+    "agent rename": (RENAMED, "", 0)}), log_argv=True, api="modern")
+r = e.run("launch", "t", str(e.worktree), "w1")
+check("timeout, status unknown then working: moved=yes",
+      r.returncode == 0 and kv(r.stdout).get("moved") == "yes")
+check("timeout, status unknown then working: polled until the status was known",
+      len(e.call_args("pane get")) == 2)
+e.close()
+
+# --- ...but a worker held at a prompt (blocked) is not a launch ------------ #
+e = Env(modern_cases(**{
+    "agent start": ("", TIMEOUT_ERR, 1),
+    "pane get": (pane_get("claude", "blocked"), "", 0)}), log_argv=True, api="modern")
+r = e.run("launch", "t", str(e.worktree), "w1")
+check("timeout, blocked: blocked=unverified", r.stdout.startswith("blocked=unverified\n"))
+check("timeout, blocked: says it is held at a prompt", "held at a prompt" in r.stderr)
+check("timeout, blocked: stops at the first known state, no rename",
+      len(e.call_args("pane get")) == 1 and not e.call_args("agent rename"))
+e.close()
+
+# --- ...and one whose detection never settles is unverified, not "at a prompt"
+e = Env(modern_cases(**{
+    "agent start": ("", TIMEOUT_ERR, 1),
+    "pane get": (pane_get("claude", "unknown"), "", 0)}), log_argv=True, api="modern")
+r = e.run("launch", "t", str(e.worktree), "w1")
+check("timeout, unknown throughout: blocked=unverified", r.stdout.startswith("blocked=unverified\n"))
+check("timeout, unknown throughout: says detection had not settled, not a prompt",
+      "had not settled" in r.stderr and "prompt" not in r.stderr)
 e.close()
 
 # --- ...but a timeout with NOTHING detected stays unverified --------------- #

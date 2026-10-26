@@ -188,6 +188,9 @@ fi
 # (`tab create`, `agent start`, `pane run`, `pane move`): `agent start` carries
 # herdr's own `--timeout`, and client-side killing a half-applied mutation would
 # trade a hang for unknown server state — those keep their pre-existing behavior.
+# PROBE_SECONDS is that bound for every read; a seam so tests under load can widen
+# it, never a reason to change the production 10s.
+PROBE_SECONDS="${WORK_SYSTEM_HERDR_PROBE_SECONDS:-10}"
 # shellcheck source=lib-bounded.sh
 . "$SCRIPT_DIR/lib-bounded.sh" 2>/dev/null || {
   echo "herdr-launch.sh: cannot source $SCRIPT_DIR/lib-bounded.sh (it ships alongside this script)" >&2
@@ -216,7 +219,7 @@ detect_launch_api() {
   # so a SIGKILLed grandchild still holding it would keep this $( ) open forever —
   # defeating the exact hang guard run_bounded's temp-file stdout routing provides.
   # `--help` goes to stdout; herdr's stderr is of no use here.
-  help="$(run_bounded 10 herdr agent start --help 2>/dev/null)" || rc=$?
+  help="$(run_bounded "$PROBE_SECONDS" herdr agent start --help 2>/dev/null)" || rc=$?
   # Plain substring tests on a string already in memory — `case` does this with no
   # subprocess, where the printf|grep pipelines it replaces cost eight per launch
   # and implied a regex match that was never wanted.
@@ -246,7 +249,7 @@ READY_TRIES="${WORK_SYSTEM_HERDR_READY_TRIES:-60}"               # shell-prompt 
 DETECT_TRIES="${WORK_SYSTEM_HERDR_DETECT_TRIES:-60}"             # wrapper detection polls
 RETRY_DELAY="${WORK_SYSTEM_HERDR_RETRY_DELAY:-0.5}"              # seconds between polls
 # Try counts alone do NOT bound these loops in wall clock: each iteration makes
-# herdr calls that are themselves only bounded at 10s each, so against a wedged
+# herdr calls that are themselves bounded at PROBE_SECONDS (10s) each, so against a wedged
 # socket "60 tries" can mean twenty minutes rather than the ~30s the numbers imply.
 # Every poll loop therefore also carries an absolute deadline, and whichever bound
 # trips first ends it.
@@ -540,7 +543,7 @@ fail_definitive() {
 # reads a killed probe as unreadable instead of exiting. Non-printables are
 # stripped: both fields reach the terminal in diagnostics.
 pane_agent_state() {
-  run_bounded 10 herdr pane get "$1" 2>/dev/null | python3 -c "$extract_pane_agent_state" 2>/dev/null | tr -dc '[:print:]\n' || true
+  run_bounded "$PROBE_SECONDS" herdr pane get "$1" 2>/dev/null | python3 -c "$extract_pane_agent_state" 2>/dev/null | tr -dc '[:print:]\n' || true
 }
 
 # name_agent <pane> <name> — give a confirmed worker the herdr agent name its
@@ -552,7 +555,7 @@ pane_agent_state() {
 name_agent() {
   local diag rc=0
   rename_err="$(mktemp)"   # global, so the EXIT trap removes it on a signal
-  run_bounded 10 herdr agent rename "$1" "$2" >/dev/null 2>"$rename_err" || rc=$?
+  run_bounded "$PROBE_SECONDS" herdr agent rename "$1" "$2" >/dev/null 2>"$rename_err" || rc=$?
   if [ "$rc" != 0 ]; then
     diag="$(herdr_diag "$(cat "$rename_err")" "$workspace" 0)"
     [ -n "$diag" ] && printf '%s\n' "$diag" >&2
@@ -585,7 +588,7 @@ if not pid or not panes:
 print("present" if any(p.get("pane_id") == pid for p in panes) else "gone")'
 pane_state() {
   local json
-  json="$(run_bounded 10 herdr pane list 2>/dev/null || true)"
+  json="$(run_bounded "$PROBE_SECONDS" herdr pane list 2>/dev/null || true)"
   [ -n "$json" ] || { printf 'unverified\n'; return 0; }
   printf '%s' "$json" | python3 -c "$extract_pane_present" "$1" 2>/dev/null || printf 'unverified\n'
 }
@@ -615,7 +618,7 @@ pane_state() {
 # its own shell prompt". `ready` = the shell itself holds the foreground, `busy` =
 # a child does (the wrapper is running), `unknown` = herdr cannot answer.
 pane_shell_state() {
-  run_bounded 10 herdr pane process-info --pane "$1" 2>/dev/null \
+  run_bounded "$PROBE_SECONDS" herdr pane process-info --pane "$1" 2>/dev/null \
     | python3 -c "$extract_shell_ready" 2>/dev/null || echo unknown
 }
 
@@ -727,7 +730,7 @@ EOF_RESOLVE
         # We never got an answer, so we know nothing about the contract. Say THAT,
         # instead of accusing herdr of an unrecognizable API — the cause here is a
         # wedged/unreachable socket or a probe that outran its bound.
-        echo "could not probe 'herdr agent start --help' (no output, an error, or it outran its 10s bound) — herdr may be unreachable or wedged" >&2
+        echo "could not probe 'herdr agent start --help' (no output, an error, or it outran its ${PROBE_SECONDS}s bound) — herdr may be unreachable or wedged" >&2
         echo "nothing was created and no worker was started — start it by hand, or retry once herdr responds" >&2
         exit 1
         ;;

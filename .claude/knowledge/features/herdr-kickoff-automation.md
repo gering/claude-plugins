@@ -1,10 +1,10 @@
 ---
 title: "herdr /kickoff + /continue-reopen Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-08-19
+updatedAt: 2026-10-31
 createdFrom: "PR #17"
-updatedFrom: "session: 2026-08-19 (task/offer-cc-harness-agents-at-kickoff)"
-pluginVersion: 1.12.0
+updatedFrom: "session: 2026-10-31 (task/fix-herdr-launch-unverified-on-0-8-2)"
+pluginVersion: 1.29.1
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -164,7 +164,8 @@ decisions from the fix:
   Definitive failures close the created tab exactly once through
   `herdr-teardown.sh close-tab` (the existing close-then-verify SoT — it deliberately
   does not re-issue the close, since a recycled tab id would kill an unrelated live
-  tab). Ambiguous outcomes — readiness timeout, an unclassifiable herdr error, a
+  tab). Ambiguous outcomes — a readiness timeout with no running worker detected
+  (see the 0.8.2 section below), an unclassifiable herdr error, a
   returned pane id that isn't the requested one, a wrapper detected as the wrong kind
   — leave the tab alone and return the new fail-closed `blocked=unverified` result
   (exit 0, `blocked` FIRST). An *unconfirmed* rollback downgrades to the same result:
@@ -185,7 +186,7 @@ decisions from the fix:
   "the verified worker is in its dedicated tab", and changing the key would break
   every caller for a cosmetic gain.
 
-### herdr 0.8.2: `agent start` waits for an IDLE agent (work-system 1.28.2)
+### herdr 0.8.2: `agent start` waits for an IDLE agent (work-system 1.29.1)
 
 From 0.8.2, `agent start` succeeds only once the agent is *ready for input* — idle.
 A claude worker handed `/work-system:continue` starts working immediately and stays
@@ -198,8 +199,10 @@ pane-run path (cc-harness, kimi) never hit this: it confirms by detection, not b
 `agent start`'s readiness.
 
 - **A `timeout` — that code only — is confirmed from process state.** A bounded poll
-  (`CONFIRM_SECONDS`, 10s) for `pane get`'s `agent` in that exact pane: the expected
-  kind → `moved=yes`; a different kind or nothing → `blocked=unverified` as before.
+  (`WORK_SYSTEM_HERDR_CONFIRM_SECONDS`, 10s) of `pane get`'s `agent` + `agent_status`
+  in that exact pane: the expected kind while `working`/`idle`/`done` → `moved=yes`;
+  `blocked` (held at a prompt), a different kind or nothing → `blocked=unverified` as
+  before. `unknown` is herdr's first seconds of detection and is polled through.
   Nothing is retried. A timeout is genuinely two-sided: live, a 3s start into a pane
   whose shell was still busy typed **nothing** and left a bare prompt.
 - **Then name it**: `agent rename <pane> <label>` (idempotent, so bounded unlike the
@@ -212,6 +215,20 @@ pane-run path (cc-harness, kimi) never hit this: it confirms by detection, not b
   working, so it stays ambiguous → `unverified`.
 - herdr's own error line is withheld on a confirmed launch and printed only when
   confirmation fails.
+
+### Gotcha: a killed probe shifts a sequenced test stub
+
+`test_herdr_launch.py`'s herdr stub answers the Nth call to a subcommand with the
+Nth canned reply, counting on ENTRY. A bounded read that a loaded runner stalls past
+its bound is killed after it was counted, so every later answer shifts by one — the
+suite then failed on a different assertion each run (`stops immediately` sees 2
+polls; a ready→busy shell reads busy at once). Measured: a single 2s `pane get` under
+a 1s bound turns 1 poll into 2. Hence every time bound is a seam
+(`WORK_SYSTEM_HERDR_PROBE_SECONDS`, `WORK_SYSTEM_AGENT_PROBE_SECONDS`,
+`HA_CALL_TIMEOUT_SECS`) pinned to 120s in `Env.__init__`, together with every poll
+window (`…_CONFIRM/DETECT/READY/ALIVE/BUSY_SECONDS`): a read that stalls without
+being killed would otherwise end a window after one poll. Production stays 10s. A
+new bounded call or window needs the same seam, or the flake returns.
 
 ### Gotcha: a supervisor cannot take its signal from terminal text
 
