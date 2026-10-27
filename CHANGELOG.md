@@ -52,6 +52,9 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.28.2 — 2026-10-27
+- `test_close_request.py` and `test_landing.py` build their shadow `PATH` with `os.path.lexists`, so a dangling link that `/usr/bin` and `/bin` both list (usrmerge) is skipped as a duplicate instead of failing the second `symlink_to` with `FileExistsError` (Structure Checks red on main since #91). Tests only; no script behavior changes.
+
 ### 1.28.1 — 2026-10-22
 - The merge gate's lane diff id hashes only the lane's own lines: a `-U0` diff, whose place is the file, the hunk order and git's function context. A rebase over main edits next to a lane hunk keeps `covered=yes` (#89 asked to re-review lines the lane never touched). A lane line that changes or moves (under another header, or past another lane hunk) still flips it. A main edit to the hunk's function-context line still asks for a review. Accepted residuals: a lane line moved within one function past no other lane hunk keeps the id, and so does a main edit that changes what a lane hunk means (deleting a guard right above it). Reviews recorded by 1.28.0 (`diff_id_form=context`) or earlier (`legacy`; `context` when no manifest is touched, the same text) keep matching their unchanged lane, also under a non-default diff config, and `delta` still shows context. `delta`'s `diff_form=masked` is now `context-free` (or `context`/`legacy` for an older record).
 - `mandate.sh round` (and the other record writers) no longer exit 4 when a concurrent booker releases the lock between a failed `mkdir` and the check: only a `mkdir` error other than "File exists" is a lock that cannot be created. The lock's pid is written atomically, so a partial pid never marks a live lock stale, and a file or symlink at the lock path exits 4 at once with a hint instead of waiting 5 s and blaming another process.

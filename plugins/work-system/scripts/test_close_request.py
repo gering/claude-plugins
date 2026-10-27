@@ -28,11 +28,19 @@ FAILS = []
 # once, not per fixture (it is a few thousand symlinks on a typical host).
 _SHADOW = tempfile.TemporaryDirectory()
 SHADOW = Path(os.path.realpath(_SHADOW.name))
-for _src in ("/usr/bin", "/bin"):
-    for _name in os.listdir(_src):
-        if _name in ("gh", "herdr") or (SHADOW / _name).exists():
-            continue
-        (SHADOW / _name).symlink_to(os.path.join(_src, _name))
+
+
+def build_shadow(dest, sources):
+    # lexists, not exists(): a dangling link the first source already placed
+    # is still a duplicate (usrmerge lists every name under both dirs).
+    for src in sources:
+        for name in os.listdir(src):
+            if name in ("gh", "herdr") or os.path.lexists(dest / name):
+                continue
+            (dest / name).symlink_to(os.path.join(src, name))
+
+
+build_shadow(SHADOW, ("/usr/bin", "/bin"))
 
 
 def check(name, cond):
@@ -599,6 +607,24 @@ fx.close()
 
 r = subprocess.run(["bash", str(SCRIPT), "bogus"], capture_output=True, text=True)
 check("usage: unknown subcommand exits 2", r.returncode == 2)
+
+# --- shadow PATH: a dangling link listed by both sources ----------------------- #
+# The runner's /bin is /usr/bin (usrmerge) and holds a dangling link; the second
+# pass must skip it instead of failing with FileExistsError.
+
+with tempfile.TemporaryDirectory() as _td:
+    _td = Path(_td)
+    _a, _b, _dest = _td / "usr-bin", _td / "bin", _td / "shadow"
+    for _d in (_a, _b, _dest):
+        _d.mkdir()
+    for _d in (_a, _b):
+        (_d / "dangling").symlink_to(_td / "missing")
+    try:
+        build_shadow(_dest, (_a, _b))
+        _ok = os.readlink(_dest / "dangling") == str(_a / "dangling")
+    except FileExistsError:
+        _ok = False
+    check("shadow build skips a dangling duplicate", _ok)
 
 if FAILS:
     print("FAIL:")
