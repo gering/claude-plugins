@@ -52,6 +52,9 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.29.2 — 2026-10-31
+- Faster, load-robust tests: `test_agent_registry.py` and `test_herdr_shell.py` write each distinct stub body once and link it (macOS assesses every new executable on first exec, which made these tests idle for minutes under parallel load); `test_insights_handoff.py` checks for temp-file leaks in a private `TMPDIR` and proves through a logging `mktemp` shim that the run made temp files there. `sessions.py` gets a test seam `SESSIONS_POLL_MS` (50–1000 ms; it can only shorten the 1 s reload-verify poll), used by `test_sessions.py`.
+
 ### 1.29.1 — 2026-10-31
 - `herdr-launch.sh launch` confirms an `agent start` worker (in practice a native `claude:*` one) whose `agent start` hit herdr's readiness `timeout`: herdr 0.8.2 waits for an idle agent, and a worker handed `/work-system:continue` is busy from the start, so every such kickoff ended `blocked=unverified` while it ran. On that error code only, a bounded poll (`WORK_SYSTEM_HERDR_CONFIRM_SECONDS`, 10 s) for the expected kind in the pane, in a running state (`working`/`idle`/`done`), turns it into `moved=yes`; a worker held at a prompt (`blocked`), nothing or a different kind stays `unverified`, and nothing is retried. The confirmed worker then gets the herdr agent name the timed-out start never registered (`agent rename`, best-effort; a refused name adds `named=no`, which `/kickoff` relays), and herdr's timeout error is printed only when the confirmation fails.
 - Test seams for the probe time bounds (`WORK_SYSTEM_HERDR_PROBE_SECONDS`, `WORK_SYSTEM_AGENT_PROBE_SECONDS`; production default unchanged at 10 s), pinned with `HA_CALL_TIMEOUT_SECS` and every poll window in `test_herdr_launch.py`. A stalled call killed by the bound had already advanced the herdr stub's per-call sequence, which is why the test failed on a different assertion each loaded run.
