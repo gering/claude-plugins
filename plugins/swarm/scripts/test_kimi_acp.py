@@ -46,6 +46,13 @@ def tool_update(kind_of_update, tool_id, kind, status):
             "params": {"sessionId": "fake-session", "update": update}}
 
 
+# How long the fake waits for the client's kill before it carries on to
+# end_turn. A client that kills on sight never lets it get past this; one that
+# waits for end_turn does, and the test then sees prompt_done. The bound only
+# has to outlast the kill under load: the passing path never sleeps it out.
+KILL_WAIT = 10.0
+
+
 def response_error(request_id, code, message):
     emit({"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}})
 
@@ -167,14 +174,14 @@ for raw in sys.stdin:
             u = tool_update("tool_call_update", "tool-x9", None, "in_progress")
             u["params"]["update"]["rawInput"] = {"command": "git config user.email x"}
             emit(u)
-            time.sleep(1.0)
+            time.sleep(KILL_WAIT)
             for _ in range(50):
                 emit(agent_text("still running "))
         elif scenario == "exec-denied":
             u = tool_update("tool_call", "tool-x2", "execute", "in_progress")
             u["params"]["update"]["rawInput"] = {"command": os.environ.get("FAKE_COMMAND", "git log > /tmp/out")}
             emit(u)
-            time.sleep(1.0)   # let the kill land (see unsafe-in-progress)
+            time.sleep(KILL_WAIT)   # let the kill land
             for _ in range(50):
                 emit(agent_text("still running "))
         elif scenario == "exec-permission":
@@ -241,12 +248,11 @@ for raw in sys.stdin:
             # sight instead of waiting for end_turn (execute differs: its
             # command may still be streaming — see exec-no-command).
             emit(tool_update("tool_call", "tool-7", "edit", "in_progress"))
-            # Give the client's kill a moment to land: it arrives within
-            # milliseconds of the frame above, and a client that instead waited
-            # for end_turn lets this fake reach prompt_done after the pause —
-            # which is what the test asserts. Without the pause the whole burst
-            # (plus prompt_done) could be written before the kill (1 in ~8 runs).
-            time.sleep(1.0)
+            # Wait for the client's kill (see KILL_WAIT): it usually lands within
+            # milliseconds, but a fixed short pause lost that race under load.
+            # Without any pause the whole burst (plus prompt_done) could be
+            # written before the kill (1 in ~8 runs).
+            time.sleep(KILL_WAIT)
             # Keep streaming: the client must NOT wait for end_turn.
             for _ in range(50):
                 emit(agent_text("still running "))
@@ -398,6 +404,18 @@ for raw in sys.stdin:
 # a fake ACP server subprocess through run_helper's fixture, and unittest's
 # addCleanup/TemporaryDirectory handling is what keeps those fixtures hermetic.
 class KimiAcpTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # One fake binary for the whole class: it is steered by env alone. macOS
+        # assesses every NEW executable on its first exec (~150 ms, serialized
+        # across processes), so a fresh copy per run made this test minutes
+        # long under parallel load.
+        temp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(temp.cleanup)
+        cls.fake = Path(temp.name) / "kimi"
+        cls.fake.write_text(_FAKE_KIMI, encoding="utf-8")
+        cls.fake.chmod(0o755)
+
     def run_helper(self, scenario: str = "valid", *, schema: Path = SCHEMA,
                    env_extra: dict | None = None, prompt_bytes: bytes | None = None,
                    effort: str = "max", make_symlink: bool = False,
@@ -405,9 +423,6 @@ class KimiAcpTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
-        fake = root / "kimi"
-        fake.write_text(_FAKE_KIMI, encoding="utf-8")
-        fake.chmod(0o755)
         prompt = root / "prompt.txt"
         if prompt_bytes is None:
             prompt.write_text("PROMPT_SENTINEL_7f0ac9\n", encoding="utf-8")
@@ -438,7 +453,7 @@ class KimiAcpTests(unittest.TestCase):
                 "--cwd", str(root),
                 "--model", MODEL,
                 "--effort", effort,
-                "--kimi-bin", str(fake),
+                "--kimi-bin", str(self.fake),
                 "--deny-path", str(root / ".kimi-code"),
             ] + (["--metrics-file", str(metrics_file)] if metrics_file is not None else [])
               + (["--tools", tools] if tools is not None else []),

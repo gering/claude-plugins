@@ -455,6 +455,9 @@ entries are grouped per plugin, newest first.
 
 ## swarm
 
+### 0.16.1 — 2026-10-31
+- Load-robust tests: `test_codex_models.py` separates the deadline under test from the time a working peer gets (a 0.4–2 s deadline was shorter than an interpreter start under load), `test_kimi_acp.py` and `test_grok_compat.py` write their fake CLI once instead of per case. Tests only; no script behavior changes.
+
 ### 0.15.0 — 2026-10-19
 - A `/swarm:review` of the whole lane (branch delta on a clean tree, or `--pr`) records the commit it reviewed (default-branch PRs only; the head read before the diff, so edits or pushes made while it runs are never stamped) for work-system's merge gate (`scripts/review-record.sh reviewed --head`, before any fix); fixes applied after the last recorded review are recorded once (`fixed --after`). Soft-coupled: without work-system, a mandate or a new enough work-system it is a silent no-op. Ships its own copy of the work-system locator (`lib-work-system.sh`, comparator pinned by work-system's `test_locator_sync.py`).
 
