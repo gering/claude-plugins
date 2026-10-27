@@ -31,13 +31,16 @@ SHADOW = Path(os.path.realpath(_SHADOW.name))
 
 
 def build_shadow(dest, sources):
-    # lexists, not exists(): a dangling link the first source already placed
-    # is still a duplicate (usrmerge lists every name under both dirs).
+    # A dangling source entry is skipped, so a later source's real binary of
+    # that name still gets linked; lexists, not exists(), so a name already
+    # placed counts as present (usrmerge lists every name under both dirs).
     for src in sources:
         for name in os.listdir(src):
-            if name in ("gh", "herdr") or os.path.lexists(dest / name):
+            target = os.path.join(src, name)
+            if (name in ("gh", "herdr") or not os.path.exists(target)
+                    or os.path.lexists(dest / name)):
                 continue
-            (dest / name).symlink_to(os.path.join(src, name))
+            (dest / name).symlink_to(target)
 
 
 build_shadow(SHADOW, ("/usr/bin", "/bin"))
@@ -404,12 +407,15 @@ with tempfile.TemporaryDirectory() as _td:
         _d.mkdir()
     for _d in (_a, _b):
         (_d / "dangling").symlink_to(_td / "missing")
+    (_a / "tool").symlink_to(_td / "missing")
+    (_b / "tool").write_text("")
     try:
         build_shadow(_dest, (_a, _b))
-        _ok = os.readlink(_dest / "dangling") == str(_a / "dangling")
+        _ok = (not os.path.lexists(_dest / "dangling")
+               and os.readlink(_dest / "tool") == str(_b / "tool"))
     except FileExistsError:
         _ok = False
-    check("shadow build skips a dangling duplicate", _ok)
+    check("shadow build skips a dangling source entry", _ok)
 
 if FAILS:
     print("FAIL:")
