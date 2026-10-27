@@ -110,6 +110,12 @@
 # negative answer that is NOT a user decision — their `reason=` names it.
 set -eu
 
+# Every git call closes fd 9, the record lock (acquire_round_lock). A flock lasts
+# until the last descriptor on it closes, and git can leave a daemon behind
+# (core.fsmonitor) that would otherwise inherit the descriptor and hold the
+# lane's lock long after this script exited.
+git() { command git "$@" 9>&-; }
+
 MANDATE_FILE="MANDATE.md"
 MANDATE_VERSION=1
 
@@ -411,70 +417,82 @@ do_allows() {
 # so that worker's own review loop and the Manager's can book a round at the same
 # time. Both read used=1, both write 2, and a budget of 2 funds an unbounded
 # number of reviews. (This was rejected four times on a "one lane = one worker"
-# invariant that the lane resolver itself breaks.) mkdir is the portable atomic
-# test-and-set; the name starts with .MANDATE. so the git exclude already covers
-# it. A bounded wait then a loud exit 4 — never a silent second booking, and
-# never a wedged lane without saying which file to remove.
-ROUND_LOCK=""
-# Is the lock abandoned? Its owner recorded a pid; if that process is gone, or
-# the directory is older than the bound, nobody is coming back for it. Without
-# this a `kill -9` (or a herdr tab torn down mid-round) wedged the lane
-# permanently — every later round exits 4, and the `.MANDATE.*` exclude hides
-# the lock from `git status`, so nothing points at the cause.
-LOCK_STALE_MINUTES=5
-lock_is_stale() {
-  local lock="$1" pid=""
-  [ -d "$lock" ] || return 1
-  [ -f "$lock/pid" ] && pid="$(cat "$lock/pid" 2>/dev/null || true)"
-  case "$pid" in
-    ''|*[!0-9]*) ;;
-    *) if ! kill -0 "$pid" 2>/dev/null; then return 0; fi ;;
-  esac
-  # Age is the backstop: a pid can be reused, and `kill -0` cannot see a live
-  # process owned by another user.
-  [ -n "$(find "$lock" -maxdepth 0 -mmin "+$LOCK_STALE_MINUTES" 2>/dev/null)" ]
-}
+# invariant that the lane resolver itself breaks.) The name starts with .MANDATE.
+# so the git exclude already covers it. A bounded wait then a loud exit 4 —
+# never a silent second booking.
+#
+# flock(2), held on fd 9 of this shell, not a mkdir lock. A mkdir lock outlives a
+# `kill -9`, so it needs a "the owner is gone, break it" rule, and that rule has
+# no safe form: a breaker reads the dead owner's pid, the lock is meanwhile
+# released and taken by a live booker, and the breaker deletes the live one —
+# two writers, one lost booking (CI lost one in eight concurrent rounds). The
+# kernel drops a flock when the last descriptor on it closes, so a killed owner
+# frees it and nothing ever has to decide that a lock is abandoned. python3
+# takes the lock because macOS ships no flock(1); bash keeps the descriptor, so
+# the lock lives exactly as long as this script (or release_round_lock).
+ROUND_LOCK_WAIT=5
+# Exit 0 locked, 1 still held when the wait ran out, 2 flock itself failed (a
+# filesystem without flock support; the error is on stderr), 3 fd 9 is not the
+# regular file at the lock path (a symlink swapped in, a FIFO, a directory).
+FLOCK_PY='
+import fcntl, os, stat, sys, time
+try:
+    st, ln = os.fstat(9), os.lstat(sys.argv[1])
+except OSError:
+    sys.exit(3)
+if not stat.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) != (ln.st_dev, ln.st_ino):
+    sys.exit(3)
+end = time.monotonic() + float(sys.argv[2])
+while True:
+    try:
+        fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        sys.exit(0)
+    except BlockingIOError:
+        if time.monotonic() >= end:
+            sys.exit(1)
+        time.sleep(0.02)
+    except OSError as e:
+        print(e.strerror or e, file=sys.stderr)
+        sys.exit(2)
+'
 
 acquire_round_lock() {
-  local lock="${MANDATE_PATH%/*}/.MANDATE.lock" i=0 broke=no err
-  while ! err="$(LC_ALL=C mkdir "$lock" 2>&1)"; do
-    # mkdir can fail for two very different reasons. Anything but "File exists"
-    # is not contention (a read-only worktree, a full disk) and retrying cannot
-    # help — report it in the same words as a failed write, at once, instead of
-    # sleeping five seconds first. Decided from mkdir's own error, not from
-    # whether the lock is there now: a holder can release it between the
-    # failed mkdir and any check, and that is contention like any other.
-    case "$err" in
-      *"File exists"*) ;;
-      *) echo "${0##*/}: could not persist the consumed round — no lock could be created beside $MANDATE_PATH: ${err#mkdir: }" >&2
-         exit 4 ;;
-    esac
-    # A file or a symlink there is no lock anyone holds: waiting on it would
-    # only end in blaming a process that does not exist.
-    if [ -L "$lock" ] || { [ -e "$lock" ] && [ ! -d "$lock" ]; }; then
-      echo "${0##*/}: could not persist the consumed round — $lock is not a lock directory; remove it and retry: rm -f '$lock'" >&2
-      exit 4
-    fi
-    if [ "$broke" = no ] && lock_is_stale "$lock"; then
-      # Break it ONCE. A second staleness verdict in the same call would mean we
-      # are racing another breaker, and then waiting is the safer answer.
-      rm -rf "$lock" 2>/dev/null || true
-      broke=yes
-      continue
-    fi
-    i=$(( i + 1 ))
-    if [ "$i" -ge 50 ]; then
-      echo "${0##*/}: could not consume a review round — another process holds $lock and it does not look abandoned. If no other session is booking a round for this lane, remove it and retry: rm -rf '$lock'" >&2
-      exit 4
-    fi
-    sleep 0.1
-  done
-  # Written aside and renamed in, so lock_is_stale never reads a partial pid
-  # (`12` of `12345` names another, likely dead, process). Until it lands the
-  # lock has no pid, and a young lock without one is never stale (the age
-  # backstop), so the mkdir-to-pid gap cannot get a live lock broken.
-  printf '%s\n' "$$" > "$lock/pid.$$" 2>/dev/null && mv -f "$lock/pid.$$" "$lock/pid" 2>/dev/null || true
-  ROUND_LOCK="$lock"
+  local lock="${MANDATE_PATH%/*}/.MANDATE.lock" rc=0 err
+  # A directory here is the mkdir lock of work-system 1.28.2 and older, left by a
+  # killed run or held by an old session mid-booking. Which one cannot be told
+  # safely (that is the bug above), so say so instead of guessing.
+  if [ -d "$lock" ] && [ ! -L "$lock" ]; then
+    echo "${0##*/}: could not persist the record — $lock is a lock directory from an older work-system. If no older session is booking for this lane right now, remove it and retry: rm -rf '$lock'" >&2
+    exit 4
+  fi
+  # Checked before the open, which would follow a symlink and block on a FIFO;
+  # FLOCK_PY re-checks the opened file against the path, closing the gap.
+  if [ -L "$lock" ] || { [ -e "$lock" ] && [ ! -f "$lock" ]; }; then
+    echo "${0##*/}: could not persist the record — $lock is not a lock file; remove it and retry: rm -f '$lock'" >&2
+    exit 4
+  fi
+  # The lock file stays for good, so it must never reach a `git add -A`: make
+  # sure of the exclude here, not only in init (a hand-written MANDATE.md, or
+  # an init whose exclude write failed). Best-effort, like init's.
+  exclude_one "${MANDATE_PATH%/*}" ".MANDATE.*" || true
+  { exec 9<>"$lock"; } 2>/dev/null || {
+    echo "${0##*/}: could not persist the record — no lock could be created beside $MANDATE_PATH" >&2
+    exit 4
+  }
+  err="$(python3 -I -c "$FLOCK_PY" "$lock" "$ROUND_LOCK_WAIT" 2>&1)" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) echo "${0##*/}: could not persist the record — another process is writing this lane's record (it holds $lock). Retry once it finishes." >&2 ;;
+    2) echo "${0##*/}: could not persist the record — this filesystem refused the lock on $lock: $err" >&2 ;;
+    3) echo "${0##*/}: could not persist the record — $lock is not a lock file; remove it and retry: rm -f '$lock'" >&2 ;;
+    *) echo "${0##*/}: could not persist the record — taking the lock needs python3 (exit $rc)" >&2 ;;
+  esac
+  exec 9>&-
+  exit 4
+}
+
+release_round_lock() {
+  exec 9>&-
 }
 
 do_round() {
@@ -486,7 +504,6 @@ do_round() {
   # Locked BEFORE the read: the whole parse -> increment -> mv has to be one
   # critical section, or two readers still both see the old count.
   acquire_round_lock
-  trap 'rm -rf "$ROUND_LOCK"' EXIT
   parse_frontmatter "$MANDATE_PATH"
   budget="$FM_review_budget"; used="$FM_review_rounds_used"
   case "$used" in ''|*[!0-9]*) used=0 ;; esac
@@ -498,7 +515,7 @@ do_round() {
   # `review_budget_exhausted` keeps its one meaning, "no further rounds after
   # this one".
   if [ -n "$budget" ] && [ "$used" -ge "$budget" ]; then
-    rm -rf "$ROUND_LOCK"; trap - EXIT
+    release_round_lock
     printf 'round_authorized=no\n'
     printf 'review_rounds_used=%s\n' "$used"
     emit_budget "$budget" "$used"
@@ -506,8 +523,7 @@ do_round() {
   fi
   used=$(( used + 1 ))
   persist_keys "review_rounds_used=$used"
-  rm -rf "$ROUND_LOCK"
-  trap - EXIT
+  release_round_lock
 
   printf 'round_authorized=yes\n'
   printf 'review_rounds_used=%s\n' "$used"
@@ -529,8 +545,8 @@ persist_keys() {
   # the orphan `.MANDATE.XXXXXX` is untracked in the worktree root — exactly what
   # a worker authorized to `git add -A` would commit. `ensure_excluded` covers
   # the pattern too, for the kill -9 the shell can never catch.
-  trap 'rm -f "$tmp"; rm -rf "$ROUND_LOCK"' EXIT
-  trap 'rm -f "$tmp"; rm -rf "$ROUND_LOCK"; exit 4' INT TERM HUP
+  trap 'rm -f "$tmp"' EXIT
+  trap 'rm -f "$tmp"; exit 4' INT TERM HUP
 
   # A key that is ABSENT (hand-edited away, a mandate from another tool, or one
   # recorded before the key existed) is inserted before the closing fence — the
@@ -569,8 +585,7 @@ persist_keys() {
     echo "${0##*/}: could not persist the record to $MANDATE_PATH" >&2
     exit 4
   }
-  trap 'rm -rf "$ROUND_LOCK"' EXIT
-  trap - INT TERM HUP
+  trap - EXIT INT TERM HUP
 
   # Read the file back and confirm every value is really there before reporting
   # it. Reporting a round the file never recorded is the single failure the
@@ -889,11 +904,10 @@ do_reviewed() {
     || die "could not record the review: $DIFF_ERR"
   head="${REV_COMMIT:-$(git -C "${MANDATE_PATH%/*}" rev-parse --verify -q HEAD 2>/dev/null || true)}"
   acquire_round_lock
-  trap 'rm -rf "$ROUND_LOCK"' EXIT
   parse_frontmatter "$MANDATE_PATH"
   persist_keys "reviewed_head=$head" "reviewed_diff=$DIFF_ID" "fixed_diff=" \
     "acked_head=" "acked_diff=" "acked_by=" "acked_at="
-  rm -rf "$ROUND_LOCK"; trap - EXIT
+  release_round_lock
   printf 'reviewed_recorded=yes\nreviewed_head=%s\nreviewed_diff=%s\n' "$head" "$DIFF_ID"
 }
 
@@ -913,7 +927,6 @@ do_fixed() {
   after="$(git -C "${MANDATE_PATH%/*}" rev-parse --verify -q "$after^{commit}" 2>/dev/null)" \
     || die "--after names no commit in this repo"
   acquire_round_lock
-  trap 'rm -rf "$ROUND_LOCK"' EXIT
   parse_frontmatter "$MANDATE_PATH"
   if [ -z "$FM_reviewed_diff" ]; then
     reason=no-review
@@ -926,13 +939,13 @@ do_fixed() {
     echo "${0##*/}: the last review's fixes are already recorded — further changes need a new review" >&2
   fi
   if [ -n "$reason" ]; then
-    rm -rf "$ROUND_LOCK"; trap - EXIT
+    release_round_lock
     printf 'fixed_recorded=no\nreason=%s\n' "$reason"
     exit 1
   fi
   lane_diff_id "${MANDATE_PATH%/*}" worktree || die "could not record the fixes: $DIFF_ERR"
   persist_keys "fixed_diff=$DIFF_ID"
-  rm -rf "$ROUND_LOCK"; trap - EXIT
+  release_round_lock
   printf 'fixed_recorded=yes\nfixed_diff=%s\n' "$DIFF_ID"
 }
 
@@ -1157,7 +1170,6 @@ do_acknowledged() {
   dir="${MANDATE_PATH%/*}"
   record_prepare "$rev"
   acquire_round_lock
-  trap 'rm -rf "$ROUND_LOCK"' EXIT
   parse_frontmatter "$MANDATE_PATH"
   if [ -z "$FM_reviewed_diff" ]; then
     reason=no-review
@@ -1181,13 +1193,13 @@ do_acknowledged() {
     fi
   fi
   if [ -n "$reason" ]; then
-    rm -rf "$ROUND_LOCK"; trap - EXIT
+    release_round_lock
     printf 'acked_recorded=no\nreason=%s\n' "$reason"
     exit 1
   fi
   when="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   persist_keys "acked_head=$REV_COMMIT" "acked_diff=$HEAD_ID" "acked_by=user" "acked_at=$when"
-  rm -rf "$ROUND_LOCK"; trap - EXIT
+  release_round_lock
   printf 'acked_recorded=yes\nacked_head=%s\nacked_diff=%s\nacked_at=%s\n' "$REV_COMMIT" "$HEAD_ID" "$when"
 }
 

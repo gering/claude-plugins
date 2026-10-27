@@ -239,20 +239,35 @@ false, and `mandate.sh lane <branch>` is why: that resolver exists so a Manager
 session running `/cycle` from the main repo can act on a *worker's* worktree. The
 worker's own review loop and the Manager's can therefore book a round at the same
 instant, both read the same count, and a budget of two funds an unbounded number
-of reviews. The lock is eight lines of `mkdir`. Worth re-reading a standing
-rejection whenever the surrounding design moves under it — the argument was sound
-when first made and quietly stopped being true.
+of reviews. Worth re-reading a standing rejection whenever the surrounding
+design moves under it — the argument was sound when first made and quietly
+stopped being true.
 
-Its first version had a TOCTOU of its own (CI flake, rc=4, 1.28.1): after a
-failed `mkdir` it tested `[ ! -d "$lock" ]` to tell "cannot create" from
-contention — but the holder can release the lock in between, so contention
-read as a read-only tree. Decide from `mkdir`'s own error (`LC_ALL=C`, "File
-exists" = contention) instead of from the lock's state a moment later.
-Reproduce such races by running many copies of the concurrent test at once
-(16/72 runs failed); pin the fix with a PATH `mkdir` shim that fails once with
-"File exists" and no lock left behind. The pid is written aside and renamed
-in, so `lock_is_stale` never reads a partial pid; a young lock without one is
-never stale, which covers the `mkdir`-to-pid gap.
+The lock is a `flock(2)` on `.MANDATE.lock` (1.28.4), not the `mkdir` lock it
+started as. A `mkdir` lock outlives `kill -9`, so it needs a "the owner is dead,
+break it" rule, and that rule has no safe form: a breaker reads the dead owner's
+pid, the lock is meanwhile released and re-taken by a live booker, and the
+breaker deletes the live lock (ABA; a directory cannot be deleted
+conditionally). Two earlier fixes (a TOCTOU after a failed `mkdir`, the pid
+written aside and renamed in) each closed one window and left this one. The
+kernel drops a flock when the last descriptor closes, so nothing ever judges a
+lock abandoned. Mechanics worth keeping: bash holds the descriptor
+(`exec 9<>file`) and a short `python3 -I` flocks the inherited fd 9 — flock
+belongs to the open file description, so the lock outlives the python process
+and lasts as long as the script (macOS has no `flock(1)`; `lockf`/`fcntl`
+record locks would die with python). Every child inherits fd 9, so a daemon
+spawned under the lock would hold it forever: `mandate.sh` wraps `git` to close
+fd 9 (a PATH git shim that probes `( true >&9 )` pins it — not `: >&9`, whose
+failed redirect on a special builtin exits dash; only `fixed`/`acknowledged`
+run git under the lock, so `round` cannot test it). Never delete the lock file:
+unlinking a flock file lets two processes lock two different inodes. Because it
+stays, `close-request.sh` counts `.MANDATE.lock` as a lane file (else every
+mandate lane loses the zero-loss auto-close) and every writer re-ensures the
+`.MANDATE.*` exclude. Sessions on 1.28.2 and older cannot share a lane with
+1.28.4: their mkdir refuses the lock file and advises `rm -f`, which would
+unlink a held lock — reload them (`/sessions`) first.
+Reproduce such races by running many concurrent bookings in a loop (16 at once,
+1 of 40 runs lost a booking before, 0 of 160 after).
 
 ## Indentation is structure too
 

@@ -308,6 +308,8 @@ out(("task", seen["task"]), ("worktree", rp(seen["worktree"])))' "$file" "$TASK_
     while IFS= read -r line; do
       case "$line" in
         ''|'?? TASK.md'|'?? MANDATE.md'|'?? .ws-kicker'|'!! TASK.md'|'!! MANDATE.md'|'!! .ws-kicker') ;;
+        # mandate.sh's flock file: lock state that stays beside the record.
+        '?? .MANDATE.lock'|'!! .MANDATE.lock') ;;
         '!! '*) ignored=$((ignored + 1)) ;;
         *) dirty=$((dirty + 1)) ;;
       esac

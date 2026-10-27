@@ -939,7 +939,7 @@ no proof of origin, and a close is destructive (worktree removed, branch deleted
    itself proves nothing. But what a forged or mistaken request can *cost* is bounded by
    what the teardown can lose, and `auto` requires that to be nothing: the PR is merged
    (`assess` confirmed), the worktree holds nothing beyond the ephemeral
-   `TASK.md`/`MANDATE.md`/`.ws-kicker` — no modified, untracked **or gitignored** path (`--force`
+   `TASK.md`/`MANDATE.md`/`.ws-kicker` (and `mandate.sh`'s `.MANDATE.lock`) — no modified, untracked **or gitignored** path (`--force`
    deletes a gitignored `.env` too) — the local **and** remote branch tips **are** the
    merged PR's head (no commit after the merge, nothing unpushed, nothing pushed later
    that step 9 would delete), and at most one agent — the requester — lives anywhere in

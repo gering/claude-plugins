@@ -356,7 +356,8 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
        ```
        Exit **0** → the round is booked; read `review_budget_exhausted` from its
        output. Exit **4** → the round could **not** be persisted (read-only tree,
-       no space): stop and report it — reviewing on an in-session count while the
+       no space, another writer holding the lock, no python3 — stderr names
+       which): stop and report it — reviewing on an in-session count while the
        file is not being written is how a resumed session restarts the budget,
        the exact thing the persisted counter exists to prevent. Exit **3** → no
        mandate on file (nothing to bound; ask per milestone as step 3 says).

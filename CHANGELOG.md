@@ -52,6 +52,9 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.28.4 — 2026-10-27
+- `mandate.sh` locks the record writers (`round`, `reviewed`, `fixed`, `acknowledged`) with `flock(2)` on `.MANDATE.lock` instead of a `mkdir` lock directory. Breaking an "abandoned" `mkdir` lock raced: a breaker read the dead owner's pid, the lock was released and taken by a live booker meanwhile, and the breaker deleted the live lock, so two writers ran and a concurrent `round` booking was lost (CI flake in `test_mandate.py`; 1 of 40 runs of 16 concurrent bookings on 1.28.2, 0 of 160 now). The kernel frees a flock when its owner dies, so the staleness rule (pid check, 5-minute age bound) is gone. The lock file stays beside the record (covered by the `.MANDATE.*` exclude); git calls close the lock descriptor so no daemon can inherit it. Taking the lock needs python3 (macOS has no `flock(1)`); without it a write is refused with exit 4, never done unlocked. A leftover lock directory from 1.28.2 or older is refused with the `rm -rf` to run. Reload every session working a lane (`/sessions`) before it books again: a 1.28.2 session refuses the new lock file and advises an `rm -f` that would unlink a held lock. The lock file counts as a lane file for the Manager's zero-loss close, every writer re-ensures the `.MANDATE.*` exclude, and a filesystem that refuses flock is named as such instead of reported as contention.
+
 ### 1.28.2 — 2026-10-27
 - `test_close_request.py` and `test_landing.py` build their shadow `PATH` skipping dangling source entries and checking presence with `os.path.lexists`, so a dangling link that `/usr/bin` and `/bin` both list (usrmerge) no longer fails the second `symlink_to` with `FileExistsError`, and a later source's real binary of that name still gets linked (Structure Checks red on main since #91). Tests only; no script behavior changes.
 
@@ -332,6 +335,9 @@ entries are grouped per plugin, newest first.
 - Add `/work-adopt` skill; store worktrees under `.claude/worktrees/`.
 
 ## pr-flow
+
+### 1.8.2 — 2026-10-28
+- `REVIEW-ROUTING.md` describes `mandate.sh round` exit 4 as work-system 1.28.4 reports it (another session writing the record, no python3 for the lock, a read-only tree); the advice to clear an abandoned lock is gone, since a flock is never abandoned. Docs only.
 
 ### 1.8.1 — 2026-10-22
 - Trim the `/open` skill description to the word budget; the readiness-check list lives in the skill body.
