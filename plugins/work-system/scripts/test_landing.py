@@ -28,11 +28,22 @@ FAILS = []
 
 _SHADOW = tempfile.TemporaryDirectory()
 SHADOW = Path(os.path.realpath(_SHADOW.name))
-for _src in ("/usr/bin", "/bin"):
-    for _name in os.listdir(_src):
-        if _name in ("gh", "herdr") or (SHADOW / _name).exists():
-            continue
-        (SHADOW / _name).symlink_to(os.path.join(_src, _name))
+
+
+def build_shadow(dest, sources):
+    # A dangling source entry is skipped, so a later source's real binary of
+    # that name still gets linked; lexists, not exists(), so a name already
+    # placed counts as present (usrmerge lists every name under both dirs).
+    for src in sources:
+        for name in os.listdir(src):
+            target = os.path.join(src, name)
+            if (name in ("gh", "herdr") or not os.path.exists(target)
+                    or os.path.lexists(dest / name)):
+                continue
+            (dest / name).symlink_to(target)
+
+
+build_shadow(SHADOW, ("/usr/bin", "/bin"))
 
 
 def check(name, cond):
@@ -384,6 +395,27 @@ check("guard: --repo without a value → usage", r.returncode == 2)
 r, _ = fx.run("bogus")
 check("guard: unknown subcommand → usage", r.returncode == 2)
 fx.close()
+
+# --- shadow PATH: a dangling link listed by both sources ----------------------- #
+# The runner's /bin is /usr/bin (usrmerge) and holds a dangling link; the second
+# pass must skip it instead of failing with FileExistsError.
+
+with tempfile.TemporaryDirectory() as _td:
+    _td = Path(_td)
+    _a, _b, _dest = _td / "usr-bin", _td / "bin", _td / "shadow"
+    for _d in (_a, _b, _dest):
+        _d.mkdir()
+    for _d in (_a, _b):
+        (_d / "dangling").symlink_to(_td / "missing")
+    (_a / "tool").symlink_to(_td / "missing")
+    (_b / "tool").write_text("")
+    try:
+        build_shadow(_dest, (_a, _b))
+        _ok = (not os.path.lexists(_dest / "dangling")
+               and os.readlink(_dest / "tool") == str(_b / "tool"))
+    except FileExistsError:
+        _ok = False
+    check("shadow build skips a dangling source entry", _ok)
 
 if FAILS:
     print("FAIL:")
