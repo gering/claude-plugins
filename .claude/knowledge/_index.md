@@ -30,4 +30,4 @@
 - `features/pr-flow-review-comment-predicate.md` — One `CLAUDE_JQ` predicate in claude-review.sh for "Claude review comment" + "finished"; GraphQL `claude` vs REST `claude[bot]`; workflow `## Review` has no `**Claude finished` header; anchored markers, error ≠ review; `pending` from one fetch; github-actions excluded; residuals: user named `claude`, sticky comments
 
 ## Deployment
-- `deployment/ci-structure-checks.md` — `check-structure.py` as the single automated guard for a build-less repo
+- `deployment/ci-structure-checks.md` — `check-structure.py` as the single automated guard for a build-less repo; why local runs go red while CI stays green (macOS first-exec cost: link stubs, don't rewrite; deadlines vs interpreter start; private TMPDIR; poll seams; per-test `TEST_TIMEOUTS`)
