@@ -194,9 +194,9 @@ Branch on **`round_authorized`**, not on the exhaustion flag:
   ones" — finish, then stop.
 - `round_authorized=no` → the budget is spent and **nothing was charged**. Stop
   and ask; do not review.
-- exit `4` → the round could not be persisted (read-only tree, or a lock another
-  session holds). Say so and do not review on an in-session count. The message
-  names the lock and the command to clear an abandoned one.
+- exit `4` → the round could not be persisted (read-only tree, another session
+  writing the record right now, no python3 for the lock). Say so and do not
+  review on an in-session count; the message names the cause.
 
 Book **once per review**, and only if your own stage does not already book — §3
 says which consumer books where.

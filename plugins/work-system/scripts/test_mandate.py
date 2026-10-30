@@ -443,8 +443,10 @@ check("repeat calls do not drift the counter",
        kv(run("show", str(repo4)).stdout).get("review_rounds_used"))[2] == "2")
 check("round kept the human body intact",
       "# Mandate" in (repo4 / "MANDATE.md").read_text())
+# .MANDATE.lock stays by design: deleting a flock file reopens the race it guards.
 check("round left no temp file behind",
-      not any(p.name.startswith(".MANDATE.") for p in repo4.iterdir())
+      not any(p.name.startswith(".MANDATE.") and p.name != ".MANDATE.lock"
+              for p in repo4.iterdir())
       and not (repo4 / "MANDATE.md.tmp").exists())
 
 # The counter must persist even when the key is missing — MANDATE.md is
@@ -837,38 +839,8 @@ check("no booking was lost to a race",
 counts = sorted(kv(r.stdout).get("review_rounds_used", "") for r in results)
 check("and each caller was told a distinct round number",
       counts == [str(i) for i in range(1, 9)])
-check("the lock directory is cleaned up",
-      not (conc / ".MANDATE.lock").exists())
-# The CI flake: mkdir fails because another booker holds the lock, and that
-# booker releases it before anyone looks. "File exists" is contention however
-# the lock looks a moment later, so the booking waits its turn, never exit 4.
-shim = Path(tempfile.mkdtemp())
-(shim / "mkdir").write_text(
-    '#!/bin/sh\n'
-    'case "$1" in *.MANDATE.lock) if [ ! -e "$0.raced" ]; then : > "$0.raced"\n'
-    '  echo "mkdir: $1: File exists" >&2; exit 1; fi ;; esac\n'
-    'exec /bin/mkdir "$@"\n')
-(shim / "mkdir").chmod(0o755)
-raced = make_repo()
-init(raced, "task=raced", "review_budget=3")
-r = subprocess.run(["bash", str(SCRIPT), "round", str(raced)], capture_output=True, text=True,
-                   timeout=120, env={**ENV, "PATH": f"{shim}:{ENV.get('PATH', '')}"})
-check("a lock released between a failed mkdir and the check is contention, not exit 4",
-      r.returncode == 0 and (shim / "mkdir.raced").exists()
-      and kv(r.stdout).get("review_rounds_used") == "1")
-stray = make_repo()
-init(stray, "task=stray", "review_budget=3")
-(stray / ".MANDATE.lock").write_text("")
-t0 = time.monotonic()
-r = run("round", str(stray))
-check("a file where the lock goes is refused at once, and named",
-      r.returncode == 4 and time.monotonic() - t0 < 3 and "not a lock directory" in r.stderr)
-check("a held lock is refused rather than ignored",
-      (conc / ".MANDATE.lock").mkdir() or run("round", str(conc)).returncode == 4)
-check("and the refusal names the lock", ".MANDATE.lock" in run("round", str(conc)).stderr)
-(conc / ".MANDATE.lock").rmdir()
-check("removing the stale lock unblocks the lane",
-      run("round", str(conc)).returncode == 0)
+check("the lock is a plain file, never a directory",
+      (conc / ".MANDATE.lock").is_file())
 check("the lock is covered by the git exclude",
       subprocess.run(["git", "-C", str(conc), "check-ignore", "-q", ".MANDATE.lock"]).returncode == 0)
 
@@ -932,33 +904,106 @@ for bad_key, bad_val in (("review_budget", "two"), ("review_rounds_used", "nope"
     check(f"and allows refuses it: {bad_key}",
           run("allows", "commit", str(bd)).returncode == 2)
 
-# --- an abandoned lock must not wedge the lane forever -----------------------
-# The traps do not survive kill -9, and the .MANDATE.* exclude hides the lock
-# from `git status`, so nothing would point at the cause.
+# --- the record lock: a flock, so a dead owner frees it --------------------
+# A mkdir lock outlived kill -9 and needed a "break it when the owner is dead"
+# rule, which deleted a live booker's lock when the dead owner's lock was
+# released and re-taken between the pid read and the rm.
+import fcntl
 st = make_repo()
 init(st, "task=stale", "review_budget=5")
 lock = st / ".MANDATE.lock"
-lock.mkdir()
-(lock / "pid").write_text("999999\n")      # a pid that cannot be running
-r = run("round", str(st))
-check("a lock whose owner is gone is broken", r.returncode == 0)
-check("and the round is actually booked", kv(r.stdout).get("round_authorized") == "yes")
-check("the lock is released afterwards", not lock.exists())
-# A lock held by a LIVE process is respected, not broken.
-import subprocess as _sp
-lock.mkdir()
-(lock / "pid").write_text(f"{os.getpid()}\n")
+holder = subprocess.Popen(
+    ["bash", "-c", 'exec 9<>"$1"; python3 -c "import fcntl; fcntl.flock(9, fcntl.LOCK_EX)"; '
+     'echo locked; exec sleep 60', "_", str(lock)], stdout=subprocess.PIPE, text=True)
+check("the holder took the lock", holder.stdout.readline().strip() == "locked")
+t0 = time.monotonic()
 r = run("round", str(st))
 check("a live holder is waited for, then reported", r.returncode == 4)
-check("and the message names the recovery", ".MANDATE.lock" in r.stderr)
+check("within the bounded wait", time.monotonic() - t0 < 30)
+check("and the message names the lock", ".MANDATE.lock" in r.stderr)
 check("nothing was booked while blocked",
-      kv(run("show", str(st)).stdout).get("review_rounds_used") == "1")
+      kv(run("show", str(st)).stdout).get("review_rounds_used") == "0")
+holder.kill(); holder.wait()
+r = run("round", str(st))
+check("a killed holder frees the lock with no staleness rule", r.returncode == 0)
+check("and the round is actually booked", kv(r.stdout).get("review_rounds_used") == "1")
+# A lock left by a script that already ended is just a file: no wait at all.
+t0 = time.monotonic()
+check("a leftover lock file does not block",
+      run("round", str(st)).returncode == 0 and time.monotonic() - t0 < 3)
+# The lock must not leak into a child: one that outlives the script (a git
+# daemon) would hold the lane's lock forever. `fixed` runs git under the lock.
+lk_main = Path(tempfile.mkdtemp())
+for args in (["init", "-q", "-b", "main"], ["-c", "user.name=t", "-c", "user.email=t@t",
+                                            "commit", "-q", "--allow-empty", "-m", "base"]):
+    subprocess.run(["git", "-C", str(lk_main), *args], check=True)
+lk = Path(tempfile.mkdtemp()) / "lane"
+subprocess.run(["git", "-C", str(lk_main), "worktree", "add", "-q", "-b", "task/lk", str(lk)],
+               check=True)
+init(lk, "task=lk", "review_budget=3")
+(lk / "f.txt").write_text("x\n")
+check("leak fixture: a review is on record", run("reviewed", str(lk)).returncode == 0)
+shim = Path(tempfile.mkdtemp())
+# A subshell and `true`: a failed redirect on the special builtin `:` exits a
+# POSIX sh (dash), killing the shim in exactly the case that should pass.
+(shim / "git").write_text('#!/bin/sh\nif ( true >&9 ) 2>/dev/null; then : > "$0.leaked"; fi\n'
+                          'PATH="$REAL_PATH" exec git "$@"\n')
+(shim / "git").chmod(0o755)
+r = subprocess.run(["bash", str(SCRIPT), "fixed", "--after", "HEAD", str(lk)],
+                   capture_output=True, text=True, timeout=120,
+                   env={**ENV, "REAL_PATH": ENV.get("PATH", ""),
+                        "PATH": f"{shim}:{ENV.get('PATH', '')}"})
+check("a locked write that runs git still works: " + r.stderr.strip()[:200], r.returncode == 0)
+check("git never inherits the lock descriptor", not (shim / "git.leaked").exists())
+# What sits at the lock path is checked, not followed or waited on.
+lock.unlink()
+lock.mkdir()
+(lock / "pid").write_text("999999\n")
+r = run("round", str(st))
+check("an old mkdir lock directory is refused, not guessed at",
+      r.returncode == 4 and "older work-system" in r.stderr and "rm -rf" in r.stderr)
 import shutil as _sh
 _sh.rmtree(lock)
-# A lock with no pid file at all falls back to the age bound: recent = respected.
-lock.mkdir()
-check("a fresh pidless lock is still respected", run("round", str(st)).returncode == 4)
-_sh.rmtree(lock)
+target = st / "elsewhere"
+lock.symlink_to(target)
+r = run("round", str(st))
+check("a symlink at the lock path is refused", r.returncode == 4 and "not a lock file" in r.stderr)
+check("and the open never followed it", not target.exists())
+lock.unlink()
+os.mkfifo(lock)
+t0 = time.monotonic()
+r = run("round", str(st))
+check("a FIFO at the lock path is refused at once",
+      r.returncode == 4 and "not a lock file" in r.stderr and time.monotonic() - t0 < 3)
+lock.unlink()
+noshim = Path(tempfile.mkdtemp())
+(noshim / "python3").write_text("#!/bin/sh\nexit 127\n")
+(noshim / "python3").chmod(0o755)
+before = kv(run("show", str(st)).stdout).get("review_rounds_used")
+r = subprocess.run(["bash", str(SCRIPT), "round", str(st)], capture_output=True, text=True,
+                   timeout=120, env={**ENV, "PATH": f"{noshim}:{ENV.get('PATH', '')}"})
+check("without a working python3 the booking is refused, not unlocked",
+      r.returncode == 4 and "python3" in r.stderr)
+check("and nothing was booked",
+      kv(run("show", str(st)).stdout).get("review_rounds_used") == before)
+# A filesystem that refuses flock (ENOTSUP/ENOLCK) is not contention: the
+# lock helper exits 2 with the error, and the message says so instead of "retry".
+(noshim / "python3").write_text("#!/bin/sh\necho 'Operation not supported' >&2\nexit 2\n")
+r = subprocess.run(["bash", str(SCRIPT), "round", str(st)], capture_output=True, text=True,
+                   timeout=120, env={**ENV, "PATH": f"{noshim}:{ENV.get('PATH', '')}"})
+check("a refused flock is named, not reported as another writer",
+      r.returncode == 4 and "refused the lock" in r.stderr
+      and "Operation not supported" in r.stderr and "Retry" not in r.stderr)
+# The lock file outlives the call, so every writer re-ensures its exclude, not
+# only init (a hand-written record, or an init whose exclude write failed).
+excl_path = Path(subprocess.run(["git", "-C", str(st), "rev-parse", "--path-format=absolute",
+                                 "--git-path", "info/exclude"],
+                                capture_output=True, text=True).stdout.strip())
+excl_path.write_text("".join(l for l in excl_path.read_text().splitlines(True)
+                             if l.strip() != "/.MANDATE.*"))
+(st / ".MANDATE.lock").unlink(missing_ok=True)
+check("round restores a missing lock exclude", run("round", str(st)).returncode == 0
+      and subprocess.run(["git", "-C", str(st), "check-ignore", "-q", ".MANDATE.lock"]).returncode == 0)
 
 # --- init resolves the worker's capabilities itself --------------------------
 # The skill used to build `--without local-review` in a variable and rely on the
