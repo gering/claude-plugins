@@ -76,14 +76,22 @@ print(json.dumps(env))
 '''.replace("@TOKEN@", TOKEN)
 
 
+# One fake binary for every Env, linked in: macOS assesses each NEW executable
+# on its first exec (~150 ms, serialized across processes), so a fresh copy per
+# Env made this test minutes long under parallel load.
+_FAKE_DIR = tempfile.TemporaryDirectory(prefix="grok-compat-fake-")
+_FAKE_BIN = pathlib.Path(_FAKE_DIR.name) / "grok"
+_FAKE_BIN.write_text(FAKE)
+_FAKE_BIN.chmod(0o755)
+
+
 class Env:
     def __init__(self):
         self.root = pathlib.Path(tempfile.mkdtemp(prefix="grok-compat-test-"))
         self.cache = self.root / "cache"
         self.calls = self.root / "calls.jsonl"
         self.grok = self.root / "grok"
-        self.grok.write_text(FAKE)
-        self.grok.chmod(0o755)
+        self.grok.symlink_to(_FAKE_BIN)
 
     def run(self, mode, model="grok-4.7", fake="ok", version="1.0.40", extra=(), **env):
         e = dict(os.environ, SWARM_GROK_COMPAT_DIR=str(self.cache), FAKE_CALLS=str(self.calls),

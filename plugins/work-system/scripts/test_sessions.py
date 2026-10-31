@@ -336,7 +336,8 @@ def sh(*args, herdr=True, mkt=MKT, extra=None):
     env.update(PATH=f"{BIN}:{os.environ['PATH']}", STUB_DIR=str(STUB),
                SESSIONS_INSTALLED_FILE=str(INSTALLED), SESSIONS_MARKETPLACE_FILE=str(MARKET),
                SESSIONS_STATE_FILE=str(STATE), SESSIONS_MARKETPLACE=mkt,
-               HERDR_PANE_ID="w1:self", HERDR_WORKSPACE_ID="w1", SESSIONS_VERIFY_SECS="2")
+               HERDR_PANE_ID="w1:self", HERDR_WORKSPACE_ID="w1", SESSIONS_VERIFY_SECS="2",
+               SESSIONS_POLL_MS="100")
     env.pop("HERDR_ENV", None)
     if herdr:
         env["HERDR_ENV"] = "1"
