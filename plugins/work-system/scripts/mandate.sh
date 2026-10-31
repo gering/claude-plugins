@@ -69,20 +69,21 @@
 #                            review recorded by an older work-system still
 #                            matches its unchanged lane
 #                            (diff_id_form=context|legacy).
-#   delta [--head <rev>] [--max-lines <n>] [<dir>]
+#   delta [--head <rev>] [--max-lines <n>|all] [<dir>]
 #                            What changed since the review on record, as a
-#                            diff of the two lane diffs (bounded, truncated=);
+#                            diff of the two lane diffs (bounded, truncated=),
+#                            with a per-file list (delta_file=) to summarize it;
 #                            exit 1 + reason=no-review|no-baseline.
 #                            Flags in any order, before <dir>.
 #   acknowledged --head <rev> --ack-id <id> [<dir>]
-#                            The USER read <rev>'s delta and accepts it: record
+#                            The USER accepts <rev>'s summarized delta unreviewed: record
 #                            acked_diff, so covered says via=user-ack for that
 #                            diff only. Interactive user answers only — never
 #                            called by a worker, a Manager or an autonomous
 #                            path. <id> = the ack_id= delta printed. Exit 1
 #                            + reason=no-review|no-baseline|approximate-
 #                            baseline|diff-changed|binary-delta|unreadable-
-#                            delta|already-covered.
+#                            delta|too-large|already-covered.
 #   exclude-task <dir>       Add /TASK.md (the lane's task copy) to the repo's git
 #                            exclude, so a clean-tree check never sees it; emits
 #                            excluded=already|yes|no (no: tracked or unwritable).
@@ -636,22 +637,31 @@ lane_diff_id() {
   DIFF_ID_CTX=""; DIFF_TXT_LEGACY=""; DIFF_ID_LEGACY=""
 }
 
+# The pathspecs of the files the version mask applies to: VP_INC selects
+# them, VP_EXC excludes them. The one definition lane_form_text and
+# delta_files share. Call after read_version_paths.
+VP_INC=(); VP_EXC=()
+version_pathspecs() {
+  local p
+  VP_INC=(); VP_EXC=()
+  for p in ${VERSION_PATHS[@]+"${VERSION_PATHS[@]}"}; do
+    VP_INC+=(":(top,glob)$p"); VP_EXC+=(":(top,exclude,glob)$p")
+  done
+}
+
 # The masked lane diff at -U<context> into FORM_TXT: the files on VERSION_PATHS
 # go last (a second diff) with their version values masked. FORM_SPLIT=no when
 # no lane file is on VERSION_PATHS — the masked text is then the unmasked one.
 # Returns lane_diff_text's code. Needs lane_snapshot.
 FORM_TXT=""; FORM_SPLIT=""
 lane_form_text() {
-  local dir="$1" p part1 part2=""
-  local -a inc=() exc=()
+  local dir="$1" part1 part2=""
   DIFF_U="$2"
-  for p in ${VERSION_PATHS[@]+"${VERSION_PATHS[@]}"}; do
-    inc+=(":(top,glob)$p"); exc+=(":(top,exclude,glob)$p")
-  done
-  part1="$(lane_diff_text "$dir" no ':(top)' ${exc[@]+"${exc[@]}"})" || return $?
+  version_pathspecs
+  part1="$(lane_diff_text "$dir" no ':(top)' ${VP_EXC[@]+"${VP_EXC[@]}"})" || return $?
   part1="${part1%.}"
-  if [ ${#inc[@]} -gt 0 ]; then
-    part2="$(lane_diff_text "$dir" yes "${inc[@]}")" || return $?
+  if [ ${#VP_INC[@]} -gt 0 ]; then
+    part2="$(lane_diff_text "$dir" yes "${VP_INC[@]}")" || return $?
     part2="${part2%.}"
   fi
   if [ -z "$part2" ]; then FORM_SPLIT=no; else FORM_SPLIT=yes; fi
@@ -704,7 +714,7 @@ hash_text() {
 # form that matched, not the version that wrote it. Both are exact, so neither can cover more than its old id did;
 # a recorded id in one of them still changes on a main edit next to a lane
 # hunk — such a review is re-done once, then the context-free id applies.
-# DIFF_TXT_LEGACY is also the text `delta` shows a person: with context, so the
+# DIFF_TXT_LEGACY is also the text `delta` prints: with context, so the
 # lines around a change can be read. Call after lane_diff_id. Empty on failure
 # — a "no", never a pass.
 DIFF_ID_CTX=""; DIFF_TXT_LEGACY=""; DIFF_ID_LEGACY=""
@@ -1030,10 +1040,13 @@ record_form() {
 # `delta`: what changed in the lane between the review on record and <rev> —
 # the difference between the two normalized lane diffs (a diff of diffs), so a
 # rebase over unrelated main edits shows nothing and a lane edit shows itself.
-# What a person reads before `acknowledged`; at most <max> lines (default 400),
-# with truncated=yes when cut. Header keys: baseline=exact|approximate,
+# What a user's `acknowledged` is decided from (summarized by the caller, the
+# text on request); at most <max> lines (default 400, `all` for no cut), with
+# truncated=yes when cut. Header keys: baseline=exact|approximate,
 # diff_form=, includes_agreed_fixes=, delta_lines=, binary_changes=,
-# unreadable= (then the text follows escaped), truncated=, ack_id= (set only
+# unreadable= (then the text follows escaped), truncated=, too_large= (see
+# delta_too_large: never ackable), delta_files= and
+# its delta_file= lines (see delta_files), ack_id= (set only
 # for a complete, exact, binary-free, readable delta: a hash of the shown
 # text), fence=. baseline=exact|approximate and diff_form=
 # context-free|context|legacy|approximate (record_form). Agreed fixes recorded
@@ -1042,8 +1055,8 @@ record_form() {
 # nothing to compare against: no-review, or no-baseline (reviewed_head is no
 # commit here any more). A failed diff is exit 2, never an empty delta.
 do_delta() {
-  local rev="$1" max="$2" dir d total exact=exact bin unread
-  case "$max" in ''|*[!0-9]*) die "--max-lines needs a number" ;; esac
+  local rev="$1" max="$2" dir d total exact=exact bin unread big
+  case "$max" in all) ;; ''|*[!0-9]*) die "--max-lines needs a number or all" ;; esac
   resolve_mandate_path "${3:-.}"
   dir="${MANDATE_PATH%/*}"
   printf 'lane=%s\n' "$dir"
@@ -1056,7 +1069,8 @@ do_delta() {
   [ "$REC_FORM" != approximate ] || exact=approximate
   delta_text "$dir" || die "could not compute the delta ($DELTA_ERR)"
   d="$DELTA"
-  total=0; [ -z "$d" ] || total="$(printf '%s\n' "$d" | wc -l | tr -d ' ')"
+  total="$(delta_line_count "$d")"
+  [ "$max" != all ] || max="$total"
   printf 'head=%s\nreviewed_head=%s\nbaseline=%s\ndiff_form=%s\n' \
     "$REV_COMMIT" "$FM_reviewed_head" "$exact" "$REC_FORM"
   if [ -n "$FM_fixed_diff" ]; then echo includes_agreed_fixes=yes; else echo includes_agreed_fixes=no; fi
@@ -1066,11 +1080,15 @@ do_delta() {
   if delta_unreadable "$d"; then unread=yes; else unread=no; fi
   echo "unreadable=$unread"
   if [ "$total" -gt "$max" ]; then echo truncated=yes; else echo truncated=no; fi
-  # The id `acknowledged` needs, printed only for a delta a person can have
-  # read in full: complete, from an exact baseline, with no binary and no
+  if delta_too_large "$d"; then big=yes; else big=no; fi
+  echo "too_large=$big"
+  delta_files "$dir"
+  # The id `acknowledged` needs, printed only for a delta that was printed in
+  # full and can be read as text: complete, not too large, from an exact baseline, with no binary and no
   # control or bidi characters in it — bound to the shown text itself, so no
   # other output (covered's diff_id=) can stand in for it.
-  if [ "$total" -le "$max" ] && [ "$exact" = exact ] && [ "$bin" = no ] && [ "$unread" = no ]; then
+  if [ "$total" -le "$max" ] && [ "$big" = no ] && [ "$exact" = exact ] \
+     && [ "$bin" = no ] && [ "$unread" = no ]; then
     printf 'ack_id=%s\n' "$(ack_id_of "$dir" "$d")"
   else
     echo ack_id=
@@ -1091,7 +1109,7 @@ do_delta() {
 }
 
 # A changed binary shows up in the delta as base85 nobody can read, so it is
-# never something a person acknowledged having read. Decided from the blobs,
+# never something a summary or a reader can stand for. Decided from the blobs,
 # not the delta text: a binary the review already saw, changed in place,
 # keeps its "GIT binary patch" header as an unchanged context line. Every
 # binary the lane changes, as "<base blob> <tip blob> <path>" (the base too: a
@@ -1119,15 +1137,129 @@ binaries_changed() {
   [ "$a" != "$b" ]
 }
 
-# The delta a person reads: the diff between the reviewed and the current lane
-# diff, both UNMASKED, so a version bump shows its real numbers even when the
-# record (and the ack) is in the masked form. Call after record_form. Sets
-# DELTA, or DELTA_ERR and returns 1 — a failed diff is never an empty delta.
+# The largest delta a user may acknowledge from its summary: ACK_MAX_LINES
+# lines, none longer than ACK_MAX_LINE_BYTES (a reader, and the Read tool,
+# cuts a longer line, so a payload could sit past what anyone saw). Past
+# either, nobody can be said to have covered every byte: no ack_id
+# (too_large=yes), a review instead. The one predicate delta and
+# acknowledged share.
+ACK_MAX_LINES=2000; ACK_MAX_LINE_BYTES=1000
+delta_too_large() {
+  [ "$(delta_line_count "$1")" -gt "$ACK_MAX_LINES" ] && return 0
+  printf '%s\n' "$1" | LC_ALL=C awk -v m="$ACK_MAX_LINE_BYTES" 'length($0) > m { f = 1; exit } END { exit !f }'
+}
+delta_line_count() { if [ -z "$1" ]; then echo 0; else printf '%s\n' "$1" | wc -l | tr -d ' '; fi; }
+
+# The delta text (summarized, or read on request): the diff between the
+# reviewed and the current lane diff, both UNMASKED, so a version bump
+# shows its real numbers even when the record (and the ack) is in the
+# masked form. Call after record_form. Sets DELTA, or DELTA_ERR and returns
+# 1 — a failed diff is never an empty delta.
 DELTA=""; DELTA_ERR=""
 delta_text() {
   local rc=0
   DELTA="$(diff -u --label reviewed --label head <(printf '%s' "$BASE_RAW") <(printf '%s' "$HEAD_RAW"))" || rc=$?
   [ "$rc" -le 1 ] || { DELTA=""; DELTA_ERR="diff exit $rc"; return 1; }
+}
+
+# Split a raw lane diff into one file per `diff --git` section under <dir>,
+# indexed "<n>\t<header>" in <dir>/idx. Each line is tagged H (a file header
+# line, before the first hunk) or B (hunk body), so a lane line reading "-- x"
+# is never taken for a header. git C-quotes a name holding a tab or newline,
+# so a header is always one tab-free line.
+split_lane_diff() {
+  printf '%s' "$2" | SPLIT_DIR="$1" awk '
+    BEGIN { d = ENVIRON["SPLIT_DIR"] }
+    /^diff --git / { if (f) close(f); n++; f = d "/" n; hdr = 1; printf "%s\t%s\n", n, $0 >> (d "/idx") }
+    /^@@/ { hdr = 0 }
+    f { print (hdr ? "H" : "B") $0 > f }'
+}
+
+# The delta per lane file, so a summary rests on counts instead of on reading
+# hunks whose file header lies outside their context. Prints delta_files=<n>,
+# then one line per file whose part of the lane diff changed since the review:
+#   delta_file=<new|gone|changed> lane=<n> context=<n> versions_only=<yes|no> path=<p>
+# The four fields before path= are fixed; <p> is the rest of the line,
+# shell-quoted (printf %q), so a lane-chosen name cannot add a field, and
+# escaped like the text (cat -v) when it holds control or bidi characters.
+# new/gone: the file entered/left the lane diff. lane counts the delta lines
+# that change one of the lane's own +/- lines, a hunk header (a lane hunk that
+# moved, or — counted the safe way — main editing its function-context line)
+# or a file header line (mode, new/deleted file); context counts the rest
+# (main's lines around a lane hunk, ---/+++ lines), so lane=0 means the file
+# only moved with main. A context line that leaves and comes back unchanged is
+# a lane line moved across it (diff -U0 may show the move on either side), so
+# it counts as lane: main moving a line verbatim reads as lane too, the safe way.
+# versions_only=yes: a file on VERSION_PATHS — the files the gate masks —
+# whose two diffs differ in nothing but SemVer "version" values; any other
+# file is versions_only=no. Call after record_form and delta_text (so
+# VERSION_PATHS is read and REV_COMMIT is the head). Prints
+# delta_files=unknown when the diffs cannot be split, joined or compared —
+# never a partial list.
+delta_files_unknown() { [ -z "$1" ] || rm -rf "$1"; echo delta_files=unknown; }
+delta_files() {
+  local dir="$1" tmp="" ia ib h fa fb d rc rest p status counts vp n=0 out=""
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/mandate-delta.XXXXXX")" \
+    && mkdir "$tmp/a" "$tmp/b" && : >"$tmp/a/idx" && : >"$tmp/b/idx" \
+    && split_lane_diff "$tmp/a" "$BASE_RAW" && split_lane_diff "$tmp/b" "$HEAD_RAW" \
+    || { delta_files_unknown "$tmp"; return 0; }
+  # The VERSION_PATHS files of the head's lane diff, in the same spelling as
+  # the headers (git quotes both alike).
+  version_pathspecs
+  vp=""
+  if [ ${#VP_INC[@]} -gt 0 ]; then
+    lane_base "$dir" "$REV_COMMIT" \
+      && vp="$(git -C "$dir" diff --name-only --no-renames "$LANE_BASE" "$REV_COMMIT" -- "${VP_INC[@]}")" \
+      || { delta_files_unknown "$tmp"; return 0; }
+  fi
+  # One pass joins both indexes by header (exact string, never through awk -v,
+  # which would expand the backslashes of a C-quoted name): "<a> <b> <header>",
+  # "-" for a side the file is missing from.
+  awk -F'\t' '
+    FILENAME == ARGV[1] { i = index($0, "\t"); a[substr($0, i + 1)] = $1; next }
+    { i = index($0, "\t"); h = substr($0, i + 1); b[h] = $1 }
+    END {
+      for (h in a) print a[h] "\t" ((h in b) ? b[h] : "-") "\t" h
+      for (h in b) if (!(h in a)) print "-\t" b[h] "\t" h
+    }' "$tmp/a/idx" "$tmp/b/idx" | LC_ALL=C sort -t "$(printf '\t')" -k3 >"$tmp/join" \
+    || { delta_files_unknown "$tmp"; return 0; }
+  while IFS=$'\t' read -r ia ib h; do
+    if [ "$ia" = - ]; then status=new; fa=/dev/null; else fa="$tmp/a/$ia"; fi
+    if [ "$ib" = - ]; then status=gone; fb=/dev/null; else fb="$tmp/b/$ib"; fi
+    if [ "$ia" != - ] && [ "$ib" != - ]; then
+      cmp -s "$fa" "$fb" && continue
+      status=changed
+    fi
+    rc=0; d="$(diff -U0 "$fa" "$fb")" || rc=$?
+    [ "$rc" -le 1 ] || { delta_files_unknown "$tmp"; return 0; }
+    counts="$(printf '%s\n' "$d" | awk '
+      NR > 2 && /^[-+]/ {
+        k = substr($0, 2, 1); r = substr($0, 3); c = substr(r, 1, 1)
+        if (k == "H") { if (r ~ /^(--- |\+\+\+ |diff --git )/) ctx++; else lane++ }
+        else if (c == "+" || c == "-" || c == "\\" || c == "@") lane++
+        else { ctx++; if (substr($0, 1, 1) == "-") gone[r]++; else came[r]++ }
+      }
+      END {
+        for (r in gone) if (r in came) {
+          m = (gone[r] < came[r]) ? gone[r] : came[r]; lane += 2 * m; ctx -= 2 * m
+        }
+        printf "lane=%d context=%d", lane, ctx
+      }')"
+    rest="${h#diff --git }"
+    p="${rest:0:$(( (${#rest} - 1) / 2 ))}"
+    case "$p" in '"a/'*) p="\"${p#\"a/}" ;; *) p="${p#a/}" ;; esac
+    if [ "$status" = changed ] && printf '%s\n' "$vp" | grep -qxF -- "$p" \
+       && cmp -s <(lane_version_mask <"$fa") <(lane_version_mask <"$fb"); then
+      counts="$counts versions_only=yes"
+    else
+      counts="$counts versions_only=no"
+    fi
+    ! delta_unreadable "$p" || p="$(printf '%s' "$p" | LC_ALL=C cat -v)"
+    out="$out"$'\n'"delta_file=$status $counts path=$(printf '%q' "$p")"
+    n=$((n + 1))
+  done <"$tmp/join"
+  rm -rf "$tmp"
+  printf 'delta_files=%s%s\n' "$n" "$out"
 }
 
 # Bytes a terminal does not show as written: C0 controls but tab, newline,
@@ -1136,7 +1268,7 @@ delta_text() {
 # paragraph separators; bidi embeddings, overrides and isolates
 # (U+202A-202E, U+2066-2069); word joiner and invisible operators
 # (U+2060-2064); BOM/ZWNBSP; tag characters. A delta holding one is not
-# something a person can be said to have read.
+# something a summary or a reader can be said to cover.
 delta_unreadable() {
   printf '%s' "$1" | LC_ALL=C grep -qE $'[\x01-\x08\x0b\x0e-\x1f\x7f]|\x0d.|\xc2[\x80-\x9f]|\xd8\x9c|\xe2\x80[\x8b-\x8f\xa8-\xae]|\xe2\x81[\xa0-\xa4\xa6-\xa9]|\xef\xbb\xbf|\xf3\xa0[\x80\x81]'
 }
@@ -1145,8 +1277,8 @@ delta_unreadable() {
 # in the record's form, so it names exactly what was on screen.
 ack_id_of() { hash_text "$1" "ack"$'\n'"$HEAD_ID"$'\n'"$2"; }
 
-# `acknowledged --head <rev> --ack-id <id>`: the USER read the delta `delta` showed for <rev>
-# and accepts it without a review. <id> is the ack_id= that delta printed —
+# `acknowledged --head <rev> --ack-id <id>`: the USER accepts the delta `delta` showed for <rev>
+# (summarized or as text) without a review. <id> is the ack_id= that delta printed —
 # only a complete delta prints one, so a truncated one cannot be acked. It is
 # a hash of the shown text, recomputed here: refused (reason=diff-changed)
 # unless <rev>'s delta is still exactly that text, so a base or head that moved
@@ -1160,11 +1292,12 @@ ack_id_of() { hash_text "$1" "ack"$'\n'"$HEAD_ID"$'\n'"$2"; }
 # and nothing else may call it. Exit 1 + reason=: no-review (nothing to compare
 # against — never ackable), no-baseline (no delta could be shown),
 # approximate-baseline (the delta is not measured from the reviewed state),
-# diff-changed, binary-delta, unreadable-delta, already-covered.
+# diff-changed, binary-delta, unreadable-delta, too-large (delta_too_large),
+# already-covered.
 do_acknowledged() {
   local rev="$1" shown="$3" reason="" when dir
-  [ -n "$rev" ] || die "acknowledged needs --head <rev>: the head whose delta was shown"
-  [ -n "$shown" ] || die "acknowledged needs --ack-id <id>: the ack_id= the shown delta printed"
+  [ -n "$rev" ] || die "acknowledged needs --head <rev>: the head whose delta was summarized"
+  [ -n "$shown" ] || die "acknowledged needs --ack-id <id>: the ack_id= the summarized delta printed"
   case "$shown" in *[!0-9a-f]*) die "--ack-id is a hex id: the ack_id= line above delta_begin" ;; esac
   resolve_mandate_path "${2:-.}"
   dir="${MANDATE_PATH%/*}"
@@ -1187,6 +1320,8 @@ do_acknowledged() {
       delta_text "$dir" || die "could not compute the delta ($DELTA_ERR)"
       if delta_unreadable "$DELTA"; then
         reason=unreadable-delta
+      elif delta_too_large "$DELTA"; then
+        reason=too-large
       elif [ "$(ack_id_of "$dir" "$DELTA")" != "$shown" ]; then
         reason=diff-changed
       fi
@@ -1708,7 +1843,7 @@ case "${1:-}" in
   covered|reviewed|fixed|delta|acknowledged)
            verb="$1"; shift || true
            # The one optional revision flag: --head for covered/reviewed/delta/
-           # acknowledged, --after for fixed. delta also takes --max-lines <n>.
+           # acknowledged, --after for fixed. delta also takes --max-lines <n>|all.
            flag=--head; [ "$verb" = fixed ] && flag=--after
            rec_rev=""; max_lines=400; ack_id=""
            while [ $# -gt 0 ]; do
@@ -1717,7 +1852,7 @@ case "${1:-}" in
                           [ -n "$rec_rev" ] && [ "$rec_rev" != worktree ] || die "$flag needs a revision" ;;
                "$flag"=*) rec_rev="${1#"$flag"=}"; shift
                           [ -n "$rec_rev" ] && [ "$rec_rev" != worktree ] || die "$flag needs a revision" ;;
-               --max-lines)   [ "$verb" = delta ] && [ $# -ge 2 ] || die "--max-lines is a delta option: --max-lines <n>"
+               --max-lines)   [ "$verb" = delta ] && [ $# -ge 2 ] || die "--max-lines is a delta option: --max-lines <n>|all"
                               max_lines="$2"; shift 2 ;;
                --max-lines=*) [ "$verb" = delta ] || die "--max-lines is a delta option"
                               max_lines="${1#--max-lines=}"; shift ;;

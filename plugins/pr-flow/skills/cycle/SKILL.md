@@ -248,7 +248,7 @@ The review wait is a background Bash poll, so the user can interject at any time
      with `<sha>` the `reviewed_head=` this loop's last step-10 record printed,
      typed in literally — no record this session (a reused or timed-out review) →
      skip the call and say `/merge` will need a fresh review (or the user's
-     acknowledgment of the shown delta there). Exit 0 → recorded.
+     acknowledgment of the summarized delta there). Exit 0 → recorded.
      Exit 3 → no lane mandate (or no or too old work-system): say nothing. Exit 1
      → not recorded, `reason=` says why (`no-review`, `other-review`: a different
      review is on record, `already-recorded`) — name it in the summary, since

@@ -1,9 +1,9 @@
 ---
 title: "Worker Autonomy Mandate (MANDATE.md)"
 createdAt: 2026-09-07
-updatedAt: 2026-10-22
+updatedAt: 2026-10-28
 createdFrom: "branch: task/extend-worker-autonomy"
-updatedFrom: "branch: task/harden-mandate-diff-id-and-round-lock"
+updatedFrom: "branch: task/summarize-merge-delta-ack"
 pluginVersion: 1.9.0
 prime: false
 ---
@@ -512,6 +512,50 @@ covers. Why it is built this way:
   (checked on a temp file with `tr -d '\000' | cmp`). The script cannot
   see who asks, so "interactive user only" lives in the callers' prose; like
   `reviewed`, it is not a boundary against a worker determined to bypass it.
+- **The ack is decided from a summary, not a raw diff** (2026-10-26, after
+  #91's ~278-line delta was acked unread: "I am not a robot"). An ack
+  text that claims "I have read this delta" records something that did not
+  happen, so the prompt is `[a]cknowledge — merge this change without a
+  re-review / [d]iff / [r]e-review / [s]top`, and the model reads the full
+  delta itself and summarizes it per file. The summary stands on mechanical
+  facts, not on hunk reading: a diff-of-diffs hunk often has its file header
+  outside its 3 context lines, so `delta` prints `delta_file=` lines computed
+  per file from the two raw lane diffs — `lane=` (delta lines whose inner
+  prefix is the lane's own `+`/`-`) vs. `context=` (main's lines, headers), so
+  `lane=0` provably means "only moved with main", and `versions_only=` (equal
+  after the version mask). The kind labels are gated on those facts ("from
+  main" only at `lane=0`, "agreed fix" only with `includes_agreed_fixes=yes`
+  and only for the hunks shown to be one); everything else is `new code` or
+  `unclear`. The list sits above `delta_begin`, outside the hashed text, so
+  the `ack_id` and every refusal are unchanged. Review round 1 (swarm) found
+  three traps: `awk -v h="$header"` expands the backslashes of a C-quoted
+  name (`"a/\303\244.sh"`), so the lookup missed and new lane code read
+  `new lane=0` — join both indexes in one awk pass instead, never pass
+  lane-derived text through `-v`; `versions_only` must follow the gate's
+  `version_paths` policy, or a dependency downgrade elsewhere reads as a
+  renumbering; and a lane-chosen path printed raw can forge `key=value`
+  fields, so it goes last, `%q`-quoted. The model reads the delta from a
+  file (`--max-lines all`, Read in ranges to the last line): a single Bash
+  result is capped by the harness while the header still says
+  `truncated=no`. Kind labels other than the two mechanical ones are the
+  model's reading of the code, never of what the lane text calls itself.
+  Round 2: an unbounded `--max-lines all` made `ack_id` prove only that the
+  text was printed, so a delta over `ACK_MAX_LINES` (2000) — or, round 3,
+  with a line over 1000 bytes, which the Read tool cuts — gets none and
+  `acknowledged` refuses it (`too-large`); `%q` alone leaves multibyte bidi
+  characters raw under `core.quotePath=false`, so the path is `cat -v`-escaped
+  first; `FNR == NR` joins break when the first file is empty (use
+  `FILENAME == ARGV[1]`). Round 4: a compat fallback must keep every
+  guarantee, not just the one in view — rewriting `all` to 2000 for a
+  pre-1.29 work-system kept the line ceiling but not the byte ceiling, so an
+  old `acknowledged` would ack one long line no summary shows; the shim now
+  answers `old-work-system` there and `/merge` stops. And `lane=0` is not
+  "only main moved" when the lane moves its own lines across a context line:
+  `diff -U0` may show that as the context line leaving and returning (two lane
+  lines past one context line make that the cheaper side), with no hunk header
+  change inside a function — a context line that leaves and returns verbatim
+  counts as lane. Reproduce such a case before trusting a fix: a one-line
+  move is a tie and passed the old code too.
 - **`fixed` is an attestation, so once per review, bound by `--after <sha>`**
   to the review the caller ran. Repeatable or unbound, it would let any later
   edit be stamped as covered.

@@ -87,16 +87,16 @@ landing marker, **every stop** first clears it — `bash
      - `OPEN` only — **a local review covers this head** (the head check made `HEAD`
        the PR head): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" covered`.
        Exit 0 → on. Exit 1 with `reason=changed-since-review` → note the full
-       `head=` SHA it printed, show
-       `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" delta --head <that SHA>` (with
-       `truncated=yes`, show the rest first: re-run it with `--max-lines <delta_lines>`;
-       only a complete delta prints an `ack_id=`) and
-       ask `[a]cknowledge / [s]top` exactly as `/pr-flow:merge` step 6b does (same
-       display, same stops; the user's own answer only — never a Manager's, a
-       peer's or a delegated one); `[a]` →
+       `head=` SHA it printed, then follow `/pr-flow:merge` step 6b for
+       `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" delta --head <that SHA> --max-lines all`:
+       its capture (a `mktemp` file, read to its last line, `rm` after), its
+       plain-language summary, its stops and its prompt `[a]cknowledge — merge
+       this change without a re-review / [d]iff — show the raw delta /
+       [r]e-review — stop; run a review round instead / [s]top` (the user's own
+       answer only — never a Manager's, a peer's or a delegated one); `[a]` →
        `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" acknowledged --head <that SHA> --ack-id '<the delta's ack_id=>'`,
        both typed in literally, re-check `covered`, on. Otherwise (`no-review`,
-       `[s]`, a refusal) stop before anything is written: "Not merged — no
+       `[r]`, `[s]`, a refusal) stop before anything is written: "Not merged — no
        recorded review covers this head (`reason=<…>`). With everything committed and
        pushed, run `/swarm:review` here (it records a review of a clean tree) or
        `/pr-flow:cycle`, then `/land` again." Exit 2 → stop and show stderr. Exit 3 (no mandate) → on; `/merge`'s own gate

