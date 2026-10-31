@@ -109,6 +109,8 @@
 #   WORK_SYSTEM_CC_HARNESS_AGENTS    path to the optional cc-harness-agents
 #                                    helper; default: `cc-harness-agents` on PATH.
 #                                    Point it at a stub to test without PATH munging.
+#   WORK_SYSTEM_AGENT_PROBE_SECONDS  time bound of each CLI availability probe
+#                                    (default 10); a test seam for loaded runners.
 #   No global state and no shipped fallback — a repo with no default gets the
 #   picker instead.
 #
@@ -346,7 +348,7 @@ harness_list_raw() {
   # from "configured but this provider is logged out". pipefail is not POSIX, so
   # dash-as-sh cannot express this.
   set +e
-  run_bounded 10 bash -c 'set -o pipefail; "$1" list 2>/dev/null | head -c "$2"' _ \
+  run_bounded "$PROBE_SECONDS" bash -c 'set -o pipefail; "$1" list 2>/dev/null | head -c "$2"' _ \
     "$HARNESS_BIN" "$HARNESS_MAX_BYTES" >"$tmp"
   rc=$?
   set -e
@@ -693,6 +695,7 @@ row_for_selector() {
 # lib-bounded.sh (herdr-launch.sh sources the same file): two private copies had
 # already drifted apart, and a sibling-script dependency is the norm here anyway.
 _LIB_BOUNDED="$SCRIPT_DIR/lib-bounded.sh"
+PROBE_SECONDS="${WORK_SYSTEM_AGENT_PROBE_SECONDS:-10}"
 # shellcheck source=lib-bounded.sh
 . "$_LIB_BOUNDED" 2>/dev/null || {
   echo "agent-registry.sh: cannot source $_LIB_BOUNDED (it ships alongside this script)" >&2
@@ -717,7 +720,7 @@ _GROK_RAW_RC=0
 grok_models_load() {
   [ -n "$_GROK_RAW_LOADED" ] && return 0
   _GROK_RAW_LOADED=1
-  _GROK_RAW="$(run_bounded 10 grok models 2>/dev/null)" || _GROK_RAW_RC=$?
+  _GROK_RAW="$(run_bounded "$PROBE_SECONDS" grok models 2>/dev/null)" || _GROK_RAW_RC=$?
 }
 grok_models_raw() {
   grok_models_load
@@ -767,7 +770,7 @@ grok_resolve_latest() {
 # model alias against the raw JSON rather than parsing it — no jq/python
 # dependency, and a reshaped config document can't yield a wrong token.
 kimi_models_raw() {
-  run_bounded 10 kimi provider list --json 2>/dev/null
+  run_bounded "$PROBE_SECONDS" kimi provider list --json 2>/dev/null
 }
 
 entry_status() {
@@ -787,7 +790,7 @@ entry_status() {
       local crc=0
       if ! command -v codex >/dev/null 2>&1; then note="not installed"
       else
-        run_bounded 10 codex login status >/dev/null 2>&1 || crc=$?
+        run_bounded "$PROBE_SECONDS" codex login status >/dev/null 2>&1 || crc=$?
         if [ "$crc" -eq 0 ]; then avail=yes
         elif [ "$crc" -eq 124 ]; then avail=yes; note="codex login status timed out — availability assumed"
         else note="run: codex login"; fi

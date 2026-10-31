@@ -598,6 +598,12 @@ keeps the original branch name rather than renaming it to `task/<name>`:
   a bounded window. On **0.7.0–0.7.4** the old `agent start --workspace --cwd -- …`
   plus `pane move --new-tab` sequence is kept unchanged. If neither contract is
   recognizable, nothing is created and you get the manual command instead.
+- On herdr **0.8.2**, `agent start` only returns once the agent is idle, so a
+  worker already busy (in practice claude with `/work-system:continue`) runs into
+  herdr's startup timeout. The launcher then confirms the worker from herdr's own
+  detection — the expected kind in that pane, `working`/`idle`/`done` (one held at
+  a prompt stays unconfirmed) — and tries to give it the tab's agent name; if herdr
+  refuses the name, `/kickoff` says so and the worker is addressed by pane.
 - If a launch can't be **confirmed** (the worker never became detectable, an
   unclassifiable herdr error, a pane-id mismatch), the tab is left in place and the
   skill tells you to look at it rather than launching a second worker onto the same

@@ -467,6 +467,9 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
       stderr, which says what could not be confirmed.
     - **exit 0 with `moved=yes`** → the task is running in its own background tab
       (`tab=<id>`) with worker `agent=<cli:model>`. Report success (template below).
+      A `named=no` line means herdr refused the tab's agent name (e.g. a stale tab
+      holds it): add one line that the worker is addressed by pane `<pane>`, and
+      relay the helper's stderr.
     - **exit 0 with `moved=no`** (legacy herdr only) → the worker started but the tab
       move failed, so it is running as a split in *this* session's tab — tell the user
       it's here, not in a new tab. The helper's stderr for this call carries herdr's own

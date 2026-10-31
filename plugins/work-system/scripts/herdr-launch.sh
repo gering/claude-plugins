@@ -83,6 +83,8 @@
 #                     resume: always yes — its own tab)
 #   agent=<name>     (launch only) the resolved CLI×model (e.g. codex:gpt-5.6-sol,
 #                     or plain `claude` for the legacy no-selector path)
+#   named=no         (launch only, rare) a worker confirmed after a readiness
+#                     timeout did not get its herdr agent name — address it by pane
 # launch selector errors (nothing spawned): exit 2 = unknown selector; exit 3 =
 # the CLI is not available, with stdout `unavailable=<name>` + `note=<hint>` so
 # the caller can print a clear "run: … login".
@@ -92,8 +94,9 @@
 #   tab=<tab or empty>
 #   agent=<resolved agent>
 # It means a tab exists and a worker MAY be running in it, but the launch could
-# not be confirmed (readiness timeout, an unrecognized herdr error, a pane-id
-# mismatch, or a rollback that could not be verified). Callers must branch on
+# not be confirmed (a readiness timeout with no worker detected in the pane
+# afterwards, an unrecognized herdr error, a pane-id mismatch, or a rollback that
+# could not be verified). Callers must branch on
 # `blocked` BEFORE `moved`, tell the user to inspect that tab, and must NOT launch
 # again, print the manual worker command, or save a project default.
 # resume adds three keys so the caller never reports a resume that didn't happen:
@@ -154,12 +157,12 @@ command -v python3 >/dev/null 2>&1 || { echo "python3 not on PATH" >&2; exit 1; 
 }
 [ -d "$worktree" ] || { echo "worktree dir not found: $worktree" >&2; exit 1; }
 
-# The four herdr-call stderr-capture tempfiles below are each cleaned up with an
+# The herdr-call stderr-capture tempfiles below are each cleaned up with an
 # explicit `rm -f` on their own success/failure branches, but a SIGINT/SIGTERM
 # between their `mktemp` and that `rm -f` would otherwise leak the file — matching
 # the existing convention in herdr-tab-glyph.sh. `${var:-}` tolerates a variable
 # that isn't assigned yet (or on a code path that never used it) under `set -u`.
-trap 'rm -f "${start_err:-}" "${move_err:-}" "${create_err:-}" "${run_err:-}" "${close_err:-}"' EXIT
+trap 'rm -f "${start_err:-}" "${move_err:-}" "${create_err:-}" "${run_err:-}" "${close_err:-}" "${rename_err:-}"' EXIT
 
 # Stamp the task's CURRENT state glyph onto the sidebar label (○ ● ◇ ◆ ✓ — the
 # same mapping the [ws …] statusline renders; ws-statusline.sh is the single
@@ -185,6 +188,9 @@ fi
 # (`tab create`, `agent start`, `pane run`, `pane move`): `agent start` carries
 # herdr's own `--timeout`, and client-side killing a half-applied mutation would
 # trade a hang for unknown server state — those keep their pre-existing behavior.
+# PROBE_SECONDS is that bound for every read; a seam so tests under load can widen
+# it, never a reason to change the production 10s.
+PROBE_SECONDS="${WORK_SYSTEM_HERDR_PROBE_SECONDS:-10}"
 # shellcheck source=lib-bounded.sh
 . "$SCRIPT_DIR/lib-bounded.sh" 2>/dev/null || {
   echo "herdr-launch.sh: cannot source $SCRIPT_DIR/lib-bounded.sh (it ships alongside this script)" >&2
@@ -213,7 +219,7 @@ detect_launch_api() {
   # so a SIGKILLed grandchild still holding it would keep this $( ) open forever —
   # defeating the exact hang guard run_bounded's temp-file stdout routing provides.
   # `--help` goes to stdout; herdr's stderr is of no use here.
-  help="$(run_bounded 10 herdr agent start --help 2>/dev/null)" || rc=$?
+  help="$(run_bounded "$PROBE_SECONDS" herdr agent start --help 2>/dev/null)" || rc=$?
   # Plain substring tests on a string already in memory — `case` does this with no
   # subprocess, where the printf|grep pipelines it replaces cost eight per launch
   # and implied a regex match that was never wanted.
@@ -243,12 +249,17 @@ READY_TRIES="${WORK_SYSTEM_HERDR_READY_TRIES:-60}"               # shell-prompt 
 DETECT_TRIES="${WORK_SYSTEM_HERDR_DETECT_TRIES:-60}"             # wrapper detection polls
 RETRY_DELAY="${WORK_SYSTEM_HERDR_RETRY_DELAY:-0.5}"              # seconds between polls
 # Try counts alone do NOT bound these loops in wall clock: each iteration makes
-# herdr calls that are themselves only bounded at 10s each, so against a wedged
+# herdr calls that are themselves bounded at PROBE_SECONDS (10s) each, so against a wedged
 # socket "60 tries" can mean twenty minutes rather than the ~30s the numbers imply.
 # Every poll loop therefore also carries an absolute deadline, and whichever bound
 # trips first ends it.
 READY_SECONDS="${WORK_SYSTEM_HERDR_READY_SECONDS:-45}"
 DETECT_SECONDS="${WORK_SYSTEM_HERDR_DETECT_SECONDS:-45}"
+# After an `agent start` readiness timeout: how long to look for the worker herdr
+# may already have started in the pane. Short on purpose — measured live, herdr
+# detects a typed claude in under a second, and by then the start has already
+# spent its own --timeout.
+CONFIRM_SECONDS="${WORK_SYSTEM_HERDR_CONFIRM_SECONDS:-10}"
 ALIVE_SECONDS="${WORK_SYSTEM_HERDR_ALIVE_SECONDS:-20}"
 # The busy-retry budget is wall clock for a reason: `agent start` may REJECT
 # instantly (a precondition check) or only after consuming its own --timeout, so a
@@ -278,12 +289,14 @@ try:
 except Exception:
     pass'
 #   modern launch: the detected agent kind of one pane (`pane get`), i.e. what
-#   herdr believes is running there. Empty for a plain shell pane.
-extract_pane_agent='import sys, json
+#   herdr believes is running there, plus its agent_status, as `<kind>|<status>`.
+#   The kind is empty for a plain shell pane; an unreadable answer is a bare "|".
+extract_pane_agent_state='import sys, json
 try:
-    print(json.load(sys.stdin)["result"]["pane"].get("agent") or "")
+    p = json.load(sys.stdin)["result"]["pane"]
+    print((p.get("agent") or "") + "|" + (p.get("agent_status") or ""))
 except Exception:
-    pass'
+    print("|")'
 #   modern launch (pane-run) + resume: is the pane back at its own shell prompt,
 #   i.e. safe to type a command into? Answered from WHICH PROCESSES hold the
 #   foreground: only the shell itself → ready; anything else (rc-file startup
@@ -441,7 +454,16 @@ HERDR_WORKSPACE_ID=$ws_clean is not a valid workspace on this herdr server (like
 # exist to keep the three outcome shapes (success, rolled-back failure, fail-closed
 # unverified) in ONE place instead of repeated inline at every error site.
 
-# classify_start_failure <rc> <stderr-blob> → busy | definitive | ambiguous
+# herdr_error_code <stderr-blob> → herdr's error.code, or empty.
+herdr_error_code() {
+  local code
+  code="$(printf '%s' "$1" | tr -dc '[:print:]\t\n' | python3 -c "$extract_herdr_error" 2>/dev/null || true)"
+  printf '%s\n' "${code%%|*}"
+}
+
+# classify_start_failure <rc> <error-code> → busy | definitive | ambiguous
+#   (<error-code> from herdr_error_code, so a caller that branches on it too
+#   parses the blob once)
 #   busy       herdr refused because the pane's shell was not at a prompt yet. This
 #              is THE failure right after `tab create` (a login shell running
 #              direnv/sops/ssh-add takes seconds), so it is retried — bounded, and
@@ -452,13 +474,13 @@ HERDR_WORKSPACE_ID=$ws_clean is not a valid workspace on this herdr server (like
 #              required --pane", "unknown option: …") or a no-such-pane/placement
 #              error code.
 #   ambiguous  anything else, INCLUDING a readiness timeout: the worker may be
-#              coming up in that pane. Never rolled back, never retried — reported
-#              as blocked=unverified so the user inspects the tab.
+#              coming up in that pane. Never rolled back, never retried. The
+#              native-start caller confirms a `timeout` from process state
+#              (moved=yes when the expected kind is detected); everything else is
+#              reported as blocked=unverified so the user inspects the tab.
 classify_start_failure() {
-  local rc="$1" blob="$2" code
+  local rc="$1" code="$2"
   [ "$rc" = 2 ] && { printf 'definitive\n'; return 0; }
-  code="$(printf '%s' "$blob" | tr -dc '[:print:]\t\n' | python3 -c "$extract_herdr_error" 2>/dev/null || true)"
-  code="${code%%|*}"
   case "$code" in
     agent_pane_busy) printf 'busy\n' ;;
     agent_pane_not_found|agent_target_not_found|agent_placement_not_found|pane_not_found)
@@ -515,9 +537,32 @@ fail_definitive() {
   exit 0
 }
 
-# pane_agent_kind <pane> — what herdr currently detects in that pane ("" = nothing).
-pane_agent_kind() {
-  run_bounded 10 herdr pane get "$1" 2>/dev/null | python3 -c "$extract_pane_agent" 2>/dev/null || true
+# pane_agent_state <pane> → `<kind>|<agent_status>` of what herdr currently
+# detects in that pane ("|" = nothing readable, printed by the extractor; empty
+# if python3 itself fails). Never fails, so a caller under an inherited pipefail
+# reads a killed probe as unreadable instead of exiting. Non-printables are
+# stripped: both fields reach the terminal in diagnostics.
+pane_agent_state() {
+  run_bounded "$PROBE_SECONDS" herdr pane get "$1" 2>/dev/null | python3 -c "$extract_pane_agent_state" 2>/dev/null | tr -dc '[:print:]\n' || true
+}
+
+# name_agent <pane> <name> — give a confirmed worker the herdr agent name its
+# timed-out `agent start` never registered, so `agent read/prompt <label>` works.
+# Best-effort: the worker is confirmed either way, so a failure (e.g.
+# agent_name_taken by a stale tab) is reported and returns 1, which the caller
+# turns into a `named=no` line. A rename is idempotent,
+# which is why — unlike the launch mutations — it may be bounded.
+name_agent() {
+  local diag rc=0
+  rename_err="$(mktemp)"   # global, so the EXIT trap removes it on a signal
+  run_bounded "$PROBE_SECONDS" herdr agent rename "$1" "$2" >/dev/null 2>"$rename_err" || rc=$?
+  if [ "$rc" != 0 ]; then
+    diag="$(herdr_diag "$(cat "$rename_err")" "$workspace" 0)"
+    [ -n "$diag" ] && printf '%s\n' "$diag" >&2
+    echo "the worker in pane $1 is running, but herdr did not take the agent name '$2' — address it by pane" >&2
+  fi
+  rm -f "$rename_err"
+  return "$rc"
 }
 
 # pane_state <pane> → present | gone | unverified. Used on the LEGACY path, where a
@@ -543,7 +588,7 @@ if not pid or not panes:
 print("present" if any(p.get("pane_id") == pid for p in panes) else "gone")'
 pane_state() {
   local json
-  json="$(run_bounded 10 herdr pane list 2>/dev/null || true)"
+  json="$(run_bounded "$PROBE_SECONDS" herdr pane list 2>/dev/null || true)"
   [ -n "$json" ] || { printf 'unverified\n'; return 0; }
   printf '%s' "$json" | python3 -c "$extract_pane_present" "$1" 2>/dev/null || printf 'unverified\n'
 }
@@ -573,7 +618,7 @@ pane_state() {
 # its own shell prompt". `ready` = the shell itself holds the foreground, `busy` =
 # a child does (the wrapper is running), `unknown` = herdr cannot answer.
 pane_shell_state() {
-  run_bounded 10 herdr pane process-info --pane "$1" 2>/dev/null \
+  run_bounded "$PROBE_SECONDS" herdr pane process-info --pane "$1" 2>/dev/null \
     | python3 -c "$extract_shell_ready" 2>/dev/null || echo unknown
 }
 
@@ -685,7 +730,7 @@ EOF_RESOLVE
         # We never got an answer, so we know nothing about the contract. Say THAT,
         # instead of accusing herdr of an unrecognizable API — the cause here is a
         # wedged/unreachable socket or a probe that outran its bound.
-        echo "could not probe 'herdr agent start --help' (no output, an error, or it outran its 10s bound) — herdr may be unreachable or wedged" >&2
+        echo "could not probe 'herdr agent start --help' (no output, an error, or it outran its ${PROBE_SECONDS}s bound) — herdr may be unreachable or wedged" >&2
         echo "nothing was created and no worker was started — start it by hand, or retry once herdr responds" >&2
         exit 1
         ;;
@@ -845,7 +890,8 @@ EOF_RESOLVE
         rm -f "$start_err"
         [ "$start_rc" = 0 ] && break
 
-        class="$(classify_start_failure "$start_rc" "$start_blob")"
+        start_code="$(herdr_error_code "$start_blob")"
+        class="$(classify_start_failure "$start_rc" "$start_code")"
         # Retry ONLY the "shell not ready yet" rejection, bounded. Everything else
         # falls straight through — a retry loop over an unrelated error is how a
         # launcher ends up starting two workers.
@@ -856,14 +902,64 @@ EOF_RESOLVE
         fi
 
         # This call never sends --workspace, so a placement error here cannot be a
-        # stale-workspace problem: ws_relevant=0 keeps that hint off.
-        diag="$(herdr_diag "$start_blob" "$workspace" 0)"
-        [ -n "$diag" ] && printf '%s\n' "$diag" >&2
+        # stale-workspace problem: ws_relevant=0 keeps that hint off. A timeout's
+        # diagnostic waits until the confirmation below has failed — a confirmed
+        # launch is a success and must not print herdr's error.
+        if [ "$start_code" != timeout ]; then
+          diag="$(herdr_diag "$start_blob" "$workspace" 0)"
+          [ -n "$diag" ] && printf '%s\n' "$diag" >&2
+        fi
         if [ "$class" = busy ]; then
           fail_definitive "pane $pane never reached an interactive shell prompt (herdr kept reporting agent_pane_busy for ${BUSY_SECONDS}s / $BUSY_TRIES retries) — nothing was started"
         fi
         if [ "$class" = definitive ]; then
           fail_definitive "herdr agent start --kind $herdr_kind was rejected before starting anything in pane $pane"
+        fi
+        # A readiness TIMEOUT is the one ambiguous error confirmed from process
+        # state. Since herdr 0.8.2 `agent start` returns only once the agent is
+        # ready for input, i.e. idle — and a claude worker handed
+        # /work-system:continue starts working at once and stays busy for the
+        # whole task, so the call outlives its --timeout although the worker is
+        # healthy (measured live: detected as claude 0.6s in, timeout at 10.4s).
+        # herdr then never registers the requested name either. A timeout can
+        # equally mean nothing was typed (shell still busy when herdr gave up), so
+        # only herdr detecting the EXPECTED kind in THIS pane, in a running state
+        # (working/idle/done), turns it into a launch. `blocked` is a worker held
+        # at a prompt nobody was told about, so it stays unverified; `unknown` is
+        # the first seconds of detection and is polled through. Nothing is retried.
+        if [ "$start_code" = timeout ]; then
+          detected=""
+          status=""
+          i=0
+          confirm_deadline=$(( SECONDS + CONFIRM_SECONDS ))
+          while [ "$i" -lt "$DETECT_TRIES" ] && [ "$SECONDS" -lt "$confirm_deadline" ]; do
+            state="$(pane_agent_state "$pane")"
+            detected="${state%%|*}"
+            status="${state#*|}"
+            if [ -n "$detected" ] && [ "$status" != unknown ] && [ -n "$status" ]; then break; fi
+            [ -n "$detected" ] && [ "$detected" != "$herdr_kind" ] && break
+            i=$((i + 1))
+            sleep "$RETRY_DELAY" 2>/dev/null || true
+          done
+          if [ "$detected" = "$herdr_kind" ]; then
+            case "$status" in
+              working|idle|done)
+                named=yes
+                name_agent "$pane" "$label" || named=no
+                printf 'pane=%s\ntab=%s\nmoved=yes\nagent=%s\n' "$pane" "$tab" "$agent_name"
+                if [ "$named" = no ]; then printf 'named=no\n'; fi
+                exit 0 ;;
+            esac
+          fi
+          diag="$(herdr_diag "$start_blob" "$workspace" 0)"
+          [ -n "$diag" ] && printf '%s\n' "$diag" >&2
+          if [ -n "$detected" ] && [ "$detected" != "$herdr_kind" ]; then
+            echo "herdr detects '$detected' in pane $pane, not the expected '$herdr_kind' — cannot confirm the launch" >&2
+          elif [ "$status" = blocked ]; then
+            echo "herdr detects $detected in pane $pane, held at a prompt (blocked) — it is waiting for input" >&2
+          elif [ -n "$detected" ]; then
+            echo "herdr detects $detected in pane $pane, but its state is still '${status:-unreadable}' — detection had not settled when the confirmation window ended" >&2
+          fi
         fi
         echo "herdr agent start --kind $herdr_kind did not confirm the worker in pane $pane — it may still be coming up, so the tab was left alone" >&2
         emit_unverified
@@ -904,7 +1000,7 @@ EOF_RESOLVE
     if [ "$run_rc" != 0 ]; then
       diag="$(herdr_diag "$run_blob" "$workspace" 0)"
       [ -n "$diag" ] && printf '%s\n' "$diag" >&2
-      if [ "$(classify_start_failure "$run_rc" "$run_blob")" = definitive ]; then
+      if [ "$(classify_start_failure "$run_rc" "$(herdr_error_code "$run_blob")")" = definitive ]; then
         fail_definitive "herdr pane run could not deliver the $agent_name wrapper to pane $pane"
       fi
       echo "herdr pane run returned an error for pane $pane but may still have delivered the command — the tab was left alone" >&2
@@ -918,7 +1014,7 @@ EOF_RESOLVE
     # second one.
     #
     # A dead wrapper is detected from process state, not from anything it printed
-    # (see the note above pane_agent_kind). The signal is NOT the busy→ready
+    # (see the note above pane_agent_state). The signal is NOT the busy→ready
     # transition — measured live, a wrapper that fails on startup (the common case:
     # expired auth) is gone before the first poll, so its "running" phase is never
     # observable. What IS observable is the steady state: a `sh -c` wrapper puts a
@@ -944,7 +1040,8 @@ EOF_RESOLVE
     # milliseconds and tear down a healthy worker that had not started yet.
     idle_earliest=$(( SECONDS + IDLE_MIN_SECONDS ))
     while [ "$i" -lt "$DETECT_TRIES" ] && [ "$SECONDS" -lt "$detect_deadline" ]; do
-      detected="$(pane_agent_kind "$pane")"
+      state="$(pane_agent_state "$pane")"
+      detected="${state%%|*}"
       if [ "$detected" = "$herdr_kind" ]; then
         printf 'pane=%s\ntab=%s\nmoved=yes\nagent=%s\n' "$pane" "$tab" "$agent_name"
         exit 0
