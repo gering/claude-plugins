@@ -112,6 +112,7 @@ class Harness(unittest.TestCase):
         self.assertNotIn("cc-harness:short", rows, "a 3-column row breaks the contract")
         sol = rows["cc-harness:sol"]
         self.assertTrue(sol["available"] and sol["ready"])
+        self.assertEqual(sol["model"], "gpt-6.1-sol", "the routed model is its own field, not parsed from a label")
         self.assertEqual(sol["family"], "openai")
         self.assertEqual(rows["cc-harness:grok"]["family"], "grok")
         self.assertEqual(rows["cc-harness:odd"]["family"], "unknown:odd")
@@ -123,6 +124,19 @@ class Harness(unittest.TestCase):
         self.assertFalse([b for b in self.rows(STUB_LIST_RC="3") if b.startswith("cc-harness:")])
         absent = self.rows(SWARM_CC_HARNESS_BIN=str(self.stub / "nope"))
         self.assertFalse([b for b in absent if b.startswith("cc-harness:")])
+
+    def test_unconfigured_helper_says_why(self):
+        r = self.sh("ready", "cc-harness:sol", STUB_LIST_RC="3")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not configured here (no gateway token)", r.stderr)
+
+    def test_list_runs_once_per_run(self):
+        counter = self.stub / "list-calls"
+        helper = (self.stub / "cc-harness-agents")
+        helper.write_text(HELPER.replace('list) ', f'list) echo x >> "{counter}"; '))
+        r = self.run_voice()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(counter.read_text().splitlines()), 1, "one `list` probe per run, not one per lookup")
 
     def test_shell_function_claude_does_not_count(self):
         (self.stub / "claude").unlink()
@@ -138,7 +152,7 @@ class Harness(unittest.TestCase):
 
     def voices(self, live, **env):
         rows = [{"backend": b, "available": True, "ready": True, "family": f,
-                 "version": f"via cc-harness: {m}" if b.startswith("cc-harness:") else "1.0"}
+                 "version": "1.0", "model": m}
                 for b, f, m in live]
         r = self.sh("voices", stdin=json.dumps(rows), **env)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -179,8 +193,18 @@ class Harness(unittest.TestCase):
             ({"ANTHROPIC_BASE_URL": "http://127.0.0.1:9"}, "model=;family=unknown:session"),
             ({"ANTHROPIC_MODEL": "mystery-9"}, "model=mystery-9;family=unknown:session"),
             ({"ANTHROPIC_MODEL": "gpt-6$(id)"}, "model=gpt-6id;family=openai"),
+            # Anchored: a vendor prefix wins over a tier word inside the id.
+            ({"ANTHROPIC_MODEL": "gpt-5.4-haiku"}, "model=gpt-5.4-haiku;family=openai"),
+            ({"ANTHROPIC_MODEL": "grok-4-codex"}, "model=grok-4-codex;family=grok"),
+            # A tier alias resolves the way Claude Code does — a gateway maps it.
+            ({"ANTHROPIC_MODEL": "opus", "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-6.1-sol",
+              "ANTHROPIC_BASE_URL": "http://127.0.0.1:9"}, "model=gpt-6.1-sol;family=openai"),
+            ({"ANTHROPIC_MODEL": "opus", "ANTHROPIC_BASE_URL": "http://127.0.0.1:9"},
+             "model=opus;family=unknown:session"),
+            ({"ANTHROPIC_MODEL": "opus"}, "model=opus;family=claude"),
         ]
         for env, want in cases:
+            env = {"ANTHROPIC_DEFAULT_OPUS_MODEL": "", **env}
             r = self.sh("session", **env)
             self.assertEqual(r.stdout.strip(), want, env)
 
@@ -236,6 +260,12 @@ class Harness(unittest.TestCase):
             self.assertEqual(r.returncode, 1, envelope)
             self.assertEqual(r.stdout.strip(), "", envelope)
 
+    def test_rerouted_id_fails_the_voice(self):
+        r = self.run_voice(SWARM_HARNESS_EXPECT="grok-4.7")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not the 'grok-4.7' this run was planned with", r.stderr)
+        self.assertEqual(self.run_voice(SWARM_HARNESS_EXPECT="gpt-6.1-sol").returncode, 0)
+
     def test_model_flag_is_refused(self):
         r = self.sh("run", "cc-harness:sol", "--model", "gpt-x", "--prompt-file", str(self.prompt))
         self.assertEqual(r.returncode, 2)
@@ -253,6 +283,9 @@ class Harness(unittest.TestCase):
         self.assertIn(str(home / ".claude" / "plugins"), paths)
         self.assertIn(str(home / ".claude" / "settings.json"), paths)
         self.assertIn(str(home / ".codex"), paths)
+        self.assertNotIn(str(home / ".cli-proxy-api"), paths, "the routed voice may need its own gateway config")
+        sib = self.source("_sandbox_deny_paths codex", HOME=str(home), SWARM_HOST_HOME=str(home))
+        self.assertIn(str(home / ".cli-proxy-api"), sib.stdout.splitlines(), "siblings never read gateway credentials")
         self.assertIn(str(self.repo.resolve() / "CLAUDE.md"), [str(Path(p).resolve()) for p in paths])
 
 

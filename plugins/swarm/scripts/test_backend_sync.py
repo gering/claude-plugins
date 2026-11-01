@@ -95,7 +95,9 @@ check("adapter readiness has a cc-harness arm", ready_block and "cc-harness:*)" 
 check("adapter run dispatch has a cc-harness arm", "cc-harness:*) run_cc_harness" in run_block)
 check("adapter list appends the helper's rows", "for b in claude codex grok kimi ${harness[@]+" in ADAPTER)
 check("workflow registers one backend per live harness id",
-      "...Object.keys(HARNESS).map((id) => ({ backend: `cc-harness:${id}`, ...PROFILE.externals['cc-harness'] }))" in WORKFLOW)
+      "...Object.keys(HARNESS).map((id) => ({ backend: `cc-harness:${id}`, ...PROFILE.externals['cc-harness']," in WORKFLOW)
+check("workflow pins each harness voice to the model prep froze its family from",
+      "SWARM_HARNESS_EXPECT=${shQuote(HARNESS[id].model)}" in WORKFLOW)
 check("every profile carries a cc-harness entry with a null model",
       all(PROFILES[p]["externals"]["cc-harness"]["model"] is None for p in PROFILES))
 check("skill takes externalVoices from the adapter's voices verb", "agents.sh\" voices" in SKILL)

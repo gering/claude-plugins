@@ -486,6 +486,9 @@ def case_family_follows_the_session_model():
               inp={"session": "model=mystery-9;family=unknown:session"})
     if "unknown:session" not in out["familiesPresent"] or out["consensusReachable"]:
         fail("session-family", f"unknown session family paired for consensus: {out!r}")
+    note = " ".join(out["coverageNotes"])
+    if "Nur eine benannte Modellfamilie (openai)" not in note or "unknown:session" not in note:
+        fail("session-family", f"the one-family note must name only openai and list the unknown apart: {note!r}")
     if out["unitsDegraded"] or any("reduziert" in n for n in out["coverageNotes"]):
         fail("session-family", f"an unknown family read as a degraded run: {out['coverageNotes']!r}")
 

@@ -1041,7 +1041,10 @@ const EXTERNAL_BACKENDS = [
   { backend: 'kimi', ...PROFILE.externals.kimi, clusters: ['breakage', 'threat'], env: 'SWARM_KIMI=1 ' },
   // cc-harness voices: one per live id prep reported (args.harness), all on the
   // shared `cc-harness` profile entry; the helper routes the model.
-  ...Object.keys(HARNESS).map((id) => ({ backend: `cc-harness:${id}`, ...PROFILE.externals['cc-harness'] })),
+  // SWARM_HARNESS_EXPECT: the routed model prep froze the family from — the
+  // adapter fails the voice if the helper routes the id elsewhere by now.
+  ...Object.keys(HARNESS).map((id) => ({ backend: `cc-harness:${id}`, ...PROFILE.externals['cc-harness'],
+    env: HARNESS[id].model ? `SWARM_HARNESS_EXPECT=${shQuote(HARNESS[id].model)} ` : '' })),
 ]
 // Units a backend actually runs: all of them, or (with `clusters`) those whose
 // lenses belong to an allowed cluster — under --max the units are single lenses,
@@ -1327,7 +1330,9 @@ if (familiesLost.length) {
 if (!consensusReachable && independentFamilies(familiesExpected).length >= 2) {
   coverageNotes.push(`Weniger als 2 Modellfamilien haben geliefert — kein Finding in diesem Lauf kann Konsens erreichen; jedes fällt auf solo + adversarialen Verifier zurück.`)
 } else if (!consensusReachable) {
-  coverageNotes.push(`Nur eine Modellfamilie (${familiesPresent.join(', ')}) ist in diesem Lauf konfiguriert — Konsens ist per Definition nicht anwendbar; jedes Finding läuft über solo + adversarialen Verifier.`)
+  // Name the unknown families apart: they took part, they just cannot pair.
+  const unknownPresent = familiesPresent.filter((f) => !independentFamilies([f]).length)
+  coverageNotes.push(`Nur eine benannte Modellfamilie (${independentFamilies(familiesPresent).join(', ') || 'keine'}) ist in diesem Lauf konfiguriert${unknownPresent.length ? ` (dazu ${unknownPresent.join(', ')} — Hersteller unbekannt, zählt nicht für Konsens)` : ''} — Konsens ist per Definition nicht anwendbar; jedes Finding läuft über solo + adversarialen Verifier.`)
 } else if (unitsDegraded.length) {
   coverageNotes.push(`Cluster ${unitsDegraded.join(', ')}: weniger als 2 Familien haben geliefert — Findings DORT fallen auf solo + Verifier zurück. Die übrigen Cluster sind unberührt.`)
 }

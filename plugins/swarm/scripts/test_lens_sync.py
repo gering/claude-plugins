@@ -465,6 +465,7 @@ if mb and hr:
         ("unitsForBackend", r"const unitsForBackend = .*?\n\}"),
         ("unitBrief", r"const unitBrief = .*?(?=\n(?:const |//))"),
         ("lensInstr", r"const lensInstr = .*?(?=\n// Compile each voice)"),
+        ("shQuote", r"const shQuote = [^\n]*"),
     ):
         helper = re.search(pattern, js, re.S)
         check(f"workflow: {name} source found for exact headroom", helper)
@@ -472,7 +473,7 @@ if mb and hr:
             helpers.append(helper.group(0))
     registry = re.search(r"const EXTERNAL_BACKENDS = \[.*?\n\]", js, re.S)
     check("workflow: backend registry found for exact headroom", registry)
-    if len(helpers) == 6 and registry and shutil.which("node"):
+    if len(helpers) == 7 and registry and shutil.which("node"):
         program = "\n".join(helpers) + "\n" + r'''
 const PROFILES = JSON.parse(process.argv[1]);
 let PROFILE;

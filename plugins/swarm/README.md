@@ -95,7 +95,7 @@ observations, reproducible inputs and measurement limits.
 ## The pipeline (`/swarm:review`)
 
 ```
-Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok ∥ kimi)
+Scope+gate → Fan-out (session-model lenses ∥ codex|cc-harness:sol ∥ grok|cc-harness:grok ∥ kimi)
           → Merge (file, mechanism) → Verify (solos + design + unverified consensus) → Ranked synthesis
 ```
 
@@ -141,9 +141,11 @@ longest single call drops 374 s → 313 s, and total work rises.
 Design-lens findings carry `kind: "design"` and render in their own report
 section, so suggestions never dilute the defect ranking.
 
-**Consensus counts model *families*, not voices.** Several Claude lenses
+**Consensus counts model *families*, not voices.** Several lenses
 flagging the same thing is one vote, not a cross-check — a `CONSENSUS` tag
-requires ≥2 of *claude / openai / grok / moonshot*. Everything else is a solo and earns
+requires ≥2 of *claude / openai / grok / moonshot*, where the lenses count as
+the session model's family (see [cc-harness voices](#cc-harness-voices-and-proxy-driven-sessions))
+and an `unknown:*` family never pairs. Everything else is a solo and earns
 its place through the verifier. Only **tagged topical-defect** consensus is
 auto-accepted; design, all-untagged, and Claude-unchecked methodological
 consensus still go through the verifier (agreement isn't repo-grounded

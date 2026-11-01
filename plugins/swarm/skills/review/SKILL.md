@@ -600,7 +600,9 @@ echo "SESSION_RUN=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" session)"
   three — and, when `cc-harness-agents` is on PATH, each live `cc-harness:<id>`
   of `SWARM_HARNESS_VOICES` (default `sol grok`) REPLACES the native of its
   family. Name every `replaced=` pair once (e.g. "codex → cc-harness:sol, routed
-  via the gateway"); `SWARM_HARNESS=off` keeps the native CLIs. Kimi's readiness already includes the opt-in (`--kimi` / `SWARM_KIMI=1`;
+  via the gateway"); `SWARM_HARNESS=off` keeps the native CLIs. A native named in
+  `replaced=` is NOT absent: skip its model announcement below and never relay
+  its `CODEX_DEGRADED`/`GROK_DEGRADED` as a reason it did not run. Kimi's readiness already includes the opt-in (`--kimi` / `SWARM_KIMI=1`;
   without it the hint says "opt-in only") and the OS jail (its ACP transport
   keeps read/web enabled and has no safe jail-less fallback, so the adapter
   reports it not-ready with a jail hint instead of failing once per cluster);
