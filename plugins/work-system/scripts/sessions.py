@@ -57,8 +57,8 @@ so the next inventory counts it.
 
 Exit: 0 done (results are in the output), 2 usage, 3 refresh outside herdr or
 herdr unreachable. Test seams (env): SESSIONS_INSTALLED_FILE,
-SESSIONS_MARKETPLACE_FILE, SESSIONS_STATE_FILE, SESSIONS_VERIFY_SECS, SESSIONS_READ_LINES; herdr and
-ps come from PATH.
+SESSIONS_MARKETPLACE_FILE, SESSIONS_STATE_FILE, SESSIONS_VERIFY_SECS,
+SESSIONS_POLL_MS, SESSIONS_READ_LINES; herdr and ps come from PATH.
 """
 import datetime
 import json
@@ -84,6 +84,13 @@ CALL_TIMEOUT = 15
 STARTUP_GRACE = 10
 _VERIFY_ENV = os.environ.get("SESSIONS_VERIFY_SECS", "")
 VERIFY_SECS = int(_VERIFY_ENV) if _VERIFY_ENV.isdigit() else 20
+# The pause between transcript looks while a reload is verified. A test seam: a
+# stub pane renders at once, and a 1 s poll per pane made the test minutes long.
+# It can only shorten the pause, so it never stretches the VERIFY_SECS bound, and
+# it never drops under 50 ms, so a leaked value cannot spin herdr in a busy loop.
+_POLL_ENV = os.environ.get("SESSIONS_POLL_MS", "")
+POLL_SECS = (max(50, min(int(_POLL_ENV), 1000)) / 1000
+             if _POLL_ENV.isascii() and _POLL_ENV.isdigit() and len(_POLL_ENV) <= 4 else 1)
 
 
 def usage(msg=""):
@@ -699,7 +706,7 @@ def reload_one(row, wait_ms):
     deadline = time.time() + VERIFY_SECS
     reply, seen = "", ""
     while time.time() < deadline:
-        time.sleep(1)
+        time.sleep(POLL_SECS)
         res = look()
         if res is None:
             continue
@@ -710,6 +717,8 @@ def reload_one(row, wait_ms):
             seen = summary
             break
     if seen:
+        # Not POLL_SECS: this is the grace a late --force line gets to render,
+        # and a shorter test poll must not let a partial reload read as done.
         time.sleep(1)
         res = look()
         # A --force line counts whether or not the summary is still on screen.

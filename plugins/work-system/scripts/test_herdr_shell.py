@@ -11,6 +11,7 @@ send-secret gate (prompt + echo=off ∧ icanon=on, raw/echo-on refused, the
 secret never in any argv), close/sweep ownership rules, and that handover
 never reads the pane. The live counterpart is smoke_herdr_shell.py.
 """
+import hashlib
 import json
 import os
 import socket
@@ -130,6 +131,9 @@ class FakeSocket:
             c.close()
 
 
+_STUB_CACHE = tempfile.TemporaryDirectory()
+
+
 class Env:
     def __init__(self, config, stty=STTY_PW, keychain=None):
         self.tmp = tempfile.TemporaryDirectory()
@@ -146,8 +150,8 @@ class Env:
         self._exe(bindir / "ps", "#!/bin/sh\necho ' ttys042'\n")
         (self.stub / "stty.txt").write_text(stty)
         # stty2.txt, when present, answers every call after the first.
-        self._exe(bindir / "stty", f"""#!/bin/sh
-d='{self.stub}'
+        self._exe(bindir / "stty", """#!/bin/sh
+d="$STUB"
 n=$(cat "$d/stty.count" 2>/dev/null || echo 0); echo $((n+1)) > "$d/stty.count"
 if [ "$n" -ge 1 ] && [ -f "$d/stty2.txt" ]; then cat "$d/stty2.txt"; else cat "$d/stty.txt"; fi
 """)
@@ -168,8 +172,15 @@ if [ "$n" -ge 1 ] && [ -f "$d/stty2.txt" ]; then cat "$d/stty2.txt"; else cat "$
 
     @staticmethod
     def _exe(path, body):
-        path.write_text(body)
-        path.chmod(0o755)
+        # macOS assesses every NEW executable on its first exec (~150 ms,
+        # serialized across processes); a link to one already run is not new.
+        # Each distinct body is written once and linked, never written through.
+        src = Path(_STUB_CACHE.name) / hashlib.sha256(body.encode()).hexdigest()
+        if not src.exists():
+            src.write_text(body)
+            src.chmod(0o755)
+        path.unlink(missing_ok=True)
+        path.symlink_to(src)
 
     def set(self, key, seq):
         self.config[key] = seq

@@ -71,11 +71,14 @@ def make_tree(root, insights="real"):
     return ws / SCRIPT.name
 
 
-def run(script, *args, store=None, home=None, cwd=None):
+def run(script, *args, store=None, home=None, cwd=None, tmpdir=None, extra_env=None):
     """Invoke the bridge with a fully isolated environment."""
     env = dict(os.environ)
     env.pop("CLAUDE_PLUGIN_ROOT", None)
     env["HOME"] = str(home)
+    if tmpdir is not None:
+        env["TMPDIR"] = str(tmpdir)
+    env.update(extra_env or {})
     if store is None:
         env.pop("INSIGHTS_STORE_DIR", None)
     else:
@@ -477,12 +480,29 @@ with tempfile.TemporaryDirectory() as td:
 
     # The cleanup trap was dead code: `f="$(mktemp_tracked)"` appended inside a
     # subshell, so the parent's array was always empty. Assert no stray temp
-    # files survive a run that creates several.
-    before = set(Path(os.environ.get("TMPDIR", "/tmp")).glob("insights-handoff.*"))
-    run(real, "reported", "some-task", "--project-dir", str(proj),
-        store=store, home=home, cwd=proj)
-    after = set(Path(os.environ.get("TMPDIR", "/tmp")).glob("insights-handoff.*"))
-    check("the bridge leaves no temp files behind", after <= before)
+    # files survive a run that creates several. A private TMPDIR: in the shared
+    # one, a parallel run's live temp files read as this run's leftovers. A
+    # logging mktemp shim proves the run made temp files at all and says where,
+    # so a run that makes none (or makes them elsewhere) cannot pass vacuously.
+    own_tmp = tmp / "own-tmp"
+    own_tmp.mkdir()
+    shim_dir = tmp / "mktemp-shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "mktemp"
+    real_mktemp = shutil.which("mktemp")
+    shim.write_text(f'#!/bin/sh\nout="$(\'{real_mktemp}\' "$@")" || exit $?\n'
+                    'printf \'%s\\n\' "$out" >> "$MKTEMP_LOG"\nprintf \'%s\\n\' "$out"\n')
+    shim.chmod(0o755)
+    made = tmp / "mktemp.log"
+    r = run(real, "reported", "some-task", "--project-dir", str(proj),
+            store=store, home=home, cwd=proj, tmpdir=own_tmp,
+            extra_env={"PATH": f"{shim_dir}:{os.environ['PATH']}", "MKTEMP_LOG": str(made)})
+    created = [p for p in made.read_text().splitlines() if p] if made.exists() else []
+    check("the bridge makes its temp files under TMPDIR",
+          bool(created) and all(Path(p).parent == own_tmp for p in created))
+    check("the bridge leaves no temp files behind",
+          r.returncode == 0 and not any(os.path.lexists(p) for p in created)
+          and not list(own_tmp.glob("insights-handoff.*")))
 
 
 # ======================================================= /close ordering contract

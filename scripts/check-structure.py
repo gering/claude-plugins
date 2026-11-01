@@ -30,6 +30,16 @@ REPO = Path(__file__).resolve().parent.parent
 DESC_WORDS_ERROR = 40
 DESC_WORDS_WARN = 30
 
+# Per-test wall-clock bound for the plugin tests. It is a hang guard, not a
+# speed target, so the default stays tight and a new hang still fails fast.
+# A test that is simply long gets its own bound here, from a measurement:
+# test_mandate runs 75 s alone and with three full runs in parallel (2026-10-27),
+# a fifth of it in deliberate lock waits. Every other test stays under 50 s.
+TEST_TIMEOUT_DEFAULT = 120
+TEST_TIMEOUTS = {
+    "plugins/work-system/scripts/test_mandate.py": 300,
+}
+
 errors: list[str] = []
 warnings: list[str] = []
 
@@ -279,7 +289,11 @@ def check_plugin_tests():
     write-capable token to an untrusted PR run — GitHub Actions withholds both
     from fork PRs by default, which is the property this relies on. If that ever
     changes (secrets added to the PR job), gate this check to trusted branches."""
-    for test in sorted((REPO / "plugins").glob("*/scripts/test_*.py")):
+    tests = sorted((REPO / "plugins").glob("*/scripts/test_*.py"))
+    for name in sorted(set(TEST_TIMEOUTS) - {rel(t) for t in tests}):
+        err(f"scripts/check-structure.py: TEST_TIMEOUTS names {name}, which no longer exists")
+    for test in tests:
+        timeout = TEST_TIMEOUTS.get(rel(test), TEST_TIMEOUT_DEFAULT)
         try:
             result = subprocess.run(
                 ["python3", str(test)],
@@ -287,13 +301,13 @@ def check_plugin_tests():
                 text=True,
                 cwd=str(test.parent),
                 stdin=subprocess.DEVNULL,  # a test that reads stdin must not block CI
-                timeout=120,               # a hang must fail, not wedge the check
+                timeout=timeout,           # a hang must fail, not wedge the check
             )
         except FileNotFoundError:
             err("python3 not found on PATH — cannot run plugin tests")
             return
         except subprocess.TimeoutExpired:
-            err(f"{rel(test)}: test timed out (>120s) — treated as a failure")
+            err(f"{rel(test)}: test timed out (>{timeout}s) — treated as a failure")
             continue
         if result.returncode != 0:
             detail = (result.stderr.strip() or result.stdout.strip()).splitlines()

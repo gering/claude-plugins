@@ -122,6 +122,18 @@ while True:
 '''
 
 
+# A working peer is two interpreter starts (helper + fake codex) plus a few
+# JSON lines; on a loaded machine that alone outlasts a sub-second deadline.
+# So the deadline under test (DEADLINE) and the time a working peer gets
+# (WORKING) are separate bounds: only the cases that test a deadline run with a
+# short one. HANG_BOUND sits below the helper's 10 s default deadline, so a
+# helper that ignored --timeout would still fail the bound.
+DEADLINE = 0.35
+WORKING = 20  # the helper's own maximum
+HANG_BOUND = 8
+WAIT = 30     # outer bound for this test's own waits on the helper
+
+
 class CodexModelsTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -132,7 +144,7 @@ class CodexModelsTests(unittest.TestCase):
         self.peer.chmod(0o700)
         self.pids = self.root / "pids.json"
 
-    def command(self, timeout=2):
+    def command(self, timeout=WORKING):
         return [sys.executable, str(HELPER), "--codex", str(self.peer),
                 "--timeout", str(timeout)]
 
@@ -141,9 +153,9 @@ class CodexModelsTests(unittest.TestCase):
         return {"HOME": str(self.root), "CODEX_HOME": str(self.root / "codex-home"),
                 "PATH": os.defpath, "CASE": case, "PIDS": str(self.pids)}
 
-    def run_peer(self, case, timeout=2):
+    def run_peer(self, case, timeout=WORKING):
         return subprocess.run(self.command(timeout), env=self.env(case),
-                              capture_output=True, text=True, timeout=5)
+                              capture_output=True, text=True, timeout=WAIT)
 
     def assert_failed(self, result):
         self.assertNotEqual(result.returncode, 0)
@@ -180,14 +192,17 @@ class CodexModelsTests(unittest.TestCase):
                      "error", "server-request", "wrong-id", "duplicate-key",
                      "non-json-number", "oversized"):
             with self.subTest(case=case):
-                self.assert_failed(self.run_peer(case))
+                result = self.run_peer(case)
+                self.assert_failed(result)
+                # Rejected on sight, not by the deadline: these fakes then hang.
+                self.assertNotIn("timed out", result.stderr)
 
     def test_timeout_bounds_handshake_and_entire_pagination(self):
         for case in ("init-hang", "partial-timeout", "shared-deadline", "notification-flood"):
             with self.subTest(case=case):
                 start = time.monotonic()
-                self.assert_failed(self.run_peer(case, timeout=0.35))
-                self.assertLess(time.monotonic() - start, 2)
+                self.assert_failed(self.run_peer(case, timeout=DEADLINE))
+                self.assertLess(time.monotonic() - start, HANG_BOUND)
 
     def assert_descendants_stopped(self):
         pids = json.loads(self.pids.read_text())
@@ -201,15 +216,18 @@ class CodexModelsTests(unittest.TestCase):
                 return True
             except ProcessLookupError:
                 return False
-        deadline = time.monotonic() + 2
+        deadline = time.monotonic() + HANG_BOUND
         while any(alive(pid) for pid in pids) and time.monotonic() < deadline:
             time.sleep(0.01)
         self.assertFalse(any(alive(pid) for pid in pids), pids)
 
     def test_group_cleanup_on_success_timeout_and_orphaned_pipe(self):
-        for case in ("success-child", "timeout", "leader-exit"):
+        # "timeout" and "leader-exit" (an orphan holds the pipe open) end by the
+        # deadline, which must fire only after the fake has spawned its
+        # descendants: a few seconds of headroom, not DEADLINE.
+        for case, timeout in (("success-child", WORKING), ("timeout", 5), ("leader-exit", 5)):
             with self.subTest(case=case):
-                result = self.run_peer(case, timeout=0.4)
+                result = self.run_peer(case, timeout=timeout)
                 if case == "success-child":
                     self.assertEqual(result.returncode, 0, result.stderr)
                 else:
@@ -220,12 +238,12 @@ class CodexModelsTests(unittest.TestCase):
         proc = subprocess.Popen(self.command(), env=self.env("term"),
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
-            deadline = time.monotonic() + 2
+            deadline = time.monotonic() + WAIT
             while not self.pids.exists() and time.monotonic() < deadline:
                 time.sleep(0.01)
             self.assertTrue(self.pids.exists())
             proc.send_signal(signal.SIGTERM)
-            stdout, stderr = proc.communicate(timeout=2)
+            stdout, stderr = proc.communicate(timeout=WAIT)
             self.assertNotEqual(proc.returncode, 0)
             self.assertEqual(stdout, "")
             self.assertIn("interrupted", stderr)

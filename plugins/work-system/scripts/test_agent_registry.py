@@ -18,6 +18,7 @@ test does not depend on what is really installed/authed. The kimi stub also
 logs every invocation's argv, so the resolved launch argv can be executed for
 real and each phase asserted.
 """
+import hashlib
 import json
 import os
 import subprocess
@@ -34,6 +35,24 @@ FAILS = []
 def check(name, cond):
     if not cond:
         FAILS.append(name)
+
+
+# macOS assesses every NEW executable on its first exec (~150 ms, serialized
+# across processes); a symlink to one already run is not new. The ~40 Envs below
+# would otherwise write ~190 fresh stubs, and the test spent most of its time,
+# and minutes under parallel load, waiting on that. Each distinct stub body is
+# written once here; put_stub replaces the LINK, never the shared file.
+_STUB_CACHE = tempfile.TemporaryDirectory()
+
+
+def put_stub(path, body):
+    data = body.encode() if isinstance(body, str) else body
+    src = Path(_STUB_CACHE.name) / hashlib.sha256(data).hexdigest()
+    if not src.exists():
+        src.write_bytes(data)
+        src.chmod(0o755)
+    path.unlink(missing_ok=True)
+    path.symlink_to(src)
 
 
 class Env:
@@ -55,7 +74,7 @@ class Env:
         bindir.mkdir()
         # codex stub: `login status` exit reflects auth; anything else exits 0.
         codex_rc = 0 if codex_authed else 1
-        (bindir / "codex").write_text(
+        put_stub(bindir / "codex",
             "#!/bin/sh\n"
             'if [ "$1" = "login" ] && [ "$2" = "status" ]; then exit %d; fi\n'
             "exit 0\n" % codex_rc
@@ -67,7 +86,7 @@ class Env:
             '  echo "  * %s"\n' % m for m in grok_models
         )
         models_rc = 0 if grok_models_ok else 1
-        (bindir / "grok").write_text(
+        put_stub(bindir / "grok",
             "#!/bin/sh\n"
             'if [ "$1" = "models" ]; then\n'
             "%s"
@@ -76,7 +95,7 @@ class Env:
             "exit 0\n" % (model_lines, models_rc)
         )
         # claude stub: only ever hit by `command -v`.
-        (bindir / "claude").write_text("#!/bin/sh\nexit 0\n")
+        put_stub(bindir / "claude", "#!/bin/sh\nexit 0\n")
         # kimi stub: `provider list --json` drives the model-level probe (raw
         # JSON, substring-matched). Every invocation also appends its full argv
         # (one tab-joined line per call) to KIMI_ARGLOG, so a test can execute
@@ -87,7 +106,7 @@ class Env:
         # listing that genuinely offers nothing.
         kimi_section = "models" if kimi_schema_ok else "aliases"
         kimi_model_json = ",".join('\\"%s\\": {}' % m for m in kimi_models)
-        (bindir / "kimi").write_text(
+        put_stub(bindir / "kimi",
             "#!/bin/sh\n"
             '[ -n "$KIMI_ARGLOG" ] && { printf \'%%s\\t\' "$@" >> "$KIMI_ARGLOG"; '
             'printf \'\\n\' >> "$KIMI_ARGLOG"; }\n'
@@ -112,7 +131,7 @@ class Env:
                 % (n, m, a, note)
                 for (n, m, a, note) in harness_agents
             )
-            (self.harness_bin).write_text(
+            put_stub(self.harness_bin,
                 "#!/bin/sh\n"
                 'if [ "$1" = "list" ]; then\n'
                 "%s"
@@ -125,8 +144,6 @@ class Env:
                 "fi\n"
                 "exit 2\n" % (rows, harness_list_rc)
             )
-        for f in bindir.iterdir():
-            f.chmod(0o755)
         # grok auth file toggles grok readiness.
         self.grok_auth = root / "grok_auth.json"
         if grok_authed:
@@ -306,14 +323,13 @@ if len(calls) == 2:
 # real resolved argv against a stub whose non-`provider` calls exit 7, so code
 # propagation is asserted on a value nothing else could produce.
 e_fail = Env()
-(Path(e_fail.env["PATH"].split(":")[0]) / "kimi").write_text(
+put_stub(Path(e_fail.env["PATH"].split(":")[0]) / "kimi",
     "#!/bin/sh\n"
     '[ -n "$KIMI_ARGLOG" ] && { printf \'%s\\t\' "$@" >> "$KIMI_ARGLOG"; '
     'printf \'\\n\' >> "$KIMI_ARGLOG"; }\n'
     'if [ "$1" = "provider" ]; then echo \'{"models": {"kimi-code/k3-256k": {}}}\'; exit 0; fi\n'
     "exit 7\n"
 )
-(Path(e_fail.env["PATH"].split(":")[0]) / "kimi").chmod(0o755)
 fail_calls = e_fail.run_argv(kv(e_fail.run("resolve", "--kimi").stdout)["argv"])
 check("a failed seed runs the seed and NOTHING else", len(fail_calls) == 1)
 if fail_calls:
@@ -479,12 +495,13 @@ e.close()
 
 def raw_grok(e, listing):
     """Replace the grok stub with one printing `listing` verbatim and counting calls."""
-    stub = e.harness_bin.parent / "grok"
-    e.grok_calls = e.harness_bin.parent.parent / "grok_calls"
-    (e.harness_bin.parent.parent / "grok_listing").write_text(listing)
-    stub.write_text('#!/bin/sh\nif [ "$1" = "models" ]; then echo x >>"%s"; cat "%s"; fi\nexit 0\n'
-                    % (e.grok_calls, e.harness_bin.parent.parent / "grok_listing"))
-    stub.chmod(0o755)
+    root = e.harness_bin.parent.parent
+    e.grok_calls = root / "grok_calls"
+    (root / "grok_listing").write_text(listing)
+    e.env["RAW_GROK_DIR"] = str(root)   # not baked into the body: see put_stub
+    put_stub(e.harness_bin.parent / "grok",
+             '#!/bin/sh\nif [ "$1" = "models" ]; then echo x >>"$RAW_GROK_DIR/grok_calls"; '
+             'cat "$RAW_GROK_DIR/grok_listing"; fi\nexit 0\n')
 
 
 def grok_call_count(e):
@@ -951,9 +968,8 @@ for bad, why in ((b"cc-harness:", "empty id"),
     e = Env(harness_agents=[("cc-harness:good", "m", "yes", "-")])
     rows_sh = (b"  printf 'cc-harness:good\\tm\\tyes\\t-\\n'\n"
                b"  printf '" + bad + b"\\tm\\tyes\\t-\\n'\n")
-    e.harness_bin.write_bytes(
-        b"#!/bin/sh\nif [ \"$1\" = \"list\" ]; then\n" + rows_sh + b"  exit 0\nfi\nexit 2\n")
-    e.harness_bin.chmod(0o755)
+    put_stub(e.harness_bin,
+             b"#!/bin/sh\nif [ \"$1\" = \"list\" ]; then\n" + rows_sh + b"  exit 0\nfi\nexit 2\n")
     names = [r["name"] for r in json.loads(e.run("list", "--json").stdout)
              if r["cli"] == "cc-harness"]
     check("rejected at ingest: %s" % why, names == ["cc-harness:good"])
@@ -964,7 +980,7 @@ for bad, why in ((b"cc-harness:", "empty id"),
 # Invalid UTF-8 from the helper must not abort the whole listing — including the
 # native rows, which have nothing to do with the bad byte.
 e = Env(harness_agents=[("cc-harness:ok", "m", "yes", "-")])
-e.harness_bin.write_text(
+put_stub(e.harness_bin,
     "#!/bin/sh\n"
     'if [ "$1" = "list" ]; then\n'
     "  printf 'cc-harness:ok\\tm\\tyes\\t-\\n'\n"
@@ -972,7 +988,6 @@ e.harness_bin.write_text(
     "  exit 0\n"
     "fi\nexit 2\n"
 )
-e.harness_bin.chmod(0o755)
 res = e.run("list", "--json")
 check("invalid UTF-8 does not abort --json", res.returncode == 0)
 rows = json.loads(res.stdout) if res.returncode == 0 else []
