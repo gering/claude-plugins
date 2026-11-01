@@ -2429,7 +2429,20 @@ subcmd_jail() {
   # tool-less/no-web, codex web hard-off); the transport discards adapter
   # stderr, so this is the visible channel for that warning. Runs from the same
   # cwd as the review, so its repo root matches the run's.
-  if _read_web_safe codex; then echo "jail=yes"; else echo "jail=no"; fi
+  # stdout stays the one `jail=yes|no` line (the skill compares it verbatim);
+  # the REASON for a `no` goes to stderr. Without it, the common "ran it from a
+  # directory that is not a git checkout" (an ssh login lands in $HOME) read as
+  # a broken bwrap/AppArmor setup — the jail itself was fine.
+  if _read_web_safe codex; then echo "jail=yes"; return 0; fi
+  echo "jail=no"
+  if ! _jail_available codex; then
+    # A wrapper that exists but fails its smoke probe already warned in
+    # _init_sandbox; only the "none on PATH" case is silent so far.
+    command -v sandbox-exec >/dev/null || command -v bwrap >/dev/null \
+      || echo "reason: no OS sandbox wrapper on PATH (sandbox-exec on macOS, bwrap on Linux)" >&2
+  else
+    echo "reason: no git repository root from $PWD — run from inside the checkout under review" >&2
+  fi
 }
 
 subcmd_grok_model() {
