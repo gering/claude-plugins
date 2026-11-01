@@ -50,6 +50,15 @@ if cmd == ["label", "create"]:
         print(f"label with name \"{args[2]}\" already exists", file=sys.stderr); sys.exit(1)
     st["labels"].append(args[2]); save(); sys.exit(0)
 issues = st.setdefault("issues", [])
+if args[:1] == ["api"]:
+    # REST issues listing (migrate's consistent index): one JSON object per line,
+    # as --jq '.[]' prints it; states are lower case there.
+    import urllib.parse
+    label = urllib.parse.parse_qs(urllib.parse.urlsplit(args[2]).query).get("labels", [None])[0]
+    for i in issues:
+        if label is None or label in [x["name"] for x in i["labels"]]:
+            print(json.dumps(dict(i, state=i["state"].lower())))
+    sys.exit(0)
 def has_label(i, l): return l in [x["name"] for x in i["labels"]]
 if cmd == ["issue", "list"]:
     state = opt("--state", "open").upper(); label = opt("--label")
@@ -63,20 +72,46 @@ if cmd == ["issue", "view"]:
     if not hit:
         print("GraphQL: Could not resolve to an issue", file=sys.stderr); sys.exit(1)
     print(json.dumps(hit[0])); sys.exit(0)
+def opts(name):
+    return [args[k + 1] for k, a in enumerate(args[:-1]) if a == name]
+def write_call():
+    # rate_limit_after = how many content-creating calls succeed before a 403
+    left = st.get("rate_limit_after")
+    if left is not None:
+        if left <= 0:
+            print("HTTP 403: You have exceeded a secondary rate limit", file=sys.stderr); sys.exit(1)
+        st["rate_limit_after"] = left - 1
 if cmd == ["issue", "create"]:
-    if opt("--label") not in st.get("labels", []):
+    labels = opts("--label")
+    if any(l not in st.get("labels", []) for l in labels):
         print("could not add label", file=sys.stderr); sys.exit(1)
+    write_call()
     n = max([i["number"] for i in issues] + [0]) + 1
     body = sys.stdin.read() if opt("--body-file") == "-" else ""
     issues.append({"number": n, "title": opt("--title"), "body": body, "state": "OPEN",
                    "url": f"https://github.com/o/r/issues/{n}",
-                   "labels": [{"name": opt("--label")}]})
-    save(); print(f"https://github.com/o/r/issues/{n}"); sys.exit(0)
-if cmd == ["issue", "close"]:
+                   "labels": [{"name": l} for l in labels]})
+    save()
+    if st.get("create_lost_reply"):  # created, but the answer never arrived
+        print("stub: connection reset", file=sys.stderr); sys.exit(1)
+    print(f"https://github.com/o/r/issues/{n}"); sys.exit(0)
+if cmd == ["issue", "edit"]:
+    write_call()
     n = int(args[2])
     for i in issues:
         if i["number"] == n:
-            i["state"] = "CLOSED"; i["comment"] = opt("--comment")
+            for l in ",".join(opts("--add-label")).split(","):
+                if l and l not in [x["name"] for x in i["labels"]]:
+                    i["labels"].append({"name": l})
+            if opt("--body-file") == "-":
+                i["body"] = sys.stdin.read()
+    save(); sys.exit(0)
+if cmd == ["issue", "close"]:
+    write_call()
+    n = int(args[2])
+    for i in issues:
+        if i["number"] == n:
+            i["state"] = "CLOSED"; i["comment"] = opt("--comment"); i["reason"] = opt("--reason")
     save(); sys.exit(0)
 print("stub: unsupported " + " ".join(args), file=sys.stderr); sys.exit(2)
 '''
@@ -398,6 +433,309 @@ with tempfile.TemporaryDirectory() as d:
     r = e.run("get", str(e.repo), "t5")
     check("a backlog list at the cap fails instead of missing tasks",
           r.returncode == 1 and "#N" in r.stderr)
+
+# ---- migrate: local files → issues --------------------------------------------
+
+def migrate_env(d):
+    e = Env(d)
+    git(e.repo, "-c", "user.email=t@e", "-c", "user.name=T", "commit", "-q", "--allow-empty", "-m", "i")
+    t = e.repo / "tasks"
+    (t / "archive").mkdir(parents=True)
+    (t / "ROADMAP.md").write_text("# Roadmap\n")
+    (t / "add-search.md").write_text("# Add search\n\n## Goal\nFind things.\n")
+    (t / "fix-crash.md").write_text("# Fix crash\n\n## Goal\nNo crash.\n")
+    (t / "leaky.md").write_text("# Leaky\n\nexport API_TOKEN=xxxxxxxxxxxx\n")
+    (t / "archive" / "_index.md").write_text("# Archived tasks\n")
+    (t / "archive" / "old-thing.md").write_text(
+        "> Archived 2026-08-11 · PR #52 (merged @ 5cee34a) · task/old-thing\n\n# Old thing\n\nDone.\n")
+    # An archived task may share its name with an open one.
+    (t / "archive" / "add-search.md").write_text(
+        "> Archived 2026-07-01 · closed manually (no merged PR) · task/add-search\n\n# Add search v1\n")
+    return e
+
+
+def migrate(e, *args):
+    return e.run("migrate", str(e.repo), "--pace", "0", *args)
+
+
+with tempfile.TemporaryDirectory() as d:
+    e = migrate_env(d)
+    r = migrate(e)
+    items = kv(r.stdout, "item")
+    check("migrate dry run lists every task file with its action",
+          r.returncode == 0 and sorted(items) == sorted([
+              "create\topen/add-search\tnew\tAdd search", "create\topen/fix-crash\tnew\tFix crash",
+              "skip\topen/leaky\tnew\t(held back)", "create\tarchived/old-thing\tnew\tOld thing",
+              "create\tarchived/add-search\tnew\tAdd search v1"]))
+    check("dry run names the repo and its visibility",
+          kv(r.stdout, "repo") == ["o/r"] and kv(r.stdout, "visibility") == ["private"])
+    check("dry run counts what it would publish", kv(r.stdout, "publish") == ["4"])
+    check("the secret scan names the hit, never the value",
+          kv(r.stdout, "hit") == ["open/leaky\t3\tenv-assignment"] and "xxxxxxxxxxxx" not in r.stdout)
+    check("ROADMAP.md and the archive index are not tasks",
+          not any("ROADMAP" in i or "_index" in i for i in items))
+    check("a dry run writes nothing",
+          e.issues() == [] and not any(c[:2] in (["issue", "create"], ["label", "create"])
+                                       for c in e.calls()))
+    token = kv(r.stdout, "confirm")[0]
+
+    check("apply refuses a token that is not the plan's",
+          migrate(e, "--apply", "000000000000").returncode == 5 and e.issues() == [])
+    (e.repo / "tasks" / "fix-crash.md").write_text("# Fix crash\n\nChanged after the dry run.\n")
+    check("apply refuses a plan that changed since the dry run",
+          migrate(e, "--apply", token).returncode == 5 and e.issues() == [])
+    check("--include of an unknown task is a usage error",
+          migrate(e, "--include", "nope").returncode == 2)
+
+    r = migrate(e, "--include", "open/leaky")
+    check("--include publishes a file the scan held back",
+          "create\topen/leaky\tnew\tLeaky" in kv(r.stdout, "item"))
+    r = migrate(e)
+    r = migrate(e, "--apply", kv(r.stdout, "confirm")[0])
+    iss = {issue_name_of(i) + ("@archived" if any(l["name"] == "work-system:archived"
+                                                   for l in i["labels"]) else ""): i
+           for i in e.issues()}
+    check("apply creates one issue per publishable file",
+          r.returncode == 0 and sorted(iss) == ["add-search", "add-search@archived", "fix-crash",
+                                                "old-thing@archived"])
+    check("an open task becomes an open labelled issue titled by its H1",
+          iss["fix-crash"]["state"] == "OPEN" and iss["fix-crash"]["title"] == "Fix crash"
+          and [l["name"] for l in iss["fix-crash"]["labels"]] == ["work-system:task"]
+          and "# Fix crash" not in iss["fix-crash"]["body"])
+    old = iss["old-thing@archived"]
+    check("an archived task becomes a closed issue (completed) that keeps its stamp",
+          old["state"] == "CLOSED" and old.get("reason") == "completed"
+          and old["body"].startswith("> Archived 2026-08-11")
+          and [l["name"] for l in old["labels"]] == ["work-system:task", "work-system:archived"])
+    m = e.repo / "tasks" / "migrated"
+    check("files move to tasks/migrated/, not deleted",
+          (m / "fix-crash.md").exists() and (m / "archive" / "old-thing.md").exists()
+          and (m / "archive" / "add-search.md").exists() and (m / "add-search.md").exists()
+          and not (e.repo / "tasks" / "fix-crash.md").exists())
+    check("the held-back file stays and ROADMAP.md is untouched",
+          (e.repo / "tasks" / "leaky.md").exists() and (e.repo / "tasks" / "ROADMAP.md").exists())
+    mapping = (m / "issues.tsv").read_text()
+    check("the map records task ↔ issue",
+          f"open\tfix-crash\t#{iss['fix-crash']['number']}\ttasks/fix-crash.md\n" in mapping
+          and "archived\told-thing\t#" in mapping)
+    check("with a file left the backend is not switched",
+          kv(r.stdout, "backend_switched") == ["no"] and not (e.repo / ".work-system.toml").exists())
+
+    # Re-run: nothing is duplicated; including the held-back file finishes the job.
+    (e.repo / ".work-system.toml").write_text('# mine\n[paths]\ntasks_dir = "tasks"\n')
+    r = migrate(e, "--include", "leaky")
+    check("a re-run plans only what is left",
+          kv(r.stdout, "item") == ["create\topen/leaky\tnew\tLeaky"])
+    r = migrate(e, "--include", "leaky", "--apply", kv(r.stdout, "confirm")[0])
+    check("re-run creates no duplicates", r.returncode == 0 and len(e.issues()) == 5)
+    check("an empty tasks/ switches the backend, keeping the config's other lines",
+          kv(r.stdout, "backend_switched") == ["yes"]
+          and kv(r.stdout, "config_changed") == [".work-system.toml"]
+          and (e.repo / ".work-system.toml").read_text()
+          == '# mine\n[paths]\ntasks_dir = "tasks"\n\n[tasks]\nbackend = "github"\n')
+    check("the store now reads the backlog from issues",
+          kv(e.run("backend", str(e.repo)).stdout, "backend") == ["github"]
+          and kv(e.run("list", str(e.repo)).stdout, "count") == ["3"])
+    check("an untracked tasks/ needs no commit", kv(r.stdout, "commit_needed") == [])
+    check("the open name resolves to the open issue, not the archived one",
+          kv(e.run("get", str(e.repo), "add-search").stdout, "issue")
+          == [str(iss["add-search"]["number"])])
+    r = migrate(e)
+    check("a finished migration plans nothing", kv(r.stdout, "item") == [] and r.returncode == 0)
+
+    # An in-flight lane (local-format TASK.md, no issue: line) still closes.
+    tm = e.root / "TASK.md"
+    tm.write_text("# Fix crash\n\n## Goal\nNo crash.\n")
+    r = e.run("ref", str(e.repo), "fix-crash", str(tm))
+    check("an in-flight lane resolves its task by name after migration",
+          kv(r.stdout, "ref") == ["fix-crash"] and kv(r.stdout, "pinned") == ["no"])
+    r = e.run("close", str(e.repo), "fix-crash", "--branch", "task/fix-crash", "--pr", "9")
+    check("... and closes the migrated issue", kv(r.stdout, "result") == ["closed"]
+          and kv(r.stdout, "issue") == [str(iss["fix-crash"]["number"])])
+
+# Resume after a stop: a rate limit mid-run, and a create whose reply was lost.
+with tempfile.TemporaryDirectory() as d:
+    e = migrate_env(d)
+    (e.repo / "tasks" / "leaky.md").unlink()
+    # Three creates succeed; closing the archived add-search hits the limit.
+    e.gh_state(rate_limit_after=3)
+    r = migrate(e)
+    r = migrate(e, "--apply", kv(r.stdout, "confirm")[0])
+    check("a rate limit stops the run cleanly with exit 6 and a resume hint",
+          r.returncode == 6 and "resume" in r.stderr and len(kv(r.stdout, "done")) == 2)
+    check("... after three issues were written", len(e.issues()) == 3)
+    e.gh_state(rate_limit_after=None)
+    r = migrate(e)
+    check("the next dry run resumes the half-done item",
+          kv(r.stdout, "item") == ["resume\tarchived/add-search\t#3\tAdd search v1",
+                                   "create\tarchived/old-thing\tnew\tOld thing"]
+          and kv(r.stdout, "publish") == ["1"])
+    e.gh_state(create_lost_reply=True)
+    r = migrate(e, "--apply", kv(r.stdout, "confirm")[0])
+    check("a create whose reply is lost fails the run", r.returncode == 1)
+    e.gh_state(create_lost_reply=False)
+    r = migrate(e)
+    r = migrate(e, "--apply", kv(r.stdout, "confirm")[0])
+    names = sorted(issue_name_of(i) for i in e.issues())
+    check("resuming never duplicates an issue",
+          r.returncode == 0 and names == ["add-search", "add-search", "fix-crash", "old-thing"])
+    check("every archived issue ends closed",
+          all(i["state"] == "CLOSED" for i in e.issues()
+              if any(l["name"] == "work-system:archived" for l in i["labels"])))
+    check("resume finishes with the backend switched", kv(r.stdout, "backend_switched") == ["yes"])
+
+# Adopting an existing tracking issue; --open-only; tracked tasks/; public repo.
+with tempfile.TemporaryDirectory() as d:
+    e = migrate_env(d)
+    (e.repo / "tasks" / "leaky.md").unlink()
+    (e.repo / "tasks" / "fix-crash.md").write_text(
+        "# Fix crash\n\n> Tracking issue: o/r#108\n\n## Goal\nNo crash.\n")
+    (e.repo / "tasks" / "add-search.md").write_text(
+        "# Add search\n\n> Tracking issue: #109\n\nGoal.\n")
+    (e.repo / "tasks" / "other-repo.md").write_text(
+        "# Other repo\n\n> Tracking issue: someone/else#7\n")
+    e.gh_state(issues=[issue(108, "Crash on launch", "Seen on Android 14.", label="bug"),
+                       issue(109, "Search", "", state="CLOSED", label="enhancement")])
+    git(e.repo, "add", "tasks")
+    git(e.repo, "-c", "user.email=t@e", "-c", "user.name=T", "commit", "-q", "-m", "tasks")
+    r = migrate(e, "--open-only")
+    items = sorted(kv(r.stdout, "item"))
+    check("a tracking issue is adopted, shown as its own case",
+          "adopt\topen/fix-crash\t#108\tFix crash" in items)
+    check("a closed tracking issue is not adopted for an open task",
+          "skip\topen/add-search\t#109\tAdd search" in items
+          and any(s.startswith("open/add-search\t") and "closed" in s for s in kv(r.stdout, "skip")))
+    check("a tracking line for another repo creates a new issue",
+          "create\topen/other-repo\tnew\tOther repo" in items)
+    check("--open-only leaves the archive out", not any("archived/" in i for i in items))
+    check("tracked task files are reported", kv(r.stdout, "tasks_tracked") == ["yes"])
+    r = migrate(e, "--open-only", "--apply", kv(r.stdout, "confirm")[0])
+    i108 = [i for i in e.issues() if i["number"] == 108][0]
+    check("adopt adds the label and the marker without a new issue",
+          r.returncode == 0 and {l["name"] for l in i108["labels"]} == {"bug", "work-system:task"}
+          and issue_name_of(i108) == "fix-crash" and len(e.issues()) == 3)
+    check("adopt puts the file in the body and keeps the old issue text",
+          "## Goal\nNo crash." in i108["body"] and "Seen on Android 14." in i108["body"]
+          and "Tracking issue" not in i108["body"] and i108["title"] == "Crash on launch")
+    check("with tracked task files the moves need a commit (never made by the tool)",
+          kv(r.stdout, "commit_needed") == ["tasks"]
+          and git(e.repo, "log", "--oneline").stdout.count("\n") == 2)
+    r = migrate(e, "--open-only")
+    check("an adopted issue is not adopted twice",
+          not any(i.startswith("adopt\t") for i in kv(r.stdout, "item")))
+
+with tempfile.TemporaryDirectory() as d:
+    e = migrate_env(d)
+    (e.repo / "tasks" / "paths.md").write_text("# Paths\n\nSee /Users/someone/notes and app.internal.\n"
+                                               "Config: .claude/settings.local.json\n")
+    r = migrate(e)
+    private_token = kv(r.stdout, "confirm")
+    check("a private repo allows local paths but not private hosts",
+          [h for h in kv(r.stdout, "hit") if h.startswith("open/paths")] == ["open/paths\t3\tprivate-host"])
+    e.gh_state(visibility="PUBLIC")
+    r = migrate(e)
+    check("a public repo also holds back local paths",
+          [h for h in kv(r.stdout, "hit") if h.startswith("open/paths")]
+          == ["open/paths\t3\tlocal-path", "open/paths\t3\tprivate-host"])
+    check("visibility changes the token",
+          kv(r.stdout, "visibility") == ["public"] and kv(r.stdout, "confirm") != private_token)
+
+# What a dry run must refuse to plan.
+with tempfile.TemporaryDirectory() as d:
+    e = migrate_env(d)
+    t = e.repo / "tasks"
+    (t / "leaky.md").unlink()
+    secret = e.root / "dotenv"
+    secret.write_text("# Not a task\nDB=hunter2\n")
+    os.symlink(secret, t / "linked.md")
+    (t / "a.md").write_text("# A\n\n> Tracking issue: #12\n")
+    (t / "b.md").write_text("# B\n\nTracking issue: o/r#12\n")
+    e.gh_state(issues=[issue(12, "Shared", "", label="bug"),
+                       issue(20, "Fix crash", "Other text.\n\n<!-- work-system task: fix-crash -->"),
+                       issue(21, "Add search", "## Goal\nFind things.\n\n"
+                             "<!-- work-system task: add-search -->", state="CLOSED")])
+    e.setting('tasks.backend = "local"\n')
+    r = migrate(e)
+    skips = dict(x.split("\t", 1) for x in kv(r.stdout, "skip"))
+    check("a symlinked task file is never published", "symlink" in skips.get("open/linked", ""))
+    check("two files naming one tracking issue adopt neither",
+          "several" in skips.get("open/a", "") and "several" in skips.get("open/b", ""))
+    check("an issue with the marker but other text is resumed and flagged",
+          "resume\topen/fix-crash\t#20\tFix crash" in kv(r.stdout, "item")
+          and kv(r.stdout, "differs") == ["open/fix-crash\t#20"])
+    check("an open task whose issue is closed is not resumed",
+          "closed" in skips.get("open/add-search", ""))
+    check("a config the line edit cannot handle is reported in the dry run",
+          any(x.startswith("manual\t") for x in kv(r.stdout, "config_edit")))
+    e.gh_state(issues=[i for i in e.issues() if i["number"] != 12]
+               + [issue(12, "Shared", "edited later", label="bug")])
+    r2 = migrate(e)
+    check("an adopted issue's text is part of the plan token",
+          kv(r2.stdout, "confirm") != kv(r.stdout, "confirm"))
+
+# Round-2 guards: archived identity, archived leftovers, consistent index, symlinks.
+with tempfile.TemporaryDirectory() as d:
+    e = migrate_env(d)
+    t = e.repo / "tasks"
+    for f in ("leaky.md", "fix-crash.md"):
+        (t / f).unlink()
+    (t / "archive" / "add-search.md").write_text("# Add search v1\n\nTracking issue: #12\n")
+    e.gh_state(issues=[issue(12, "Add search", "## Goal\nFind things.\n\n"
+                             "<!-- work-system task: add-search -->")])
+    r = migrate(e)
+    skips = dict(x.split("\t", 1) for x in kv(r.stdout, "skip"))
+    check("an archived file never adopts its open twin's issue",
+          "open task add-search" in skips.get("archived/add-search", "")
+          and "resume\topen/add-search\t#12\tAdd search" in kv(r.stdout, "item"))
+    check("the migrate index reads the REST issues endpoint, not the search API",
+          any(c[:1] == ["api"] for c in e.calls())
+          and not any(c[:2] == ["issue", "list"] and "all" in c for c in e.calls()))
+    (t / "notes.md").write_text('# Notes\n\n{"password": "correcthorse99"}\nglpat-' + "x" * 20 + "\n")
+    hits = [h for h in kv(migrate(e).stdout, "hit") if h.startswith("open/notes")]
+    check("quoted JSON passwords and GitLab tokens are scan hits",
+          hits == ["open/notes\t3\tsecret-assignment", "open/notes\t4\tapi-key"])
+    (t / "migrated").mkdir()
+    os.symlink(e.root, t / "migrated" / "archive")
+    check("a symlinked tasks/migrated/archive is refused (exit 1, not the re-plan code 5)",
+          migrate(e).returncode == 1)
+
+with tempfile.TemporaryDirectory() as d:
+    e = Env(d)
+    e.gh_state(issues=[issue(1, "Add search", "<!-- work-system task: add-search -->"),
+                       dict(issue(2, "Add search v1", "<!-- work-system task: add-search -->"),
+                            labels=[{"name": "work-system:task"}, {"name": "work-system:archived"}])])
+    check("an archived issue a stopped run left open is not a live task",
+          kv(e.run("list", str(e.repo)).stdout, "count") == ["1"]
+          and kv(e.run("get", str(e.repo), "add-search").stdout, "issue") == ["1"])
+    e.gh_state(issues=[i for i in e.issues() if i["number"] == 2], labels=["work-system:task"])
+    body = e.root / "b.md"
+    body.write_text("# Add search\n")
+    check("... nor does it block creating that name",
+          e.run("create", str(e.repo), "add-search", "--body-file", str(body)).returncode == 0)
+    r = e.run("ref", str(e.repo), "feature/add-search")
+    check("a slash name from an adopted branch resolves to its flattened issue name",
+          kv(r.stdout, "ref") == ["feature-add-search"])
+
+# Round-3 guards: pull requests, stale archived labels, wider scan, --include.
+with tempfile.TemporaryDirectory() as d:
+    e = migrate_env(d)
+    t = e.repo / "tasks"
+    (t / "leaky.md").unlink()
+    (t / "fix-crash.md").write_text("# Fix crash\n\nTracking issue: #30\n")
+    (t / "add-search.md").write_text("# Add search\n\nTracking issue: #31\n")
+    (t / "creds.md").write_text("# Creds\n\ndb_password = correcthorse9\n")
+    e.gh_state(issues=[dict(issue(30, "A PR", "", label="bug"), url="https://github.com/o/r/pull/30"),
+                       issue(31, "Old", "", label="work-system:archived")])
+    r = migrate(e)
+    skips = dict(x.split("\t", 1) for x in kv(r.stdout, "skip"))
+    check("a tracking line naming a pull request is not adopted",
+          "pull request" in skips.get("open/fix-crash", ""))
+    check("an open task never adopts an issue labelled archived",
+          "archived task" in skips.get("open/add-search", ""))
+    check("snake_case secret names are scan hits",
+          "open/creds\t3\tsecret-assignment" in kv(r.stdout, "hit"))
+    check("a bare --include naming an open and an archived task is refused",
+          migrate(e, "--include", "add-search").returncode == 2)
 
 if FAILS:
     print("FAIL test_task_store.py:")

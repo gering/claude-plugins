@@ -40,6 +40,7 @@ Generic task and worktree workflow system for Claude Code. Keep tasks as GitHub 
 | `/close` | Clean up after merge (worktree, branches; closes the issue or archives the task file). `--delegate` preselects handing the close to the Manager |
 | `/land` | In the worktree tab: handoff report → `/pr-flow:merge` → confirmed merge → `/close --delegate` |
 | `/list` | Overview of all tasks, worktrees, and status |
+| `/migrate` | (invoke as `/work-system:migrate`; knowledge-system has its own `/migrate`) Move local task files (open → open issues, archived → closed issues) to GitHub Issues, then switch `tasks.backend` to `github`; dry run, secret scan and one confirmation first |
 | `/sessions` | Which running herdr sessions still run old plugin code, plus stale/orphaned installs; `refresh` reloads the idle stale ones with `/reload-plugins` |
 | `/statusline` | Add a `[ws …]` task-backlog segment to Claude Code's status line |
 
@@ -51,11 +52,13 @@ The backlog is centralized — `/define` adds to it even from inside a linked wo
 
 | `tasks.backend` | Backlog |
 |-----------------|---------|
-| `auto` (default) | `local` while the repo still has task files in `tasks/` (move them to issues and archive the files, or pin `github`); else `github` when `origin` is on github.com and `gh` is installed; else `local` |
+| `auto` (default) | `local` while the repo still has task files in `tasks/` (`/work-system:migrate` moves them to issues, or pin `github`); else `github` when `origin` is on github.com and `gh` is installed; else `local` |
 | `github` | Issues labelled `work-system:task` in origin's repository. The task name (kebab slug) lives in a hidden body marker `<!-- work-system task: <name> -->`, so ordinary issues are never tasks; `/kickoff` takes a name or `#N`, the other skills a name |
 | `local` | One markdown file per task in `tasks/` on the main worktree (`paths.tasks_dir` is not wired yet) |
 
-Every skill reaches the backlog through one script, `scripts/task-store.py` (`backend`, `list`, `get`, `create`, `close`, and `ref`, which pins the issue `/close` closes). A GitHub backend whose `gh` is missing, unauthenticated or unreachable fails with a clear message — work-system never falls back to local files, which would split the backlog. `/define` names the target repository before creating an issue and says when that repository is public. `tasks/ROADMAP.md` (the Manager's open follow-ups) stays local on both backends.
+Every skill reaches the backlog through one script, `scripts/task-store.py` (`backend`, `list`, `get`, `create`, `close`, `ref`, which pins the issue `/close` closes, and `migrate`). A GitHub backend whose `gh` is missing, unauthenticated or unreachable fails with a clear message — work-system never falls back to local files, which would split the backlog. `/define` names the target repository before creating an issue and says when that repository is public. `tasks/ROADMAP.md` (the Manager's open follow-ups) stays local on both backends.
+
+`/work-system:migrate` converts a local backlog: a dry run lists each file as `create`, `adopt` (the file names an existing `Tracking issue: #N`, which gets the label and marker instead of a duplicate), `resume` or `skip`, and holds back files whose secret/private-detail scan hits unless you include them. The real run needs one confirmation that names the count, the repo and its visibility; it is paced, stops cleanly on a rate limit and resumes on the next run. Files move to `tasks/migrated/` (with an `issues.tsv` map), never deleted, and the tool never commits.
 
 A task reads the same either way (on GitHub the heading is the issue title):
 
