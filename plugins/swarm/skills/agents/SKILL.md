@@ -1,8 +1,8 @@
 ---
 name: agents
 description: |
-  Shows swarm backend status: which review agents (claude, codex, grok, kimi) are
-  installed and authenticated.
+  Shows swarm backend status: which review agents (claude, codex, grok, kimi,
+  cc-harness voices) are installed and authenticated.
   Trigger: "swarm agents", "which review backends are live", "agent status".
 user_invocable: true
 ---
@@ -19,8 +19,8 @@ user_invocable: true
    `/swarm:review` or export `SWARM_KIMI=1`, it is not an install problem.)
 2. Render the JSON array as a table:
 
-   | Backend | Installed | Version | Ready | Notes |
-   |---------|-----------|---------|-------|-------|
+   | Backend | Installed | Version | Ready | Family | Notes |
+   |---------|-----------|---------|-------|--------|-------|
 
    - `available: false` → Installed ❌, Notes = "not installed"
    - `available: true, ready: false` → Ready ❌, Notes = the `hint` field (e.g. "run: codex login")
@@ -41,6 +41,11 @@ user_invocable: true
   selections produce an auth-only `hint`, even with `ready:true`. Preserve that
   hint; a catalog hit is not proof that the model can generate. Auth-probe
   failures still mean not-ready.
+- **`cc-harness:<id>` rows** appear only when the `cc-harness-agents` helper is
+  on PATH; `Version` names the routed model. In a review a live one replaces the
+  native CLI of its `family` (`SWARM_HARNESS=off` keeps the natives). The
+  `claude` row's family is the session model's — under `claude --proxy sol` it
+  reads `openai`, the same family as codex.
 - `claude` is always ready when Claude Code runs (reviews happen in-session
   via the Agent tool; the external CLIs are called through the adapter).
 - **`kimi` Ready is model/transport-aware** — it requires the real

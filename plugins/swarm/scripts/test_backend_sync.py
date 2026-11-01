@@ -28,7 +28,7 @@ validated_set = set(validated.group(1).split("|")) if validated else set()
 externals = validated_set - {"claude"}
 check("adapter backend enum found", bool(validated))
 
-rows = re.search(r"for b in ([a-z ]+); do", ADAPTER)
+rows = re.search(r"for b in ([a-z ]+?) *\$\{harness", ADAPTER)
 row_set = set(rows.group(1).split()) if rows else set()
 check("adapter list rows equal backend enum", row_set == validated_set)
 
@@ -87,6 +87,18 @@ if kimi_backend:
     check("Kimi reviews only breakage + threat (quota)", "clusters: ['breakage', 'threat']" in kimi_backend.group(1))
 for profile, effort in (("quick", "low"), ("default", "low"), ("max", "high")):
     check(f"Kimi {profile} profile effort", PROFILES[profile]["externals"]["kimi"]["effort"] == effort)
+
+# cc-harness voices: one dynamic backend family, wired at every site the
+# static enum is (validate, readiness, run dispatch, workflow registry, skill).
+check("adapter validates cc-harness:<id>", re.search(r"^\s*cc-harness:\*\)\n\s*# The id goes back", ADAPTER, re.M))
+check("adapter readiness has a cc-harness arm", ready_block and "cc-harness:*)" in ready_block.group(1))
+check("adapter run dispatch has a cc-harness arm", "cc-harness:*) run_cc_harness" in run_block)
+check("adapter list appends the helper's rows", "for b in claude codex grok kimi ${harness[@]+" in ADAPTER)
+check("workflow registers one backend per live harness id",
+      "...Object.keys(HARNESS).map((id) => ({ backend: `cc-harness:${id}`, ...PROFILE.externals['cc-harness'] }))" in WORKFLOW)
+check("every profile carries a cc-harness entry with a null model",
+      all(PROFILES[p]["externals"]["cc-harness"]["model"] is None for p in PROFILES))
+check("skill takes externalVoices from the adapter's voices verb", "agents.sh\" voices" in SKILL)
 
 PR_POST = (HERE / "pr-post.py").read_text(encoding="utf-8")
 _labels = re.search(r"_AGENT_LABELS = \{(.*?)\}", PR_POST, re.S)

@@ -461,6 +461,11 @@ entries are grouped per plugin, newest first.
 
 ## swarm
 
+### 0.17.0 — 2026-11-01
+- New external backend `cc-harness:<id>`: a headless `claude -p` routed through the PATH helper `cc-harness-agents` (ephemeral config dir, empty cwd, `Read,Grep,Glob` + `--add-dir <repo>` under the OS jail, tool-less without one, `--json-schema` structured output, prompt on stdin). `agents.sh list` adds the helper's rows with a `family` column; the new `agents.sh voices` decides the run's voices — each live id of `SWARM_HARNESS_VOICES` (default `sol grok`) replaces the native CLI of its family (`SWARM_HARNESS=off` keeps the natives).
+- Family accounting follows the session model: `agents.sh session` maps the lens model (`CLAUDE_CODE_SUBAGENT_MODEL`/`ANTHROPIC_MODEL`) to its family, so lenses on a proxied GPT model and a codex voice no longer reach consensus as two families; an unknown model is `unknown:*` and never pairs. The lens label in the report and the PR footer names the session model instead of asserting Claude.
+- `agents.sh jail` names the reason for `jail=no` on stderr (no wrapper, or no git checkout — dev-1 reported `jail=no` with a working bwrap because the check ran from `$HOME`).
+
 ### 0.16.1 — 2026-10-31
 - Load-robust tests: `test_codex_models.py` separates the deadline under test from the time a working peer gets (a 0.4–2 s deadline was shorter than an interpreter start under load), `test_kimi_acp.py` and `test_grok_compat.py` write their fake CLI once instead of per case. Tests only; no script behavior changes.
 
