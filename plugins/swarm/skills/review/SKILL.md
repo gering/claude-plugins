@@ -83,6 +83,7 @@ called "session" or "discovered" is sent.
 | externals.grok | `[null,"low",true,8]` | `[null,"medium",true,8]` | `[null,"medium",true,8]` |
 | externals.grok.clusterEffort | `null` | `{"breakage":"low","threat":"low"}` | `{"breakage":"low","threat":"low"}` |
 | externals.kimi | `["kimi-code/k3-256k","low",false,0]` | `["kimi-code/k3-256k","low",true,8]` | `["kimi-code/k3-256k","high",true,8]` |
+| externals.cc-harness | `[null,"low",true,8]` | `[null,"medium",true,8]` | `[null,"medium",true,8]` |
 <!-- END SWARM PROFILE TABLE -->
 
 Positive tool budgets are **advisory**, not hard limits or longer deadlines.
@@ -698,7 +699,7 @@ carry them.** `<CODEX_RUN>` and `<GROK_RUN>` follow the same rule: one verbatim
 token each, which the workflow turns into an explicit `--model` on every voice of
 that backend, so the whole run uses ONE concrete model per backend. **A run keeps
 its models:** on a Workflow resume (`resumeFromRunId`) and in `--loop` rounds ≥ 2,
-pass the `CODEX_RUN`, `GROK_RUN`, `SESSION_RUN` and `harness=` tokens of the run's FIRST prep block, not
+pass the `CODEX_RUN`, `GROK_RUN`, `SESSION_RUN` and `harness=` tokens of the run's FIRST prep block (and drop a `cc-harness:<id>` voice that first `harness=` does not name), not
 newer ones — a model released mid-run must not split one review across two
 models or generations (if a backend is no longer live, drop the voice as usual).
 `session` and `harness` are verbatim tokens too (an empty `harness=` value is
@@ -716,7 +717,8 @@ When external voices are live, **once per run** (no per-query nag) announce
 the posture — branch on the step-1 `JAIL` value, never claim capabilities the
 degrade stripped:
 - `JAIL=jail=yes` → note that web research is enabled subject to each backend's
-  profile policy (Quick Kimi is diff-only), and that the egress
+  profile policy (Quick Kimi is diff-only; cc-harness voices read the repo but
+  have no web or shell), and that the egress
   policy (no repo content in queries) and the OS secret-jail are active — the
   jail auto-denies root-level `.env*`/`data/`/key files (reviewed root AND, in
   a linked worktree, the main checkout); nested secrets need `SWARM_DENY_PATHS`.
@@ -1220,7 +1222,8 @@ post. Do **not** re-implement the sanitize/gate/post logic inline.
   methodological-lens consensus not tagged by a Claude voice that checked the
   claim still go through the verifier.
 - **Security floor** (adapter + this pipeline): the diff is fenced as data;
-  external CLIs run **read+web** (except diff-only Quick Kimi) under an OS jail (HOME secret stores +
+  external CLIs run **read+web** (except diff-only Quick Kimi; cc-harness voices
+  get `Read`/`Grep`/`Glob` only — no shell, no web) under an OS jail (HOME secret stores +
   root-level `.env*`/`data/`/key/cred files denied — reviewed root AND, in a
   linked worktree, the main checkout; root-level only, nested secrets via
   `SWARM_DENY_PATHS`; writes denied everywhere except the scratch/temp dirs

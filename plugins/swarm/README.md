@@ -233,6 +233,7 @@ agents.sh jail                # jail=yes|no — will read+web be granted? (worki
                               # OS sandbox AND a resolvable repo root; a `no`
                               # names its reason on stderr)
 agents.sh session             # model=<id>;family=<f> of the session's lens model
+                              # (env only — a /model switch is invisible here)
 agents.sh voices              # stdin: list --json → voices=/harness=/replaced=
                               # (the run's external voices; see cc-harness below)
 agents.sh run <backend> [--prompt-file f] [--lens-instr s --lens-instr-sum hex]

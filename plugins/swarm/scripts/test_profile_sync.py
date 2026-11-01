@@ -112,7 +112,7 @@ class ProfileTests(unittest.TestCase):
             path, *values = [cell.strip().strip("`") for cell in line.strip("|").split("|")]
             self.assertNotIn(path, rows)
             rows[path] = [json.loads(value) for value in values]
-        expected = {"unit"} | {f"stages.{stage}" for stage in STAGES} | {f"externals.{b}" for b in ("codex", "grok", "kimi")}
+        expected = {"unit"} | {f"stages.{stage}" for stage in STAGES} | {f"externals.{b}" for b in ("codex", "grok", "kimi", "cc-harness")}
         expected.add("externals.grok.clusterEffort")
         self.assertEqual(set(rows), expected)
         for index, name in enumerate(NAMES):

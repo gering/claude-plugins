@@ -1361,6 +1361,14 @@ if (consensusReachable && unitsDegraded.length) {
   log(`Cluster coverage: ${unitsDegraded.join(', ')} had fewer than 2 families return — findings there cannot reach consensus and fall back to solo + verifier`)
 }
 // swarm-test-region-end
+// A requested voice no backend definition matched (a cc-harness voice whose
+// args.harness entry is missing — e.g. a stale token reused across rounds) was
+// never planned, so it reaches no family tally. Say so instead of dropping it.
+const unmatchedVoices = wantVoices.filter((v) => !EXTERNAL_BACKENDS.some((b) => b.backend === v))
+if (unmatchedVoices.length) {
+  log(`Voices DROPPED, no backend definition: ${unmatchedVoices.join(', ')}`)
+  coverageNotes.push(`${unmatchedVoices.join(', ')} hat in diesem Lauf NICHT reviewt: keine Backend-Definition (für cc-harness fehlt der Eintrag in args.harness — harness= und voices= müssen aus demselben Prep-Schritt stammen).`)
+}
 // Outside the test region on purpose: it depends on run-level state (GROK_DROPPED),
 // not on the voice results the region is lifted out to be tested against.
 if (CODEX_DROPPED) coverageNotes.push('codex hat in diesem Lauf NICHT reviewt: für den Lauf konnte kein konkretes Codex-Modell festgelegt werden (Grund: CODEX_DEGRADED aus dem Prep-Schritt). Es wurde bewusst kein anderes Modell ersatzweise gestartet.')
@@ -1475,7 +1483,7 @@ if (pool.length > 0) {
       lens = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0] || 'unspecified'
     }
     // Consensus requires >=2 distinct FAMILIES (see FAMILY: same-vendor voices
-    // count once; Claude's many lens voices are one family, not a quorum).
+    // count once; the many lens voices are one family — the session model's — not a quorum).
     return { ...c, lens, member_indices: members, backends, families, kind, untaggedOnly, consensus: independentFamilies(families).length >= 2 ? 'CONFIRMED' : 'solo' }
   }).filter((c) => c.backends.length > 0)  // drop clusters whose member_indices all filtered out — no backing voice
 
@@ -1532,7 +1540,9 @@ const VERDICT_SCHEMA = {
 // externals while the lone Claude member tagged a DIFFERENT methodological lens
 // (`removed-behavior`) on an unrelated deletion in the same file; that Claude voice
 // never checked the cross-file claim, so grounding on "any Claude methodological
-// tag" would wave it through. Require the exact (family=claude, lens=c.lens) pair.
+// tag" would wave it through. Require the exact (in-session lens, lens=c.lens)
+// pair — keyed on backend === 'claude' (a lens that read the repo), not on the
+// family: under a proxied session that family is the session model's vendor.
 const claudeCheckedLens = (c) =>
   (c.member_indices || []).some((i) => pool[i] && pool[i].backend === 'claude' && pool[i].lens === c.lens)
 // ONE verify/auto-accept predicate — the two lists below are derived as

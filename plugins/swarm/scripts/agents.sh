@@ -776,12 +776,12 @@ _sandbox_deny_paths_build() {
     "$host/.config/anthropic" "$host/.config/openai" "$host/.claude.json"
   if [[ "$own" != "codex" ]]; then printf '%s\n' "$host/.codex"; fi
   # The local gateway's provider credentials (CLIProxyAPI's auth dir: OAuth
-  # tokens for every routed vendor). No voice needs them — the gateway reads
-  # them outside the jail. A cc-harness voice keeps the dir readable only
-  # because its helper may resolve its client token from there (the own-token
-  # residual codex has with ~/.codex). The helper's own token file is helper-
-  # owned and not listed here — add it with SWARM_DENY_PATHS.
-  if [[ "$own" != cc-harness:* ]]; then printf '%s\n' "$host/.cli-proxy-api"; fi
+  # tokens for every routed vendor). No jailed process needs them: the gateway
+  # reads them outside the jail, and a cc-harness voice's HELPER runs outside it
+  # too (run_cc_harness jails only the claude it execs), so even the routed
+  # voice is denied them. The helper's own client-token file is helper-owned
+  # and not listed here — add it with SWARM_DENY_PATHS.
+  printf '%s\n' "$host/.cli-proxy-api"
   if [[ "$own" != "grok" ]]; then
     printf '%s\n' "$host/.grok"
   elif [[ -d "$host/.grok" ]]; then
@@ -1448,7 +1448,9 @@ _harness_load() {
   (( rc == 0 )) || return 0
   _harness_rows="$(printf '%s\n' "$out" | LC_ALL=C awk -F'\t' '
     NF == 4 && length($1) <= 43 && $1 ~ /^cc-harness:[a-z0-9][a-z0-9._-]*$/ && !seen[$1]++ {
-      gsub(/[^ -~]/, "", $2); gsub(/[^ -~]/, "", $4)
+      # The model doubles as the identity of the voice (family, SWARM_HARNESS_EXPECT
+      # pin), so it gets the id charset everywhere, once, here.
+      gsub(/[^A-Za-z0-9._:\/+-]/, "", $2); gsub(/[^ -~]/, "", $4)
       print $1 "\t" substr($2, 1, 100) "\t" $3 "\t" substr($4, 1, 300)
       if (++n >= 50) exit
     }')"
@@ -2517,7 +2519,13 @@ _family_of_backend() {
     grok) echo grok ;;
     kimi) echo moonshot ;;
     cc-harness:*)
-      local f; f="$(_model_family "$(_harness_field "$(_harness_row "$1")" 2)")"
+      # A bare tier alias in a helper row is the helper's own rung name, which
+      # it may route to any vendor — not evidence of Claude.
+      local m f=""; m="$(_harness_field "$(_harness_row "$1")" 2)"
+      case "$(printf '%s' "$m" | tr '[:upper:]' '[:lower:]')" in
+        opus|opusplan|sonnet|haiku|fable|default) ;;
+        *) f="$(_model_family "$m")" ;;
+      esac
       echo "${f:-unknown:${1#cc-harness:}}" ;;
   esac
 }
@@ -2620,31 +2628,38 @@ _session_kv() {
   # and no gateway = a native Claude session (family claude, model unnamed). A
   # gateway without a readable model, or a model the mapping does not know, is
   # `unknown:session`: it never pairs with a named family for consensus.
-  local model="${CLAUDE_CODE_SUBAGENT_MODEL:-${ANTHROPIC_MODEL:-}}" fam="" tier=""
-  # A bare tier alias (`opus`, `sonnet[1m]`) is resolved the way Claude Code
-  # resolves it — through ANTHROPIC_DEFAULT_<TIER>_MODEL, which a gateway helper
-  # points at its own model (cc-harness maps the opus rung to a GPT model).
-  # Behind a gateway, an alias nothing resolves says nothing about the vendor.
-  case "$(printf '%s' "$model" | tr '[:upper:]' '[:lower:]' | sed 's/\[.*\]$//')" in
-    opus|sonnet|haiku|fable) tier="$(printf '%s' "$model" | tr '[:lower:]' '[:upper:]' | sed 's/\[.*\]$//')" ;;
+  # RESIDUAL: only the environment is visible here — a `/model` switch or a
+  # `--model` flag inside the session is not, so set the env when proxying.
+  local model fam="" alias="" var
+  # A context suffix (`opus[1m]`) is not part of the id.
+  model="$(printf '%s' "${CLAUDE_CODE_SUBAGENT_MODEL:-${ANTHROPIC_MODEL:-}}" | sed 's/\[[^]]*\]$//')"
+  # Bare aliases resolve the way Claude Code resolves them — through
+  # ANTHROPIC_DEFAULT_<TIER>_MODEL, which a gateway helper points at its own
+  # model (cc-harness maps the opus rung to a GPT model).
+  case "$(printf '%s' "$model" | tr '[:upper:]' '[:lower:]')" in
+    opus|opusplan) alias=OPUS ;;
+    sonnet) alias=SONNET ;; haiku) alias=HAIKU ;; fable) alias=FABLE ;;
+    default) alias=DEFAULT ;;
   esac
-  if [[ -n "$tier" ]]; then
-    local resolved_var="ANTHROPIC_DEFAULT_${tier}_MODEL"
-    if [[ -n "${!resolved_var:-}" ]]; then
-      model="${!resolved_var}"
-    elif [[ -n "${ANTHROPIC_BASE_URL:-}" ]]; then
-      model="$(printf '%s' "$model" | LC_ALL=C tr -cd 'A-Za-z0-9._:/+-' | cut -c1-100)"
-      printf 'model=%s;family=unknown:session\n' "$model"
-      return 0
+  if [[ -n "$alias" ]]; then
+    var="ANTHROPIC_DEFAULT_${alias}_MODEL"
+    if [[ "$alias" != DEFAULT && -n "${!var:-}" ]]; then
+      model="$(printf '%s' "${!var}" | sed 's/\[[^]]*\]$//')"; alias=""
+    elif [[ -z "${ANTHROPIC_BASE_URL:-}" ]]; then
+      fam="claude"   # a native session's alias is a Claude model by definition
+    else
+      fam="unknown:session"   # behind a gateway, an unresolved alias names no vendor
     fi
   fi
   model="$(printf '%s' "$model" | LC_ALL=C tr -cd 'A-Za-z0-9._:/+-' | cut -c1-100)"
-  if [[ -n "$model" ]]; then
-    fam="$(_model_family "$model")"; fam="${fam:-unknown:session}"
-  elif [[ -n "${ANTHROPIC_BASE_URL:-}" ]]; then
-    fam="unknown:session"
-  else
-    fam="claude"
+  if [[ -z "$fam" ]]; then
+    if [[ -n "$model" ]]; then
+      fam="$(_model_family "$model")"; fam="${fam:-unknown:session}"
+    elif [[ -n "${ANTHROPIC_BASE_URL:-}" ]]; then
+      fam="unknown:session"
+    else
+      fam="claude"
+    fi
   fi
   printf 'model=%s;family=%s\n' "$model" "$fam"
 }
@@ -3278,16 +3293,25 @@ run_cc_harness() {
   schema_json="$(python3 -c 'import json, sys; print(json.dumps(json.load(open(sys.argv[1]))))' "$schema")" \
     || { echo "Could not read the schema: $schema" >&2; exit 2; }
 
-  # Prompt on STDIN (claude -p reads it there), never argv. The parent session's
-  # Claude Code markers are dropped so the child is a plain headless session;
-  # the env filter in sandboxed() already strips *_TOKEN/*_API_KEY, and the
-  # helper sets the routing (base URL, token, model) itself right before exec.
-  # The subshell scopes the cd to the empty cwd; stderr (the transcript) is
-  # discarded like codex's, it never passes scrub_secrets.
+  # ORDER: timeout → env filter → HELPER (unjailed) → jail → claude. The helper
+  # is the user's own trusted binary (its `list` runs unjailed too); it may read
+  # its gateway config, so it runs OUTSIDE the jail and execs the jail wrapper,
+  # which then runs claude with the gateway credential dir denied. The env
+  # filter strips the PARENT's *_TOKEN/*_API_KEY before the helper adds the
+  # routing token, which the model process then holds only as env — no shell
+  # tool to read it with. Prompt on STDIN (claude -p reads it there), never
+  # argv; the parent session's Claude Code markers are dropped. The subshell
+  # scopes the cd to the empty cwd; stderr (the transcript) is discarded like
+  # codex's, it never passes scrub_secrets.
+  _init_sandbox "$backend"
+  local env_args=() _e
+  while IFS= read -r _e; do env_args+=("$_e"); done < <(_env_filter_args)
   local rc=0
-  ( cd "$home/cwd" && sandboxed "$backend" env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SSE_PORT \
+  ( cd "$home/cwd" && with_timeout env ${env_args[@]+"${env_args[@]}"} \
+      -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SSE_PORT \
+      GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0 \
       CLAUDE_CONFIG_DIR="$home/config" \
-      "$HARNESS_BIN" exec "$id" -- claude -p \
+      "$HARNESS_BIN" exec "$id" -- ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"} claude -p \
       --output-format json --json-schema "$schema_json" \
       "${tool_args[@]}" ${dir_args[@]+"${dir_args[@]}"} \
       --permission-mode dontAsk --strict-mcp-config --no-session-persistence \

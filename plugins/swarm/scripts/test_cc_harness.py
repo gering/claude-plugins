@@ -26,6 +26,8 @@ ROWS = (
     "cc-harness:grok\tgrok-4.7\tyes\t-\n"
     "cc-harness:luna\tgpt-6-luna\tno\trun: cliproxyapi -codex-login\n"
     "cc-harness:odd\tmystery-9\tyes\t-\n"
+    "cc-harness:rung\topus\tyes\t-\n"
+    "cc-harness:wide\tgpt-5.6-sol [1m]\tyes\t-\n"
     "bad name\tx\tyes\t-\n"
     "cc-harness:short\tonly-three\tyes\n"
 )
@@ -116,6 +118,8 @@ class Harness(unittest.TestCase):
         self.assertEqual(sol["family"], "openai")
         self.assertEqual(rows["cc-harness:grok"]["family"], "grok")
         self.assertEqual(rows["cc-harness:odd"]["family"], "unknown:odd")
+        self.assertEqual(rows["cc-harness:rung"]["family"], "unknown:rung", "a helper rung name is not Claude")
+        self.assertEqual(rows["cc-harness:wide"]["model"], "gpt-5.6-sol1m", "identity charset at load, one place")
         luna = rows["cc-harness:luna"]
         self.assertFalse(luna["ready"])
         self.assertIn("cliproxyapi -codex-login", luna["hint"])
@@ -140,7 +144,9 @@ class Harness(unittest.TestCase):
 
     def test_shell_function_claude_does_not_count(self):
         (self.stub / "claude").unlink()
-        r = self.sh("ready", "cc-harness:sol", PATH=f"{self.stub}:/usr/bin:/bin")
+        # An EXPORTED function named claude (the cc-router shape) must not count.
+        r = self.sh("ready", "cc-harness:sol", PATH=f"{self.stub}:/usr/bin:/bin",
+                    **{"BASH_FUNC_claude%%": "() {  echo fn; }"})
         self.assertEqual(r.returncode, 1)
         self.assertIn("no claude executable on PATH", r.stderr)
 
@@ -202,6 +208,13 @@ class Harness(unittest.TestCase):
             ({"ANTHROPIC_MODEL": "opus", "ANTHROPIC_BASE_URL": "http://127.0.0.1:9"},
              "model=opus;family=unknown:session"),
             ({"ANTHROPIC_MODEL": "opus"}, "model=opus;family=claude"),
+            # A context suffix is not part of the id; plan/default aliases are Claude natively.
+            ({"ANTHROPIC_MODEL": "opus[1m]"}, "model=opus;family=claude"),
+            ({"ANTHROPIC_MODEL": "claude-opus-5-5[1m]"}, "model=claude-opus-5-5;family=claude"),
+            ({"ANTHROPIC_MODEL": "opusplan"}, "model=opusplan;family=claude"),
+            ({"ANTHROPIC_MODEL": "default"}, "model=default;family=claude"),
+            ({"ANTHROPIC_MODEL": "default", "ANTHROPIC_BASE_URL": "http://127.0.0.1:9"},
+             "model=default;family=unknown:session"),
         ]
         for env, want in cases:
             env = {"ANTHROPIC_DEFAULT_OPUS_MODEL": "", **env}
@@ -244,6 +257,17 @@ class Harness(unittest.TestCase):
         env = (self.stub / "env").read_text()
         self.assertNotIn("CLAUDECODE=", env)
 
+    def test_helper_runs_outside_the_jail(self):
+        # The helper must exec the jail wrapper, not run inside it: it may read
+        # its gateway config, which the jail denies to the model process.
+        r = self.source(
+            "_jail_available() { return 0; }",
+            "_init_sandbox() { SANDBOX_CMD=(env SWARM_STUB_JAILED=1); }",
+            f'main run cc-harness:sol --prompt-file "{self.prompt}" --effort high')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("SWARM_STUB_JAILED=1", (self.stub / "env").read_text())
+        self.assertEqual(self.argv()[0], "-p", "the jail wraps claude, after the helper")
+
     def test_jailless_run_is_toolless(self):
         r = self.run_voice(jail=False)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -283,7 +307,7 @@ class Harness(unittest.TestCase):
         self.assertIn(str(home / ".claude" / "plugins"), paths)
         self.assertIn(str(home / ".claude" / "settings.json"), paths)
         self.assertIn(str(home / ".codex"), paths)
-        self.assertNotIn(str(home / ".cli-proxy-api"), paths, "the routed voice may need its own gateway config")
+        self.assertIn(str(home / ".cli-proxy-api"), paths, "the jailed claude never needs gateway credentials")
         sib = self.source("_sandbox_deny_paths codex", HOME=str(home), SWARM_HOST_HOME=str(home))
         self.assertIn(str(home / ".cli-proxy-api"), sib.stdout.splitlines(), "siblings never read gateway credentials")
         self.assertIn(str(self.repo.resolve() / "CLAUDE.md"), [str(Path(p).resolve()) for p in paths])

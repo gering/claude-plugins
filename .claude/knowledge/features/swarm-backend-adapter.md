@@ -842,9 +842,14 @@ obvious from `run_cc_harness`:
   aliases exact, and a bare alias is resolved through
   `ANTHROPIC_DEFAULT_<TIER>_MODEL` — the helper maps the opus rung to a GPT
   model, so `opus` behind a gateway is not evidence of Claude.
-- The gateway's credential dir (`~/.cli-proxy-api`) is denied to every other
-  voice; the helper's own client-token path is helper-owned and a residual
-  (`SWARM_DENY_PATHS`).
+- **Helper outside, `claude` inside the jail.** `run_cc_harness` runs
+  timeout → env filter → helper (unjailed, it may read its gateway config) →
+  jail wrapper → claude, so the gateway's credential dir (`~/.cli-proxy-api`)
+  is denied to every jailed process, the routed voice included (round 2 of the
+  review found the first version, helper inside the jail, had to leave it
+  readable). The env filter strips only the PARENT's tokens; the helper adds
+  the routing token afterwards. The helper's own client-token path is
+  helper-owned and a residual (`SWARM_DENY_PATHS`).
 - **Memo trap, again:** `_harness_load` must run in the MAIN shell before any
   `$(_harness_row …)`, or each lookup re-runs the helper's `list` and blows the
   per-run probe budget (caught by the first local review).
