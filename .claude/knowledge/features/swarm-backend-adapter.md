@@ -1,9 +1,9 @@
 ---
 title: "Swarm Backend Adapter Layer"
 createdAt: 2026-07-03
-updatedAt: 2026-10-22
+updatedAt: 2026-11-01
 createdFrom: "PR #21"
-updatedFrom: "grok-turn-telemetry-and-effort"
+updatedFrom: "branch: task/add-swarm-cc-proxy-voices-for-linux"
 pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
@@ -815,6 +815,42 @@ by name first and by kind only as a fallback.
   There, the long runs were the multi-turn read explorations, and none of them
   produced findings. The evidence is thin, so the advisory TOOL BUDGET stays and
   there is still no turn cap (see above).
+
+## cc-harness voices (swarm 0.17.0)
+
+`cc-harness:<id>` is an external backend that runs a headless `claude -p`
+through the PATH helper's `exec <id>` (contract:
+`plugins/work-system/docs/cc-harness-agents.md`). Decisions that are not
+obvious from `run_cc_harness`:
+
+- **Not `--bare`.** It restricts auth to `ANTHROPIC_API_KEY`/apiKeyHelper, and
+  the helper authenticates with an auth-token env var. Isolation comes instead
+  from an ephemeral `CLAUDE_CONFIG_DIR` beside the prompt (no user settings,
+  hooks, plugins, MCP) and an **empty cwd** (no project CLAUDE.md/.claude
+  discovery); the repo is reachable only via `--add-dir`, with
+  `Read,Grep,Glob` — no shell, no web, so no egress tool. Jail-less → tool-less
+  (Read takes absolute paths; a leaked secret could ride a finding into a
+  `--pr` comment). Verified live on dev-1 (2026-11-01): schema output via
+  `structured_output`, an out-of-diff caller found through `--add-dir`, repo
+  writes denied under bwrap.
+- **Family comes from the helper's routed model column** (display-only in the
+  contract, but the only source; an unparseable one fails safe to `unknown:<id>`).
+  `agents.sh voices` (not skill prose) replaces the live native of the same
+  family; the workflow pins each voice with `SWARM_HARNESS_EXPECT` so a helper
+  that reroutes an id mid-run fails the voice instead of mislabelling its vendor.
+- **Mapping is anchored** (`_model_family`): vendor prefixes first, Claude tier
+  aliases exact, and a bare alias is resolved through
+  `ANTHROPIC_DEFAULT_<TIER>_MODEL` — the helper maps the opus rung to a GPT
+  model, so `opus` behind a gateway is not evidence of Claude.
+- The gateway's credential dir (`~/.cli-proxy-api`) is denied to every other
+  voice; the helper's own client-token path is helper-owned and a residual
+  (`SWARM_DENY_PATHS`).
+- **Memo trap, again:** `_harness_load` must run in the MAIN shell before any
+  `$(_harness_row …)`, or each lookup re-runs the helper's `list` and blows the
+  per-run probe budget (caught by the first local review).
+- **`agents.sh jail` = `no` also when there is no git root.** dev-1 reported
+  `jail=no` with a working bwrap because the check ran over ssh from `$HOME`;
+  the reason now goes to stderr (stdout stays the one line the skill compares).
 
 ## One parser for the numeric knobs (`agents.sh config`, 0.10.x)
 
