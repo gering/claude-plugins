@@ -881,6 +881,52 @@ with tempfile.TemporaryDirectory() as d:
           "adopt\topen/add-search\t#4\tAdd search" in kv(r.stdout, "item")
           and not any(x.startswith("open/add-search") for x in kv(r.stdout, "differs")))
 
+# Round-3 guards: identity lookups, include label created, migrate edges.
+with tempfile.TemporaryDirectory() as d:
+    e = Env(d)
+    e.gh_state(issues=[issue(1, "Marked", "<!-- work-system task: marked -->",
+                             labels=["work-system:task", "dependencies"]),
+                       issue(2, "Müll-Tour", "x", labels=["bug"])])
+    e.setting('[tasks]\nexclude_labels = ["dependencies"]\n')
+    check("get hides an excluded task", e.run("get", str(e.repo), "marked").returncode == 3)
+    r = e.run("get", str(e.repo), "marked", "--identity")
+    check("get --identity finds it, as close would", r.returncode == 0 and kv(r.stdout, "issue") == ["1"])
+    check("--identity excludes --write", e.run("get", str(e.repo), "marked", "--identity",
+                                               "--write", str(e.root / "T.md")).returncode == 2)
+    r = e.run("close", str(e.repo), "#2", "--branch", "task/muell-tour", "--name", "muell-tour")
+    check("a pinned close of a lane's own issue survives a switch back to label mode",
+          r.returncode == 0 and kv(r.stdout, "result") == ["closed"])
+    nfd = "Müll-Tour"
+    e.gh_state(issues=[issue(3, nfd, "x", labels=["work-system:task"])])
+    check("a decomposed umlaut slugs like a composed one",
+          kv(e.run("get", str(e.repo), "#3").stdout, "task") == ["muell-tour"])
+    e.setting('[tasks]\ninclude_labels = ["ws-ready"]\n')
+    body = e.root / "b.md"
+    body.write_text("# New\n")
+    r = e.run("create", str(e.repo), "new", "--body-file", str(body))
+    check("create makes the include label when the repo lacks it",
+          r.returncode == 0 and "ws-ready" in json.loads(e.state.read_text())["labels"])
+
+with tempfile.TemporaryDirectory() as d:
+    e = migrate_env(d)
+    (e.repo / "tasks" / "leaky.md").unlink()
+    e.setting('[tasks]\nbackend = "local"\nselect = "all-open"\nexclude_labels = ["dependencies"]\n')
+    e.gh_state(issues=[issue(5, "Fix crash", "dup", labels=["dependencies"]),
+                       issue(6, "Search", "## Goal\nFind things.\n\n<!-- work-system task: add-search -->",
+                             labels=[])])
+    r = migrate(e, "--open-only")
+    skips = dict(x.split("\t", 1) for x in kv(r.stdout, "skip"))
+    check("migrate's name clash ignores the label lists",
+          "already answers to fix-crash" in skips.get("open/fix-crash", ""))
+    check("migrate resumes an unlabelled marked issue under all-open instead of duplicating it",
+          "resume\topen/add-search\t#6\tSearch" in kv(r.stdout, "item")
+          or any(i.startswith("resume\topen/add-search\t#6") for i in kv(r.stdout, "item")))
+    e.setting('[tasks]\nbackend = "local"\nselect = "all-open"\nexclude_labels = ["hide"]\n')
+    e.gh_state(issues=[issue(6, "Search", "<!-- work-system task: add-search -->", labels=["hide"])])
+    r = migrate(e, "--open-only")
+    check("migrate never resumes onto an issue the filter hides",
+          "would not be listed" in dict(x.split("\t", 1) for x in kv(r.stdout, "skip")).get("open/add-search", ""))
+
 if FAILS:
     print("FAIL test_task_store.py:")
     for f in FAILS:

@@ -81,7 +81,9 @@ valid_task() { printf '%s' "$1" | grep -Eq "$TASK_RE"; }
 # lane is only ever `ask` — the user decides, nothing is torn down unasked.
 task_recorded() {
   local out rc=0
-  out="$(python3 -I "$SCRIPT_DIR/task-store.py" get "$1" "$2" 2>/dev/null)" || rc=$?
+  # --identity: the lookup close uses — an exclude label added mid-lane must not
+  # turn a shipped task into "not a lane".
+  out="$(python3 -I "$SCRIPT_DIR/task-store.py" get "$1" "$2" --identity 2>/dev/null)" || rc=$?
   [ "$rc" -eq 3 ] && return 1
   [ "$rc" -ne 0 ] && return 0
   printf '%s\n' "$out" | grep -qx 'state=open'

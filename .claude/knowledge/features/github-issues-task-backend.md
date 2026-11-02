@@ -89,11 +89,19 @@ not in SKILL.md.
   turns into a question, then closes the confirmed `#N` without `--name`. Review
   rounds tried two looser variants first: a slug-match exemption (a retitle
   plus an exclude label fell to exit 3) and ignoring the mode for `#N` (any bug
-  issue became closable).
+  issue became closable). What stayed: lists never apply to close, and the mode
+  is waived only for a `#N` whose name equals `--name` (the lane's own issue
+  after a switch back to label mode).
+- **Every lifecycle lookup uses that identity view.** `get --identity` is it,
+  for `close-request.sh`'s "is the task still recorded" and `/close`'s
+  unpinned confirmation. A filtered lookup there read an exclude label added
+  mid-lane as "no such task" (exit 3 = nothing to close / not a lane), the
+  exact case close itself was made immune to.
 - **A body marker is identity, never selection.** Round 1 let a marked issue
   bypass `include_labels` so `/define`'s tasks stay visible; round 2 showed any
   issue author can write a marker. Instead `create` and `migrate` give a new
-  task issue the first include label. `create` checks name clashes against
+  task issue the first include label (created when missing; if that label is
+  also a gate label, every new task is gated, and `/adopt` asks like `/kickoff`). `create` checks name clashes against
   every open issue (also excluded ones, naming the `#N`) and refuses with exit 2
   (config, not a taken name) when `exclude_labels` holds the task label.
 - **`all-open` puts strangers' text into context.** Any reporter's title shows
@@ -115,7 +123,8 @@ not in SKILL.md.
   cannot tell who said yes, but the copy cannot happen silently.
 - **`migrate` under `all-open`** also treats unlabelled open issues as names
   already taken (from the search route; the REST index only sees labelled
-  ones). Every adopt, in any mode, ignores the secret holdback because nothing
+  ones) — marked unlabelled issues there become `resume`, never a duplicate
+  create, and a resume onto an issue the filter hides is a skip. Every adopt, in any mode, ignores the secret holdback because nothing
   from the file is published, and never adopts an excluded issue; `publish=`
   counts creates only.
 - **The 1000-issue cap is counted before include/exclude** (gh cannot apply

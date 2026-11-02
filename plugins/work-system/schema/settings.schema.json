@@ -40,7 +40,7 @@
           "type": "string",
           "enum": ["label", "all-open"],
           "default": "label",
-          "description": "Which open issues are tasks on the github backend. label: those labelled work-system:task. all-open: every open issue (pull requests never). An issue without a work-system body marker answers to the slug of its title; #N always works."
+          "description": "Which open issues are tasks on the github backend. label: those labelled work-system:task. all-open: every open issue (pull requests never). An issue without a work-system body marker answers to the slug of its title."
         },
         "include_labels": {
           "type": "array",

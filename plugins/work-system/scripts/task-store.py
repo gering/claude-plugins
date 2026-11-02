@@ -4,8 +4,9 @@
 Usage:
   task-store.py backend <dir>
   task-store.py list    <dir>
-  task-store.py get     <dir> <name|#N> [--write <path> [--allow-gated] | --body]
-                        (an issue ref needs the #)
+  task-store.py get     <dir> <name|#N> [--write <path> [--allow-gated] | --body | --identity]
+                        (an issue ref needs the #; --identity: the lookup close
+                        uses, ignoring include/exclude_labels)
   task-store.py create  <dir> <name> --body-file <file> [--title <text>]
   task-store.py close   <dir> <name|#N> --branch <task-branch> [--pr <n>] [--sha <sha>]
                         [--name <task>]   (with #N: refuse an issue of another task)
@@ -157,6 +158,18 @@ def task_labels(sel):
     return [LABEL] + sel["include"][:1]
 
 
+def new_issue_hidden(sel):
+    """Why an issue carrying task_labels() would still not be listed (only an
+    exclude of one of those labels), else None — create and migrate refuse."""
+    return unselected({"labels": [{"name": l} for l in task_labels(sel)]}, sel)
+
+
+def ensure_task_labels(repo, sel):
+    ensure_label(repo, LABEL, LABEL_COLOR, LABEL_DESC)
+    for extra in sel["include"][:1]:
+        ensure_label(repo, extra, "ededed", "Selects work-system tasks (tasks.include_labels)")
+
+
 def task_files(main, rel):
     """Every task file in <rel> — what keeps `auto` on local. `list` hands a
     skill only the plain names (a file can be named `$(…).md`)."""
@@ -254,7 +267,8 @@ def gh(args, repo):
 
 def slugify(title):
     # German umlauts spelled out, other accents dropped: "Müll-Tour" → muell-tour.
-    t = title.lower().translate(str.maketrans({"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss"}))
+    # NFC first, so a decomposed ü (u + combining mark) is spelled out too.
+    t = unicodedata.normalize("NFC", title).lower().translate(str.maketrans({"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss"}))
     t = "".join(c for c in unicodedata.normalize("NFKD", t) if not unicodedata.combining(c))
     s = re.sub(r"[^a-z0-9]+", "-", t).strip("-")
     return s[:60].rstrip("-") or "task"
@@ -349,8 +363,10 @@ def gh_issues(repo, state, sel, search=None):
     return [i for i in issues if unselected(i, sel) is None]
 
 
-def gh_find(repo, sel, ref):
-    """The issue for a name or #N under `sel` (close passes the mode only)."""
+def gh_find(repo, sel, ref, lane=None):
+    """The issue for a name or #N under `sel` (close passes the mode only).
+    `lane` (close --name): a #N that IS that task counts even if the mode
+    changed since its kickoff — TASK.md's pin plus the name are its identity."""
     n = issue_ref(ref)
     if n is not None:
         r = run(["gh", "issue", "view", str(n), "--json", FIELDS, "-R", repo])
@@ -362,7 +378,7 @@ def gh_find(repo, sel, ref):
             raise Fail(1, f"gh issue view {n} failed: {oneline(r.stderr)[:300]}")
         issue = json.loads(r.stdout)
         why = unselected(issue, sel)
-        if why:
+        if why and not (lane and not is_pull_request(issue) and issue_name(issue) == lane):
             raise Fail(3, f"#{n} is not a work-system task here: {why}")
         return issue
     name = check_name(ref)
@@ -487,11 +503,14 @@ def cmd_list(d):
     print(f"count={len(rows)}")
 
 
-def cmd_get(d, ref, write, body, allow_gated=False):
+def cmd_get(d, ref, write, body, allow_gated=False, identity=False):
     backend, main, info = resolve(d)
     gate = []
     if backend == "github":
-        sel = selection(main)
+        # --identity: the lookup close does, for callers deciding whether a
+        # lane's task still exists (an exclude label added mid-lane must not
+        # make it "gone"). It reads no gate labels: it never starts work.
+        sel = selection(main, lists=not identity)
         issue = gh_find(info["repo"], sel, ref)
         doc = issue_doc(issue)
         gate = gates(issue, sel)
@@ -560,8 +579,8 @@ def cmd_create(d, name, body_file, title):
         raise Fail(2, "no title: pass --title or start the body with a '# ' heading")
     sel = selection(main)
     labels = task_labels(sel)
-    why = unselected({"labels": [{"name": l} for l in labels]}, sel)
-    if why:  # only an exclude of the task label itself gets here
+    why = new_issue_hidden(sel)
+    if why:
         raise Fail(2, f"a new task issue would not be a task here ({why}) — fix [tasks] in "
                       ".work-system.toml")
     # The name clash counts every issue that answers to a name, also one the
@@ -571,7 +590,7 @@ def cmd_create(d, name, body_file, title):
     if clash:
         raise Fail(5, f"an open task named {name} already exists in {repo} "
                       f"(#{clash[0]['number']}, possibly hidden by [tasks] exclude/include_labels)")
-    ensure_label(repo, LABEL, LABEL_COLOR, LABEL_DESC)
+    ensure_task_labels(repo, sel)
     body = with_marker(body, name)
     r = run(["gh", "issue", "create", "--title", title,
              *[x for l in labels for x in ("--label", l)], "--body-file", "-",
@@ -598,7 +617,7 @@ def cmd_close(d, ref, branch, pr, sha, name=None):
     # label added mid-lane must not leave the shipped issue open (/close reads
     # exit 3 as "nothing to close"). The mode still counts: in label mode an
     # unlabelled #N is not a task.
-    issue = gh_find(repo, selection(main, lists=False), ref)
+    issue = gh_find(repo, selection(main, lists=False), ref, name)
     if name and issue_name(issue) != name:
         # A marker-less issue's name is its title slug, so a retitle lands here
         # too: the caller asks the user and closes the confirmed #N without --name.
@@ -821,10 +840,16 @@ def migrate_plan(main, repo, public, includes, open_only, sel):
         elif i.get("state", "").upper() == "OPEN":
             unmarked_open.setdefault(issue_name(i), i)
     if items and sel["select"] == "all-open":
-        # Every open issue is a task there, so an unlabelled one already answers
-        # to its title slug: creating that name again would make it ambiguous.
-        for i in live(gh_issues(repo, "open", sel)):
-            if not markers(i):
+        # Every open issue is a task there, whatever its labels: an unlabelled
+        # one already answers to its marker or title slug, so creating that
+        # name again would make it ambiguous. The REST index sees labelled ones
+        # only; this (search) list adds the rest, label lists not applied.
+        seen = {i["number"] for v in by_key.values() for i in v}
+        for i in live(gh_issues(repo, "open", dict(sel, include=[], exclude=[]))):
+            found = markers(i)
+            if found and i["number"] not in seen:
+                by_key.setdefault((found[-1], False), []).append(i)
+            elif not found:
                 unmarked_open.setdefault(issue_name(i), i)
 
     for it in items:
@@ -856,6 +881,9 @@ def migrate_plan(main, repo, public, includes, open_only, sel):
             if not archived and it["state"] != "OPEN":
                 it.update(action="skip", reason=f"issue #{iss['number']} for this task is "
                           "closed — reopen it, or remove the file")
+            elif not archived and unselected(iss, sel):
+                it.update(action="skip", reason=f"issue #{iss['number']} would not be listed "
+                          f"({unselected(iss, sel)}) — fix its labels or [tasks]")
             else:
                 it["action"] = "resume"
             continue
@@ -1058,9 +1086,10 @@ def cmd_migrate(d, token, includes, open_only, pace):
         raise Fail(4, f"cannot migrate: {why} — fix gh (gh auth login)")
     visibility = repo_visibility(repo)
     sel = selection(main)
-    if unselected({"labels": [{"name": l} for l in task_labels(sel)]}, sel):
-        raise Fail(2, "tasks.exclude_labels hides the task label itself — migrated tasks would "
-                      "not be listed; fix [tasks] in .work-system.toml")
+    why = new_issue_hidden(sel)
+    if why:
+        raise Fail(2, f"migrated tasks would not be listed ({why}) — fix [tasks] in "
+                      ".work-system.toml")
     items, unplain = migrate_plan(main, repo, visibility == "public", includes, open_only, sel)
     tok = plan_token(repo, visibility, items)
     check_dest(main)
@@ -1102,7 +1131,7 @@ def cmd_migrate(d, token, includes, open_only, pace):
 
     work = [i for i in items if i["action"] != "skip"]
     if any(i["action"] in ("create", "adopt") for i in work):
-        ensure_label(repo, LABEL, LABEL_COLOR, LABEL_DESC)
+        ensure_task_labels(repo, sel)
         if any(i["kind"] == "archived" for i in work):
             ensure_label(repo, ARCHIVED_LABEL, "c5def5", "A work-system task migrated from the archive")
     writes = 0
@@ -1166,7 +1195,7 @@ def cmd_migrate(d, token, includes, open_only, pace):
 
 def usage():
     raise Fail(2, "usage: task-store.py backend|list <dir> · get <dir> <name|#N>"
-                  " [--write <path> [--allow-gated]|--body]"
+                  " [--write <path> [--allow-gated]|--body|--identity]"
                   " · create <dir> <name> --body-file <file> [--title <t>]"
                   " · close <dir> <name|#N> --branch <b> [--pr <n>] [--sha <s>] [--name <task>]"
                   " · ref <dir> <name> [<TASK.md>]"
@@ -1178,7 +1207,7 @@ def opts(rest, allowed):
     out, i = {}, 0
     while i < len(rest):
         k = rest[i]
-        if k in ("--body", "--allow-gated") and k in allowed:
+        if k in ("--body", "--allow-gated", "--identity") and k in allowed:
             out[k] = True
             i += 1
             continue
@@ -1198,10 +1227,12 @@ def main(argv):
             usage()
         (cmd_backend if cmd == "backend" else cmd_list)(d)
     elif cmd == "get" and rest:
-        o = opts(rest[1:], {"--write", "--body", "--allow-gated"})
-        if ("--write" in o and "--body" in o) or ("--allow-gated" in o and "--write" not in o):
+        o = opts(rest[1:], {"--write", "--body", "--allow-gated", "--identity"})
+        if sum(k in o for k in ("--write", "--body", "--identity")) > 1 \
+                or ("--allow-gated" in o and "--write" not in o):
             usage()
-        cmd_get(d, rest[0], o.get("--write"), o.get("--body", False), o.get("--allow-gated", False))
+        cmd_get(d, rest[0], o.get("--write"), o.get("--body", False), o.get("--allow-gated", False),
+                o.get("--identity", False))
     elif cmd == "create" and rest:
         o = opts(rest[1:], {"--body-file", "--title"})
         if "--body-file" not in o:

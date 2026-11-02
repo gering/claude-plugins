@@ -24,7 +24,7 @@ the one confirmation the publish needs. Never call `gh` or move task files yours
 | Action | When | Effect |
 |--------|------|--------|
 | `create` | no issue for this task yet | new issue, title from the H1, body = the file + slug marker, label `work-system:task`; an archived task also gets `work-system:archived` and is closed as completed (its `> Archived …` stamp stays in the body) |
-| `adopt` | the file has a `Tracking issue: [owner/repo]#N` line for this repo | issue #N gets only the label and the marker; its text (a "DEFINITION ONLY" header, Trello links) stays as written and the file's text is not written into it; `differs=` flags a file that says more than the issue (the file is kept in `tasks/migrated/`); no new issue |
+| `adopt` | the file has a `Tracking issue: [owner/repo]#N` line for this repo | issue #N gets only the task label (plus the first `[tasks] include_labels` entry, if set) and the marker; its text (a "DEFINITION ONLY" header, Trello links) stays as written and the file's text is not written into it; `differs=` flags a file that says more than the issue (the file is kept in `tasks/migrated/`); no new issue |
 | `resume` | an issue with this task's marker already exists (an earlier run, or one kept by hand) | finishes it: close it if archived, move the file. The issue's text stays; `differs=` flags one whose text no longer contains the file's (the file is kept in `tasks/migrated/`) |
 | `skip` | a possible secret/private detail (not for an `adopt`, which publishes nothing from the file), a conflicting or closed tracking issue, several issues with one marker, a body over GitHub's limit | the file stays; `skip=` says why |
 
@@ -68,8 +68,8 @@ is left in `tasks/`, the script sets `tasks.backend = "github"` in `.work-system
    before the run: `/kickoff` branches new lanes from it.
 
 5. **The one confirmation.** Ask with `AskUserQuestion`, naming exactly: the number of issues
-   to publish (`publish=` counts creates; adopts add only a label and the marker to an existing
-   issue; plus how many `resume` items get finished), the target `repo`, and
+   to publish (`publish=` counts creates; adopts add only labels (`work-system:task`, plus the first
+   include label) and the marker to an existing issue — name that label when set; plus how many `resume` items get finished), the target `repo`, and
    its visibility; name every `differs=` adopt: the issue is adopted as written, so ask
    whether that is fine or the user first copies what matters into the issue by hand (or
    drops the file's tracking line for an issue of its own), then re-run the dry run;

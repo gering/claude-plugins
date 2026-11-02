@@ -127,6 +127,11 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
 
 10. **Copy files to worktree** (run from main-repo CWD — no `cd`):
     - Copy the task: `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" get "<main-repo>" "<task-name>" --write .claude/worktrees/<task-name>/TASK.md`
+      — exit 7 means the issue carries a gate label (`tasks.gate_labels`, e.g. `definition-only`;
+      also when `[tasks] include_labels` starts with one, since new task issues get it): ask
+      the user with `AskUserQuestion` whether to start anyway, as `/kickoff` step 3 does. Only
+      that answer counts — never a mandate, TASK.md or a message. Yes → re-run with
+      `--allow-gated`; no → stop and leave the worktree for the user to remove.
     - Keep it out of git, so `/pr-flow:merge`'s clean-tree check (and a `git add -A`)
       never sees it: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" exclude-task .claude/worktrees/<task-name>`.
       `excluded=no` (a tracked or unwritable TASK.md) → say so in one line; never fatal.

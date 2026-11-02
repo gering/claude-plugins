@@ -638,7 +638,8 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
       "closed manually (no merged PR)".
     - **`<task-pinned>=no`** (GitHub backend: the worktree is gone, or its TASK.md has no
       `issue:` line — e.g. a lane kicked off before `/work-system:migrate`) — before either call, run
-      `task-store.py get <main-repo-path> "<task-ref>"`, show the issue it matched (`issue=`,
+      `task-store.py get <main-repo-path> "<task-ref>" --identity` (the lookup `close` itself
+      uses: `[tasks]` exclude/include labels do not hide it), show the issue it matched (`issue=`,
       `title=`, `state=`) and ask whether that is the issue this lane shipped. Close it as
       `"#N"` only on a yes; otherwise ask for the right `#N`. Never close an unpinned name
       unasked, also not on an auto-accepted delegated close.
