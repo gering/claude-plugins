@@ -189,8 +189,9 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
 2. **Check for TASK.md**:
    - Read `TASK.md` in the current directory
    - If exists, read and display the task requirements
-   - If missing, read it from the backlog: `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" get "$PWD" "<task-name>" --body`
-     (the store resolves the main checkout itself; a local file or the GitHub issue). Exit 3
+   - If missing, read it from the backlog: `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" get "$PWD" "<task-name>" --body --identity`
+     (the store resolves the main checkout itself; a local file or the GitHub issue; `--identity`:
+     the lane's own task, even after an exclude label was added). Exit 3
      → no task on record; exit 4 → the GitHub backend's `gh` is unusable, say so in one line.
 
 3. **Read the mandate** — what this worker is authorized to do without asking:

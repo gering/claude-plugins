@@ -23,10 +23,10 @@ the one confirmation the publish needs. Never call `gh` or move task files yours
 
 | Action | When | Effect |
 |--------|------|--------|
-| `create` | no issue for this task yet | new issue, title from the H1, body = the file + slug marker, label `work-system:task`; an archived task also gets `work-system:archived` and is closed as completed (its `> Archived …` stamp stays in the body) |
+| `create` | no issue for this task yet | new issue, title from the H1, body = the file + slug marker, label `work-system:task` (plus the first `[tasks] include_labels` entry, if set); an archived task also gets `work-system:archived` and is closed as completed (its `> Archived …` stamp stays in the body) |
 | `adopt` | the file has a `Tracking issue: [owner/repo]#N` line for this repo | issue #N gets only the task label (plus the first `[tasks] include_labels` entry, if set) and the marker; its text (a "DEFINITION ONLY" header, Trello links) stays as written and the file's text is not written into it; `differs=` flags a file that says more than the issue (the file is kept in `tasks/migrated/`); no new issue |
 | `resume` | an issue with this task's marker already exists (an earlier run, or one kept by hand) | finishes it: close it if archived, move the file. The issue's text stays; `differs=` flags one whose text no longer contains the file's (the file is kept in `tasks/migrated/`) |
-| `skip` | a possible secret/private detail (not for an `adopt`, which publishes nothing from the file), a conflicting or closed tracking issue, several issues with one marker, a body over GitHub's limit | the file stays; `skip=` says why |
+| `skip` | a possible secret/private detail (not for an `adopt`, which publishes nothing from the file), a conflicting or closed tracking issue, several issues with one marker, a body over GitHub's limit, an issue `[tasks]` would not list | the file stays; `skip=` says why |
 
 Every step can be repeated: the issue is written before the file moves, and a written issue
 is found by its marker, so a stopped run continues on the next one without duplicates.

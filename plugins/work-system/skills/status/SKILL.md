@@ -38,7 +38,7 @@ user_invocable: true
    "not merged".
 
 2. **Read the task** for human context (optional):
-   - Run: `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" get "$PWD" "<task_name>" --body 2>/dev/null` — use the title/goal to
+   - Run: `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" get "$PWD" "<task_name>" --body --identity 2>/dev/null` — use the title/goal to
      label the report (a GitHub task also has its issue number in it).
 
 3. **Report** from `verdict` + `confidence`, quoting the concrete evidence fields:

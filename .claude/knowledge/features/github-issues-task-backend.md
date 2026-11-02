@@ -91,10 +91,12 @@ not in SKILL.md.
   plus an exclude label fell to exit 3) and ignoring the mode for `#N` (any bug
   issue became closable). What stayed: lists never apply to close, and the mode
   is waived only for a `#N` whose name equals `--name` (the lane's own issue
-  after a switch back to label mode).
+  after a switch back to label mode); a `#N` answering to another name is exit
+  5 (ask), and the user's pick then closes without `--name`.
 - **Every lifecycle lookup uses that identity view.** `get --identity` is it,
-  for `close-request.sh`'s "is the task still recorded" and `/close`'s
-  unpinned confirmation. A filtered lookup there read an exclude label added
+  for `close-request.sh`'s "is the task still recorded", `/close`'s unpinned
+  confirmation, `/continue`'s and `/status`'s task text and `/adopt`'s
+  name check. A filtered lookup there read an exclude label added
   mid-lane as "no such task" (exit 3 = nothing to close / not a lane), the
   exact case close itself was made immune to.
 - **A body marker is identity, never selection.** Round 1 let a marked issue
@@ -110,9 +112,9 @@ not in SKILL.md.
   a description, never authorization; there is no author-trust filter
   (`gh issue list --json` has no author association) — a residual the README
   names.
-- **Residuals:** `close-request.sh` looks a gone lane's task up by name
-  through the filter, so an exclude label added mid-lane makes the Manager
-  reject a delegated close as "not a lane" (the issue stays open, nothing is
+- **Residuals:** a gone lane's by-name lookup still applies the mode, so a
+  marker-less lane started under `all-open` and looked up after a switch back
+  to `label` is "not a lane" for the Manager (the issue stays open, nothing is
   torn down unasked). The 1.31 slug change (umlauts spelled out) renames a
   pre-1.31 marker-less lane with a non-ASCII title; its `/close` meets exit 5
   and asks.

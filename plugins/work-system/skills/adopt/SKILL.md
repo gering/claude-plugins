@@ -64,8 +64,8 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
    - Show proposed task name and ask for confirmation
 
 4. **Check for conflicts**:
-   - Check the backlog: `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" get "<main-repo>" "<task-name>"` — exit 0 with
-     `state=open` is a conflict; exit 3 or `state=closed` is free; any other exit → show its stderr and stop
+   - Check the backlog: `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" get "<main-repo>" "<task-name>" --identity` — the
+     lookup `create` clashes with, include/exclude ignored; exit 0 with `state=open` is a conflict; exit 3 or `state=closed` is free; any other exit → show its stderr and stop
      (4: the GitHub backend's `gh` is unusable; 5: several open issues carry the name; 1: a
      `gh` call failed).
    - Check if `task/<task-name>` branch already exists

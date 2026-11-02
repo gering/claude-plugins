@@ -847,6 +847,9 @@ with tempfile.TemporaryDirectory() as d:
     e.setting('[tasks]\nexclude_labels = ["dependencies"]\n')
     check("in label mode close by #N refuses an issue without the task label",
           e.run("close", str(e.repo), "#3", "--branch", "task/x").returncode == 3)
+    r = e.run("close", str(e.repo), "#3", "--branch", "task/x", "--name", "x")
+    check("in label mode a pinned #N of another name asks (5) instead of 'nothing to close'",
+          r.returncode == 5 and "retitled" in r.stderr)
     i1 = [i for i in e.issues() if i["number"] == 1][0]
     e.gh_state(issues=[i for i in e.issues() if i["number"] != 1]
                + [dict(i1, labels=i1["labels"] + [{"name": "dependencies"}])])
@@ -881,7 +884,7 @@ with tempfile.TemporaryDirectory() as d:
           "adopt\topen/add-search\t#4\tAdd search" in kv(r.stdout, "item")
           and not any(x.startswith("open/add-search") for x in kv(r.stdout, "differs")))
 
-# Round-3 guards: identity lookups, include label created, migrate edges.
+# Task-filter guards: identity lookups, include label created, migrate edges.
 with tempfile.TemporaryDirectory() as d:
     e = Env(d)
     e.gh_state(issues=[issue(1, "Marked", "<!-- work-system task: marked -->",
@@ -900,6 +903,20 @@ with tempfile.TemporaryDirectory() as d:
     e.gh_state(issues=[issue(3, nfd, "x", labels=["work-system:task"])])
     check("a decomposed umlaut slugs like a composed one",
           kv(e.run("get", str(e.repo), "#3").stdout, "task") == ["muell-tour"])
+    e.gh_state(issues=[issue(4, "Исправить вход", "x", labels=["work-system:task"]),
+                       issue(5, "修复登录", "x", labels=["work-system:task"])])
+    check("titles with nothing to slug get distinct names",
+          sorted(l.split("\t")[0] for l in kv(e.run("list", str(e.repo)).stdout, "task"))
+          == ["issue-4", "issue-5"])
+    e.setting('[tasks]\nexclude_labels = ["dependencies"]\n')
+    e.gh_state(issues=[issue(1, "Marked", "body text <!-- work-system task: marked -->",
+                             labels=["work-system:task", "dependencies"])])
+    r = e.run("get", str(e.repo), "marked", "--body", "--identity")
+    check("get --body --identity reads a lane's task the filter now hides",
+          r.returncode == 0 and "body text" in r.stdout)
+    e.setting('[tasks]\ninclude_labels = ["needs,review"]\n')
+    check("an include label gh would split is a config error (2)",
+          e.run("create", str(e.repo), "new", "--body-file", str(e.root / "nope.md")).returncode == 2)
     e.setting('[tasks]\ninclude_labels = ["ws-ready"]\n')
     body = e.root / "b.md"
     body.write_text("# New\n")
@@ -919,8 +936,7 @@ with tempfile.TemporaryDirectory() as d:
     check("migrate's name clash ignores the label lists",
           "already answers to fix-crash" in skips.get("open/fix-crash", ""))
     check("migrate resumes an unlabelled marked issue under all-open instead of duplicating it",
-          "resume\topen/add-search\t#6\tSearch" in kv(r.stdout, "item")
-          or any(i.startswith("resume\topen/add-search\t#6") for i in kv(r.stdout, "item")))
+          "resume\topen/add-search\t#6\tAdd search" in kv(r.stdout, "item"))
     e.setting('[tasks]\nbackend = "local"\nselect = "all-open"\nexclude_labels = ["hide"]\n')
     e.gh_state(issues=[issue(6, "Search", "<!-- work-system task: add-search -->", labels=["hide"])])
     r = migrate(e, "--open-only")
