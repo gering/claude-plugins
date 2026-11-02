@@ -883,6 +883,13 @@ with tempfile.TemporaryDirectory() as d:
     check("an adopt whose file holds only its title and tracking line is not drift",
           "adopt\topen/add-search\t#4\tAdd search" in kv(r.stdout, "item")
           and not any(x.startswith("open/add-search") for x in kv(r.stdout, "differs")))
+    (e.repo / "tasks" / "fix-crash.md").write_text("# Fix crash\n\nTracking issue: #5\n")
+    e.setting('[tasks]\nbackend = "local"\nselect = "all-open"\n')
+    e.gh_state(issues=e.issues() + [issue(5, "Crash on launch", "", label="bug")])
+    r = migrate(e, "--open-only")
+    check("migrate never adopts onto a name another open issue already answers to",
+          "already answers to fix-crash" in dict(x.split("\t", 1) for x in kv(r.stdout, "skip"))
+          .get("open/fix-crash", ""))
 
 # Task-filter guards: identity lookups, include label created, migrate edges.
 with tempfile.TemporaryDirectory() as d:

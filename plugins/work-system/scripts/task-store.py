@@ -29,7 +29,7 @@ ws-settings.py at the main checkout):
           `label` (default) = labelled `work-system:task`, `all-open` = every
           open issue; then `tasks.include_labels` (any of them, when set; new
           task issues get the first) and `tasks.exclude_labels` (none of them)
-          narrow it. `close` looks up by the mode alone, ignoring the lists. The task name lives
+          narrow it. `close` ignores exclude_labels (include_labels still count). The task name lives
           in a body marker `<!-- work-system task: <name> -->`; an issue
           without one answers to the slug of its title. The branch stays
           task/<name>. An issue carrying one of `tasks.gate_labels` (default
@@ -382,7 +382,7 @@ def gh_issues(repo, state, sel, search=None):
 
 
 def gh_find(repo, sel, ref, lane=None):
-    """The issue for a name or #N under `sel` (close passes the mode only).
+    """The issue for a name or #N under `sel` (close passes the identity view).
     `lane` (close --name): a #N that IS that task counts even if the mode
     changed since its kickoff — TASK.md's pin plus the name are its identity;
     one that answers to another name (retitled) is exit 5 (ask), never 3
@@ -639,10 +639,10 @@ def cmd_close(d, ref, branch, pr, sha, name=None):
         os.execvp("bash", args)
     print(f"backend={backend}")
     repo = info["repo"]
-    # Close looks the task up by identity, not by the label lists: an exclude
-    # label added mid-lane must not leave the shipped issue open (/close reads
-    # exit 3 as "nothing to close"). The mode still counts: in label mode an
-    # unlabelled #N is not a task.
+    # Close looks the task up in the identity view: an exclude label added
+    # mid-lane must not leave the shipped issue open. The mode and include_labels
+    # still count (in label mode an unlabelled #N is not a task), except for a
+    # pinned #N whose name equals --name (gh_find).
     issue = gh_find(repo, selection(main, lists=False), ref, name)
     if name and issue_name(issue) != name:
         # A marker-less issue's name is its title slug, so a retitle lands here
@@ -950,6 +950,13 @@ def migrate_plan(main, repo, public, includes, open_only, sel):
             if why:
                 it.update(action="skip", reason=f"its tracking issue #{n} would not be listed "
                                                 f"({why})")
+                continue
+            # The marker makes #n answer to the name; another open issue that
+            # already does (by its title slug) would make the name ambiguous.
+            clash = unmarked_open.get(name) if not archived else None
+            if clash and clash["number"] != n:
+                it.update(action="skip", reason=f"open issue #{clash['number']} already answers "
+                                                f"to {name} (a task issue without a marker)")
                 continue
             old = strip_marker(iss.get("body")).strip()
             core = strip_marker(TRACKING_RE.sub("", it["body"], count=1)).strip()

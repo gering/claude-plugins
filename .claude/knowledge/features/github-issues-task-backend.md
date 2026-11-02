@@ -86,7 +86,8 @@ not in SKILL.md.
   issue open. The mode still counts (in label mode an unlabelled `#N` is no
   task), and the identity is checked: with `--name`, a mismatch (another task,
   or a marker-less issue retitled since kickoff) is exit 5, which `/close`
-  turns into a question, then closes the confirmed `#N` without `--name`. Review
+  turns into a question, then closes the confirmed `#N` without `--name` (in
+  label mode an unlabelled `#N` is then exit 3: the user closes it by hand). Review
   rounds tried two looser variants first: a slug-match exemption (a retitle
   plus an exclude label fell to exit 3) and ignoring the mode for `#N` (any bug
   issue became closable). What stayed: exclude never applies to close (include
@@ -128,8 +129,10 @@ not in SKILL.md.
   cannot tell who said yes, but the copy cannot happen silently.
 - **`migrate` under `all-open`** also treats unlabelled open issues as names
   already taken (from the search route; the REST index only sees labelled
-  ones) — marked unlabelled issues there become `resume`, never a duplicate
-  create, and a resume onto an issue the filter hides is a skip. Every adopt, in any mode, ignores the secret holdback because nothing
+  ones) — a marked unlabelled issue there is a skip (its marker blocks the
+  name, it is never a resume target: any author can write one), never a
+  duplicate create, and a resume onto an issue the filter hides is a skip; an
+  adopt onto a name another open issue answers to is a skip too. Every adopt, in any mode, ignores the secret holdback because nothing
   from the file is published, and never adopts an excluded issue; `publish=`
   counts creates only.
 - **The 1000-issue cap is counted before include/exclude** (gh cannot apply
