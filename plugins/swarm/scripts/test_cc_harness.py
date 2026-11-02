@@ -46,6 +46,7 @@ printf '%s\\n' "$@" > "$STUB_DIR/argv"
 pwd -P > "$STUB_DIR/cwd"
 ls -A | wc -l | tr -d ' ' > "$STUB_DIR/cwd-entries"
 echo "$CLAUDE_CONFIG_DIR" > "$STUB_DIR/config"
+cp "$CLAUDE_CONFIG_DIR/settings.json" "$STUB_DIR/settings" 2>/dev/null
 env > "$STUB_DIR/env"
 cat > "$STUB_DIR/stdin"
 printf '%s\\n' "$STUB_ENVELOPE"
@@ -256,6 +257,20 @@ class Harness(unittest.TestCase):
                          "CLAUDE_CONFIG_DIR must be the ephemeral dir beside the prompt")
         env = (self.stub / "env").read_text()
         self.assertNotIn("CLAUDECODE=", env)
+        settings = json.loads((self.stub / "settings").read_text())
+        self.assertIn("Read(//proc/**)", settings["permissions"]["deny"],
+                      "the routing token is in the voice's env: /proc/self/environ must not be readable")
+
+    def test_scrub_redacts_underscore_token_forms(self):
+        r = self.source('printf \'{"s":"ANTHROPIC_AUTH_TOKEN=abcdefghijklmnopqrstuv"}\' | scrub_secrets')
+        self.assertNotIn("abcdefghijklmnopqrstuv", r.stdout)
+        self.assertIn("TOKEN=[REDACTED]", r.stdout)
+
+    def test_oversize_listing_truncates_instead_of_failing(self):
+        many = "".join(f"cc-harness:v{i}\tgpt-6.1-sol\tyes\t{'x' * 200}\n" for i in range(400))
+        rows = self.rows(STUB_ROWS=many)
+        harness = [b for b in rows if b.startswith("cc-harness:")]
+        self.assertEqual(len(harness), 50, "a long listing is capped, not read as a failed one (SIGPIPE)")
 
     def test_helper_runs_outside_the_jail(self):
         # The helper must exec the jail wrapper, not run inside it: it may read
@@ -308,6 +323,7 @@ class Harness(unittest.TestCase):
         self.assertIn(str(home / ".claude" / "settings.json"), paths)
         self.assertIn(str(home / ".codex"), paths)
         self.assertIn(str(home / ".cli-proxy-api"), paths, "the jailed claude never needs gateway credentials")
+        self.assertIn(str(home / ".config" / "cc-router"), paths, "the helper's client token stays outside the jail")
         sib = self.source("_sandbox_deny_paths codex", HOME=str(home), SWARM_HOST_HOME=str(home))
         self.assertIn(str(home / ".cli-proxy-api"), sib.stdout.splitlines(), "siblings never read gateway credentials")
         self.assertIn(str(self.repo.resolve() / "CLAUDE.md"), [str(Path(p).resolve()) for p in paths])

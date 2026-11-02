@@ -444,9 +444,11 @@ for jailed read access, `bwrap` with working unprivileged user namespaces —
 check with `agents.sh jail` **from inside the checkout** (outside one it
 answers `jail=no` and says so). A helper in `~/.local/bin` is not on PATH in a
 non-interactive ssh shell. The 600 s per-call ceiling still applies; prefer
-`--quick` for large diffs. Residual: the helper's own gateway-token file is not
-in the jail's denylist (its path is helper-owned) — add it with
-`SWARM_DENY_PATHS` if sibling voices must not read it.
+`--quick` for large diffs. The jail denies the gateway's credentials
+(`~/.cli-proxy-api`) and cc-router's config (`~/.config/cc-router`, where the
+helper keeps its client token) to every voice; a helper that stores its token
+elsewhere needs `SWARM_DENY_PATHS`. A harness voice's own routing token lives in
+its env: its settings deny `Read(//proc/**)`, and the scrub redacts `*_TOKEN=`.
 
 ## Requirements
 

@@ -725,8 +725,9 @@ degrade stripped:
 - `JAIL=jail=no` → warn that no working OS sandbox exists on this host, so the
   externals run **degraded, fail closed**: grok tool-less/no-web, codex with
   web hard-off (its FS reads stay inside codex's own read-only sandbox — the
-  0.5.x read surface), and Kimi omitted entirely because ACP has no safe inline
-  prompt/tool-less fallback. This warning is the audible half of the fail-closed
+  0.5.x read surface), cc-harness voices tool-less on the inlined diff, and
+  Kimi omitted entirely because ACP has no safe inline prompt/tool-less
+  fallback. This warning is the audible half of the fail-closed
   contract — never omit it.
 The workflow runs in the background for several minutes — **tell the user they
 can watch live progress with `/workflows`** while it runs. It returns
@@ -785,8 +786,8 @@ here in German. Do not translate finding content.)
 - **Ort** — `` `file:line` `` in backticks.
 - **Befund** — one short clause, **≤ ~40 chars** (hard budget); no emoji here.
 - **Quelle** — who raised it + ensemble confidence, folded into one cell: the
-  labels from `balance.agents[].model` (session inheritance is displayed as
-  `session`, never a guessed model), dot-joined, then a confidence glyph — **`✓` = CONFIRMED ·
+  labels from `balance.agents[].model` (the lenses show the session model
+  `agents.sh session` named, else `session` — never a guessed model), dot-joined, then a confidence glyph — **`✓` = CONFIRMED ·
   `~` = PLAUSIBLE**
   (e.g. `session·grok ✓`, `gpt ~`). Never the backend names / single letters. A
   single-source review (no ensemble) omits this column.

@@ -848,8 +848,14 @@ obvious from `run_cc_harness`:
   is denied to every jailed process, the routed voice included (round 2 of the
   review found the first version, helper inside the jail, had to leave it
   readable). The env filter strips only the PARENT's tokens; the helper adds
-  the routing token afterwards. The helper's own client-token path is
-  helper-owned and a residual (`SWARM_DENY_PATHS`).
+  the routing token afterwards. cc-router's config dir (`~/.config/cc-router`,
+  the helper's client token) is denied the same way; another helper's token
+  path needs `SWARM_DENY_PATHS`.
+- **The routing token is in the voice's env, so `/proc` is a read path.**
+  bwrap mounts `--proc /proc`, and Read can open `/proc/self/environ`; the
+  ephemeral settings deny `Read(//proc/**)` (deny beats `--allowedTools`), and
+  `scrub_secrets` matches `*_TOKEN=` (`_` is a word char, so `\btoken\b` missed
+  `AUTH_TOKEN=`). Found by the third local review.
 - **Memo trap, again:** `_harness_load` must run in the MAIN shell before any
   `$(_harness_row …)`, or each lookup re-runs the helper's `list` and blows the
   per-run probe budget (caught by the first local review).

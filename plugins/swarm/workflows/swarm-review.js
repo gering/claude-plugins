@@ -552,12 +552,17 @@ const EXTERNAL_SCHEMA = {
 // counts toward consensus (see independentFamilies).
 const FAMILY = { claude: 'claude', codex: 'openai', grok: 'grok', kimi: 'moonshot' }
 const FAMILY_RE = /^(?:[a-z]+|unknown:[a-z0-9._-]{1,32})$/
-const SESSION = (() => {
+// `k=v;k=v` → object; the ONE parser for every prep token (session, codex, grok).
+const parseRunToken = (token) => {
   const kv = {}
-  for (const part of String(INPUT.session || '').split(';')) {
+  for (const part of String(token || '').split(';')) {
     const i = part.indexOf('=')
     if (i > 0) kv[part.slice(0, i).trim()] = part.slice(i + 1).trim()
   }
+  return kv
+}
+const SESSION = (() => {
+  const kv = parseRunToken(INPUT.session)
   const model = /^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,99}$/.test(kv.model || '') ? kv.model : ''
   // No token = an older caller: keep the historical `claude` family.
   const family = INPUT.session == null ? 'claude' : (FAMILY_RE.test(kv.family || '') ? kv.family : 'unknown:session')
@@ -600,7 +605,7 @@ function scrubField(s) {
     [/\bsk-[A-Za-z0-9]{20,}/g, '[REDACTED-API-KEY]'],
     // JWT-shaped bearer/refresh tokens (Moonshot OAuth): three base64url runs.
     [/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, '[REDACTED-JWT]'],
-    [/(?<key>\b(?:secret|token|password|passwd|api[_-]?key)\b)\s*[=:]\s*[A-Za-z0-9/+._-]{16,}/gi, '$<key>=[REDACTED]'],
+    [/(?<key>(?:(?<=_)|\b)(?:secret|token|password|passwd|api[_-]?key)\b)\s*[=:]\s*[A-Za-z0-9/+._-]{16,}/gi, '$<key>=[REDACTED]'],
   ]
   for (const [re, repl] of rules) {
     const next = s.replace(re, repl)
@@ -978,14 +983,6 @@ const wantVoices = Array.isArray(INPUT.externalVoices) ? INPUT.externalVoices : 
 // does not validate freezes nothing and says so, rather than injecting.
 // The prep step's `k=v;k=v` run tokens (args.grok, args.codex). Keys and values
 // are only split here; each consumer validates its own fields.
-const parseRunToken = (token) => {
-  const kv = {}
-  for (const part of String(token || '').split(';')) {
-    const i = part.indexOf('=')
-    if (i > 0) kv[part.slice(0, i).trim()] = part.slice(i + 1).trim()
-  }
-  return kv
-}
 const GROK_RUN = (() => {
   const kv = parseRunToken(INPUT.grok)
   const okId = (v) => typeof v === 'string' && v.length <= 64 && /^grok-[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$/.test(v)
@@ -1318,7 +1315,7 @@ if (voicesReturned < voices.length) {
 if (familiesLost.length) {
   // ONE sentence, not two: the previous pair stated the same "N of M families"
   // fact twice (once in German, once in English) and the skill printed both.
-  coverageNotes.push(`Konsens-Basis reduziert: ${familiesLost.map(lostCallsPhrase).join(', ')} lieferte nichts — ${familiesPresent.length} von ${familiesExpected.length} Modellfamilien haben reviewt, "Konsens" heißt in diesem Lauf Übereinstimmung von ${familiesPresent.join(', ')}.`)
+  coverageNotes.push(`Konsens-Basis reduziert: ${familiesLost.map(lostCallsPhrase).join(', ')} lieferte nichts — ${familiesPresent.length} von ${familiesExpected.length} Modellfamilien haben reviewt, "Konsens" heißt in diesem Lauf Übereinstimmung von ${independentFamilies(familiesPresent).join(', ') || 'keiner benannten Familie'}${familiesPresent.some((f) => !independentFamilies([f]).length) ? ' (unbekannte Hersteller zählen nicht)' : ''}.`)
 }
 // Scoped to actual LOSS, and worded for what happened. Gated on
 // `!consensusReachable` alone this fired on a stock Claude-only install — where
@@ -1691,7 +1688,12 @@ findings.forEach((c, i) => { c.num = i + 1 })
 // The lens label names the session model when the adapter could read it, never
 // a guessed one (`session` otherwise) — the same SESSION answer the family uses.
 const MODEL_LABEL = { claude: PROFILE.stages.finder.model || SESSION.model || 'session', codex: CODEX_RUN.model || 'codex', grok: GROK_RUN.model || 'grok', kimi: PROFILE.externals.kimi.model }
-for (const [id, h] of Object.entries(HARNESS)) MODEL_LABEL[`cc-harness:${id}`] = h.model || `cc-harness:${id}`
+// A harness voice routed to the session's own model would print the lens label
+// twice (`gpt-6.1-sol×5 · gpt-6.1-sol×5`); only then it carries a suffix.
+for (const [id, h] of Object.entries(HARNESS)) {
+  const label = h.model || `cc-harness:${id}`
+  MODEL_LABEL[`cc-harness:${id}`] = Object.values(MODEL_LABEL).includes(label) ? `${label}@cc-harness` : label
+}
 const agents = {}
 for (const v of voices) {
   const a = agents[v.backend] || (agents[v.backend] = { backend: v.backend, model: MODEL_LABEL[v.backend] || v.backend, voices: 0, failedVoices: 0, findings: 0, ok: true })

@@ -25,11 +25,15 @@ user_invocable: true
    - `available: false` → Installed ❌, Notes = "not installed"
    - `available: true, ready: false` → Ready ❌, Notes = the `hint` field (e.g. "run: codex login")
    - both true → ✅ ✅, Notes = `hint` when nonempty (model availability may be unverified); otherwise empty
+   - Family = the `family` field (`unknown:<id>` as is); for a `cc-harness:<id>`
+     row, Notes also names its routed `model` when the hint is empty
 3. Close with one line stating which backends are live (`available && ready`),
    e.g.:
    `Live backends: claude + codex + grok + kimi — full ensemble.`
    If only claude is live, note that installing/authenticating the external
-   CLIs (`codex`, `grok`, `kimi`) would widen the ensemble. Do not reference other
+   CLIs (`codex`, `grok`, `kimi`) — or putting the `cc-harness-agents` helper on
+   PATH (the gateway path, e.g. on a headless Linux host) — would widen the
+   ensemble. Do not reference other
    swarm commands until they ship.
 
 ## Notes

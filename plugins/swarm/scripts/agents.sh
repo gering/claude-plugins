@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # agents.sh — swarm backend adapter layer
 #
-# Uniform interface over the review backends (claude, codex, grok, kimi) so
+# Uniform interface over the review backends (claude, codex, grok, kimi and
+# PATH-detected cc-harness:<id> gateway voices) so
 # swarm skills never talk to an external CLI directly.
 #
 # Subcommands:
@@ -45,7 +46,8 @@
 #                           REQUIRED whenever --lens-instr is given; a mismatch
 #                           means it was altered in transport -> hard error.
 #       --effort <level>    low|medium|high|xhigh|max (default: xhigh)
-#       --model <name>      Backend model override
+#       --model <name>      Backend model override (refused for cc-harness:<id>:
+#                           the helper's row fixes the routed model)
 #       --tools <bool>      true (default); false: Kimi diff-only session gate
 #       --tool-budget <N>   Advisory calls, 1..1000 (default 8); false requires 0
 #       --schema <file>     JSON schema to enforce (default: bundled finding.schema.json)
@@ -59,7 +61,8 @@
 #       --unit <name>       Cluster/lens label recorded in the telemetry line
 #
 # The prompt reaches the backend OUT-OF-BAND (codex: stdin · grok:
-# --prompt-file · kimi: ACP v1 NDJSON over stdio), never on argv — so the diff
+# --prompt-file · kimi: ACP v1 NDJSON over stdio · cc-harness: claude -p
+# stdin), never on argv — so the diff
 # is bounded by model context, not by exec's MAX_ARG_STRLEN.
 # SWARM_MAX_PROMPT_BYTES (default 512 KiB) is that sanity cap.
 #
@@ -68,6 +71,12 @@
 #
 #   claude — probe-only: reviews run in-session via the Agent tool, so
 #            `run claude` is a usage error. available/ready/list include it.
+#   cc-harness:<id> — rows from `cc-harness-agents list` (only when the helper
+#            is on PATH). `run` is a headless `claude -p` under
+#            `cc-harness-agents exec <id>`: the helper runs unjailed and execs
+#            the jailed claude with an ephemeral config dir, an empty cwd and
+#            Read/Grep/Glob + --add-dir <repo> (tool-less without a jail);
+#            family = the routed model's (see _model_family).
 #   codex  — `codex exec --output-schema` with `-C <repo>` +
 #            `-c tools.web_search=true --ignore-user-config --ignore-rules`.
 #            Under the OS jail it runs `-s danger-full-access`: codex's own
@@ -779,9 +788,10 @@ _sandbox_deny_paths_build() {
   # tokens for every routed vendor). No jailed process needs them: the gateway
   # reads them outside the jail, and a cc-harness voice's HELPER runs outside it
   # too (run_cc_harness jails only the claude it execs), so even the routed
-  # voice is denied them. The helper's own client-token file is helper-owned
-  # and not listed here — add it with SWARM_DENY_PATHS.
-  printf '%s\n' "$host/.cli-proxy-api"
+  # voice is denied them. Same for the helper's own config (cc-router keeps its
+  # client token in ~/.config/cc-router); a helper that stores it elsewhere
+  # needs SWARM_DENY_PATHS.
+  printf '%s\n' "$host/.cli-proxy-api" "$host/.config/cc-router"
   if [[ "$own" != "grok" ]]; then
     printf '%s\n' "$host/.grok"
   elif [[ -d "$host/.grok" ]]; then
@@ -1339,8 +1349,7 @@ sandboxed() {
     echo "warning: no sandbox-exec/bwrap — external calls run without an OS secret-read/repo-write jail (secret scrub + env filter still apply)" >&2
     _sandbox_warned=1
   fi
-  local env_args=() _e
-  while IFS= read -r _e; do env_args+=("$_e"); done < <(_env_filter_args)
+  _hardened_env_prefix
   # GIT_CONFIG_GLOBAL/SYSTEM=/dev/null: the denylist now jails ~/.gitconfig /
   # ~/.config/git (a PAT can live there via url.insteadOf / http.extraHeader),
   # but git treats an EPERM on a config it reads as FATAL — so point git at
@@ -1351,10 +1360,21 @@ sandboxed() {
   # order: timeout → env (strip secrets, redirect git config) → sandbox-exec (jail) → backend.
   # env options (-u …) MUST precede the NAME=VALUE assignments, or env treats the
   # first `-u` after an assignment as the command.
-  with_timeout env ${env_args[@]+"${env_args[@]}"} \
-    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-    GIT_OPTIONAL_LOCKS=0 \
-    ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"} "$@"
+  with_timeout "${HARDENED_ENV[@]}" ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"} "$@"
+}
+
+# The env half of the hardening, shared by sandboxed() and run_cc_harness (which
+# puts its helper BETWEEN this prefix and the jail): HARDENED_ENV = env, the
+# secret filter's -u list plus any extra names to unset ($@), then the git
+# config redirects. Options before assignments — env reads the first `-u` after
+# an assignment as the command.
+HARDENED_ENV=()
+_hardened_env_prefix() {
+  local _e _x
+  HARDENED_ENV=(env)
+  while IFS= read -r _e; do HARDENED_ENV+=("$_e"); done < <(_env_filter_args)
+  for _x in "$@"; do HARDENED_ENV+=(-u "$_x"); done
+  HARDENED_ENV+=(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0)
 }
 
 scrub_secrets() {
@@ -1374,7 +1394,8 @@ PATTERNS = [
     # END). Alternation: END-block first, else base64 run.
     (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----|[A-Za-z0-9+/=\r\n]*)"), "[REDACTED-PRIVATE-KEY]"),
     (re.compile(r"(?i)aws_secret_access_key\s*[=:]\s*[A-Za-z0-9/+]{20,}"), "aws_secret_access_key=[REDACTED]"),
-    (re.compile(r"(?i)\b(secret|token|password|passwd|api[_-]?key)\b\s*[=:]\s*[A-Za-z0-9/+._-]{16,}"), r"\1=[REDACTED]"),
+    # (?<=_) too: `ANTHROPIC_AUTH_TOKEN=…` has no word boundary before TOKEN.
+    (re.compile(r"(?i)(?:(?<=_)|\b)(secret|token|password|passwd|api[_-]?key)\b\s*[=:]\s*[A-Za-z0-9/+._-]{16,}"), r"\1=[REDACTED]"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "[REDACTED-GH-TOKEN]"),
     (re.compile(r"\bsk-[A-Za-z0-9]{20,}"), "[REDACTED-API-KEY]"),
     # JWT-shaped bearer/refresh tokens (Moonshot OAuth): three base64url runs.
@@ -1443,16 +1464,22 @@ _harness_load() {
   if ! command -v "$HARNESS_BIN" >/dev/null 2>&1; then _harness_rc=127; return 0; fi
   _probe_setup_lenient
   local out rc=0
-  out="$(_probe_or_bare "$HARNESS_BIN" list | head -c 65536)" || rc=$?
+  # Read whole, THEN cap: a `| head -c` cut would SIGPIPE the helper (rc 141
+  # under pipefail) and an oversize listing would read as a failed one. The
+  # probe's own deadline bounds how much it can print.
+  out="$(_probe_or_bare "$HARNESS_BIN" list)" || rc=$?
   _harness_rc="$rc"
   (( rc == 0 )) || return 0
+  out="${out:0:65536}"
+  # awk reads to EOF (a row cap, not an early `exit`) so printf never hits a
+  # closed pipe either.
   _harness_rows="$(printf '%s\n' "$out" | LC_ALL=C awk -F'\t' '
-    NF == 4 && length($1) <= 43 && $1 ~ /^cc-harness:[a-z0-9][a-z0-9._-]*$/ && !seen[$1]++ {
+    n < 50 && NF == 4 && length($1) <= 43 && $1 ~ /^cc-harness:[a-z0-9][a-z0-9._-]*$/ && !seen[$1]++ {
       # The model doubles as the identity of the voice (family, SWARM_HARNESS_EXPECT
       # pin), so it gets the id charset everywhere, once, here.
       gsub(/[^A-Za-z0-9._:\/+-]/, "", $2); gsub(/[^ -~]/, "", $4)
       print $1 "\t" substr($2, 1, 100) "\t" $3 "\t" substr($4, 1, 300)
-      if (++n >= 50) exit
+      n++
     }')"
   return 0
 }
@@ -2590,7 +2617,7 @@ json.dump(rows, sys.stdout, indent=2)
 print()
 '
   else
-    { printf 'BACKEND\tAVAILABLE\tVERSION\tREADY\tFAMILY\tROUTED\tHINT\n'; print_rows "-" "$codex_model"; } \
+    { printf 'BACKEND\tAVAILABLE\tVERSION\tREADY\tFAMILY\tMODEL\tHINT\n'; print_rows "-" "$codex_model"; } \
       | column_or_cat
   fi
 }
@@ -3274,7 +3301,7 @@ run_cc_harness() {
   home="$(_ephemeral_home_beside_prompt cc-harness "$prompt_path")" || exit 2
   TMP_CC_HOME="$home"
   mkdir -p "$home/config" "$home/cwd" \
-    && printf '{"permissions":{"allow":[],"deny":[]}}\n' > "$home/config/settings.json" \
+    && printf '{"permissions":{"allow":[],"deny":["Read(//proc/**)"]}}\n' > "$home/config/settings.json" \
     || { echo "Could not create the isolated cc-harness runtime" >&2; exit 2; }
 
   # Read/Grep/Glob only: no shell, no web, no edits — so no egress tool at all.
@@ -3298,18 +3325,18 @@ run_cc_harness() {
   # its gateway config, so it runs OUTSIDE the jail and execs the jail wrapper,
   # which then runs claude with the gateway credential dir denied. The env
   # filter strips the PARENT's *_TOKEN/*_API_KEY before the helper adds the
-  # routing token, which the model process then holds only as env — no shell
-  # tool to read it with. Prompt on STDIN (claude -p reads it there), never
+  # routing token, which the model process then holds in its env. No shell tool
+  # reads it, but Read could open /proc/self/environ under bwrap's /proc — so
+  # the ephemeral settings deny Read(//proc/**) (deny beats --allowedTools; Claude
+  # Code applies Read rules to Grep/Glob too), and scrub_secrets redacts
+  # `*_TOKEN=` forms as a second line. Prompt on STDIN (claude -p reads it there), never
   # argv; the parent session's Claude Code markers are dropped. The subshell
   # scopes the cd to the empty cwd; stderr (the transcript) is discarded like
   # codex's, it never passes scrub_secrets.
   _init_sandbox "$backend"
-  local env_args=() _e
-  while IFS= read -r _e; do env_args+=("$_e"); done < <(_env_filter_args)
+  _hardened_env_prefix CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SSE_PORT
   local rc=0
-  ( cd "$home/cwd" && with_timeout env ${env_args[@]+"${env_args[@]}"} \
-      -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SSE_PORT \
-      GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0 \
+  ( cd "$home/cwd" && with_timeout "${HARDENED_ENV[@]}" \
       CLAUDE_CONFIG_DIR="$home/config" \
       "$HARNESS_BIN" exec "$id" -- ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"} claude -p \
       --output-format json --json-schema "$schema_json" \
