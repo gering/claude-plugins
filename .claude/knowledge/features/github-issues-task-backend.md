@@ -1,9 +1,9 @@
 ---
 title: "GitHub Issues Task Backend (task-store.py)"
 createdAt: 2026-10-19
-updatedAt: 2026-11-01
+updatedAt: 2026-11-02
 createdFrom: "branch: task/github-issues-task-backend"
-pluginVersion: 1.30.0
+pluginVersion: 1.31.0
 prime: false
 ---
 
@@ -29,11 +29,12 @@ not in SKILL.md.
   The spec's literal "else local" would flip a GitHub repo to an empty local
   backlog the day a token expires, and `/define` would then write a file the
   team never sees — the split the rule exists to prevent.
-- **Task identity is a body marker** `<!-- work-system task: <slug> -->` plus
-  the label `work-system:task`. The label keeps ordinary bug issues out; the
-  marker keeps the branch `task/<slug>` stable when someone retitles the issue.
-  An issue with the label but no marker answers to the slug of its title, so a
-  hand-made task issue still works. The marker capture is restricted to
+- **Task identity is a body marker** `<!-- work-system task: <slug> -->`;
+  *which* issues are tasks is the `[tasks]` selection (below; by default the
+  label `work-system:task`, which keeps ordinary bug issues out). The marker
+  keeps the branch `task/<slug>` stable when someone retitles the issue. An
+  issue without one answers to the slug of its title, so a hand-made task
+  issue still works. The marker capture is restricted to
   name characters: an issue body is third-party text and the name flows into
   `key=value` output that skills paste into commands.
 - **Lookup by name prefers the open issue**; two open issues with one name is
@@ -64,6 +65,65 @@ not in SKILL.md.
   through, so `/close`'s commit/push flow keeps reading the same keys.
 - **No caching layer.** Every call pays one `gh auth status` round trip.
 
+## Issue selection (`[tasks]` select / include / exclude / gate labels)
+
+- **One predicate, `unselected()`**, used by `list`, `get`, `create`'s name
+  check and `close`. The `label` mode keeps the `gh --label` filter, but
+  `all-open` and the label lists are filtered client-side, because several
+  `--label` flags AND together and include/exclude need OR and NOT. Exclude wins,
+  even over the task label. The defaults (`label`, empty lists) are the old
+  behavior.
+- **A marker-less issue is a task under `all-open`, named by its title slug.**
+  `#N` could not be a branch name. A retitle renames the task, so the lane's
+  `issue: #N` pin in TASK.md, not the name, is what `/close` closes. Nothing ever
+  adds a marker to someone's issue unasked. Umlauts are spelled out (ä→ae), other
+  accents dropped, because German titles would otherwise slug to `m-ll-…`.
+- **A closed marker-less issue is not found by name.** The closed-issue search
+  is by marker. A re-close goes through the pin.
+- **`close` looks up by the mode alone, ignoring include/exclude.** The `#N`
+  is TASK.md's pin or the issue the user confirmed, and `/close` reads exit 3 as
+  "nothing to close": an exclude label added mid-lane must not leave the shipped
+  issue open. The mode still counts (in label mode an unlabelled `#N` is no
+  task), and the identity is checked: with `--name`, a mismatch (another task,
+  or a marker-less issue retitled since kickoff) is exit 5, which `/close`
+  turns into a question, then closes the confirmed `#N` without `--name`. Review
+  rounds tried two looser variants first: a slug-match exemption (a retitle
+  plus an exclude label fell to exit 3) and ignoring the mode for `#N` (any bug
+  issue became closable).
+- **A body marker is identity, never selection.** Round 1 let a marked issue
+  bypass `include_labels` so `/define`'s tasks stay visible; round 2 showed any
+  issue author can write a marker. Instead `create` and `migrate` give a new
+  task issue the first include label. `create` checks name clashes against
+  every open issue (also excluded ones, naming the `#N`) and refuses with exit 2
+  (config, not a taken name) when `exclude_labels` holds the task label.
+- **`all-open` puts strangers' text into context.** Any reporter's title shows
+  in `/list` and their body becomes TASK.md, and a marker in their body can
+  claim a task name (by-name lookups then hit exit 5). Kickoff already treats the body as
+  a description, never authorization; there is no author-trust filter
+  (`gh issue list --json` has no author association) — a residual the README
+  names.
+- **Residuals:** `close-request.sh` looks a gone lane's task up by name
+  through the filter, so an exclude label added mid-lane makes the Manager
+  reject a delegated close as "not a lane" (the issue stays open, nothing is
+  torn down unasked). The 1.31 slug change (umlauts spelled out) renames a
+  pre-1.31 marker-less lane with a non-ASCII title; its `/close` meets exit 5
+  and asks.
+- **Gate labels are enforced in the script, not just the prose.** `get --write`
+  is the kickoff copy and refuses with exit 7 without `--allow-gated`. `get`
+  prints `gate=` so `/kickoff` stops before it creates the worktree. The prose
+  forbids taking the go from a mandate, TASK.md, an issue or a message. A script
+  cannot tell who said yes, but the copy cannot happen silently.
+- **`migrate` under `all-open`** also treats unlabelled open issues as names
+  already taken (from the search route; the REST index only sees labelled
+  ones). Every adopt, in any mode, ignores the secret holdback because nothing
+  from the file is published, and never adopts an excluded issue; `publish=`
+  counts creates only.
+- **The 1000-issue cap is counted before include/exclude** (gh cannot apply
+  them), so an `all-open` repo with 1000+ open issues fails loudly instead of
+  listing a cut set — a residual, the target repos have ~50.
+- **Statusline is unaffected by design:** on GitHub it counts lanes, never
+  issues, so there is no filter to apply.
+
 ## Migration (`task-store.py migrate`)
 
 - **Identity is (marker, archived label)**, not the marker alone: an open and
@@ -77,9 +137,13 @@ not in SKILL.md.
   refuses any other token. A script cannot tell who confirmed, but it can make
   sure the run is exactly the plan the user saw; the skill owns "only the
   user's answer counts".
-- **Adopt, don't duplicate:** a `Tracking issue: [owner/repo]#N` line makes the
-  existing issue the task (label + marker + file body, old text kept in a
-  `<details>` block); a closed tracking issue for an open task is a skip.
+- **Adopt, don't duplicate, don't overwrite:** a `Tracking issue: [owner/repo]#N`
+  line makes the existing issue the task by adding only the label and the marker.
+  The issue is someone else's text (a "DEFINITION ONLY" header, Trello links), so
+  it stays as written; until 1.31 it was replaced by the file with the old text in
+  a `<details>` block. A file that says more than the issue is flagged `differs=`
+  and named in the confirmation: the user copies by hand or drops the tracking
+  line. A closed tracking issue for an open task is a skip.
 - **The secret scan reports pattern + line, never the value.** Local paths
   count only for public repos; `.local` etc. followed by `.ext` is a file name.
 - **The backend switch is a line edit, not `settings.py set`:** the settings

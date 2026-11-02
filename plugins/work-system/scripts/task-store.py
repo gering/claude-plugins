@@ -4,7 +4,8 @@
 Usage:
   task-store.py backend <dir>
   task-store.py list    <dir>
-  task-store.py get     <dir> <name|#N> [--write <path> | --body]   (an issue ref needs the #)
+  task-store.py get     <dir> <name|#N> [--write <path> [--allow-gated] | --body]
+                        (an issue ref needs the #)
   task-store.py create  <dir> <name> --body-file <file> [--title <text>]
   task-store.py close   <dir> <name|#N> --branch <task-branch> [--pr <n>] [--sha <sha>]
                         [--name <task>]   (with #N: refuse an issue of another task)
@@ -22,10 +23,16 @@ ws-settings.py at the main checkout):
           (paths.tasks_dir is not read: archive-task.sh and the statusline
           hardcode tasks/, and one backlog must have one directory. Wiring
           the setting is the follow-up task wire-work-system-paths-to-settings.)
-  github  Issues labelled `work-system:task` in origin's repository. The task
-          name lives in a body marker `<!-- work-system task: <name> -->`; an
-          issue carrying the label but no marker answers to the slug of its
-          title. The branch stays task/<name>.
+  github  Open issues in origin's repository, selected by `tasks.select`:
+          `label` (default) = labelled `work-system:task`, `all-open` = every
+          open issue; then `tasks.include_labels` (any of them, when set; new
+          task issues get the first) and `tasks.exclude_labels` (none of them)
+          narrow it. `close` looks up by the mode alone, ignoring the lists. The task name lives
+          in a body marker `<!-- work-system task: <name> -->`; an issue
+          without one answers to the slug of its title. The branch stays
+          task/<name>. An issue carrying one of `tasks.gate_labels` (default
+          definition-only) is listed but gated: `get` prints `gate=` and
+          `get --write` (the kickoff copy) refuses it without --allow-gated.
   auto    (default) Deterministic: task files in tasks/ → local, with a
           hint on leaving it; else an origin on github.com plus an installed gh →
           github; else local. An explicit value always wins.
@@ -37,6 +44,9 @@ gh that fails is the same exit 4.
 
 Output is key=value lines on stdout; `list` prints one `task=<name>\\t<ref>\\t<title>`
 line per task (ref = #N or the file path relative to the main checkout).
+On github, `backend` and `list` also print `select=<mode>`; `list` prints one
+`gated=<name>\\t<ref>\\t<labels>` line per gated task, and `get` one `gate=<label>`
+per gate label the issue carries.
 
 `migrate` moves a local backlog (tasks/*.md and tasks/archive/*.md) into
 origin's GitHub issues: see cmd_migrate. Without --apply it is a dry run that
@@ -46,7 +56,8 @@ and refuses one that changed since.
 Exit: 0 ok · 1 a call failed (gh, git, settings, writing a file) · 2 usage ·
 3 no such task · 4 backend unavailable · 5 conflict (name taken, ambiguous, or a
 pinned issue that is not this task) · 6 migrate stopped by a GitHub rate limit
-(re-run the dry run later; it resumes).
+(re-run the dry run later; it resumes) · 7 gated: the issue carries a gate label
+and --allow-gated was not passed.
 """
 import hashlib
 import json
@@ -56,6 +67,7 @@ import stat
 import subprocess
 import sys
 import time
+import unicodedata
 from urllib.parse import urlsplit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -108,14 +120,41 @@ def main_checkout(d):
     return first[len("worktree "):]
 
 
-def setting(main, key):
+def setting_lines(main, key):
     r = run([sys.executable, "-I", os.path.join(HERE, "ws-settings.py"), "get", main, key])
     if r is None or r.returncode != 0:
         raise Fail(1, f"ws-settings.py get {key} failed: {oneline(r.stderr if r else '')}")
-    kv = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
-    if kv.get("note"):  # stderr: stdout may be a task body (get --body)
-        print(f"note={kv['note']}", file=sys.stderr)
-    return kv.get("value", "")
+    lines = [l.split("=", 1) for l in r.stdout.splitlines() if "=" in l]
+    for k, v in lines:
+        if k == "note":  # stderr: stdout may be a task body (get --body)
+            print(f"note={v}", file=sys.stderr)
+    return lines
+
+
+def setting(main, key):
+    return dict(setting_lines(main, key)).get("value", "")
+
+
+def setting_list(main, key):
+    return [v for k, v in setting_lines(main, key) if k == "item"]
+
+
+def selection(main, lists=True):
+    """Which issues are tasks, from [tasks] in .work-system.toml (the schema
+    defaults are the behavior before the setting existed). lists=False reads
+    only the mode: the identity view `close` needs, one settings read, not four."""
+    if not lists:
+        return {"select": setting(main, "tasks.select"), "include": [], "exclude": [], "gate": []}
+    return {"select": setting(main, "tasks.select"),
+            "include": setting_list(main, "tasks.include_labels"),
+            "exclude": setting_list(main, "tasks.exclude_labels"),
+            "gate": setting_list(main, "tasks.gate_labels")}
+
+
+def task_labels(sel):
+    """The labels an issue work-system creates or adopts must carry to count:
+    the task label, plus the first include label when the repo narrows by them."""
+    return [LABEL] + sel["include"][:1]
 
 
 def task_files(main, rel):
@@ -214,7 +253,10 @@ def gh(args, repo):
 
 
 def slugify(title):
-    s = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    # German umlauts spelled out, other accents dropped: "Müll-Tour" → muell-tour.
+    t = title.lower().translate(str.maketrans({"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss"}))
+    t = "".join(c for c in unicodedata.normalize("NFKD", t) if not unicodedata.combining(c))
+    s = re.sub(r"[^a-z0-9]+", "-", t).strip("-")
     return s[:60].rstrip("-") or "task"
 
 
@@ -253,17 +295,62 @@ def issue_ref(ref):
 FIELDS = "number,title,body,state,url,labels"
 
 
-def gh_issues(repo, state, search=None):
-    args = ["issue", "list", "--label", LABEL, "--state", state, "--limit", str(LIST_LIMIT),
+def label_names(issue):
+    # GitHub label names are case-insensitive: Definition-Only is definition-only.
+    return {(l.get("name") or "").lower() for l in issue.get("labels") or []}
+
+
+def lowered(labels):
+    return {x.lower() for x in labels}
+
+
+def is_pull_request(issue):
+    # The path ends in /pull/<n>: a repo or owner named `pull` is still issues.
+    return bool(re.search(r"/pull/[0-9]+/?$", issue.get("url") or ""))
+
+
+def unselected(issue, sel):
+    """None when the issue is a task under this repo's selection, else why not.
+    Exclude wins over everything, the task label included. include_labels
+    applies to every issue: a body marker is identity, never selection, since
+    any issue author can write one (a label needs triage access)."""
+    have = label_names(issue)
+    if is_pull_request(issue):
+        return "it is a pull request"
+    if sel["select"] != "all-open" and LABEL not in have:
+        return f"no {LABEL} label (tasks.select = \"label\")"
+    hit = sorted(have & lowered(sel["exclude"]))
+    if hit:
+        return f"label {hit[0]} is in tasks.exclude_labels"
+    if sel["include"] and not have & lowered(sel["include"]):
+        return "none of tasks.include_labels"
+    return None
+
+
+def gates(issue, sel):
+    """The configured gate labels this issue carries, in config order."""
+    have = label_names(issue)
+    return [g for g in sel["gate"] if g.lower() in have]
+
+
+def gh_issues(repo, state, sel, search=None):
+    # Only the label mode can be filtered by gh: several --label flags AND
+    # together, and include/exclude need OR / NOT. The rest is filtered here.
+    label = ["--label", LABEL] if sel["select"] != "all-open" else []
+    args = ["issue", "list", *label, "--state", state, "--limit", str(LIST_LIMIT),
             "--json", FIELDS] + (["--search", search] if search else [])
     issues = json.loads(gh(args, repo) or "[]")
     if len(issues) >= LIST_LIMIT:
-        raise Fail(1, f"{LIST_LIMIT} or more {state} task issues in {repo} — the list may be "
-                      "cut off; refer to the task as #N")
-    return issues
+        # Counted before include/exclude: gh cannot apply them, so a cut list
+        # could be missing tasks they would have kept.
+        raise Fail(1, f"{LIST_LIMIT} or more {state} {'task ' if label else ''}issues in {repo} — "
+                      "the list may be cut off (include/exclude_labels are applied after it); "
+                      "refer to the task as #N")
+    return [i for i in issues if unselected(i, sel) is None]
 
 
-def gh_find(repo, ref):
+def gh_find(repo, sel, ref):
+    """The issue for a name or #N under `sel` (close passes the mode only)."""
     n = issue_ref(ref)
     if n is not None:
         r = run(["gh", "issue", "view", str(n), "--json", FIELDS, "-R", repo])
@@ -274,8 +361,9 @@ def gh_find(repo, ref):
                 raise Fail(3, f"no issue #{n} in {repo}")
             raise Fail(1, f"gh issue view {n} failed: {oneline(r.stderr)[:300]}")
         issue = json.loads(r.stdout)
-        if LABEL not in [l.get("name") for l in issue.get("labels") or []]:
-            raise Fail(3, f"#{n} is not a work-system task (no {LABEL} label)")
+        why = unselected(issue, sel)
+        if why:
+            raise Fail(3, f"#{n} is not a work-system task here: {why}")
         return issue
     name = check_name(ref)
     # Open tasks are the working set and are listed whole. Closed ones only
@@ -283,13 +371,15 @@ def gh_find(repo, ref):
     # so they are narrowed by a search on the marker and then matched exactly.
     # A work-system:archived issue is history (migrate closes it; one a stopped
     # run left open must not shadow or duplicate the live task).
-    open_hits = [i for i in live(gh_issues(repo, "open")) if issue_name(i) == name]
+    open_hits = [i for i in live(gh_issues(repo, "open", sel)) if issue_name(i) == name]
     if len(open_hits) > 1:
         nums = ", ".join(f"#{i['number']}" for i in open_hits)
         raise Fail(5, f"task {name} is ambiguous: open issues {nums} — pass #N")
     if open_hits:
         return open_hits[0]
-    hits = [i for i in gh_issues(repo, "closed", f'"work-system task: {name}" in:body')
+    # A closed issue without a marker is not found by name (its title may have
+    # changed since); /close finds it by the #N pin in TASK.md.
+    hits = [i for i in gh_issues(repo, "closed", sel, f'"work-system task: {name}" in:body')
             if issue_name(i) == name]
     if hits:
         return max(hits, key=lambda i: (not has_label(i, ARCHIVED_LABEL), i["number"]))
@@ -355,6 +445,7 @@ def cmd_backend(d):
         if info.get(k):
             print(f"{k}={info[k]}")
     if backend == "github":
+        print(f"select={setting(main, 'tasks.select')}")
         print(f"visibility={repo_visibility(info['repo'])}")
 
 
@@ -371,10 +462,15 @@ def cmd_list(d):
     print(f"backend={backend}")
     if info.get("hint"):
         print(f"hint={info['hint']}")
-    rows = []
+    rows, gated = [], []
     if backend == "github":
-        for i in sorted(live(gh_issues(info["repo"], "open")), key=lambda i: i["number"]):
+        sel = selection(main)
+        print(f"select={sel['select']}")
+        for i in sorted(live(gh_issues(info["repo"], "open", sel)), key=lambda i: i["number"]):
             rows.append((issue_name(i), f"#{i['number']}", oneline(i["title"])))
+            g = gates(i, sel)
+            if g:
+                gated.append((issue_name(i), f"#{i['number']}", ",".join(g)))
     else:
         rel = info["tasks_dir"]
         every = task_files(main, rel)
@@ -386,17 +482,22 @@ def cmd_list(d):
             rows.append((f[:-3], f"{rel}/{f}", first_title(os.path.join(main, rel, f))))
     for name, ref, title in rows:  # names are NAME_RE-clean: no tab or newline
         print(f"task={name}\t{ref}\t{title}")
+    for name, ref, labels in gated:  # gate labels come from the config, not the issue
+        print(f"gated={name}\t{ref}\t{oneline(labels)}")
     print(f"count={len(rows)}")
 
 
-def cmd_get(d, ref, write, body):
+def cmd_get(d, ref, write, body, allow_gated=False):
     backend, main, info = resolve(d)
+    gate = []
     if backend == "github":
-        issue = gh_find(info["repo"], ref)
+        sel = selection(main)
+        issue = gh_find(info["repo"], sel, ref)
         doc = issue_doc(issue)
+        gate = gates(issue, sel)
         meta = [("task", issue_name(issue)), ("issue", issue["number"]),
                 ("url", issue.get("url", "")), ("state", issue.get("state", "").lower()),
-                ("title", oneline(issue["title"]))]
+                ("title", oneline(issue["title"]))] + [("gate", oneline(g)) for g in gate]
     else:
         name = check_name(ref, local=True)
         path = local_path(main, info["tasks_dir"], name)
@@ -413,6 +514,11 @@ def cmd_get(d, ref, write, body):
     for k, v in meta:
         print(f"{k}={v}")
     if write:
+        if gate and not allow_gated:
+            # The kickoff copy is the start of work; a gate label means the
+            # issue's owner has not released it. Only the user lifts that.
+            raise Fail(7, f"#{issue['number']} carries the gate label {gate[0]} (tasks.gate_labels) — "
+                          "no kickoff without an explicit go; --allow-gated only on the user's word")
         write_out(write, doc)
 
 
@@ -452,11 +558,23 @@ def cmd_create(d, name, body_file, title):
     title, body = split_title(text, oneline(title or ""))
     if not title:
         raise Fail(2, "no title: pass --title or start the body with a '# ' heading")
-    if any(issue_name(i) == name for i in live(gh_issues(repo, "open"))):
-        raise Fail(5, f"an open task named {name} already exists in {repo}")
+    sel = selection(main)
+    labels = task_labels(sel)
+    why = unselected({"labels": [{"name": l} for l in labels]}, sel)
+    if why:  # only an exclude of the task label itself gets here
+        raise Fail(2, f"a new task issue would not be a task here ({why}) — fix [tasks] in "
+                      ".work-system.toml")
+    # The name clash counts every issue that answers to a name, also one the
+    # label lists filter out: two open issues with one name make it ambiguous.
+    clash = [i for i in live(gh_issues(repo, "open", dict(sel, include=[], exclude=[])))
+             if issue_name(i) == name]
+    if clash:
+        raise Fail(5, f"an open task named {name} already exists in {repo} "
+                      f"(#{clash[0]['number']}, possibly hidden by [tasks] exclude/include_labels)")
     ensure_label(repo, LABEL, LABEL_COLOR, LABEL_DESC)
     body = with_marker(body, name)
-    r = run(["gh", "issue", "create", "--title", title, "--label", LABEL, "--body-file", "-",
+    r = run(["gh", "issue", "create", "--title", title,
+             *[x for l in labels for x in ("--label", l)], "--body-file", "-",
              "-R", repo], input=body)
     if r is None or r.returncode != 0:
         raise Fail(1, f"gh issue create failed: {oneline(r.stderr if r else '')[:300]}")
@@ -476,10 +594,16 @@ def cmd_close(d, ref, branch, pr, sha, name=None):
         os.execvp("bash", args)
     print(f"backend={backend}")
     repo = info["repo"]
-    issue = gh_find(repo, ref)
+    # Close looks the task up by identity, not by the label lists: an exclude
+    # label added mid-lane must not leave the shipped issue open (/close reads
+    # exit 3 as "nothing to close"). The mode still counts: in label mode an
+    # unlabelled #N is not a task.
+    issue = gh_find(repo, selection(main, lists=False), ref)
     if name and issue_name(issue) != name:
+        # A marker-less issue's name is its title slug, so a retitle lands here
+        # too: the caller asks the user and closes the confirmed #N without --name.
         raise Fail(5, f"#{issue['number']} is task {issue_name(issue)}, not {name} — "
-                      "check which issue this lane shipped")
+                      "check which issue this lane shipped (retitled?)")
     print(f"task={issue_name(issue)}\nissue={issue['number']}")
     if issue.get("state", "").upper() != "OPEN":
         print("result=already-closed")
@@ -538,7 +662,8 @@ def cmd_ref(d, name, task_md):
 # an `archived` one. Each gets one action:
 #   create  a new issue (archived: then closed as completed)
 #   adopt   the file names an existing issue (`Tracking issue: [owner/repo]#N`):
-#           that issue gets the label, the marker and the file as its body
+#           that issue gets the label and the marker; its text stays (a file
+#           that says more is flagged differs=, never written over it)
 #   resume  an issue with this task's marker already exists (an earlier run, or
 #           this one stopped half-way): finish it (close, move the file)
 #   skip    left alone, with a reason
@@ -604,7 +729,7 @@ def task_doc(text):
 
 
 def has_label(issue, label):
-    return label in [l.get("name") for l in issue.get("labels") or []]
+    return label.lower() in label_names(issue)
 
 
 
@@ -665,7 +790,7 @@ def digest(text):
     return hashlib.sha256((text or "").encode()).hexdigest()
 
 
-def migrate_plan(main, repo, public, includes, open_only):
+def migrate_plan(main, repo, public, includes, open_only, sel):
     items, unplain = [], 0
     dirs = [("open", TASKS_DIR)] + ([] if open_only else [("archived", f"{TASKS_DIR}/archive")])
     for kind, rel in dirs:
@@ -695,6 +820,12 @@ def migrate_plan(main, repo, public, includes, open_only):
             by_key.setdefault((found[-1], has_label(i, ARCHIVED_LABEL)), []).append(i)
         elif i.get("state", "").upper() == "OPEN":
             unmarked_open.setdefault(issue_name(i), i)
+    if items and sel["select"] == "all-open":
+        # Every open issue is a task there, so an unlabelled one already answers
+        # to its title slug: creating that name again would make it ambiguous.
+        for i in live(gh_issues(repo, "open", sel)):
+            if not markers(i):
+                unmarked_open.setdefault(issue_name(i), i)
 
     for it in items:
         archived = it["kind"] == "archived"
@@ -744,7 +875,7 @@ def migrate_plan(main, repo, public, includes, open_only):
             if other:
                 it.update(action="skip", reason=f"its tracking issue #{n} is task {other[-1]}")
                 continue
-            if "/pull/" in (iss.get("url") or ""):
+            if is_pull_request(iss):
                 it.update(action="skip", reason=f"its tracking line names pull request #{n}, "
                                                 "not an issue — drop the line to get a new issue")
                 continue
@@ -756,18 +887,24 @@ def migrate_plan(main, repo, public, includes, open_only):
                 it.update(action="skip", reason=f"its tracking issue #{n} is closed — reopen it "
                                                 f"or drop the line to get a new issue")
                 continue
-            # Drop the self-reference; keep what the issue said that the file does not.
-            body = TRACKING_RE.sub("", it["body"], count=1).strip("\n")
+            # The issue is someone's text (a "DEFINITION ONLY" header, Trello
+            # links): adopt adds only the label and the marker. A file that says
+            # more than the issue is flagged, never written over it; it stays in
+            # tasks/migrated/.
+            hidden = sorted(label_names(iss) & lowered(sel["exclude"]))
+            if hidden:
+                it.update(action="skip", reason=f"its tracking issue #{n} carries {hidden[0]} "
+                                                "(tasks.exclude_labels) and would not be listed")
+                continue
             old = strip_marker(iss.get("body")).strip()
-            if old and old not in body:
-                body += ("\n\n<details><summary>Issue text before the migration</summary>\n\n"
-                         f"{old}\n\n</details>")
-            it.update(action="adopt", body=body)
+            core = strip_marker(TRACKING_RE.sub("", it["body"], count=1)).strip()
+            it["differs"] = bool(core) and core not in old
+            it.update(action="adopt", body=old)
         elif not archived and name in unmarked_open:
             it.update(action="skip", reason=f"open issue #{unmarked_open[name]['number']} already "
                                             f"answers to {name} (a task issue without a marker)")
             continue
-        if it["hits"] and name not in includes and f"{it['kind']}/{name}" not in includes:
+        if it["hits"] and it["action"] != "adopt" and name not in includes and f"{it['kind']}/{name}" not in includes:
             it.update(action="skip", reason="possible secret or private detail (see hit= lines); "
                                             f"--include {it['kind']}/{name} publishes it anyway")
             continue
@@ -920,7 +1057,11 @@ def cmd_migrate(d, token, includes, open_only, pace):
     if why:
         raise Fail(4, f"cannot migrate: {why} — fix gh (gh auth login)")
     visibility = repo_visibility(repo)
-    items, unplain = migrate_plan(main, repo, visibility == "public", includes, open_only)
+    sel = selection(main)
+    if unselected({"labels": [{"name": l} for l in task_labels(sel)]}, sel):
+        raise Fail(2, "tasks.exclude_labels hides the task label itself — migrated tasks would "
+                      "not be listed; fix [tasks] in .work-system.toml")
+    items, unplain = migrate_plan(main, repo, visibility == "public", includes, open_only, sel)
     tok = plan_token(repo, visibility, items)
     check_dest(main)
     tracked = git_tracked(main, *[i["rel"] for i in items]) if items else False
@@ -949,8 +1090,9 @@ def cmd_migrate(d, token, includes, open_only, pace):
               for a in ("create", "adopt", "resume", "skip")}
     for a, c in counts.items():
         print(f"count_{a}={c}")
-    print(f"count_differs={sum(1 for i in items if i['action'] == 'resume' and i['differs'])}")
-    print(f"publish={counts['create'] + counts['adopt']}\nunplain={unplain}")
+    print(f"count_differs={sum(1 for i in items if i['action'] in ('resume', 'adopt') and i['differs'])}")
+    # publish = issues that get a file's text; an adopt adds only label + marker.
+    print(f"publish={counts['create']}\nunplain={unplain}")
     if token is None:
         print(f"confirm={tok}")
         return
@@ -974,7 +1116,7 @@ def cmd_migrate(d, token, includes, open_only, pace):
     os.makedirs(os.path.join(main, TASKS_DIR, MIGRATED_DIR), exist_ok=True)
     for it in work:
         archived = it["kind"] == "archived"
-        labels = [LABEL] + ([ARCHIVED_LABEL] if archived else [])
+        labels = task_labels(sel) + ([ARCHIVED_LABEL] if archived else [])
         if it["action"] == "create":
             paced()
             out = gh_write(["issue", "create", "--title", it["title"],
@@ -1023,7 +1165,8 @@ def cmd_migrate(d, token, includes, open_only, pace):
 
 
 def usage():
-    raise Fail(2, "usage: task-store.py backend|list <dir> · get <dir> <name|#N> [--write <path>|--body]"
+    raise Fail(2, "usage: task-store.py backend|list <dir> · get <dir> <name|#N>"
+                  " [--write <path> [--allow-gated]|--body]"
                   " · create <dir> <name> --body-file <file> [--title <t>]"
                   " · close <dir> <name|#N> --branch <b> [--pr <n>] [--sha <s>] [--name <task>]"
                   " · ref <dir> <name> [<TASK.md>]"
@@ -1035,7 +1178,7 @@ def opts(rest, allowed):
     out, i = {}, 0
     while i < len(rest):
         k = rest[i]
-        if k == "--body" and "--body" in allowed:
+        if k in ("--body", "--allow-gated") and k in allowed:
             out[k] = True
             i += 1
             continue
@@ -1055,10 +1198,10 @@ def main(argv):
             usage()
         (cmd_backend if cmd == "backend" else cmd_list)(d)
     elif cmd == "get" and rest:
-        o = opts(rest[1:], {"--write", "--body"})
-        if "--write" in o and "--body" in o:
+        o = opts(rest[1:], {"--write", "--body", "--allow-gated"})
+        if ("--write" in o and "--body" in o) or ("--allow-gated" in o and "--write" not in o):
             usage()
-        cmd_get(d, rest[0], o.get("--write"), o.get("--body", False))
+        cmd_get(d, rest[0], o.get("--write"), o.get("--body", False), o.get("--allow-gated", False))
     elif cmd == "create" and rest:
         o = opts(rest[1:], {"--body-file", "--title"})
         if "--body-file" not in o:

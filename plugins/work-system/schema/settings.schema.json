@@ -34,7 +34,31 @@
           "type": "string",
           "enum": ["auto", "github", "local"],
           "default": "auto",
-          "description": "github: issues labelled work-system:task in origin's repo. local: markdown files in tasks/. auto: local while task files exist there (until they are moved to issues), else github when origin is on github.com and gh is installed, else local."
+          "description": "github: issues in origin's repo, picked by select/include_labels/exclude_labels. local: markdown files in tasks/. auto: local while task files exist there (until they are moved to issues), else github when origin is on github.com and gh is installed, else local."
+        },
+        "select": {
+          "type": "string",
+          "enum": ["label", "all-open"],
+          "default": "label",
+          "description": "Which open issues are tasks on the github backend. label: those labelled work-system:task. all-open: every open issue (pull requests never). An issue without a work-system body marker answers to the slug of its title; #N always works."
+        },
+        "include_labels": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "When non-empty, a task issue must also carry at least one of these labels; issues work-system creates or migrates get the first one. Empty: no constraint."
+        },
+        "exclude_labels": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "An issue carrying any of these labels is not a task (wins over select and include_labels), e.g. [\"dependencies\"]."
+        },
+        "gate_labels": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["definition-only"],
+          "description": "A task issue carrying one of these is listed but gated: /kickoff stops and needs the user's explicit go (a mandate never grants it). Empty: no gate."
         }
       }
     },

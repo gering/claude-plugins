@@ -132,8 +132,9 @@ When a plugin adopts settings, it should:
    (`claude-review.sh route_setting`), and so does work-system through one
    reusable reader (`scripts/ws-settings.py get <dir> <key>`, first consumer
    `mandate.review_budget`, then `deploy.by`/`deploy.confirm`, `tasks.backend`
-   (via `task-store.py`) and the string list `mandate.version_paths` (one
-   `item=` line per entry) — read from the main
+   and `tasks.select` (via `task-store.py`) and the string lists
+   `mandate.version_paths`, `tasks.include_labels`, `tasks.exclude_labels` and
+   `tasks.gate_labels` (one `item=` line per entry) — read from the main
    checkout, never the lane's own file). Both resolve the file at the same root as
    `settings.py` — the git toplevel — so `/settings set` edits what they read.
    One exception: `mandate.version_paths` is read only as committed on the main

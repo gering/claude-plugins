@@ -650,7 +650,8 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
       Never fall back to a file. **1** on the local backend is `archive-task.sh` failing — see
       `backend=local` below.
     - **Exit 5** (several open issues carry this task name, or the pinned `#N` belongs to
-      another task — `--name` checks it) or **2** (the name was refused):
+      another task — `--name` checks it; a marker-less issue retitled since kickoff lands
+      here too) or **2** (the name was refused):
       nothing was closed. Show stderr and the open candidates, ask which issue this lane
       shipped, and close that one with the same call, `"#N"` (quoted) in place of the name
       and **without** `--name` (the user's confirmation replaces that check). Never

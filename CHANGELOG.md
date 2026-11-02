@@ -52,6 +52,11 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.31.0 — 2026-11-02
+- Configurable GitHub issue filter in `[tasks]` of `.work-system.toml`: `select = "label"` (default, `work-system:task`, unchanged) or `"all-open"` (every open issue, never a pull request), narrowed by `include_labels` (any of) and `exclude_labels` (none of, wins). `list`, `get`, `create` and `close` share the one predicate; a marker-less issue answers to its title slug (umlauts spelled out) and is never edited to add a marker; `close` looks up by the mode alone, so an exclude label added mid-lane never leaves the shipped issue open (a retitled marker-less pin is exit 5, so `/close` asks). `create` and `migrate` give new task issues the first `include_labels` entry, name the issue a name clash hides, and refuse when `exclude_labels` holds the task label; `migrate` never adopts an excluded issue, and its `publish=` counts creates only. A pre-1.31 marker-less lane whose title has umlauts gets a new slug, and its `/close` asks.
+- Gate labels (`tasks.gate_labels`, default `["definition-only"]`): `list` prints `gated=`, `get` prints `gate=`, and the kickoff copy (`get --write`) refuses a gated issue with exit 7 unless `--allow-gated`; `/kickoff` asks the user for an explicit go, which no mandate grants.
+- `migrate` adopt keeps an existing issue's text and adds only the label and the marker (no longer replaced by the file with the old text folded into `<details>`); a file that says more than the issue is flagged `differs=` and named in the confirmation.
+
 ### 1.30.0 — 2026-11-01
 - Add `/work-system:migrate` and `task-store.py migrate`: move a local backlog to GitHub Issues — open task files become open issues, archived ones closed issues (`work-system:archived`, stamp kept), a file naming an existing `Tracking issue: #N` adopts that issue instead of duplicating it. Dry run by default with a secret/private-detail scan (hits held back unless included; local paths only for public repos); the real run needs the dry run's `confirm=` token, so it runs exactly the confirmed plan. Paced writes, exit 6 on a rate limit, resumable via the slug marker. Files move to `tasks/migrated/` with an `issues.tsv` map; when `tasks/` is empty, `tasks.backend = "github"` is set in `.work-system.toml` (comments kept). Never commits.
 

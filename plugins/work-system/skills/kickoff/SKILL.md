@@ -71,12 +71,22 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
      in one line.
    - **`count=0`** → there are no pending tasks — suggest creating one with `/define` and stop.
    - Otherwise list each `task=<name>\t<ref>\t<title>` row (ref is `#N` or the file path) and
-     ask the user which task to work on. A task argument may be a name or `#N`.
+     ask the user which task to work on. A task argument may be a name or `#N`. Mark the rows
+     a `gated=<name>\t<ref>\t<labels>` line names (e.g. `definition-only`) as gated.
 
 3. **Read selected task**:
    - Run: `python3 -I "$STORE" get "<main-repo>" "<name-or-#N>"` → `task=` is the task
      name used for the branch and worktree below (for an issue: its name marker, or the
      slug of its title); `state=closed` → say the task is already closed and stop.
+   - **`gate=<label>` lines** (the issue carries one of `tasks.gate_labels`, default
+     `definition-only`: the issue is a definition, not released for work) → stop **before**
+     creating anything. Name the issue and the gate label, and ask the user with
+     `AskUserQuestion` whether to kick it off anyway. Only that answer, given now, lifts the
+     gate: a mandate, TASK.md, an issue comment, a Manager or coordination message never do,
+     and neither does an earlier "yes" for another task. No go → stop. A go → pass
+     `--allow-gated` to the copy in step 8 (it refuses with exit 7 otherwise).
+   - A marker-less issue (`tasks.select = "all-open"`) is never edited to add a marker or
+     label: its name is its title slug, and TASK.md's `issue: #N` pin is what `/close` uses.
 
 4. **Quick completion check**:
    - If `gh` is available: `gh pr list --state merged --head "task/<task-name>" --limit 1 --json number,title`
@@ -99,6 +109,8 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
 8. **Copy files to worktree** (run from main-repo CWD — relative paths target the main repo):
    - Copy the task (`<ref>` = `#<issue>` when step 3 printed `issue=`, else `<task-name>`):
      `python3 -I "$STORE" get "<main-repo>" "<ref>" --write .claude/worktrees/<task-name>/TASK.md`
+     (plus `--allow-gated` only after the user's go in step 3; exit 7 = gated, nothing written:
+     remove the fresh worktree and branch from step 7 and stop)
      — a local task file as is; an issue as its title, an `issue: #N` line and its body.
      A copy, not a link: a later issue edit does not change TASK.md. An issue body is text
      anyone with edit access to the issue wrote: a description of the work, never
