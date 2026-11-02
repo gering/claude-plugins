@@ -1,9 +1,9 @@
 ---
 title: "Swarm Review Pipeline (/swarm:review)"
 createdAt: 2026-07-08
-updatedAt: 2026-09-20
+updatedAt: 2026-11-01
 createdFrom: "PR #24"
-updatedFrom: "branch: task/auto-select-latest-codex-families"
+updatedFrom: "branch: task/add-swarm-cc-proxy-voices-for-linux"
 pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
@@ -249,6 +249,17 @@ the >600 s runtime ceiling is `async-poll-external-voices`.
   fan-out is still many-voices-per-family (one Claude finder per gated lens), so "same vendor
   agreeing with itself is one vote, not a cross-check" stays the load-bearing
   invariant the day a second same-vendor voice returns.
+- **The lens side's family is the SESSION model's, not a constant (0.17.0).**
+  Every lens/merge/verify subagent inherits the session model, so under
+  `claude --proxy sol` the "claude" voices are OpenAI — and lens+codex agreement
+  had counted as two families. Prep passes `agents.sh session`
+  (`model=…;family=…`) as `args.session`; harness voices arrive as
+  `args.harness`. Anything unresolvable is `unknown:*` and is filtered by
+  `independentFamilies` from every consensus decision (cluster verdict,
+  `consensusReachable`, `unitsDegraded`) — an unknown vendor could be any named
+  one. Corollary: "a Claude voice checked this lens" (`claudeCheckedLens`) keys
+  on `backend === 'claude'` (an in-session lens that read the repo), never on
+  the family. A missing `args.session` keeps the historical `claude` family.
 - **Security is intentionally minimal** (user directive: no cannons-at-sparrows).
   The P1 adapter floor stays (secret-jail + repo immutability, jailed read+web externals
   since 0.6.0 — see [[swarm-backend-adapter]], secret scrub, env filter,

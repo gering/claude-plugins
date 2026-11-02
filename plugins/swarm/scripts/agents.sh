@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 # agents.sh — swarm backend adapter layer
 #
-# Uniform interface over the review backends (claude, codex, grok, kimi) so
+# Uniform interface over the review backends (claude, codex, grok, kimi and
+# PATH-detected cc-harness:<id> gateway voices) so
 # swarm skills never talk to an external CLI directly.
 #
 # Subcommands:
 #   list [--json] [--codex-model M]  Probe backends + selected model -> table/JSON
 #   available <backend>   Exit 0 if the CLI is installed; prints its version
 #   ready <backend> [--model M]  Exit 0 if usable; hints include model uncertainty
-#   jail                  Print jail=yes|no (working OS sandbox wrapper?)
+#   jail                  Print jail=yes|no (working OS sandbox AND a git repo
+#                         root, i.e. will read+web be granted?); a `no` names
+#                         its reason on stderr
+#   session               Print model=<id>;family=<f> of this session's lens model
+#   voices                stdin = `list --json` → voices=/harness=/replaced= for
+#                         the run (harness voices replace same-family natives;
+#                         SWARM_HARNESS=auto|off, SWARM_HARNESS_VOICES="sol grok")
 #   grok-model [--model <id>]  Select the grok model for ONE run and print it as
 #                         key=value data: selected, latest_candidate, source
 #                         (latest|older-compatible|last-known|pinned|none),
@@ -39,7 +46,8 @@
 #                           REQUIRED whenever --lens-instr is given; a mismatch
 #                           means it was altered in transport -> hard error.
 #       --effort <level>    low|medium|high|xhigh|max (default: xhigh)
-#       --model <name>      Backend model override
+#       --model <name>      Backend model override (refused for cc-harness:<id>:
+#                           the helper's row fixes the routed model)
 #       --tools <bool>      true (default); false: Kimi diff-only session gate
 #       --tool-budget <N>   Advisory calls, 1..1000 (default 8); false requires 0
 #       --schema <file>     JSON schema to enforce (default: bundled finding.schema.json)
@@ -53,7 +61,8 @@
 #       --unit <name>       Cluster/lens label recorded in the telemetry line
 #
 # The prompt reaches the backend OUT-OF-BAND (codex: stdin · grok:
-# --prompt-file · kimi: ACP v1 NDJSON over stdio), never on argv — so the diff
+# --prompt-file · kimi: ACP v1 NDJSON over stdio · cc-harness: claude -p
+# stdin), never on argv — so the diff
 # is bounded by model context, not by exec's MAX_ARG_STRLEN.
 # SWARM_MAX_PROMPT_BYTES (default 512 KiB) is that sanity cap.
 #
@@ -62,6 +71,12 @@
 #
 #   claude — probe-only: reviews run in-session via the Agent tool, so
 #            `run claude` is a usage error. available/ready/list include it.
+#   cc-harness:<id> — rows from `cc-harness-agents list` (only when the helper
+#            is on PATH). `run` is a headless `claude -p` under
+#            `cc-harness-agents exec <id>`: the helper runs unjailed and execs
+#            the jailed claude with an ephemeral config dir, an empty cwd and
+#            Read/Grep/Glob + --add-dir <repo> (tool-less without a jail);
+#            family = the routed model's (see _model_family).
 #   codex  — `codex exec --output-schema` with `-C <repo>` +
 #            `-c tools.web_search=true --ignore-user-config --ignore-rules`.
 #            Under the OS jail it runs `-s danger-full-access`: codex's own
@@ -165,6 +180,10 @@ GROK_STREAM_HELPER="$SCRIPT_DIR/grok-stream.py"
 CODEX_DEFAULT_FAMILY="sol"
 KIMI_DEFAULT_MODEL="kimi-code/k3-256k"
 KIMI_BIN="${SWARM_KIMI_BIN:-kimi}"
+# cc-harness voices: the PATH helper that routes a headless `claude -p` through
+# a local gateway (see the cc-harness section below). Overridable for tests.
+HARNESS_BIN="${SWARM_CC_HARNESS_BIN:-cc-harness-agents}"
+HARNESS_ID_RE='^[a-z0-9][a-z0-9._-]{0,31}$'
 # Kimi is OPT-IN (SWARM_KIMI=1; `/swarm:review --kimi` exports it for one run):
 # Moonshot meters the CLI on a 5-hour AND a 7-day quota, and two ~370 KiB
 # cluster prompts with a tool loop — every ACP tool round-trip re-sends the whole
@@ -395,6 +414,7 @@ cleanup() {
   if [[ -n "${TMP_BOUNDED:-}" ]]; then rm -f "$TMP_BOUNDED"; fi
   if [[ -n "${TMP_KIMI_HOME:-}" ]]; then rm -rf "$TMP_KIMI_HOME"; fi
   if [[ -n "${TMP_GROK_HOME:-}" ]]; then rm -rf "$TMP_GROK_HOME"; fi
+  if [[ -n "${TMP_CC_HOME:-}" ]]; then rm -rf "$TMP_CC_HOME"; fi
   if [[ -n "${TMP_GROK_TIMES:-}" ]]; then rm -f "$TMP_GROK_TIMES"; fi
   # Kept unless run_grok cleared it after a validated result: a timeout or a
   # rejected answer is exactly the run worth inspecting. Empty = grok produced
@@ -764,6 +784,14 @@ _sandbox_deny_paths_build() {
     "$host/.gitconfig" "$host/.config/git" "/etc/master.passwd" \
     "$host/.config/anthropic" "$host/.config/openai" "$host/.claude.json"
   if [[ "$own" != "codex" ]]; then printf '%s\n' "$host/.codex"; fi
+  # The local gateway's provider credentials (CLIProxyAPI's auth dir: OAuth
+  # tokens for every routed vendor). No jailed process needs them: the gateway
+  # reads them outside the jail, and a cc-harness voice's HELPER runs outside it
+  # too (run_cc_harness jails only the claude it execs), so even the routed
+  # voice is denied them. Same for the helper's own config (cc-router keeps its
+  # client token in ~/.config/cc-router); a helper that stores it elsewhere
+  # needs SWARM_DENY_PATHS.
+  printf '%s\n' "$host/.cli-proxy-api" "$host/.config/cc-router"
   if [[ "$own" != "grok" ]]; then
     printf '%s\n' "$host/.grok"
   elif [[ -d "$host/.grok" ]]; then
@@ -849,7 +877,11 @@ _sandbox_deny_paths_build() {
         done
       done
     fi
-    if [[ "$own" == "grok" ]]; then
+    if [[ "$own" == "grok" || "$own" == cc-harness:* ]]; then
+      # cc-harness voices ARE Claude Code: the same host tree and repo-local
+      # instruction/config surfaces apply, and run_cc_harness already starts
+      # them from an ephemeral CLAUDE_CONFIG_DIR + an empty cwd — the denies
+      # keep a Read of those surfaces from smuggling them in as instructions.
       # grok 1.0 is a Claude Code look-alike: it loads ~/.claude/settings*.json
       # (permission rules AND hooks — it ran the operator's SessionStart hook),
       # ~/.claude/plugins (skills, agents, MCP servers, more hooks), the global
@@ -858,7 +890,13 @@ _sandbox_deny_paths_build() {
       # AGENTS.md — all of it as INSTRUCTIONS or executable config, outside the
       # DIFF-<nonce> fence and, for --pr, attacker-controlled. Deny the host
       # tree wholesale (grok needs nothing from it) and the repo-local surfaces.
-      printf '%s\n' "$host/.claude"
+      if [[ "$own" == grok ]]; then
+        printf '%s\n' "$host/.claude"
+      else
+        # Entry-wise: an old-style install keeps the claude executable itself
+        # under ~/.claude/local — denying the whole tree would block its exec.
+        _deny_store_entries "$host/.claude" "" "$(_bin_physical_dir "$(_claude_exe)")"
+      fi
       for r in "${roots[@]+"${roots[@]}"}"; do
         for p in "$r"/.grok "$r"/.mcp.json "$r"/.claude/settings.json \
                  "$r"/.claude/settings.local.json "$r"/.claude/rules "$r"/.claude/hooks \
@@ -1311,8 +1349,7 @@ sandboxed() {
     echo "warning: no sandbox-exec/bwrap — external calls run without an OS secret-read/repo-write jail (secret scrub + env filter still apply)" >&2
     _sandbox_warned=1
   fi
-  local env_args=() _e
-  while IFS= read -r _e; do env_args+=("$_e"); done < <(_env_filter_args)
+  _hardened_env_prefix
   # GIT_CONFIG_GLOBAL/SYSTEM=/dev/null: the denylist now jails ~/.gitconfig /
   # ~/.config/git (a PAT can live there via url.insteadOf / http.extraHeader),
   # but git treats an EPERM on a config it reads as FATAL — so point git at
@@ -1323,10 +1360,21 @@ sandboxed() {
   # order: timeout → env (strip secrets, redirect git config) → sandbox-exec (jail) → backend.
   # env options (-u …) MUST precede the NAME=VALUE assignments, or env treats the
   # first `-u` after an assignment as the command.
-  with_timeout env ${env_args[@]+"${env_args[@]}"} \
-    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-    GIT_OPTIONAL_LOCKS=0 \
-    ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"} "$@"
+  with_timeout "${HARDENED_ENV[@]}" ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"} "$@"
+}
+
+# The env half of the hardening, shared by sandboxed() and run_cc_harness (which
+# puts its helper BETWEEN this prefix and the jail): HARDENED_ENV = env, the
+# secret filter's -u list plus any extra names to unset ($@), then the git
+# config redirects. Options before assignments — env reads the first `-u` after
+# an assignment as the command.
+HARDENED_ENV=()
+_hardened_env_prefix() {
+  local _e _x
+  HARDENED_ENV=(env)
+  while IFS= read -r _e; do HARDENED_ENV+=("$_e"); done < <(_env_filter_args)
+  for _x in "$@"; do HARDENED_ENV+=(-u "$_x"); done
+  HARDENED_ENV+=(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0)
 }
 
 scrub_secrets() {
@@ -1346,7 +1394,8 @@ PATTERNS = [
     # END). Alternation: END-block first, else base64 run.
     (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----|[A-Za-z0-9+/=\r\n]*)"), "[REDACTED-PRIVATE-KEY]"),
     (re.compile(r"(?i)aws_secret_access_key\s*[=:]\s*[A-Za-z0-9/+]{20,}"), "aws_secret_access_key=[REDACTED]"),
-    (re.compile(r"(?i)\b(secret|token|password|passwd|api[_-]?key)\b\s*[=:]\s*[A-Za-z0-9/+._-]{16,}"), r"\1=[REDACTED]"),
+    # (?<=_) too: `ANTHROPIC_AUTH_TOKEN=…` has no word boundary before TOKEN.
+    (re.compile(r"(?i)(?:(?<=_)|\b)(secret|token|password|passwd|api[_-]?key)\b\s*[=:]\s*[A-Za-z0-9/+._-]{16,}"), r"\1=[REDACTED]"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "[REDACTED-GH-TOKEN]"),
     (re.compile(r"\bsk-[A-Za-z0-9]{20,}"), "[REDACTED-API-KEY]"),
     # JWT-shaped bearer/refresh tokens (Moonshot OAuth): three base64url runs.
@@ -1366,16 +1415,90 @@ sys.stdout.write(data)
 validate_backend() {
   case "$1" in
     claude|codex|grok|kimi) ;;
-    *) echo "Unknown backend: $1 (expected claude|codex|grok|kimi)" >&2; exit 2 ;;
+    cc-harness:*)
+      # The id goes back to the helper as `exec <id>` and into telemetry, labels
+      # and a shell line the workflow builds — a strict charset, never scrubbed.
+      [[ "${1#cc-harness:}" =~ $HARNESS_ID_RE ]] \
+        || { echo "Invalid cc-harness id: ${1#cc-harness:} (expected [a-z0-9][a-z0-9._-]{0,31})" >&2; exit 2; } ;;
+    *) echo "Unknown backend: $1 (expected claude|codex|grok|kimi|cc-harness:<id>)" >&2; exit 2 ;;
   esac
 }
+
+# ---------- model families ----------
+# THE one model→family mapping, for the session's lens model (`session`) and
+# for harness voices (`list`, `voices`). Consensus counts FAMILIES: a Sol-driven
+# session and a native codex voice are one vendor, so their agreement must not
+# read as an independent cross-check. Unknown → nothing; callers then use an
+# `unknown:<name>` family, which the workflow never counts toward consensus.
+_model_family() {
+  # Vendor PREFIXES first, then the bare Claude tier aliases EXACTLY — never an
+  # unanchored substring (`gpt-5.4-haiku` is not Claude, `grok-4-codex` is not
+  # OpenAI). Unknown → nothing.
+  local m
+  m="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  case "$m" in
+    gpt-*|o[0-9]*|codex-*|openai/*) echo openai ;;
+    grok-*|xai/*) echo grok ;;
+    kimi|kimi-*|moonshot*) echo moonshot ;;
+    claude-*|anthropic/*|anthropic.claude-*|*.anthropic.claude-*) echo claude ;;
+    opus|sonnet|haiku|fable|opus-*|sonnet-*|haiku-*|fable-*) echo claude ;;
+  esac
+  return 0
+}
+
+# ---------- cc-harness voices ----------
+# A cc-harness voice is a headless `claude -p` whose inference the PATH helper
+# routes through a local gateway (contract: work-system docs/cc-harness-agents.md
+# — `list` rows name/model/available/note, `exec <id> -- <argv>` replaces itself
+# with the target). It is an EXTERNAL voice like codex/grok: own process, own
+# jail, schema-validated JSON — only the vendor behind it is the gateway's.
+_harness_is() { [[ "$1" == cc-harness:* ]]; }
+# The helper's `list`, bounded and memoized per process. rc: 127 = helper not on
+# PATH, 3 = helper present but not configured (no gateway token), other non-zero
+# = the probe failed. Rows are filtered to the contract's 4-column shape with a
+# valid name; model/note are display-only and stripped to printable ASCII.
+_harness_rows_done=""; _harness_rows=""; _harness_rc=0
+_harness_load() {
+  [[ -n "$_harness_rows_done" ]] && return 0
+  _harness_rows_done=1
+  if ! command -v "$HARNESS_BIN" >/dev/null 2>&1; then _harness_rc=127; return 0; fi
+  _probe_setup_lenient
+  local out rc=0
+  # Read whole, THEN cap: a `| head -c` cut would SIGPIPE the helper (rc 141
+  # under pipefail) and an oversize listing would read as a failed one. The
+  # probe's own deadline bounds how much it can print.
+  out="$(_probe_or_bare "$HARNESS_BIN" list)" || rc=$?
+  _harness_rc="$rc"
+  (( rc == 0 )) || return 0
+  out="${out:0:65536}"
+  # awk reads to EOF (a row cap, not an early `exit`) so printf never hits a
+  # closed pipe either.
+  _harness_rows="$(printf '%s\n' "$out" | LC_ALL=C awk -F'\t' '
+    n < 50 && NF == 4 && length($1) <= 43 && $1 ~ /^cc-harness:[a-z0-9][a-z0-9._-]*$/ && !seen[$1]++ {
+      # The model doubles as the identity of the voice (family, SWARM_HARNESS_EXPECT
+      # pin), so it gets the id charset everywhere, once, here.
+      gsub(/[^A-Za-z0-9._:\/+-]/, "", $2); gsub(/[^ -~]/, "", $4)
+      print $1 "\t" substr($2, 1, 100) "\t" $3 "\t" substr($4, 1, 300)
+      n++
+    }')"
+  return 0
+}
+_harness_row() {
+  # $1 = backend (cc-harness:<id>) → its row, or nothing.
+  _harness_load
+  [[ -n "$_harness_rows" ]] || return 0
+  printf '%s\n' "$_harness_rows" | awk -F'\t' -v n="$1" '$1 == n { print; exit }'
+}
+_harness_field() { printf '%s\n' "$1" | cut -f"$2"; }
 
 # ---------- probes ----------
 
 _backend_bin() {
-  # The ONE backend→executable mapping; only kimi is overridable (SWARM_KIMI_BIN).
+  # The ONE backend→executable mapping; kimi (SWARM_KIMI_BIN) and the harness
+  # helper (SWARM_CC_HARNESS_BIN) are overridable.
   case "$1" in
     kimi) printf '%s\n' "$KIMI_BIN" ;;
+    cc-harness:*) printf '%s\n' "$HARNESS_BIN" ;;
     *)    printf '%s\n' "$1" ;;
   esac
 }
@@ -1383,7 +1506,19 @@ _backend_bin() {
 backend_installed() {
   local backend="$1"
   [[ "$backend" == "claude" ]] && return 0
+  if _harness_is "$backend"; then
+    # The helper execs `claude` by PATH, so a shell-function `claude` (cc-router)
+    # does not count: the target must be an executable.
+    command -v "$HARNESS_BIN" >/dev/null || return 1
+    [[ -n "$(_harness_row "$backend")" ]]
+    return
+  fi
   command -v "$(_backend_bin "$backend")" >/dev/null
+}
+
+_claude_exe() {
+  # `type -P`: a PATH executable only — never a function or alias of that name.
+  type -P claude 2>/dev/null || true
 }
 
 available_version() {
@@ -1406,6 +1541,13 @@ available_version() {
     _probe_setup_lenient
     cver="$(_probe_or_bare claude --version | head -1 || true)"
     echo "${cver:-in-session}"
+    return 0
+  fi
+  if _harness_is "$backend"; then
+    # No version probe of its own: the helper's `list` row already names the
+    # routed model, which is the useful fact here.
+    backend_installed "$backend" || return 1
+    echo "via cc-harness: $(_harness_field "$(_harness_row "$backend")" 2)"
     return 0
   fi
   local executable; executable="$(_backend_bin "$backend")"
@@ -1458,6 +1600,7 @@ probe_timeout() {
 # call starts. Every one is memoized per process, so this is the worst case for
 # the heaviest backend (grok or kimi): grok (`models`, `--help`, sandbox smoke
 # test); kimi (`acp --help`, `provider list --json`, same sandbox test).
+# A cc-harness voice needs two (the helper's `list`, the same sandbox test).
 # Codex needs two on `run` (`login status`, the same sandbox test); its model
 # catalog is advisory and only probed by `ready`/`list`, never per voice.
 # `--version` is NOT among them: the `run` gate asks `command -v`, and the probe
@@ -2241,6 +2384,12 @@ ready_check() {
     kimi)   _kimi_opted_in && _kimi_credentials_usable && _kimi_has_acp \
               && kimi_model_offered "${requested_model:-$KIMI_DEFAULT_MODEL}" \
               && _read_web_safe kimi && _scratch_dir_ok ;;
+    # The helper's own verdict (literal `yes` only), plus a claude EXECUTABLE for
+    # it to exec. No jail requirement: jail-less, the voice runs tool-less on
+    # the inlined diff (run_cc_harness), the codex/grok fail-closed posture.
+    cc-harness:*)
+      [[ "$(_harness_field "$(_harness_row "$backend")" 3)" == yes ]] \
+        && [[ -n "$(_claude_exe)" ]] && _scratch_dir_ok ;;
   esac
 }
 
@@ -2311,6 +2460,23 @@ ready_hint() {
       fi
       # (a TMPDIR inside the checkout is reported by the shared guard at the top)
       ;;
+    cc-harness:*)
+      local row; row="$(_harness_row "$backend")"
+      if [[ "$_harness_rc" == 127 ]]; then
+        echo "$HARNESS_BIN not on PATH"
+      elif [[ "$_harness_rc" == 3 ]]; then
+        echo "$HARNESS_BIN is not configured here (no gateway token)"
+      elif [[ "$_harness_rc" != 0 ]]; then
+        echo "\`$HARNESS_BIN list\` failed (rc=$_harness_rc)"
+      elif [[ -z "$row" ]]; then
+        echo "$HARNESS_BIN does not list ${backend}"
+      elif [[ "$(_harness_field "$row" 3)" != yes ]]; then
+        local note; note="$(_harness_field "$row" 4)"
+        echo "not available via the gateway${note:+ — $note}"
+      elif [[ -z "$(_claude_exe)" ]]; then
+        echo "no claude executable on PATH for $HARNESS_BIN to exec (a shell function named claude does not count)"
+      fi
+      ;;
   esac
 }
 
@@ -2321,6 +2487,7 @@ subcmd_available() {
   local backend="${1:-}"
   [[ -z "$backend" ]] && usage
   validate_backend "$backend"
+  if _harness_is "$backend"; then _harness_load; fi
   available_version "$backend"
 }
 
@@ -2335,7 +2502,11 @@ require_usable() {
   # not where it is discarded.
   local backend="$1" requested_model="${2:-}"
   if ! backend_installed "$backend"; then
-    echo "$backend: not installed" >&2
+    if _harness_is "$backend"; then
+      echo "$backend: not available — $(ready_hint "$backend")" >&2
+    else
+      echo "$backend: not installed" >&2
+    fi
     exit 1
   fi
   if ! ready_check "$backend" "$requested_model"; then
@@ -2355,6 +2526,7 @@ subcmd_ready() {
   [[ -z "$backend" ]] && usage
   shift
   validate_backend "$backend"
+  if _harness_is "$backend"; then _harness_load; fi
   while [[ $# -gt 0 ]]; do
     [[ "$1" == --model && $# -ge 2 ]] \
       || { echo "Expected --model <id>" >&2; exit 2; }
@@ -2365,14 +2537,42 @@ subcmd_ready() {
   echo "ready"
 }
 
+_family_of_backend() {
+  # $1 = backend → its consensus family. claude = the SESSION's lens model
+  # (inherited by every lens subagent), harness voices = their routed model.
+  case "$1" in
+    claude) _session_kv | sed -n 's/.*;family=//p' ;;
+    codex) echo openai ;;
+    grok) echo grok ;;
+    kimi) echo moonshot ;;
+    cc-harness:*)
+      # A bare tier alias in a helper row is the helper's own rung name, which
+      # it may route to any vendor — not evidence of Claude.
+      local m f=""; m="$(_harness_field "$(_harness_row "$1")" 2)"
+      case "$(printf '%s' "$m" | tr '[:upper:]' '[:lower:]')" in
+        opus|opusplan|sonnet|haiku|fable|default) ;;
+        *) f="$(_model_family "$m")" ;;
+      esac
+      echo "${f:-unknown:${1#cc-harness:}}" ;;
+  esac
+}
+
 print_rows() {
-  # One TSV row per backend: backend, available, version, ready, hint.
+  # One TSV row per backend: backend, available, version, ready, family, hint.
   # $1 fills empty fields — the human table needs a placeholder because BSD
   # column collapses adjacent tabs, shifting later columns left.
+  # Harness rows follow the native four, one per id the helper lists — none
+  # when it is absent, so a host without the helper sees the old table.
   local placeholder="${1:-}" codex_model="${2:-}"
   local b ver avail rdy hint model
-  for b in claude codex grok kimi; do
-    ver="" avail=no rdy=no hint="" model=""
+  _harness_load   # HERE, not inside a $(…) below, so the memo survives the loop
+  local harness=() n
+  while IFS= read -r n; do [[ -n "$n" ]] && harness+=("$n"); done \
+    < <(printf '%s\n' "$_harness_rows" | cut -f1)
+  local routed
+  for b in claude codex grok kimi ${harness[@]+"${harness[@]}"}; do
+    ver="" avail=no rdy=no hint="" model="" routed=""
+    _harness_is "$b" && routed="$(_harness_field "$(_harness_row "$b")" 2)"
     [[ "$b" == codex ]] && model="$codex_model"
     if ver="$(available_version "$b")"; then
       avail=yes
@@ -2386,7 +2586,8 @@ print_rows() {
       hint="not installed"
     fi
     ver="${ver//$'\t'/ }"  # a tab inside a version string would shift the TSV columns
-    printf '%s\t%s\t%s\t%s\t%s\n' "$b" "$avail" "${ver:-$placeholder}" "$rdy" "${hint:-$placeholder}"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$b" "$avail" "${ver:-$placeholder}" "$rdy" \
+      "$(_family_of_backend "$b")" "${routed:-$placeholder}" "${hint:-$placeholder}"
   done
 }
 
@@ -2409,14 +2610,14 @@ subcmd_list() {
 import json, sys
 rows = []
 for line in sys.stdin:
-    b, avail, ver, rdy, hint = (line.rstrip("\n").split("\t") + [""] * 5)[:5]
+    b, avail, ver, rdy, fam, routed, hint = (line.rstrip("\n").split("\t") + [""] * 7)[:7]
     rows.append({"backend": b, "available": avail == "yes", "version": ver,
-                 "ready": rdy == "yes", "hint": hint})
+                 "ready": rdy == "yes", "family": fam, "model": routed, "hint": hint})
 json.dump(rows, sys.stdout, indent=2)
 print()
 '
   else
-    { printf 'BACKEND\tAVAILABLE\tVERSION\tREADY\tHINT\n'; print_rows "-" "$codex_model"; } \
+    { printf 'BACKEND\tAVAILABLE\tVERSION\tREADY\tFAMILY\tMODEL\tHINT\n'; print_rows "-" "$codex_model"; } \
       | column_or_cat
   fi
 }
@@ -2429,7 +2630,120 @@ subcmd_jail() {
   # tool-less/no-web, codex web hard-off); the transport discards adapter
   # stderr, so this is the visible channel for that warning. Runs from the same
   # cwd as the review, so its repo root matches the run's.
-  if _read_web_safe codex; then echo "jail=yes"; else echo "jail=no"; fi
+  # stdout stays the one `jail=yes|no` line (the skill compares it verbatim);
+  # the REASON for a `no` goes to stderr. Without it, the common "ran it from a
+  # directory that is not a git checkout" (an ssh login lands in $HOME) read as
+  # a broken bwrap/AppArmor setup — the jail itself was fine.
+  if _read_web_safe codex; then echo "jail=yes"; return 0; fi
+  echo "jail=no"
+  if ! _jail_available codex; then
+    # A wrapper that exists but fails its smoke probe already warned in
+    # _init_sandbox; only the "none on PATH" case is silent so far.
+    command -v sandbox-exec >/dev/null || command -v bwrap >/dev/null \
+      || echo "reason: no OS sandbox wrapper on PATH (sandbox-exec on macOS, bwrap on Linux)" >&2
+  else
+    echo "reason: no git repository root from $PWD — run from inside the checkout under review" >&2
+  fi
+}
+
+_session_kv() {
+  # The lens model of THIS session, as `model=<id>;family=<f>`. Every lens,
+  # merge and verify subagent inherits the session model, so this is what the
+  # "claude" side of a review actually runs on. Read from the environment the
+  # session hands its Bash children: CLAUDE_CODE_SUBAGENT_MODEL (what subagents
+  # use when set — cc-router/cc-harness set it) before ANTHROPIC_MODEL. No model
+  # and no gateway = a native Claude session (family claude, model unnamed). A
+  # gateway without a readable model, or a model the mapping does not know, is
+  # `unknown:session`: it never pairs with a named family for consensus.
+  # RESIDUAL: only the environment is visible here — a `/model` switch or a
+  # `--model` flag inside the session is not, so set the env when proxying.
+  local model fam="" alias="" var
+  # A context suffix (`opus[1m]`) is not part of the id.
+  model="$(printf '%s' "${CLAUDE_CODE_SUBAGENT_MODEL:-${ANTHROPIC_MODEL:-}}" | sed 's/\[[^]]*\]$//')"
+  # Bare aliases resolve the way Claude Code resolves them — through
+  # ANTHROPIC_DEFAULT_<TIER>_MODEL, which a gateway helper points at its own
+  # model (cc-harness maps the opus rung to a GPT model).
+  case "$(printf '%s' "$model" | tr '[:upper:]' '[:lower:]')" in
+    opus|opusplan) alias=OPUS ;;
+    sonnet) alias=SONNET ;; haiku) alias=HAIKU ;; fable) alias=FABLE ;;
+    default) alias=DEFAULT ;;
+  esac
+  if [[ -n "$alias" ]]; then
+    var="ANTHROPIC_DEFAULT_${alias}_MODEL"
+    if [[ "$alias" != DEFAULT && -n "${!var:-}" ]]; then
+      model="$(printf '%s' "${!var}" | sed 's/\[[^]]*\]$//')"; alias=""
+    elif [[ -z "${ANTHROPIC_BASE_URL:-}" ]]; then
+      fam="claude"   # a native session's alias is a Claude model by definition
+    else
+      fam="unknown:session"   # behind a gateway, an unresolved alias names no vendor
+    fi
+  fi
+  model="$(printf '%s' "$model" | LC_ALL=C tr -cd 'A-Za-z0-9._:/+-' | cut -c1-100)"
+  if [[ -z "$fam" ]]; then
+    if [[ -n "$model" ]]; then
+      fam="$(_model_family "$model")"; fam="${fam:-unknown:session}"
+    elif [[ -n "${ANTHROPIC_BASE_URL:-}" ]]; then
+      fam="unknown:session"
+    else
+      fam="claude"
+    fi
+  fi
+  printf 'model=%s;family=%s\n' "$model" "$fam"
+}
+
+subcmd_session() { _session_kv; }
+
+subcmd_voices() {
+  # stdin = `list --json` → the run's external voices, decided HERE rather than
+  # in skill prose (a compaction can drop a prose rule, not this function).
+  #   voices=<comma list>      what the workflow gets as externalVoices
+  #   harness=<id>=<family>,<model>;…   the live harness voices' identities
+  #   replaced=<native>><harness>,…     natives a harness voice stood in for
+  # Policy: every native that is available && ready is live. With the helper
+  # present and SWARM_HARNESS=auto (default), each id in SWARM_HARNESS_VOICES
+  # (default "sol grok") that is live joins and REPLACES the live native of the
+  # same family — never both, they are one vendor. An id that is not live
+  # leaves its native in place. SWARM_HARNESS=off keeps the natives only.
+  local mode="${SWARM_HARNESS:-auto}"
+  case "$mode" in
+    auto|off) ;;
+    *) echo "Invalid SWARM_HARNESS='$mode' (auto|off)" >&2; exit 2 ;;
+  esac
+  require_python3
+  SWARM_HARNESS="$mode" SWARM_HARNESS_VOICES="${SWARM_HARNESS_VOICES:-sol grok}" python3 -c '
+import json, os, re, sys
+try:
+    rows = json.load(sys.stdin)
+    assert isinstance(rows, list)
+except Exception:
+    sys.stderr.write("voices: stdin is not a list --json array\n"); sys.exit(2)
+live = {r.get("backend"): r for r in rows
+        if isinstance(r, dict) and r.get("available") is True and r.get("ready") is True}
+voices = [b for b in ("codex", "grok", "kimi") if b in live]
+harness, replaced = [], []
+if os.environ["SWARM_HARNESS"] == "auto":
+    # The native rows say which family each one is: no third copy of the
+    # backend→family table here.
+    native_of = {r.get("family"): b for b, r in live.items() if b in ("codex", "grok", "kimi") and r.get("family")}
+    for hid in re.split(r"[\s,]+", os.environ["SWARM_HARNESS_VOICES"].strip()):
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,31}", hid or ""):
+            continue
+        name = "cc-harness:" + hid
+        r = live.get(name)
+        if not r or name in voices:
+            continue
+        fam = r.get("family") or ("unknown:" + hid)
+        model = re.sub(r"[^A-Za-z0-9._:/+-]", "", r.get("model") or "")[:100]
+        nat = native_of.get(fam)
+        if nat in voices:
+            voices.remove(nat)
+            replaced.append(nat + ">" + name)
+        voices.append(name)
+        harness.append("%s=%s,%s" % (hid, fam, model))
+print("voices=" + ",".join(voices))
+print("harness=" + ";".join(harness))
+print("replaced=" + ",".join(replaced))
+'
 }
 
 subcmd_grok_model() {
@@ -2597,7 +2911,11 @@ subcmd_run() {
       --lens-instr)  lens_instr="$2";  lens_instr_set=1; shift 2 ;;
       --lens-instr-sum) lens_instr_sum="$2"; shift 2 ;;
       --effort)      effort="$2"; shift 2 ;;
-      --model)       validate_model "$2"; model="$2"; shift 2 ;;
+      --model)
+        if _harness_is "$backend"; then
+          echo "$backend: --model is not accepted — the cc-harness helper sets the routed model" >&2; exit 2
+        fi
+        validate_model "$2"; model="$2"; shift 2 ;;
       --tools)       tools="$2"; shift 2 ;;
       --tool-budget)
         [[ "$2" =~ ^[0-9]+$ ]] || { echo "Invalid --tool-budget: expected an integer" >&2; exit 2; }
@@ -2803,6 +3121,9 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
   # wall that will actually apply, not a value assigned inside a subshell.
   _set_enforced_wall
   _codex_on_run_path
+  # MAIN shell, after the strict probe setup: every later _harness_row runs in a
+  # $(…) and would otherwise re-run the helper's `list` (one probe each).
+  if _harness_is "$backend"; then _harness_load; fi
   require_usable "$backend" "$model"
   require_python3
   # A bare `run codex` (no --model) resolves HERE — after the install/python3
@@ -2842,6 +3163,7 @@ print("%08x" % h)') || { echo "Could not compute the --lens-instr checksum (pyth
     codex) run_codex "$prompt_path" "$effort" "$model" "$schema" ;;
     grok)  run_grok  "$prompt_path" "$effort" "$model" "$schema" ;;
     kimi)  run_kimi  "$prompt_path" "$effort" "$model" "$schema" "$tools" "$tool_budget" ;;
+    cc-harness:*) run_cc_harness "$backend" "$prompt_path" "$effort" "$schema" ;;
   esac
 }
 
@@ -2949,6 +3271,108 @@ if not (isinstance(d, dict) and isinstance(d.get("findings"), list)):
     sys.stderr.write("codex output is not a {findings:[...]} object\n"); sys.exit(1)
 ' <"$TMP_OUT" || exit 1
   scrub_secrets <"$TMP_OUT"
+  echo
+}
+
+run_cc_harness() {
+  # A headless `claude -p` routed by the cc-harness helper: one review voice of
+  # whatever vendor the helper's row names (gpt-*-sol → openai, grok-* → grok).
+  local backend="$1" prompt_path="$2" effort="$3" schema="$4"
+  local id="${backend#cc-harness:}" row model
+  row="$(_harness_row "$backend")"
+  model="$(_harness_field "$row" 2)"
+  TELEMETRY_EFFORT="$effort"; TELEMETRY_MODEL="$model"
+  # The run's consensus family was frozen at prep from this model. A helper
+  # that routes the id elsewhere now (remapped mid-run, a resumed round) would
+  # make the voice count as the wrong vendor — fail the voice instead.
+  if [[ -n "${SWARM_HARNESS_EXPECT:-}" && "$SWARM_HARNESS_EXPECT" != "$model" ]]; then
+    echo "$backend: the helper now routes to '${model:-?}', not the '$SWARM_HARNESS_EXPECT' this run was planned with — refusing a voice whose family would be misattributed" >&2
+    exit 1
+  fi
+  TMP_OUT="$(mktemp)"
+
+  # ISOLATION. Not `--bare`: it limits auth to ANTHROPIC_API_KEY/apiKeyHelper,
+  # and the helper authenticates with ANTHROPIC_AUTH_TOKEN. Instead the voice
+  # starts from an EPHEMERAL config dir (no user settings, hooks, plugins,
+  # memory, MCP, sessions — auth comes from the helper's env) and an EMPTY cwd
+  # (no project CLAUDE.md, .claude/ or .mcp.json is discovered); the repository
+  # is reachable only through --add-dir, read-only tools only.
+  local home
+  home="$(_ephemeral_home_beside_prompt cc-harness "$prompt_path")" || exit 2
+  TMP_CC_HOME="$home"
+  mkdir -p "$home/config" "$home/cwd" \
+    && printf '{"permissions":{"allow":[],"deny":["Read(//proc/**)"]}}\n' > "$home/config/settings.json" \
+    || { echo "Could not create the isolated cc-harness runtime" >&2; exit 2; }
+
+  # Read/Grep/Glob only: no shell, no web, no edits — so no egress tool at all.
+  # Under the jail they reach the repo (minus its denied secrets); WITHOUT one,
+  # fail closed to TOOL-LESS: Read takes absolute paths, and with no jail a
+  # prompt-injected read of ~/.ssh could be routed into a finding (the output
+  # reaches the report, and with --pr a public comment).
+  local tool_args=(--tools "Read,Grep,Glob" --allowedTools "Read,Grep,Glob") dir_args=()
+  if _read_web_safe "$backend"; then
+    dir_args=(--add-dir "$_REPO_ROOT_MEMO")
+  else
+    echo "warning: no working OS jail or unresolvable repo root — $backend runs tool-less on the inlined diff (fail closed)" >&2
+    tool_args=(--tools "")
+  fi
+  local schema_json
+  schema_json="$(python3 -c 'import json, sys; print(json.dumps(json.load(open(sys.argv[1]))))' "$schema")" \
+    || { echo "Could not read the schema: $schema" >&2; exit 2; }
+
+  # ORDER: timeout → env filter → HELPER (unjailed) → jail → claude. The helper
+  # is the user's own trusted binary (its `list` runs unjailed too); it may read
+  # its gateway config, so it runs OUTSIDE the jail and execs the jail wrapper,
+  # which then runs claude with the gateway credential dir denied. The env
+  # filter strips the PARENT's *_TOKEN/*_API_KEY before the helper adds the
+  # routing token, which the model process then holds in its env. No shell tool
+  # reads it, but Read could open /proc/self/environ under bwrap's /proc — so
+  # the ephemeral settings deny Read(//proc/**) (deny beats --allowedTools; Claude
+  # Code applies Read rules to Grep/Glob too), and scrub_secrets redacts
+  # `*_TOKEN=` forms as a second line. Prompt on STDIN (claude -p reads it there), never
+  # argv; the parent session's Claude Code markers are dropped. The subshell
+  # scopes the cd to the empty cwd; stderr (the transcript) is discarded like
+  # codex's, it never passes scrub_secrets.
+  _init_sandbox "$backend"
+  _hardened_env_prefix CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SSE_PORT
+  local rc=0
+  ( cd "$home/cwd" && with_timeout "${HARDENED_ENV[@]}" \
+      CLAUDE_CONFIG_DIR="$home/config" \
+      "$HARNESS_BIN" exec "$id" -- ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"} claude -p \
+      --output-format json --json-schema "$schema_json" \
+      "${tool_args[@]}" ${dir_args[@]+"${dir_args[@]}"} \
+      --permission-mode dontAsk --strict-mcp-config --no-session-persistence \
+      --effort "$effort" \
+      <"$prompt_path" >"$TMP_OUT" 2>/dev/null ) || rc=$?
+  TELEMETRY_RC="$rc"
+  if (( rc != 0 )); then
+    if _is_timeout_rc "$rc"; then echo "$backend timed out after ${_adapter_timeout}s" >&2
+    elif (( rc == 126 )); then echo "$backend could not be run: the helper or claude was found but could not be executed, or the adapter could not create a scratch file to bound it (check TMPDIR)" >&2
+    else echo "$backend failed (rc=$rc; helper: 1 = agent unavailable, 3 = no gateway token)" >&2; fi
+    exit 1
+  fi
+  [[ -s "$TMP_OUT" ]] || { echo "$backend produced no output" >&2; exit 1; }
+  # The validated object is the envelope's structured_output; is_error or a
+  # missing/misshapen object is a failed voice, never "no findings".
+  # Validated into a VARIABLE, never a second file: a predictable sibling name
+  # in the shared TMPDIR (writable to every jailed voice) could be pre-planted as
+  # a symlink, and this step runs outside the jail.
+  local validated
+  validated="$(python3 -c '
+import json, sys
+who = sys.argv[1]
+try:
+    env = json.load(sys.stdin)
+except Exception:
+    sys.stderr.write(who + " returned invalid JSON\n"); sys.exit(1)
+if not isinstance(env, dict) or env.get("is_error"):
+    sys.stderr.write(who + " reported an error: " + str((env or {}).get("subtype") if isinstance(env, dict) else "non-object")[:120] + "\n"); sys.exit(1)
+d = env.get("structured_output")
+if not (isinstance(d, dict) and isinstance(d.get("findings"), list)):
+    sys.stderr.write(who + " output has no {findings:[...]} structured_output\n"); sys.exit(1)
+json.dump(d, sys.stdout)
+' "$backend" <"$TMP_OUT")" || exit 1
+  printf '%s' "$validated" | scrub_secrets
   echo
 }
 
@@ -3824,6 +4248,8 @@ main() {
     available)     subcmd_available "$@" ;;
     ready)         subcmd_ready "$@" ;;
     jail)          subcmd_jail ;;
+    session)       subcmd_session ;;
+    voices)        subcmd_voices ;;
     grok-model)    subcmd_grok_model "$@" ;;
     codex-model)   subcmd_codex_model "$@" ;;
     config)        subcmd_config ;;

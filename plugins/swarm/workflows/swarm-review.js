@@ -1,9 +1,9 @@
 export const meta = {
   name: 'swarm-review',
-  description: 'Local mixture-of-agents review: scope+gate → fan-out (Claude lenses + codex + grok + kimi) → (file,mechanism) merge with family-aware consensus → verify solos + design clusters → output-gated ranked synthesis.',
+  description: 'Local mixture-of-agents review: scope+gate → fan-out (session-model lenses + codex/grok/kimi or cc-harness voices) → (file,mechanism) merge with family-aware consensus → verify solos + design clusters → output-gated ranked synthesis.',
   phases: [
     { title: 'Scope', detail: 'classify diff + gate lenses' },
-    { title: 'Fan-out', detail: 'Claude lens-cluster finders + codex + grok + kimi in parallel' },
+    { title: 'Fan-out', detail: 'lens-cluster finders on the session model + external voices in parallel' },
     { title: 'Merge', detail: 'cluster by (file, mechanism), consensus by family' },
     { title: 'Verify', detail: '3-state verify of solo + design clusters' },
   ],
@@ -13,7 +13,9 @@ export const meta = {
 // args.adapter            absolute path to scripts/agents.sh
 // args.diffFile           file the Claude finders read (raw unified diff)
 // args.externalPromptFile file the external CLIs get (review instr + fenced diff)
-// args.externalVoices     which external backends are live (subset of codex, grok, kimi)
+// args.externalVoices     which external backends are live (subset of codex, grok, kimi, cc-harness:<id>)
+// args.session            `model=<id>;family=<f>` of the session's lens model (agents.sh session)
+// args.harness            `<id>=<family>,<model>;…` of the live cc-harness voices (agents.sh voices)
 // args.claude             false → external-only control run (no Claude lenses)
 // args.profile            quick | default | max (exact strings; anything else → default)
 // args.codex / args.grok  the run's frozen model selection, one `k=v;…` token each (prep step)
@@ -317,7 +319,8 @@ const PROFILES = {
     "externals": {
       "codex": { "model": null, "family": "sol", "effort": "low", "tools": true, "toolBudget": 8 },
       "grok": { "model": null, "effort": "low", "tools": true, "toolBudget": 8 },
-      "kimi": { "model": "kimi-code/k3-256k", "effort": "low", "tools": false, "toolBudget": 0 }
+      "kimi": { "model": "kimi-code/k3-256k", "effort": "low", "tools": false, "toolBudget": 0 },
+      "cc-harness": { "model": null, "effort": "low", "tools": true, "toolBudget": 8 }
     }
   },
   "default": {
@@ -332,7 +335,8 @@ const PROFILES = {
     "externals": {
       "codex": { "model": null, "family": "sol", "effort": "medium", "tools": true, "toolBudget": 8 },
       "grok": { "model": null, "effort": "medium", "tools": true, "toolBudget": 8, "clusterEffort": { "breakage": "low", "threat": "low" } },
-      "kimi": { "model": "kimi-code/k3-256k", "effort": "low", "tools": true, "toolBudget": 8 }
+      "kimi": { "model": "kimi-code/k3-256k", "effort": "low", "tools": true, "toolBudget": 8 },
+      "cc-harness": { "model": null, "effort": "medium", "tools": true, "toolBudget": 8 }
     }
   },
   "max": {
@@ -347,7 +351,8 @@ const PROFILES = {
     "externals": {
       "codex": { "model": null, "family": "astra", "effort": "medium", "tools": true, "toolBudget": 8 },
       "grok": { "model": null, "effort": "medium", "tools": true, "toolBudget": 8, "clusterEffort": { "breakage": "low", "threat": "low" } },
-      "kimi": { "model": "kimi-code/k3-256k", "effort": "high", "tools": true, "toolBudget": 8 }
+      "kimi": { "model": "kimi-code/k3-256k", "effort": "high", "tools": true, "toolBudget": 8 },
+      "cc-harness": { "model": null, "effort": "medium", "tools": true, "toolBudget": 8 }
     }
   }
 }
@@ -538,7 +543,45 @@ const EXTERNAL_SCHEMA = {
 // backend label -> model family. Consensus counts distinct FAMILIES, not
 // backends: if two voices ever share a vendor again (as grok-4.5 + composer
 // did), their agreement must count once, not as an independent cross-check.
+// swarm-test-region: family
+// `claude` is NOT a constant: every lens, merge and verify subagent inherits the
+// SESSION model, so under `claude --proxy sol` the "claude" side is really an
+// OpenAI model — the same vendor as codex. Its family comes from args.session,
+// cc-harness voices' from args.harness, both resolved by the adapter's one
+// model→family mapping. Anything unresolvable is `unknown:<name>`, which never
+// counts toward consensus (see independentFamilies).
 const FAMILY = { claude: 'claude', codex: 'openai', grok: 'grok', kimi: 'moonshot' }
+const FAMILY_RE = /^(?:[a-z]+|unknown:[a-z0-9._-]{1,32})$/
+// `k=v;k=v` → object; the ONE parser for every prep token (session, codex, grok).
+const parseRunToken = (token) => {
+  const kv = {}
+  for (const part of String(token || '').split(';')) {
+    const i = part.indexOf('=')
+    if (i > 0) kv[part.slice(0, i).trim()] = part.slice(i + 1).trim()
+  }
+  return kv
+}
+const SESSION = (() => {
+  const kv = parseRunToken(INPUT.session)
+  const model = /^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,99}$/.test(kv.model || '') ? kv.model : ''
+  // No token = an older caller: keep the historical `claude` family.
+  const family = INPUT.session == null ? 'claude' : (FAMILY_RE.test(kv.family || '') ? kv.family : 'unknown:session')
+  return { model, family }
+})()
+// id → { family, model } for every cc-harness voice prep reported live.
+const HARNESS = (() => {
+  const out = {}
+  for (const part of String(INPUT.harness || '').split(';')) {
+    const m = /^([a-z0-9][a-z0-9._-]{0,31})=([^,]+),([A-Za-z0-9._:/+-]{0,100})$/.exec(part.trim())
+    if (m && FAMILY_RE.test(m[2])) out[m[1]] = { family: m[2], model: m[3] }
+  }
+  return out
+})()
+const harnessId = (backend) => (typeof backend === 'string' && backend.startsWith('cc-harness:')) ? backend.slice(11) : null
+// Families that may count toward consensus: an unknown vendor could be any of
+// the named ones, so pairing it with one could double-count a single vendor.
+const independentFamilies = (fams) => fams.filter((f) => !String(f).startsWith('unknown:'))
+// swarm-test-region-end
 
 // ---- output gate: last-line secret scrub over surviving findings ------------
 // Runs on EVERY finding (incl. Claude finders, which never pass the adapter)
@@ -562,7 +605,7 @@ function scrubField(s) {
     [/\bsk-[A-Za-z0-9]{20,}/g, '[REDACTED-API-KEY]'],
     // JWT-shaped bearer/refresh tokens (Moonshot OAuth): three base64url runs.
     [/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, '[REDACTED-JWT]'],
-    [/(?<key>\b(?:secret|token|password|passwd|api[_-]?key)\b)\s*[=:]\s*[A-Za-z0-9/+._-]{16,}/gi, '$<key>=[REDACTED]'],
+    [/(?<key>(?:(?<=_)|\b)(?:secret|token|password|passwd|api[_-]?key)\b)\s*[=:]\s*[A-Za-z0-9/+._-]{16,}/gi, '$<key>=[REDACTED]'],
   ]
   for (const [re, repl] of rules) {
     const next = s.replace(re, repl)
@@ -940,14 +983,6 @@ const wantVoices = Array.isArray(INPUT.externalVoices) ? INPUT.externalVoices : 
 // does not validate freezes nothing and says so, rather than injecting.
 // The prep step's `k=v;k=v` run tokens (args.grok, args.codex). Keys and values
 // are only split here; each consumer validates its own fields.
-const parseRunToken = (token) => {
-  const kv = {}
-  for (const part of String(token || '').split(';')) {
-    const i = part.indexOf('=')
-    if (i > 0) kv[part.slice(0, i).trim()] = part.slice(i + 1).trim()
-  }
-  return kv
-}
 const GROK_RUN = (() => {
   const kv = parseRunToken(INPUT.grok)
   const okId = (v) => typeof v === 'string' && v.length <= 64 && /^grok-[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$/.test(v)
@@ -1001,6 +1036,12 @@ const EXTERNAL_BACKENDS = [
   // when GROK_DROPPED already removed grok from liveExternals.
   { backend: 'grok', ...PROFILE.externals.grok, model: GROK_RUN.model || null, env: GROK_FROZEN_ENV },
   { backend: 'kimi', ...PROFILE.externals.kimi, clusters: ['breakage', 'threat'], env: 'SWARM_KIMI=1 ' },
+  // cc-harness voices: one per live id prep reported (args.harness), all on the
+  // shared `cc-harness` profile entry; the helper routes the model.
+  // SWARM_HARNESS_EXPECT: the routed model prep froze the family from — the
+  // adapter fails the voice if the helper routes the id elsewhere by now.
+  ...Object.keys(HARNESS).map((id) => ({ backend: `cc-harness:${id}`, ...PROFILE.externals['cc-harness'],
+    env: HARNESS[id].model ? `SWARM_HARNESS_EXPECT=${shQuote(HARNESS[id].model)} ` : '' })),
 ]
 // Units a backend actually runs: all of them, or (with `clusters`) those whose
 // lenses belong to an allowed cluster — under --max the units are single lenses,
@@ -1163,9 +1204,14 @@ const backendErrors = voices.filter((v) => v.ok === false)
 // Compute it here (never in the presenter): a family counts as PRESENT if at
 // least one of its voices returned, even with zero findings — "reviewed and found
 // nothing" is participation; only an errored voice is absence.
-const familyOf = (backend) => FAMILY[backend] || backend
+const familyOf = (backend) => {
+  if (backend === 'claude') return SESSION.family
+  const id = harnessId(backend)
+  if (id !== null) return HARNESS[id] ? HARNESS[id].family : `unknown:${id}`
+  return FAMILY[backend] || backend
+}
 const familiesExpected = Array.from(new Set([
-  ...(runClaude ? ['claude'] : []),
+  ...(runClaude ? [familyOf('claude')] : []),
   ...liveExternals.map((b) => familyOf(b.backend)),
 ])).sort()
 // ONE definition of "this voice took part", counted once. familiesPresent,
@@ -1216,8 +1262,8 @@ for (const v of voices) {
 // clusters as degraded on a stock Claude-only install that ran exactly as
 // intended — and the value is exported in `balance`, so every presenter reading
 // it repeated the claim. Degradation means "lost something", not "never had it".
-const unitsDegraded = familiesExpected.length < 2 ? [] : Array.from(unitsByName.entries())
-  .filter(([, fams]) => fams.size < 2)
+const unitsDegraded = independentFamilies(familiesExpected).length < 2 ? [] : Array.from(unitsByName.entries())
+  .filter(([, fams]) => independentFamilies([...fams]).length < 2)
   .map(([unit]) => unit)
   .sort()
 // <2 families means NO finding in this run can reach consensus at all — every
@@ -1230,10 +1276,10 @@ const unitsDegraded = familiesExpected.length < 2 ? [] : Array.from(unitsByName.
 // Collapsing them made a single degraded cluster read as "no finding in this run
 // can reach consensus" — false for every healthy cluster, printed next to a
 // header stating full family coverage.
-const consensusReachable = familiesPresent.length >= 2
+const consensusReachable = independentFamilies(familiesPresent).length >= 2
 if (familiesLost.length) {
   log(`Family coverage: lost ${familiesLost.join(', ')} — ${familiesPresent.length} of ${familiesExpected.length} families reviewed` +
-      (familiesPresent.length >= 2 ? '' : '; consensus is UNREACHABLE this run, every finding falls back to solo + verifier'))
+      (consensusReachable ? '' : '; consensus is UNREACHABLE this run, every finding falls back to solo + verifier'))
 }
 const coverageNotes = []
 // THE HEADLINE, emitted here rather than templated in the presenter. The skill
@@ -1269,7 +1315,7 @@ if (voicesReturned < voices.length) {
 if (familiesLost.length) {
   // ONE sentence, not two: the previous pair stated the same "N of M families"
   // fact twice (once in German, once in English) and the skill printed both.
-  coverageNotes.push(`Konsens-Basis reduziert: ${familiesLost.map(lostCallsPhrase).join(', ')} lieferte nichts — ${familiesPresent.length} von ${familiesExpected.length} Modellfamilien haben reviewt, "Konsens" heißt in diesem Lauf Übereinstimmung von ${familiesPresent.join(', ')}.`)
+  coverageNotes.push(`Konsens-Basis reduziert: ${familiesLost.map(lostCallsPhrase).join(', ')} lieferte nichts — ${familiesPresent.length} von ${familiesExpected.length} Modellfamilien haben reviewt, "Konsens" heißt in diesem Lauf Übereinstimmung von ${independentFamilies(familiesPresent).join(', ') || 'keiner benannten Familie'}${familiesPresent.some((f) => !independentFamilies([f]).length) ? ' (unbekannte Hersteller zählen nicht)' : ''}.`)
 }
 // Scoped to actual LOSS, and worded for what happened. Gated on
 // `!consensusReachable` alone this fired on a stock Claude-only install — where
@@ -1278,10 +1324,12 @@ if (familiesLost.length) {
 // a review that ran exactly as configured was reported as degraded, in the one
 // English sentence of an otherwise German block. Same mis-scoping the header one
 // branch up was fixed for in 0.10.6.
-if (!consensusReachable && familiesExpected.length >= 2) {
+if (!consensusReachable && independentFamilies(familiesExpected).length >= 2) {
   coverageNotes.push(`Weniger als 2 Modellfamilien haben geliefert — kein Finding in diesem Lauf kann Konsens erreichen; jedes fällt auf solo + adversarialen Verifier zurück.`)
 } else if (!consensusReachable) {
-  coverageNotes.push(`Nur eine Modellfamilie (${familiesPresent.join(', ')}) ist in diesem Lauf konfiguriert — Konsens ist per Definition nicht anwendbar; jedes Finding läuft über solo + adversarialen Verifier.`)
+  // Name the unknown families apart: they took part, they just cannot pair.
+  const unknownPresent = familiesPresent.filter((f) => !independentFamilies([f]).length)
+  coverageNotes.push(`Nur eine benannte Modellfamilie (${independentFamilies(familiesPresent).join(', ') || 'keine'}) ist in diesem Lauf konfiguriert${unknownPresent.length ? ` (dazu ${unknownPresent.join(', ')} — Hersteller unbekannt, zählt nicht für Konsens)` : ''} — Konsens ist per Definition nicht anwendbar; jedes Finding läuft über solo + adversarialen Verifier.`)
 } else if (unitsDegraded.length) {
   coverageNotes.push(`Cluster ${unitsDegraded.join(', ')}: weniger als 2 Familien haben geliefert — Findings DORT fallen auf solo + Verifier zurück. Die übrigen Cluster sind unberührt.`)
 }
@@ -1310,6 +1358,14 @@ if (consensusReachable && unitsDegraded.length) {
   log(`Cluster coverage: ${unitsDegraded.join(', ')} had fewer than 2 families return — findings there cannot reach consensus and fall back to solo + verifier`)
 }
 // swarm-test-region-end
+// A requested voice no backend definition matched (a cc-harness voice whose
+// args.harness entry is missing — e.g. a stale token reused across rounds) was
+// never planned, so it reaches no family tally. Say so instead of dropping it.
+const unmatchedVoices = wantVoices.filter((v) => !EXTERNAL_BACKENDS.some((b) => b.backend === v))
+if (unmatchedVoices.length) {
+  log(`Voices DROPPED, no backend definition: ${unmatchedVoices.join(', ')}`)
+  coverageNotes.push(`${unmatchedVoices.join(', ')} hat in diesem Lauf NICHT reviewt: keine Backend-Definition (für cc-harness fehlt der Eintrag in args.harness — harness= und voices= müssen aus demselben Prep-Schritt stammen).`)
+}
 // Outside the test region on purpose: it depends on run-level state (GROK_DROPPED),
 // not on the voice results the region is lifted out to be tested against.
 if (CODEX_DROPPED) coverageNotes.push('codex hat in diesem Lauf NICHT reviewt: für den Lauf konnte kein konkretes Codex-Modell festgelegt werden (Grund: CODEX_DEGRADED aus dem Prep-Schritt). Es wurde bewusst kein anderes Modell ersatzweise gestartet.')
@@ -1424,8 +1480,8 @@ if (pool.length > 0) {
       lens = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0] || 'unspecified'
     }
     // Consensus requires >=2 distinct FAMILIES (see FAMILY: same-vendor voices
-    // count once; Claude's many lens voices are one family, not a quorum).
-    return { ...c, lens, member_indices: members, backends, families, kind, untaggedOnly, consensus: families.length >= 2 ? 'CONFIRMED' : 'solo' }
+    // count once; the many lens voices are one family — the session model's — not a quorum).
+    return { ...c, lens, member_indices: members, backends, families, kind, untaggedOnly, consensus: independentFamilies(families).length >= 2 ? 'CONFIRMED' : 'solo' }
   }).filter((c) => c.backends.length > 0)  // drop clusters whose member_indices all filtered out — no backing voice
 
   // Coverage guard: the merge agent can silently omit pool indices (dropping
@@ -1481,9 +1537,11 @@ const VERDICT_SCHEMA = {
 // externals while the lone Claude member tagged a DIFFERENT methodological lens
 // (`removed-behavior`) on an unrelated deletion in the same file; that Claude voice
 // never checked the cross-file claim, so grounding on "any Claude methodological
-// tag" would wave it through. Require the exact (family=claude, lens=c.lens) pair.
+// tag" would wave it through. Require the exact (in-session lens, lens=c.lens)
+// pair — keyed on backend === 'claude' (a lens that read the repo), not on the
+// family: under a proxied session that family is the session model's vendor.
 const claudeCheckedLens = (c) =>
-  (c.member_indices || []).some((i) => pool[i] && pool[i].family === 'claude' && pool[i].lens === c.lens)
+  (c.member_indices || []).some((i) => pool[i] && pool[i].backend === 'claude' && pool[i].lens === c.lens)
 // ONE verify/auto-accept predicate — the two lists below are derived as
 // filter(needsVerify) / filter(!needsVerify), so the exactly-once partition is
 // structural (a one-sided edit can't duplicate or drop a cluster). Verified:
@@ -1627,7 +1685,15 @@ findings.forEach((c, i) => { c.num = i + 1 })
 // and discovered Grok models have no concrete id here; telemetry has the latter.
 // grok's profile model is null by design and codex's names a family; the concrete
 // ids are the run's frozen ones.
-const MODEL_LABEL = { claude: PROFILE.stages.finder.model || 'session', codex: CODEX_RUN.model || 'codex', grok: GROK_RUN.model || 'grok', kimi: PROFILE.externals.kimi.model }
+// The lens label names the session model when the adapter could read it, never
+// a guessed one (`session` otherwise) — the same SESSION answer the family uses.
+const MODEL_LABEL = { claude: PROFILE.stages.finder.model || SESSION.model || 'session', codex: CODEX_RUN.model || 'codex', grok: GROK_RUN.model || 'grok', kimi: PROFILE.externals.kimi.model }
+// A harness voice routed to the session's own model would print the lens label
+// twice (`gpt-6.1-sol×5 · gpt-6.1-sol×5`); only then it carries a suffix.
+for (const [id, h] of Object.entries(HARNESS)) {
+  const label = h.model || `cc-harness:${id}`
+  MODEL_LABEL[`cc-harness:${id}`] = Object.values(MODEL_LABEL).includes(label) ? `${label}@cc-harness` : label
+}
 const agents = {}
 for (const v of voices) {
   const a = agents[v.backend] || (agents[v.backend] = { backend: v.backend, model: MODEL_LABEL[v.backend] || v.backend, voices: 0, failedVoices: 0, findings: 0, ok: true })

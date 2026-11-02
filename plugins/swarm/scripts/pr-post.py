@@ -71,7 +71,7 @@ import tempfile
 GH_TIMEOUT = 60  # seconds for any single gh call
 
 _AGENT_LABELS = {
-    "claude": "Claude lenses",
+    "claude": "session-model lenses",
     "codex": "codex",
     "grok": "grok",
     "kimi": "kimi",

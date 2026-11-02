@@ -13,8 +13,9 @@ Complementary to [pr-flow](../pr-flow/): pr-flow drives the GitHub-PR
 ## Status
 
 **Phase 5 of 6** — the pipeline can now **act**. `/swarm:review` fans a diff
-across up to four model families (Claude lenses + `codex` + `grok`, plus
-`kimi` when opted in), each running one call per gated lens cluster, merges by mechanism, verifies solo
+across up to four model families (lenses on the session model + `codex` +
+`grok`, plus `kimi` when opted in — or `cc-harness:<id>` voices in place of
+codex/grok on a host with a gateway helper), each running one call per gated lens cluster, merges by mechanism, verifies solo
 findings + design suggestions, presents one ranked report, and — with `--fix` /
 `--loop` — applies the findings you agreed with.
 
@@ -94,7 +95,7 @@ observations, reproducible inputs and measurement limits.
 ## The pipeline (`/swarm:review`)
 
 ```
-Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok ∥ kimi)
+Scope+gate → Fan-out (session-model lenses ∥ codex|cc-harness:sol ∥ grok|cc-harness:grok ∥ kimi)
           → Merge (file, mechanism) → Verify (solos + design + unverified consensus) → Ranked synthesis
 ```
 
@@ -140,9 +141,11 @@ longest single call drops 374 s → 313 s, and total work rises.
 Design-lens findings carry `kind: "design"` and render in their own report
 section, so suggestions never dilute the defect ranking.
 
-**Consensus counts model *families*, not voices.** Several Claude lenses
+**Consensus counts model *families*, not voices.** Several lenses
 flagging the same thing is one vote, not a cross-check — a `CONSENSUS` tag
-requires ≥2 of *claude / openai / grok / moonshot*. Everything else is a solo and earns
+requires ≥2 of *claude / openai / grok / moonshot*, where the lenses count as
+the session model's family (see [cc-harness voices](#cc-harness-voices-and-proxy-driven-sessions))
+and an `unknown:*` family never pairs. Everything else is a solo and earns
 its place through the verifier. Only **tagged topical-defect** consensus is
 auto-accepted; design, all-untagged, and Claude-unchecked methodological
 consensus still go through the verifier (agreement isn't repo-grounded
@@ -227,7 +230,12 @@ agents.sh config              # resolved numeric config (caps, timeouts,
                               # probe budget) — the ONE parser; the review
                               # skill reads these instead of re-deriving them
 agents.sh jail                # jail=yes|no — will read+web be granted? (working
-                              # OS sandbox AND a resolvable repo root)
+                              # OS sandbox AND a resolvable repo root; a `no`
+                              # names its reason on stderr)
+agents.sh session             # model=<id>;family=<f> of the session's lens model
+                              # (env only — a /model switch is invisible here)
+agents.sh voices              # stdin: list --json → voices=/harness=/replaced=
+                              # (the run's external voices; see cc-harness below)
 agents.sh run <backend> [--prompt-file f] [--lens-instr s --lens-instr-sum hex]
                         [--effort E] [--model M] [--schema f]
                         [--tools true|false] [--tool-budget N]
@@ -251,6 +259,7 @@ Backends:
 | `claude` | probe-only | reviews run in-session via the Agent tool |
 | `codex` | external reviewer | `codex exec -s danger-full-access --ignore-user-config --ignore-rules -C <repo> -c tools.web_search=true --output-schema` under the OS jail (its own seatbelt cannot nest inside it; `-s read-only` is kept only on a jail-less host), profile-selected family — newest listed Sol (`low`/`medium`) or Astra (`medium`), resolved once per run by `codex-select.py` — prompt on stdin (`-- -`); shell + file-read + web; auth via `codex login status`, selected-model catalog check via bounded `codex-models.py` |
 | `grok` | external reviewer | headless `--prompt-file` with inline `--json-schema`; the model is **selected per run** — the newest canonical `grok-4.x/5.x` the CLI offers whose `--json-schema` enforcement was *measured* (see [Grok model selection](#grok-model-selection)), never a hand-maintained version list and never a silent upgrade to an unmeasured model. Strict `--tools` allowlist (`read_file,list_dir,grep,run_terminal_command,web_search,web_fetch`) + `--permission-mode dontAsk` + `--deny` prefix rules (egress/destructive verbs) + `--cwd <repo>`, run from an ephemeral HOME/GROK_HOME with only `auth.json` linked — the OS jail's inverted write model makes the shell read-only in effect. Readiness is model-aware: auth, `--prompt-file` support, **and** a selectable model. `ready` answers usable/not-usable plus a hint — it does **not** say which model runs; `agents.sh grok-model` does, and the review freezes that id onto every grok voice (it also appears in each call's telemetry line). |
+| `cc-harness:<id>` | external reviewer | headless `claude -p` through the PATH helper `cc-harness-agents exec <id>` (contract: work-system `docs/cc-harness-agents.md`), which routes it to a gateway model (`sol` → gpt-*-sol, `grok` → grok-*). Listed only when the helper is on PATH and lists the id; ready = the helper's `available=yes` plus a `claude` **executable** (a shell-function `claude` cannot be exec'd). Runs from an ephemeral `CLAUDE_CONFIG_DIR` and an empty cwd (no user/project settings, hooks, plugins, MCP or CLAUDE.md — not `--bare`, which refuses the helper's `ANTHROPIC_AUTH_TOKEN`), `--tools Read,Grep,Glob` with the repo via `--add-dir` (no shell, no web), `--json-schema` → `structured_output`, prompt on stdin. Jail-less → tool-less on the inlined diff. Its family is its routed model's, so `cc-harness:sol` and native codex are one family. |
 | `kimi` | external reviewer | ACP v1 over stdio (`kimi acp`), pinned to `kimi-code/k3-256k`; the complete prompt is an ACP content block, not argv. Isolated HOME/KIMI_CODE_HOME that links the host's `credentials/`+`oauth/` (links, not a copy — Moonshot rotates refresh tokens, so a refresh must land on the host file) and carries a filtered config projection. The client advertises no FS/terminal capability and approves only allowlisted read-only shell commands once and rejects every other permission request (defense-in-depth); repository immutability is OS-enforced. Invalid output or policy/protocol drift is a visible backend error, never an empty review. Requires auth, ACP, the pinned model, and a working OS jail. |
 
 Codex's `model/list` is an **advisory picker catalog**, not proof of generation
@@ -409,6 +418,37 @@ Severity is one of `critical | warning | minor`; confidence one of
 
 `failure_scenario` is required and must be falsifiable — it is what the
 verifier tests in the confidence phase.
+
+### cc-harness voices and proxy-driven sessions
+
+The lens, merge and verify subagents inherit the **session** model. In a session
+started as `claude --proxy <id>` (or under `cc-harness-agents exec`), the lenses
+therefore run on the routed model, and the review's family accounting follows
+it: `agents.sh session` reads `CLAUDE_CODE_SUBAGENT_MODEL`/`ANTHROPIC_MODEL`
+and maps the id (gpt-* → openai, grok-* → grok, claude/opus/sonnet/haiku →
+claude); an unknown model is `unknown:session`, which never counts toward
+consensus. The `haiku` pins of the gate and transport stages resolve through the
+helper's `ANTHROPIC_DEFAULT_HAIKU_MODEL` mapping.
+
+When `cc-harness-agents` is on PATH, `agents.sh voices` puts each live id of
+`SWARM_HARNESS_VOICES` (default `sol grok`) in place of the native CLI of the
+same family — never both, they are one vendor. An id that is not live leaves its
+native in place; `SWARM_HARNESS=off` keeps the natives only. A host with no
+external voice at all still runs a lens-only review (one family, so every
+finding goes through the verifier); that path needs no `bwrap`.
+
+**Linux host checklist** (e.g. a headless ARM64 server): `python3`, `git`, `gh`,
+`jq`, coreutils `timeout`, util-linux `column`; a **writable working directory**
+(the workflow is staged under cwd); the Workflow tool in that Claude Code; and,
+for jailed read access, `bwrap` with working unprivileged user namespaces —
+check with `agents.sh jail` **from inside the checkout** (outside one it
+answers `jail=no` and says so). A helper in `~/.local/bin` is not on PATH in a
+non-interactive ssh shell. The 600 s per-call ceiling still applies; prefer
+`--quick` for large diffs. The jail denies the gateway's credentials
+(`~/.cli-proxy-api`) and cc-router's config (`~/.config/cc-router`, where the
+helper keeps its client token) to every voice; a helper that stores its token
+elsewhere needs `SWARM_DENY_PATHS`. A harness voice's own routing token lives in
+its env: its settings deny `Read(//proc/**)`, and the scrub redacts `*_TOKEN=`.
 
 ## Requirements
 

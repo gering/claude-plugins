@@ -64,31 +64,22 @@ def region(name):
     return body.split(end, 1)[0]
 
 
-@functools.lru_cache(maxsize=None)
-def family_map():
-    """Reuse the real FAMILY map instead of copying it into the test."""
-    text = _source()
-    # Line-break tolerant, like test_backend_sync.py's extractor: pinning the
-    # map to ONE line meant a cosmetic wrap would fail CI for no real reason.
-    m = re.search(r"const FAMILY = \{[^}]+\}", text)
-    if not m:
-        sys.exit(
-            f"FATAL: could not find the one-line `const FAMILY = {{...}}` in "
-            f"{SOURCE.name}. A copy in this test would silently drift from it, "
-            "so update this extractor instead of hardcoding the map."
-        )
-    return m.group(0)
+def family_map(inp=None):
+    """Reuse the real family resolution (FAMILY + session/harness parsing)
+    instead of copying it into the test. `inp` stands in for the workflow's
+    INPUT (args.session / args.harness); None = an older caller with neither."""
+    return f"const INPUT = {json.dumps(inp or {})}\n" + region("family")
 
 
 # --- harness -----------------------------------------------------------------
 
 
-def run(planned, settled, run_claude=True, live_externals=()):
+def run(planned, settled, run_claude=True, live_externals=(), inp=None):
     """Execute the extracted accounting against synthetic voices."""
     prelude = f"""
 const logs = []
 const log = (m) => logs.push(String(m))
-{family_map()}
+{family_map(inp)}
 const runClaude = {json.dumps(run_claude)}
 const liveExternals = {json.dumps([{"backend": b} for b in live_externals])}
 const plannedVoices = {json.dumps(planned)}
@@ -467,6 +458,46 @@ def case_mapping_fails_closed():
         fail("mapping", "a genuine empty review was misreported as a failure")
 
 
+def case_family_follows_the_session_model():
+    """Under `claude --proxy sol` the lenses ARE OpenAI: lenses + codex is one
+    family (no consensus), lenses + a grok-routed harness voice is two."""
+    planned = [voice("claude", c) for c in CLUSTERS] + [voice("codex", c) for c in CLUSTERS]
+    settled = [ok_result("claude", c, 1) for c in CLUSTERS] + [ok_result("codex", c, 1) for c in CLUSTERS]
+    out = run(planned, settled, live_externals=["codex"],
+              inp={"session": "model=gpt-6.1-sol;family=openai"})
+    if out["familiesExpected"] != ["openai"]:
+        fail("session-family", f"sol lenses + codex expected one family, got {out['familiesExpected']!r}")
+    if out["consensusReachable"]:
+        fail("session-family", "sol lenses + codex reported consensus as reachable")
+
+    h = "cc-harness:grok"
+    planned = [voice("claude", c) for c in CLUSTERS] + [voice(h, c) for c in CLUSTERS]
+    settled = [ok_result("claude", c, 1) for c in CLUSTERS] + [ok_result(h, c, 1) for c in CLUSTERS]
+    out = run(planned, settled, live_externals=[h],
+              inp={"session": "model=gpt-6.1-sol;family=openai", "harness": "grok=grok,grok-4.7"})
+    if out["familiesExpected"] != ["grok", "openai"] or not out["consensusReachable"]:
+        fail("session-family", f"sol lenses + harness grok must be two families: {out['familiesExpected']!r}")
+
+    # A harness voice the token does not describe, and an unknown session model,
+    # are `unknown:*` — present, but never a consensus partner.
+    planned = [voice("claude", c) for c in CLUSTERS] + [voice("codex", c) for c in CLUSTERS]
+    settled = [ok_result("claude", c, 1) for c in CLUSTERS] + [ok_result("codex", c, 1) for c in CLUSTERS]
+    out = run(planned, settled, live_externals=["codex"],
+              inp={"session": "model=mystery-9;family=unknown:session"})
+    if "unknown:session" not in out["familiesPresent"] or out["consensusReachable"]:
+        fail("session-family", f"unknown session family paired for consensus: {out!r}")
+    note = " ".join(out["coverageNotes"])
+    if "Nur eine benannte Modellfamilie (openai)" not in note or "unknown:session" not in note:
+        fail("session-family", f"the one-family note must name only openai and list the unknown apart: {note!r}")
+    if out["unitsDegraded"] or any("reduziert" in n for n in out["coverageNotes"]):
+        fail("session-family", f"an unknown family read as a degraded run: {out['coverageNotes']!r}")
+
+    # No session token (an older caller) keeps the historical claude family.
+    out = run(planned, settled, live_externals=["codex"])
+    if out["familiesExpected"] != ["claude", "openai"]:
+        fail("session-family", f"no session token must stay claude: {out['familiesExpected']!r}")
+
+
 def main():
     if not SOURCE.exists():
         sys.exit(f"FATAL: {SOURCE} not found")
@@ -482,6 +513,7 @@ def main():
         case_healthy_run_is_quiet,
         case_claude_only_is_quiet,
         case_identity_mismatch_fails_closed,
+        case_family_follows_the_session_model,
     ):
         case()
     if failures:

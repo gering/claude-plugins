@@ -1,15 +1,16 @@
 ---
 name: review
 description: |
-  Local mixture-of-agents review: Claude lenses, codex, grok, opt-in kimi; one
-  ranked report. --fix/--loop applies agreed findings; --pr posts to a PR.
+  Local mixture-of-agents review: lenses plus codex/grok/kimi or cc-harness
+  voices; one ranked report. --fix/--loop applies agreed findings; --pr posts to a PR.
   Trigger: "swarm review", "review my changes", "review this PR".
 user_invocable: true
 ---
 
 # Swarm Review
 
-> Fan one code review across Claude lenses + codex + grok + kimi, merge by
+> Fan one code review across lenses on the session model + external voices
+> (codex, grok, kimi, or cc-harness voices routed through a gateway), merge by
 > mechanism, verify solos + design clusters, and present one ranked report.
 
 ## Arguments
@@ -82,6 +83,7 @@ called "session" or "discovered" is sent.
 | externals.grok | `[null,"low",true,8]` | `[null,"medium",true,8]` | `[null,"medium",true,8]` |
 | externals.grok.clusterEffort | `null` | `{"breakage":"low","threat":"low"}` | `{"breakage":"low","threat":"low"}` |
 | externals.kimi | `["kimi-code/k3-256k","low",false,0]` | `["kimi-code/k3-256k","low",true,8]` | `["kimi-code/k3-256k","high",true,8]` |
+| externals.cc-harness | `[null,"low",true,8]` | `[null,"medium",true,8]` | `[null,"medium",true,8]` |
 <!-- END SWARM PROFILE TABLE -->
 
 Positive tool budgets are **advisory**, not hard limits or longer deadlines.
@@ -544,7 +546,17 @@ echo "CODEX_DEGRADED=$CODEX_DEGRADED"
 # pays for a probe itself — on an oversize diff grok-model was skipped, and
 # readiness in `ensure` mode would have bought the probes anyway. Codex
 # readiness is judged on the concrete model just selected.
-echo "LIVE_JSON=$(SWARM_GROK_PROBE=0 bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json --codex-model "$CODEX_MODEL" | tr -d '\n')"
+LIVE_JSON="$(SWARM_GROK_PROBE=0 bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" list --json --codex-model "$CODEX_MODEL" | tr -d '\n')"
+echo "LIVE_JSON=$LIVE_JSON"
+# The run's voices, decided by the adapter (not re-derived here): live natives,
+# with each live cc-harness voice replacing the native of its family
+# (SWARM_HARNESS=off keeps the natives). Prints voices=, harness=, replaced=.
+if ! VOICES_KV="$(printf '%s\n' "$LIVE_JSON" | bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" voices 2>&1)"; then
+  echo "SWARM_PREP_ERR=voices: $VOICES_KV"; rm -rf "$TMPD" "$WORKDIR"; exit 1
+fi
+printf '%s\n' "$VOICES_KV"
+# The lens side's model + family (the session model every lens inherits).
+echo "SESSION_RUN=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" session)"
 ```
 
 - `SWARM_PROFILE_ERR=…` → surface the error and **stop**; never substitute another
@@ -583,14 +595,20 @@ echo "LIVE_JSON=$(SWARM_GROK_PROBE=0 bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.
   the second-order fence can't be provisioned on this host and stop.
 - `SWARM_WARN=…` → surface that line: the scope narrowed to uncommitted changes
   because no default-branch ancestor was found. Then continue.
-- From `LIVE_JSON` build `externalVoices`: include each of `"codex"`, `"grok"`,
+- `externalVoices` is the `voices=` line split on commas (empty → `[]`) —
+  copy it, never re-derive it. The adapter's rule: each of `"codex"`, `"grok"`,
   `"kimi"` iff that backend is `available && ready` — the same rule for all
-  three. Kimi's readiness already includes the opt-in (`--kimi` / `SWARM_KIMI=1`;
+  three — and, when `cc-harness-agents` is on PATH, each live `cc-harness:<id>`
+  of `SWARM_HARNESS_VOICES` (default `sol grok`) REPLACES the native of its
+  family. Name every `replaced=` pair once (e.g. "codex → cc-harness:sol, routed
+  via the gateway"); `SWARM_HARNESS=off` keeps the native CLIs. A native named in
+  `replaced=` is NOT absent: skip its model announcement below and never relay
+  its `CODEX_DEGRADED`/`GROK_DEGRADED` as a reason it did not run. Kimi's readiness already includes the opt-in (`--kimi` / `SWARM_KIMI=1`;
   without it the hint says "opt-in only") and the OS jail (its ACP transport
   keeps read/web enabled and has no safe jail-less fallback, so the adapter
   reports it not-ready with a jail hint instead of failing once per cluster);
   do not re-derive either from the flags or `JAIL` here. If none are live, the
-  review runs with the Claude lenses alone — say so. When Kimi is installed but
+  review runs with the lenses alone — say so. When Kimi is installed but
   not opted in, mention once that `--kimi` adds the fourth family. Surface every
   nonempty readiness `hint`, **including rows with `ready=true`**: an unverified
   selected Codex model may proceed on auth-only readiness, never silently.
@@ -622,7 +640,7 @@ echo "LIVE_JSON=$(SWARM_GROK_PROBE=0 bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.
   to measure a new model (up to two bounded 45 s probes): run it with a Bash
   timeout of at least 300000 ms.
 - **Oversize** — `EXTERNALS_OVERSIZE=1` means the diff cannot clear the adapter's
-  per-call cap: set `externalVoices` to `[]` (Claude-lens-only review), tell the
+  per-call cap: set `externalVoices` to `[]` (lens-only review), tell the
   user the external backends were skipped as *prompt too large*, and suggest
   narrowing the range (or raising `SWARM_MAX_PROMPT_BYTES`). Do NOT pass live
   voices the adapter would only reject — one clean skip beats N per-call backend
@@ -656,7 +674,9 @@ Workflow({
     codex: "<CODEX_RUN>",
     grok: "<GROK_RUN>",
     profile: "<PROFILE>",
-    externalVoices: [<the live voices from step 1>]
+    session: "<SESSION_RUN>",
+    harness: "<the harness= value>",
+    externalVoices: [<the voices= list from step 1>]
   }
 })
 ```
@@ -679,10 +699,15 @@ carry them.** `<CODEX_RUN>` and `<GROK_RUN>` follow the same rule: one verbatim
 token each, which the workflow turns into an explicit `--model` on every voice of
 that backend, so the whole run uses ONE concrete model per backend. **A run keeps
 its models:** on a Workflow resume (`resumeFromRunId`) and in `--loop` rounds ≥ 2,
-pass the `CODEX_RUN` and `GROK_RUN` tokens of the run's FIRST prep block, not
+pass the `CODEX_RUN`, `GROK_RUN`, `SESSION_RUN` and `harness=` tokens of the run's FIRST prep block (and drop a `cc-harness:<id>` voice that first `harness=` does not name), not
 newer ones — a model released mid-run must not split one review across two
 models or generations (if a backend is no longer live, drop the voice as usual).
-Copy `profile: "<PROFILE>"` from the prep output on EVERY
+`session` and `harness` are verbatim tokens too (an empty `harness=` value is
+`""`): the workflow derives the lens side's consensus family from `SESSION_RUN`
+— under `claude --proxy sol` the lenses are an OpenAI model, so their agreement
+with a codex or `cc-harness:sol` voice is ONE family, not consensus. Announce the
+lens model from `SESSION_RUN` (`model=` empty → "lenses on the session model",
+never a guessed name). Copy `profile: "<PROFILE>"` from the prep output on EVERY
 invocation (including default); never pass legacy `max`. Announce the selected
 profile and the resolved Codex model from `CODEX_RUN`, not a guessed model.
 Add `claude: false` to `args`
@@ -692,15 +717,17 @@ When external voices are live, **once per run** (no per-query nag) announce
 the posture — branch on the step-1 `JAIL` value, never claim capabilities the
 degrade stripped:
 - `JAIL=jail=yes` → note that web research is enabled subject to each backend's
-  profile policy (Quick Kimi is diff-only), and that the egress
+  profile policy (Quick Kimi is diff-only; cc-harness voices read the repo but
+  have no web or shell), and that the egress
   policy (no repo content in queries) and the OS secret-jail are active — the
   jail auto-denies root-level `.env*`/`data/`/key files (reviewed root AND, in
   a linked worktree, the main checkout); nested secrets need `SWARM_DENY_PATHS`.
 - `JAIL=jail=no` → warn that no working OS sandbox exists on this host, so the
   externals run **degraded, fail closed**: grok tool-less/no-web, codex with
   web hard-off (its FS reads stay inside codex's own read-only sandbox — the
-  0.5.x read surface), and Kimi omitted entirely because ACP has no safe inline
-  prompt/tool-less fallback. This warning is the audible half of the fail-closed
+  0.5.x read surface), cc-harness voices tool-less on the inlined diff, and
+  Kimi omitted entirely because ACP has no safe inline prompt/tool-less
+  fallback. This warning is the audible half of the fail-closed
   contract — never omit it.
 The workflow runs in the background for several minutes — **tell the user they
 can watch live progress with `/workflows`** while it runs. It returns
@@ -759,8 +786,8 @@ here in German. Do not translate finding content.)
 - **Ort** — `` `file:line` `` in backticks.
 - **Befund** — one short clause, **≤ ~40 chars** (hard budget); no emoji here.
 - **Quelle** — who raised it + ensemble confidence, folded into one cell: the
-  labels from `balance.agents[].model` (session inheritance is displayed as
-  `session`, never a guessed model), dot-joined, then a confidence glyph — **`✓` = CONFIRMED ·
+  labels from `balance.agents[].model` (the lenses show the session model
+  `agents.sh session` named, else `session` — never a guessed model), dot-joined, then a confidence glyph — **`✓` = CONFIRMED ·
   `~` = PLAUSIBLE**
   (e.g. `session·grok ✓`, `gpt ~`). Never the backend names / single letters. A
   single-source review (no ensemble) omits this column.
@@ -775,7 +802,7 @@ Then the balance block (ALWAYS, this shape), from `balance`:
 
 ```
 Bilanz:  <total> Findings (🔴<c> 🟡<w> ⚪<m> · <design> Design) · Konsens <consensus> · Solo <solo> · REFUTED <refuted> · Verdict ✅<a> 🟨<p> ❌<d>
-Agents:  <model> <findings> · …   (from balance.agents; EVERY backend is multi-voice — one call per gated cluster, per lens under --max. Render each backend's voice count so the topology is honest, e.g. `session×5 7 · gpt-5.6-sol×5 3 · grok×5 5 · kimi-code/k3-256k×2 4`; claude runs in-session, codex/grok/kimi through the adapter. When `failedVoices > 0`, append `(<failedVoices> ohne Ergebnis)` to THAT backend — `grok×5 0` alone reads as "reviewed, found nothing", which is exactly the sentence three silent runs printed while most of their calls were being denied.)
+Agents:  <model> <findings> · …   (from balance.agents; EVERY backend is multi-voice — one call per gated cluster, per lens under --max. Render each backend's voice count so the topology is honest, e.g. `session×5 7 · gpt-5.6-sol×5 3 · grok×5 5 · kimi-code/k3-256k×2 4`; claude (the session-model lenses) runs in-session, codex/grok/kimi/cc-harness voices through the adapter. When `failedVoices > 0`, append `(<failedVoices> ohne Ergebnis)` to THAT backend — `grok×5 0` alone reads as "reviewed, found nothing", which is exactly the sentence three silent runs printed while most of their calls were being denied.)
 Lenses:  <gate.run joined>  —  gated-out: <gate.skip lenses>
 Grok:    <balance.grokModel.model> (<balance.grokModel.source>)   (ONLY when balance.grokModel is non-null. When `source` is not `latest`, or `latest` differs from `model`, append ` — latest on offer: <balance.grokModel.latest>`; "grok×5" alone never says WHICH model reviewed, and a fallback/pinned model must not read as the newest. When `balance.grokDropped` is true print instead: `Grok:    nicht gelaufen — kein Modell festlegbar`; the coverage note carries the reason.)
 ```
@@ -1176,15 +1203,28 @@ post. Do **not** re-implement the sanitize/gate/post logic inline.
   applicability prompt (reuse target real? simpler form behavior-identical?)
   and rendered in their own report section, apart from the defect ranking.
 - **Consensus = cross-family agreement** (≥2 of claude / openai / grok / moonshot). Voices
-  from one vendor count once — Claude's lens voices agreeing with each other is
-  one family, not a quorum — so solos go through the adversarial verifier.
+  from one vendor count once — the lens voices agreeing with each other is
+  one family, not a quorum — so solos go through the adversarial verifier. The
+  lens family is the SESSION model's (`agents.sh session`): under
+  `claude --proxy sol` it is openai, the same as codex or `cc-harness:sol`. An
+  unrecognized model is `unknown:*` and never counts toward consensus.
+- **cc-harness voices** (`cc-harness:<id>`, when the `cc-harness-agents` helper
+  is on PATH): a headless `claude -p` routed through the helper's gateway, from an
+  ephemeral config dir and an empty cwd, with `Read,Grep,Glob` only (no shell, no
+  web) and the repo via `--add-dir`; jail-less → tool-less on the inlined diff.
+  Default ids `sol grok` replace codex/grok (`SWARM_HARNESS_VOICES`,
+  `SWARM_HARNESS=off`). Their family comes from the routed model, so a
+  `cc-harness:sol` voice and a native codex never form consensus. A host with
+  no external CLI at all (e.g. a Linux server driven by `claude --proxy <id>`)
+  still runs a lens-only review — that path needs no `bwrap`.
   **Design clusters are applicability-verified even with consensus**: agreement
   attests agreement, not necessarily repo-grounded applicability. Only
   **tagged topical-defect** consensus is auto-accepted; all-untagged consensus and
   methodological-lens consensus not tagged by a Claude voice that checked the
   claim still go through the verifier.
 - **Security floor** (adapter + this pipeline): the diff is fenced as data;
-  external CLIs run **read+web** (except diff-only Quick Kimi) under an OS jail (HOME secret stores +
+  external CLIs run **read+web** (except diff-only Quick Kimi; cc-harness voices
+  get `Read`/`Grep`/`Glob` only — no shell, no web) under an OS jail (HOME secret stores +
   root-level `.env*`/`data/`/key/cred files denied — reviewed root AND, in a
   linked worktree, the main checkout; root-level only, nested secrets via
   `SWARM_DENY_PATHS`; writes denied everywhere except the scratch/temp dirs

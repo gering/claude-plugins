@@ -387,7 +387,7 @@ for _name, _path in (
     )
 check(
     "workflow: consensusReachable is the GLOBAL question only",
-    re.search(r"const consensusReachable = familiesPresent\.length >= 2\s*$", js, re.M),
+    re.search(r"const consensusReachable = independentFamilies\(familiesPresent\)\.length >= 2\s*$", js, re.M),
 )
 
 # Sharing the env knob means sharing its CONTRACT. The adapter refuses a
@@ -465,6 +465,7 @@ if mb and hr:
         ("unitsForBackend", r"const unitsForBackend = .*?\n\}"),
         ("unitBrief", r"const unitBrief = .*?(?=\n(?:const |//))"),
         ("lensInstr", r"const lensInstr = .*?(?=\n// Compile each voice)"),
+        ("shQuote", r"const shQuote = [^\n]*"),
     ):
         helper = re.search(pattern, js, re.S)
         check(f"workflow: {name} source found for exact headroom", helper)
@@ -472,7 +473,7 @@ if mb and hr:
             helpers.append(helper.group(0))
     registry = re.search(r"const EXTERNAL_BACKENDS = \[.*?\n\]", js, re.S)
     check("workflow: backend registry found for exact headroom", registry)
-    if len(helpers) == 6 and registry and shutil.which("node"):
+    if len(helpers) == 7 and registry and shutil.which("node"):
         program = "\n".join(helpers) + "\n" + r'''
 const PROFILES = JSON.parse(process.argv[1]);
 let PROFILE;
@@ -481,6 +482,8 @@ let PROFILE;
 const GROK_RUN = {model: 'grok-4.7'};
 const CODEX_RUN = {model: 'gpt-6-sol'};
 const GROK_FROZEN_ENV = '';
+// One live cc-harness voice, so its profile entry is measured too.
+const HARNESS = {sol: {family: 'openai', model: 'gpt-6.1-sol'}};
 const rows = [];
 for (const [name, profile] of Object.entries(PROFILES)) {
   PROFILE = profile;
@@ -498,7 +501,7 @@ console.log(JSON.stringify(rows));
                                 capture_output=True, text=True, timeout=10)
         check(f"workflow: exact headroom helpers execute ({result.stderr})", result.returncode == 0)
         rows = json.loads(result.stdout) if result.returncode == 0 else []
-        check("workflow: headroom covers all nine profile/backend pairs", len(rows) == 9)
+        check("workflow: headroom covers all twelve profile/backend pairs", len(rows) == 12)
         schema = HERE / "schema" / "finding.schema.json"
         for row in rows:
             shell = ('source "$1"; _kimi_output_contract "$2" "$3" "$4"' if row["backend"] == "kimi"
@@ -689,11 +692,11 @@ check(f"adapter: no function both prints and caches into a global ({_bad_memo})"
       not _bad_memo)
 
 check("adapter: SWARM_MAX_PROBES_PER_RUN is declared", _declared)
-check(f"adapter: pre-timer probe call sites still number 9 (got {_probe_sites}) — "
+check(f"adapter: pre-timer probe call sites still number 10 (got {_probe_sites}) — "
       f"if you added one, re-derive SWARM_MAX_PROBES_PER_RUN "
       f"(currently {_declared.group(1) if _declared else '?'}, the worst case for a "
       f"single backend) and update this pin",
-      _probe_sites == 9)
+      _probe_sites == 10)
 check("adapter: Codex catalog is one bounded helper call",
       re.search(r'_probe_or_bare python3 "\$SCRIPT_DIR/codex-models\.py" --timeout "\$_probe_timeout"', sh))
 check("adapter: the declared worst case covers auth/catalog/jail and grok/kimi probes",

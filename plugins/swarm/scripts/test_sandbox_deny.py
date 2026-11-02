@@ -1285,6 +1285,41 @@ print('cfg=' + cfg.read_text().replace(chr(10), ' | '))
             self.assertNotIn("sessions", info)
 
 
+@unittest.skipUnless(
+    _sandbox_exec_works() or shutil.which("bwrap") is not None,
+    "no OS sandbox wrapper here — the no-repo-root reason needs a working one",
+)
+class TestJailReason(unittest.TestCase):
+    """`agents.sh jail` names WHY it says no, on stderr only.
+
+    dev-1 (2026-11-01) reported `jail=no` with a working bwrap: the check had
+    run from $HOME over ssh, outside any git checkout. stdout must stay the one
+    line the review skill compares verbatim.
+    """
+
+    def _jail(self, cwd: Path):
+        return subprocess.run(["bash", str(AGENTS), "jail"], cwd=str(cwd),
+                              capture_output=True, text=True, timeout=60)
+
+    def test_outside_a_checkout_says_no_repo_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            r = self._jail(Path(td))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "jail=no\n")
+        if "not functional" in r.stderr:
+            self.skipTest("wrapper present but broken on this host")
+        self.assertIn("no git repository root", r.stderr)
+
+    def test_inside_a_checkout_is_silent_yes(self):
+        with tempfile.TemporaryDirectory() as td:
+            subprocess.run(["git", "init", "-q"], cwd=td, check=True)
+            r = self._jail(Path(td))
+        if "not functional" in r.stderr:
+            self.skipTest("wrapper present but broken on this host")
+        self.assertEqual(r.stdout, "jail=yes\n")
+        self.assertNotIn("reason:", r.stderr)
+
+
 if __name__ == "__main__":
     # unittest (deliberately diverging from the siblings' plain check()/FAILS
     # style): skipUnless cleanly gates the host-dependent sandbox-exec e2e.

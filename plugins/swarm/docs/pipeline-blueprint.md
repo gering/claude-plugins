@@ -18,15 +18,16 @@
 ## Pipeline shape (4 phases)
 
 ```
-Scope+gate → Fan-out (Claude lenses ∥ codex ∥ grok) → Merge (file,mechanism) → Verify solos → Synthesis
+Scope+gate → Fan-out (session-model lenses ∥ codex|cc-harness ∥ grok|cc-harness) → Merge (file,mechanism) → Verify solos → Synthesis
 ```
 
 1. **Scope + lens gating** — one cheap agent reads the diff, classifies the
    change kind, and decides which lenses are worth running (a lens that can't
    pay off is skipped → whole finder agents saved). Gated-out lenses are
    reported, never silently dropped.
-2. **Fan-out** — in parallel: one Claude finder per gated lens (reads the file
-   itself → real line numbers) **plus** codex and grok as full multi-lens
+2. **Fan-out** — in parallel: one finder per gated lens on the session model
+   (reads the file itself → real line numbers) **plus** codex and grok — or the
+   `cc-harness:<id>` voices that replace them — as full multi-lens
    reviews through the adapter (thin wrapper agents; workflow scripts have no
    Bash). All emit the shared `finding.schema.json`.
 3. **Merge** — an LLM merge step clusters the pooled findings by
@@ -54,7 +55,7 @@ export const meta = {
   description: 'Local mixture-of-agents review: scope+gate → fan-out → (file,mechanism) merge → verify solos → ranked synthesis.',
   phases: [
     { title: 'Scope', detail: 'classify diff + gate lenses' },
-    { title: 'Fan-out', detail: 'Claude lenses + codex + grok in parallel' },
+    { title: 'Fan-out', detail: 'session-model lenses + codex/grok (or their cc-harness voices) in parallel' },
     { title: 'Merge', detail: 'cluster by (file, mechanism)' },
     { title: 'Verify', detail: '3-state verify of solos' },
   ],

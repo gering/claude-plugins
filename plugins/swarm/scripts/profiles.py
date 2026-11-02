@@ -16,6 +16,9 @@ EFFORTS = {
     "codex": {"low", "medium", "high", "xhigh"},
     "grok": {"low", "medium", "high"},
     "kimi": {"low", "high", "max"},
+    # One entry for every cc-harness voice: `claude -p --effort` takes the full
+    # ladder whatever vendor the helper routes to.
+    "cc-harness": {"low", "medium", "high", "xhigh", "max"},
 }
 MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]*\Z")
 # Cluster names only; the workflow checks them against LENS_CLUSTERS at load.
@@ -57,7 +60,7 @@ def load_profiles(workflow: Path) -> dict:
         if profile["unit"] not in ("cluster", "lens"):
             raise ValueError(f"invalid unit in {name}")
         _keys(profile["stages"], STAGES)
-        _keys(profile["externals"], {"codex", "grok", "kimi"})
+        _keys(profile["externals"], {"codex", "grok", "kimi", "cc-harness"})
         for backend, config in [*(('stage', v) for v in profile["stages"].values()), *profile["externals"].items()]:
             keys = {"model", "effort"} if backend == "stage" else {"model", "effort", "tools", "toolBudget"}
             if backend == "codex":
@@ -73,8 +76,10 @@ def load_profiles(workflow: Path) -> dict:
             if backend == "codex" and config["family"] not in CODEX_FAMILIES:
                 raise ValueError(f"invalid codex family in {name}")
             model = config["model"]
+            if backend == "cc-harness" and model is not None:
+                raise ValueError(f"cc-harness model must be null in {name} (the helper routes the model)")
             if model is None:
-                if backend not in ("stage", "grok", "codex"):
+                if backend not in ("stage", "grok", "codex", "cc-harness"):
                     raise ValueError(f"{backend} requires an explicit model")
             elif not isinstance(model, str) or not MODEL.fullmatch(model):
                 raise ValueError(f"invalid model in {name}/{backend}")
