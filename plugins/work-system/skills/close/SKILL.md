@@ -656,7 +656,9 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
       nothing was closed. Show stderr and the open candidates, ask which issue this lane
       shipped, and close that one with the same call, `"#N"` (quoted) in place of the name
       and **without** `--name` (the user's confirmation replaces that check). Never
-      pick one yourself.
+      pick one yourself. Exit 3 on that retry (an issue without `work-system:task` after
+      `tasks.select` went back to `label`) closes nothing: say issue `#N` is still open and
+      the user closes it by hand.
     - **`backend=github`** → read `issue=` and `result=`: `closed` (closed with a comment naming
       the PR, or the manual-close note) or `already-closed` (not an error). There is no file to
       archive or commit: skip the rest of this step and report "issue #N closed" / "issue #N

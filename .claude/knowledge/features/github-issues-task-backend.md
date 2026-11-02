@@ -80,7 +80,7 @@ not in SKILL.md.
   accents dropped, because German titles would otherwise slug to `m-ll-…`.
 - **A closed marker-less issue is not found by name.** The closed-issue search
   is by marker. A re-close goes through the pin.
-- **`close` looks up by the mode alone, ignoring include/exclude.** The `#N`
+- **`close` looks up by the mode and include_labels, ignoring exclude.** The `#N`
   is TASK.md's pin or the issue the user confirmed, and `/close` reads exit 3 as
   "nothing to close": an exclude label added mid-lane must not leave the shipped
   issue open. The mode still counts (in label mode an unlabelled `#N` is no
@@ -89,7 +89,9 @@ not in SKILL.md.
   turns into a question, then closes the confirmed `#N` without `--name`. Review
   rounds tried two looser variants first: a slug-match exemption (a retitle
   plus an exclude label fell to exit 3) and ignoring the mode for `#N` (any bug
-  issue became closable). What stayed: lists never apply to close, and the mode
+  issue became closable). What stayed: exclude never applies to close (include
+  does: round 5 showed that without it, under `all-open`, a stranger's body
+  marker answers to a lane's name), and the mode
   is waived only for a `#N` whose name equals `--name` (the lane's own issue
   after a switch back to label mode); a `#N` answering to another name is exit
   5 (ask), and the user's pick then closes without `--name`.
@@ -104,7 +106,8 @@ not in SKILL.md.
   issue author can write a marker. Instead `create` and `migrate` give a new
   task issue the first include label (created when missing; if that label is
   also a gate label, every new task is gated, and `/adopt` asks like `/kickoff`). `create` checks name clashes against
-  every open issue (also excluded ones, naming the `#N`) and refuses with exit 2
+  every open issue the mode lists (also excluded or not-included ones, naming
+  the `#N`; in `label` mode unlabelled issues are not scanned) and refuses with exit 2
   (config, not a taken name) when `exclude_labels` holds the task label.
 - **`all-open` puts strangers' text into context.** Any reporter's title shows
   in `/list` and their body becomes TASK.md, and a marker in their body can

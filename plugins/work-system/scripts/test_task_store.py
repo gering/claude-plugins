@@ -908,7 +908,6 @@ with tempfile.TemporaryDirectory() as d:
     check("titles with nothing to slug get distinct names",
           sorted(l.split("\t")[0] for l in kv(e.run("list", str(e.repo)).stdout, "task"))
           == ["issue-4", "issue-5"])
-    e.setting('[tasks]\nexclude_labels = ["dependencies"]\n')
     e.gh_state(issues=[issue(1, "Marked", "body text <!-- work-system task: marked -->",
                              labels=["work-system:task", "dependencies"])])
     r = e.run("get", str(e.repo), "marked", "--body", "--identity")
@@ -917,6 +916,16 @@ with tempfile.TemporaryDirectory() as d:
     e.setting('[tasks]\ninclude_labels = ["needs,review"]\n')
     check("an include label gh would split is a config error (2)",
           e.run("create", str(e.repo), "new", "--body-file", str(e.root / "nope.md")).returncode == 2)
+    e.setting('[tasks]\ninclude_labels = ["work-system:archived"]\n')
+    check("the archived label as include label is a config error (2)",
+          e.run("create", str(e.repo), "new", "--body-file", str(e.root / "nope.md")).returncode == 2)
+    e.setting('[tasks]\nselect = "all-open"\ninclude_labels = ["accepted"]\n')
+    e.gh_state(issues=[issue(12, "Fix login", "<!-- work-system task: fix-login -->",
+                             labels=["accepted"]),
+                       issue(99, "Spoof", "<!-- work-system task: fix-login -->", labels=[])])
+    r = e.run("get", str(e.repo), "fix-login", "--identity")
+    check("the identity view keeps include_labels: a stranger's marker does not answer",
+          r.returncode == 0 and kv(r.stdout, "issue") == ["12"])
     e.setting('[tasks]\ninclude_labels = ["ws-ready"]\n')
     body = e.root / "b.md"
     body.write_text("# New\n")
@@ -935,13 +944,14 @@ with tempfile.TemporaryDirectory() as d:
     skips = dict(x.split("\t", 1) for x in kv(r.stdout, "skip"))
     check("migrate's name clash ignores the label lists",
           "already answers to fix-crash" in skips.get("open/fix-crash", ""))
-    check("migrate resumes an unlabelled marked issue under all-open instead of duplicating it",
-          "resume\topen/add-search\t#6\tAdd search" in kv(r.stdout, "item"))
+    check("migrate never resumes onto an unlabelled issue's marker under all-open (skips the name)",
+          "already answers to add-search" in dict(x.split("\t", 1) for x in kv(r.stdout, "skip"))
+          .get("open/add-search", ""))
     e.setting('[tasks]\nbackend = "local"\nselect = "all-open"\nexclude_labels = ["hide"]\n')
     e.gh_state(issues=[issue(6, "Search", "<!-- work-system task: add-search -->", labels=["hide"])])
     r = migrate(e, "--open-only")
     check("migrate never resumes onto an issue the filter hides",
-          "would not be listed" in dict(x.split("\t", 1) for x in kv(r.stdout, "skip")).get("open/add-search", ""))
+          "open/add-search" in dict(x.split("\t", 1) for x in kv(r.stdout, "skip")))
 
 if FAILS:
     print("FAIL test_task_store.py:")

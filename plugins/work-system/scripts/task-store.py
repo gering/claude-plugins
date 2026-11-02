@@ -6,7 +6,7 @@ Usage:
   task-store.py list    <dir>
   task-store.py get     <dir> <name|#N> [--write <path> [--allow-gated] | --body] [--identity]
                         (an issue ref needs the #; --identity: the lookup close
-                        uses, ignoring include/exclude_labels — a lane's own task;
+                        uses, ignoring exclude_labels — a lane's own task;
                         not with --write)
   task-store.py create  <dir> <name> --body-file <file> [--title <text>]
   task-store.py close   <dir> <name|#N> --branch <task-branch> [--pr <n>] [--sha <sha>]
@@ -143,10 +143,14 @@ def setting_list(main, key):
 
 def selection(main, lists=True):
     """Which issues are tasks, from [tasks] in .work-system.toml (the schema
-    defaults are the behavior before the setting existed). lists=False reads
-    only the mode: the identity view `close` needs, one settings read, not four."""
+    defaults are the behavior before the setting existed). lists=False is the
+    identity view lifecycle lookups need: exclude_labels dropped (one added
+    mid-lane must not make a lane's task "gone"), include_labels kept (under
+    all-open they are what keeps a stranger's body marker from answering to a
+    lane's name)."""
     if not lists:
-        return {"select": setting(main, "tasks.select"), "include": [], "exclude": [], "gate": []}
+        return {"select": setting(main, "tasks.select"),
+                "include": setting_list(main, "tasks.include_labels"), "exclude": [], "gate": []}
     return {"select": setting(main, "tasks.select"),
             "include": setting_list(main, "tasks.include_labels"),
             "exclude": setting_list(main, "tasks.exclude_labels"),
@@ -162,6 +166,9 @@ def task_labels(sel):
         if "," in l or l.startswith("-") or not l.strip():
             raise Fail(2, f"tasks.include_labels[0] = {l!r} cannot be added by gh "
                           "(comma, leading '-' or blank) — fix [tasks] in .work-system.toml")
+        if l.lower() == ARCHIVED_LABEL:
+            raise Fail(2, f"tasks.include_labels[0] = {l!r} would mark every new task "
+                          "archived (hidden) — fix [tasks] in .work-system.toml")
     return [LABEL] + sel["include"][:1]
 
 
@@ -173,7 +180,7 @@ def new_issue_hidden(sel):
 
 def ensure_task_labels(repo, sel):
     ensure_label(repo, LABEL, LABEL_COLOR, LABEL_DESC)
-    for extra in sel["include"][:1]:
+    for extra in task_labels(sel)[1:]:
         ensure_label(repo, extra, "ededed", "Selects work-system tasks (tasks.include_labels)")
 
 
@@ -862,13 +869,12 @@ def migrate_plan(main, repo, public, includes, open_only, sel):
         # Every open issue is a task there, whatever its labels: an unlabelled
         # one already answers to its marker or title slug, so creating that
         # name again would make it ambiguous. The REST index sees labelled ones
-        # only; this (search) list adds the rest, label lists not applied.
+        # only; this issue list adds the rest, label lists not applied. Their
+        # marker is never a resume target: any author can write one, so the
+        # name is only blocked (skip), never handed to a stranger's issue.
         seen = {i["number"] for v in by_key.values() for i in v}
         for i in live(gh_issues(repo, "open", dict(sel, include=[], exclude=[]))):
-            found = markers(i)
-            if found and i["number"] not in seen:
-                by_key.setdefault((found[-1], False), []).append(i)
-            elif not found:
+            if i["number"] not in seen:
                 unmarked_open.setdefault(issue_name(i), i)
 
     for it in items:
@@ -939,7 +945,7 @@ def migrate_plan(main, repo, public, includes, open_only, sel):
             # more than the issue is flagged, never written over it; it stays in
             # tasks/migrated/.
             # Adopt adds the task labels, so only what those cannot fix counts.
-            why = unselected(dict(iss, labels=iss.get("labels", []) +
+            why = unselected(dict(iss, labels=(iss.get("labels") or []) +
                                   [{"name": l} for l in task_labels(sel)]), sel)
             if why:
                 it.update(action="skip", reason=f"its tracking issue #{n} would not be listed "

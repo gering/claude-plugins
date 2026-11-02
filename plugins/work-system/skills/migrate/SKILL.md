@@ -46,6 +46,8 @@ is left in `tasks/`, the script sets `tasks.backend = "github"` in `.work-system
    python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" migrate "<main-repo>" [--open-only]
    ```
    Exit 4 → `gh` is missing/unauthenticated or origin is not on github.com: show stderr, stop.
+   Exit 2 → `[tasks]` in `.work-system.toml` would hide the migrated issues or names an
+   include label gh cannot add: show stderr (a config problem, not "nothing to do"), stop.
    Read `repo=`, `visibility=`, `tasks_tracked=`, `config_edit=` (only when the backend
    switch will need a hand edit), the `item=<action>\t<kind>/<name>\t<#N|new>\t<title>`
    lines, `skip=` reasons, `hit=<kind>/<name>\t<line>\t<pattern>` lines, the `count_*`,
@@ -67,10 +69,11 @@ is left in `tasks/`, the script sets `tasks.backend = "github"` in `.work-system
    commit itself comes after the run (step 6). Do not switch the main checkout's branch
    before the run: `/kickoff` branches new lanes from it.
 
-5. **The one confirmation.** Ask with `AskUserQuestion`, naming exactly: the number of issues
-   to publish (`publish=` counts creates; adopts add only labels (`work-system:task`, plus the first
-   include label) and the marker to an existing issue — name that label when set; plus how many `resume` items get finished), the target `repo`, and
-   its visibility; name every `differs=` adopt: the issue is adopted as written, so ask
+5. **The one confirmation.** Ask with `AskUserQuestion`, naming exactly: the number of new
+   issues (`publish=`); the number of adopts, which add only the labels and the marker to an
+   existing issue; the labels every create and adopt gets (`work-system:task`, plus the first
+   `[tasks] include_labels` entry when set); how many `resume` items get finished; the target
+   `repo`; and its visibility; name every `differs=` adopt: the issue is adopted as written, so ask
    whether that is fine or the user first copies what matters into the issue by hand (or
    drops the file's tracking line for an issue of its own), then re-run the dry run;
    for `visibility=public` say plainly that every published task becomes a
