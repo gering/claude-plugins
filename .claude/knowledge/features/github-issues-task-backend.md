@@ -1,20 +1,19 @@
 ---
 title: "GitHub Issues Task Backend (task-store.py)"
 createdAt: 2026-10-19
-updatedAt: 2026-10-19
+updatedAt: 2026-11-01
 createdFrom: "branch: task/github-issues-task-backend"
-pluginVersion: 1.25.0
+pluginVersion: 1.30.0
 prime: false
 ---
 
 # GitHub Issues Task Backend
 
 work-system's backlog is GitHub Issues by default; local `tasks/*.md` files are
-an explicit opt-in and the legacy state a later migration (follow-up task
-`migrate-tasks-to-github-issues`) converts; until then `auto` stays local
-while files exist. Every
+an explicit opt-in and the legacy state `/work-system:migrate` (`task-store.py migrate`)
+converts; until then `auto` stays local while files exist. Every
 skill reaches the backlog through `scripts/task-store.py` (`backend`, `list`,
-`get`, `create`, `close`, `ref`) — no skill names `tasks/` or calls `gh issue` for the
+`get`, `create`, `close`, `ref`, `migrate`) — no skill names `tasks/` or calls `gh issue` for the
 backlog. That follows the prose-drift lesson: stateful logic in a tested script,
 not in SKILL.md.
 
@@ -64,6 +63,47 @@ not in SKILL.md.
 - **Local `close` execs `archive-task.sh` unchanged** and passes its output
   through, so `/close`'s commit/push flow keeps reading the same keys.
 - **No caching layer.** Every call pays one `gh auth status` round trip.
+
+## Migration (`task-store.py migrate`)
+
+- **Identity is (marker, archived label)**, not the marker alone: an open and
+  an archived task may share a name. Open name lookup still prefers the open
+  issue, so the closed archived twin never shadows it.
+- **Resumable by construction:** the issue is written before the file moves,
+  and a written issue is found again by its marker (`resume`), so a create
+  whose reply was lost, a rate limit (exit 6) or a crash never duplicates.
+- **The confirmation is a plan hash.** The dry run prints `confirm=<token>`
+  over repo, visibility and every item (action, issue, file hash); `--apply`
+  refuses any other token. A script cannot tell who confirmed, but it can make
+  sure the run is exactly the plan the user saw; the skill owns "only the
+  user's answer counts".
+- **Adopt, don't duplicate:** a `Tracking issue: [owner/repo]#N` line makes the
+  existing issue the task (label + marker + file body, old text kept in a
+  `<details>` block); a closed tracking issue for an open task is a skip.
+- **The secret scan reports pattern + line, never the value.** Local paths
+  count only for public repos; `.local` etc. followed by `.ext` is a file name.
+- **The backend switch is a line edit, not `settings.py set`:** the settings
+  plugin is optional, cannot find an installed work-system's schema yet, and
+  rewrites the file without comments. The edit is re-parsed and must differ
+  from the old config in that one key, else it fails asking for a hand edit.
+- **Never commits:** a tracked `tasks/` is reported as `commit_needed=`.
+- **Resume checks state and shows content drift:** a closed issue for an open
+  file is a skip. A marker issue whose body no longer contains the file's text
+  is still resumed but flagged `differs=` — the review wanted a skip, but the
+  first real repo tried had 24 hand-curated issues newer than their
+  files, so a skip would block the common case; the file moves, never deleted,
+  so nothing is lost. Two files naming one tracking issue adopt neither.
+  Symlinks are never read.
+- **The migrate index is REST, not `gh issue list --label`:** gh routes a
+  label filter through the search API (verified with `GH_DEBUG=api`), which caps
+  at 1000 and lags behind a create — exactly what the no-duplicate resume relies
+  on. `gh api --paginate repos/<r>/issues?labels=…&state=all` is consistent.
+  (The plain `list`/`get` path still uses the search route; a residual.)
+- **Archived issues are history:** `list`/`get` ignore open issues carrying
+  `work-system:archived` (a run stopped between create and close leaves one),
+  and an archived file never adopts its open twin's issue.
+- **Partial runs:** while held-back files remain, `auto` stays local and the
+  migrated tasks are not listed — the cost of never splitting the backlog.
 
 ## Surfaces that cannot use the network
 

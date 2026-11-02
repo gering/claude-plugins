@@ -52,6 +52,9 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.30.0 — 2026-11-01
+- Add `/work-system:migrate` and `task-store.py migrate`: move a local backlog to GitHub Issues — open task files become open issues, archived ones closed issues (`work-system:archived`, stamp kept), a file naming an existing `Tracking issue: #N` adopts that issue instead of duplicating it. Dry run by default with a secret/private-detail scan (hits held back unless included; local paths only for public repos); the real run needs the dry run's `confirm=` token, so it runs exactly the confirmed plan. Paced writes, exit 6 on a rate limit, resumable via the slug marker. Files move to `tasks/migrated/` with an `issues.tsv` map; when `tasks/` is empty, `tasks.backend = "github"` is set in `.work-system.toml` (comments kept). Never commits.
+
 ### 1.29.2 — 2026-10-31
 - Faster, load-robust tests: `test_agent_registry.py` and `test_herdr_shell.py` write each distinct stub body once and link it (macOS assesses every new executable on first exec, which made these tests idle for minutes under parallel load); `test_insights_handoff.py` checks for temp-file leaks in a private `TMPDIR` and proves through a logging `mktemp` shim that the run made temp files there. `sessions.py` gets a test seam `SESSIONS_POLL_MS` (50–1000 ms; it can only shorten the 1 s reload-verify poll), used by `test_sessions.py`.
 
