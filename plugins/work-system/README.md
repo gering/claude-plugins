@@ -41,6 +41,7 @@ Generic task and worktree workflow system for Claude Code. Keep tasks as GitHub 
 | `/land` | In the worktree tab: handoff report → `/pr-flow:merge` → confirmed merge → `/close --delegate` |
 | `/list` | Overview of all tasks, worktrees, and status |
 | `/migrate` | (invoke as `/work-system:migrate`; knowledge-system has its own `/migrate`) Move local task files (open → open issues, archived → closed issues) to GitHub Issues, then switch `tasks.backend` to `github`; dry run, secret scan and one confirmation first |
+| `/manager` | (invoke as `/work-system:manager`) Status of this herdr space's workers: who works, who waits on a question, which PR is ready for merge — shown to you, never answered or merged |
 | `/sessions` | Which running herdr sessions still run old plugin code, plus stale/orphaned installs; `refresh` reloads the idle stale ones with `/reload-plugins` |
 | `/statusline` | Add a `[ws …]` task-backlog segment to Claude Code's status line |
 
@@ -781,13 +782,77 @@ repo root are the candidates, and with several, the leftmost tab wins as a
 one live session carries the resolved name; everyone else goes through
 `manager.sh prompt`, which types into the Manager's pane only when it is an idle
 Claude session with no user draft in its composer (a dim prompt suggestion is not
-a draft). The event text goes in on stdin through a quoted heredoc, so quotes or
+a draft), and never into the caller's own pane (`reason=manager-is-self`). The event text goes in on stdin through a quoted heredoc, so quotes or
 `$(...)` in it never reach a shell. The event text keeps up to 1000 characters
 on both routes; a longer one is cut visibly — it ends in `…` and `manager.sh`
 prints `truncated=yes orig_len=<n>` on stderr (details: the `manager.sh` header). A
 ping that cannot be delivered (`sent=no`, e.g. a busy Manager) is not retried: it
 never carries anything to act on — open next steps travel in the handoff report's
 `Follow-ups:` list. `/close`'s delegation offer uses the same resolver.
+
+### `/work-system:manager` — worker status, questions, events
+
+The status part of the Manager (dispatch and collect come later). One helper,
+`scripts/workers.sh`, does all of it; the header of `scripts/workers.py` is the
+reference for fields, flags, payload and exit codes.
+
+- `workers.sh list [--all | --workspace <wN>] [--json]` — one row per herdr agent:
+  role (`manager` at a repo root, `worker` in `.claude/worktrees/<task>`, `self`,
+  `other`), task, status and flags: `question` (a blocked dialog), `asks` (the last
+  answer ends in `?`), `verify` (herdr says idle, the screen shows activity), `draft`
+  (someone types in that composer).
+- `workers.sh screen <pane> [--lines N]` and `workers.sh question <pane>` read a pane
+  and a pending dialog. Nothing is ever typed or pressed.
+- `workers.sh ready <worktree | pane>` — `ready=yes|no|unknown` plus `reason=`,
+  the one ready-for-merge rule the skill and `events` share (`lane-busy` while
+  any agent in the lane or a sub-directory of it is still working).
+
+The skill hands every question up to you, with the options and a recommendation;
+the dialog stays open for you. "Ready for merge" is reported, never acted on: you
+review and run `/merge` or `/land`.
+
+**Events.** `workers.sh events --state <file> [--all | --workspace <wN>] [--ping]
+[--on-blocked <cmd>] [--escalate-after <s>]` is a one-shot check for a timer of your own (herdr 0.9.5 has
+no status-change hook, and the plugin ships no loop). It raises one event when a
+worker turns `blocked` (per pane + session) or a lane becomes ready for merge (open,
+non-draft, same-repo PR at the lane's HEAD, merge state clean under branch
+protection, no changes requested, at least one check and all green, a recorded
+review covering it), checked once every agent in the lane is idle (in any workspace,
+sub-directories included). `blocked`
+fires again only after the worker left it and came back; ready-for-merge only for a
+new head (CI going red and green again on the same head is no second event). herdr's `unknown` status and an
+unreadable gh answer count as no observation, so a flicker does not re-fire. `--ping` sends one
+line to the lane's Manager through `manager.sh prompt` (idle claude Manager, no
+composer draft, never the caller's own pane); an undelivered ping is retried on the
+next run (a `retry=` line, not counted as an event) unless its reason cannot change
+(own pane, non-claude Manager, a bad pane id, no main repo); the Manager is resolved
+in the worker's workspace. The on-blocked command
+(argv, no shell) gets either event — `blocked` or `ready-for-merge`, filter on the
+payload's `event` — as JSON on stdin when the ping did not land, or
+`escalate_after` seconds after it did and the event is still open; a failing command
+is retried on at most three runs, and its output is discarded. It is read only from the flag or from
+`~/.config/work-system/events.toml` (`on_blocked = ["my-notify", "--quiet"]`; a
+regular file of yours, not group/world-writable) — never from a repo, so a cloned
+repo cannot run commands. The main checkout's `.work-system.toml` may set `[events]
+enabled` and `escalate_after` (a lane's own copy is ignored, so a worker cannot
+silence itself). The payload holds pane text from other sessions (`last_line`, the
+cwd): untrusted for every receiver, and possibly secret — send it on only to a
+receiver you would show the screen to. Use one `--state` file per timer.
+
+Example crontab entry, every two minutes. cron's environment is minimal: give it a
+`PATH` that finds `herdr`, `gh` and a Python 3.11+ (`tomllib`, for the user file
+and the repo's `[events]` settings; `events` exits 3 without it, and macOS's
+`/usr/bin/python3` is older), and resolve the newest installed plugin
+version so an update does not leave the entry on a removed path:
+
+```sh
+PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
+*/2 * * * * bash "$(ls -d ~/.claude/plugins/cache/gering-plugins/work-system/*/ | sort -V | tail -1)scripts/workers.sh" events --all --ping --state ~/.local/state/work-system/worker-events.json
+```
+
+(herdr's socket must be reachable from the timer's environment; outside herdr the
+scope is every workspace, so pass `--all` or `--workspace`. A launchd agent works
+the same way with `EnvironmentVariables` for `PATH`.)
 
 ### `/sessions` — plugin staleness across running sessions
 
@@ -819,7 +884,7 @@ says to run `/reload-plugins` there). A session whose install is stale is report
 as "reload does not help" until that install is updated, which the skill asks
 about first because it changes another repo's config. Logic and verdict rules:
 `scripts/sessions.py`; the composer draft check is shared with `manager.sh prompt`
-(`$HERDR_COMPOSER_PY` in `herdr-agent.sh`).
+and `workers.sh` (`$HERDR_COMPOSER_PY` in `herdr-agent.sh`).
 
 ### Task tabs carry their state glyph
 

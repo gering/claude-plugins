@@ -1,9 +1,9 @@
 ---
 title: "Manager Address Resolver and Milestone Pings"
 createdAt: 2026-10-02
-updatedAt: 2026-10-20
+updatedAt: 2026-11-04
 createdFrom: "session: 2026-10-02 (task/add-manager-address)"
-updatedFrom: "branch: task/add-session-plugin-refresh"
+updatedFrom: "branch: task/add-manager-status-and-events"
 pluginVersion: 1.9.0
 prime: false
 ---
@@ -91,7 +91,9 @@ terminal gate) and `/close` step 1b delegation, which replaced the name-only
   (`[work-system ping from task=… worktree=…] … (info only…)`) both routes send.
   SendMessage is skill-side (a script cannot call a tool) and needs exactly one
   live session with the name. The herdr route `manager.sh prompt` re-resolves and
-  types only into an idle/done **claude** Manager whose composer holds no draft.
+  types only into an idle/done **claude** Manager whose composer holds no draft,
+  and never into the caller's own pane (`manager-is-self`, added with
+  `workers.sh events`: a Manager-run timer must not prompt itself).
 - **One event cap, never silent.** The event text keeps 1000 chars on both
   routes; a cut ends in `…` plus `truncated=yes orig_len=<n>` on stderr (a plain
   300-char slice once lost a gate ping's open decision unnoticed). No shorter
@@ -113,7 +115,7 @@ terminal gate) and `/close` step 1b delegation, which replaced the name-only
 ## Gotchas
 
 - **Composer draft detection** (`$HERDR_COMPOSER_PY` in `herdr-agent.sh` since
-  work-system 1.26.0, shared with `sessions.sh refresh`) reads `herdr agent read --source visible --format
+  work-system 1.26.0, shared with `sessions.sh refresh` and `workers.sh`) reads `herdr agent read --source visible --format
   ansi` and inspects the region between the last two horizontal rules. The UPPER
   rule carries a label (CC prints the session name into it), so a rule is "starts
   with ten `─`", not "consists only of `─`". Dim and **mid**-gray cells are not a

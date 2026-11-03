@@ -137,6 +137,24 @@
         }
       }
     },
+    "events": {
+      "type": "object",
+      "description": "Status-change events (`workers.sh events`, /work-system:manager) for this repo's lanes. Harmless values only: the on-blocked command is never read from a repo, only from the user's ~/.config/work-system/events.toml or a CLI flag.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "false: this repo's lanes are tracked but raise no ping and run no on-blocked command."
+        },
+        "escalate_after": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 86400,
+          "description": "Seconds after a delivered Manager ping before the on-blocked command runs for an event that is still open. 0: the command runs only when the ping was not delivered. The --escalate-after flag wins."
+        }
+      }
+    },
     "compat": {
       "type": "object",
       "description": "Migration toggles between Claude-specific and neutral conventions. Storage only in this phase; no plugin consumes them yet.",
