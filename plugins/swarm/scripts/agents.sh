@@ -1363,18 +1363,45 @@ sandboxed() {
   with_timeout "${HARDENED_ENV[@]}" ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"} "$@"
 }
 
-# The env half of the hardening, shared by sandboxed() and run_cc_harness (which
-# puts its helper BETWEEN this prefix and the jail): HARDENED_ENV = env, the
-# secret filter's -u list plus any extra names to unset ($@), then the git
-# config redirects. Options before assignments — env reads the first `-u` after
-# an assignment as the command.
+# The env half of sandboxed()'s hardening: HARDENED_ENV = env, the secret
+# filter's -u list, then the git config redirects. Options before assignments —
+# env reads the first `-u` after an assignment as the command. (cc-harness splits
+# this filter around its helper: _harness_env_prefix below.)
 HARDENED_ENV=()
 _hardened_env_prefix() {
-  local _e _x
+  local _e
   HARDENED_ENV=(env)
   while IFS= read -r _e; do HARDENED_ENV+=("$_e"); done < <(_env_filter_args)
-  for _x in "$@"; do HARDENED_ENV+=(-u "$_x"); done
   HARDENED_ENV+=(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0)
+}
+
+# The cc-harness split of that same filter. The helper is the user's own trusted
+# binary and routes with credentials it reads from the ENVIRONMENT (cc-router's
+# remote route: CLIPROXY_API_KEY_<PROFILE>, CLIPROXY_CF_ACCESS_<PROFILE>_CLIENT_ID
+# / _CLIENT_SECRET), so stripping secret-shaped names BEFORE it breaks every exec
+# (rc=3 "no gateway token") while an unfiltered `list` still reports ready.
+#   HARNESS_PRE  — before the helper, for `list` AND `exec` alike (readiness and
+#                  exec must see the same env, or ready means nothing): only the
+#                  Anthropic credentials the helper REPLACES with its own routing
+#                  token, the parent session's Claude Code markers, and the git
+#                  config redirects.
+#   HARNESS_POST — between `exec <id> --` and the jail: `env -u` for every
+#                  secret-shaped name the PARENT holds (the same _env_filter_args
+#                  set, no profile names), so the jailed claude never sees them.
+#                  Computed from the parent's env, so the ANTHROPIC_AUTH_TOKEN the
+#                  helper injects survives — it is excluded explicitly too, for a
+#                  parent that already runs through a gateway.
+HARNESS_PRE=(); HARNESS_POST=()
+_harness_env_prefix() {
+  local _e
+  HARNESS_PRE=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN
+               -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SSE_PORT
+               GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0)
+  HARNESS_POST=(env)
+  while IFS= read -r _e; do
+    case "$_e" in -u|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN) continue ;; esac
+    HARNESS_POST+=(-u "$_e")
+  done < <(_env_filter_args)
 }
 
 scrub_secrets() {
@@ -1467,7 +1494,10 @@ _harness_load() {
   # Read whole, THEN cap: a `| head -c` cut would SIGPIPE the helper (rc 141
   # under pipefail) and an oversize listing would read as a failed one. The
   # probe's own deadline bounds how much it can print.
-  out="$(_probe_or_bare "$HARNESS_BIN" list)" || rc=$?
+  # Under the SAME pre-helper env as exec (see _harness_env_prefix): a helper
+  # that cannot route under the exec env must not list as ready.
+  _harness_env_prefix
+  out="$(_probe_or_bare "${HARNESS_PRE[@]}" "$HARNESS_BIN" list)" || rc=$?
   _harness_rc="$rc"
   (( rc == 0 )) || return 0
   out="${out:0:65536}"
@@ -3320,12 +3350,13 @@ run_cc_harness() {
   schema_json="$(python3 -c 'import json, sys; print(json.dumps(json.load(open(sys.argv[1]))))' "$schema")" \
     || { echo "Could not read the schema: $schema" >&2; exit 2; }
 
-  # ORDER: timeout → env filter → HELPER (unjailed) → jail → claude. The helper
-  # is the user's own trusted binary (its `list` runs unjailed too); it may read
-  # its gateway config, so it runs OUTSIDE the jail and execs the jail wrapper,
-  # which then runs claude with the gateway credential dir denied. The env
-  # filter strips the PARENT's *_TOKEN/*_API_KEY before the helper adds the
-  # routing token, which the model process then holds in its env. No shell tool
+  # ORDER: timeout → HARNESS_PRE → HELPER (unjailed) → HARNESS_POST (secret
+  # filter) → jail → claude. The helper is the user's own trusted binary (its
+  # `list` runs unjailed, under the same HARNESS_PRE); it may read its gateway
+  # config and env credentials, so it runs OUTSIDE the jail and the filter, and
+  # execs `env -u …` + the jail wrapper, which then runs claude with the parent's
+  # secret-shaped vars gone and the gateway credential dir denied. The model
+  # process holds only the routing token the helper adds. No shell tool
   # reads it, but Read could open /proc/self/environ under bwrap's /proc — so
   # the ephemeral settings deny Read(//proc/**) (deny beats --allowedTools; Claude
   # Code applies Read rules to Grep/Glob too), and scrub_secrets redacts
@@ -3334,11 +3365,12 @@ run_cc_harness() {
   # scopes the cd to the empty cwd; stderr (the transcript) is discarded like
   # codex's, it never passes scrub_secrets.
   _init_sandbox "$backend"
-  _hardened_env_prefix CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SSE_PORT
+  _harness_env_prefix
   local rc=0
-  ( cd "$home/cwd" && with_timeout "${HARDENED_ENV[@]}" \
+  ( cd "$home/cwd" && with_timeout "${HARNESS_PRE[@]}" \
       CLAUDE_CONFIG_DIR="$home/config" \
-      "$HARNESS_BIN" exec "$id" -- ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"} claude -p \
+      "$HARNESS_BIN" exec "$id" -- "${HARNESS_POST[@]}" \
+      ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"} claude -p \
       --output-format json --json-schema "$schema_json" \
       "${tool_args[@]}" ${dir_args[@]+"${dir_args[@]}"} \
       --permission-mode dontAsk --strict-mcp-config --no-session-persistence \
