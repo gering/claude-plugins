@@ -52,7 +52,7 @@
           "type": "array",
           "items": { "type": "string" },
           "default": [],
-          "description": "An issue carrying any of these labels is not a task (wins over select and include_labels), e.g. [\"dependencies\"]."
+          "description": "An issue carrying any of these labels is not a task (wins over select and include_labels; a running lane's own lookups ignore it), e.g. [\"dependencies\"]."
         },
         "gate_labels": {
           "type": "array",

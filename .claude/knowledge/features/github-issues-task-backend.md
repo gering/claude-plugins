@@ -80,7 +80,8 @@ not in SKILL.md.
   accents dropped, because German titles would otherwise slug to `m-ll-…`.
 - **A closed marker-less issue is not found by name.** The closed-issue search
   is by marker. A re-close goes through the pin.
-- **`close` looks up by the mode and include_labels, ignoring exclude.** The `#N`
+- **`close` looks up by the mode and include_labels, ignoring exclude** — except a
+  pinned `#N` whose name equals `--name`, which counts whatever the filter says. The `#N`
   is TASK.md's pin or the issue the user confirmed, and `/close` reads exit 3 as
   "nothing to close": an exclude label added mid-lane must not leave the shipped
   issue open. The mode still counts (in label mode an unlabelled `#N` is no

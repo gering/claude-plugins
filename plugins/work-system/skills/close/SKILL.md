@@ -642,9 +642,12 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
       uses: `[tasks]` exclude labels do not hide it; an issue that lost its include label does
       drop out, and is exit 3), show the issue it matched (`issue=`,
       `title=`, `state=`) and ask whether that is the issue this lane shipped. Close it as
-      `"#N"` only on a yes; otherwise ask for the right `#N`. Never close an unpinned name
+      `"#N"` only on a yes; otherwise ask for the right `#N`. Exit 3 here is not "never
+      recorded": the issue may only be filtered out (include label removed) — ask the user
+      for its `#N`, or whether there is none. Never close an unpinned name
       unasked, also not on an auto-accepted delegated close.
-    - **Exit 3** ("no such task"): read stderr. `not a work-system task here: <why>` on a `#N`
+    - **Exit 3** ("no such task"): a pinned `#N` with `--name` that answers to this lane
+      is never exit 3 (the lane's own issue counts whatever the filter says). Read stderr. `not a work-system task here: <why>` on a `#N`
       means the issue exists but the filter no longer selects it (an include label removed,
       or `tasks.select` changed): say issue `#N` is still open, quote `<why>`, and leave the
       close to the user. Otherwise nothing to close (the task was never recorded) — note it

@@ -876,18 +876,23 @@ with tempfile.TemporaryDirectory() as d:
     (e.repo / "tasks" / "add-search.md").write_text("# Add search\n\nTracking issue: #4\n")
     e.gh_state(issues=e.issues() + [issue(4, "Search", "the reporter's text", label="enhancement")])
     r = migrate(e, "--open-only")
-    e.setting('[tasks]\nbackend = "local"\nselect = "all-open"\nexclude_labels = ["enhancement"]\n')
-    r2 = migrate(e, "--open-only")
-    check("migrate never adopts an issue the filter would hide",
-          "exclude_labels" in dict(x.split("\t", 1) for x in kv(r2.stdout, "skip")).get("open/add-search", ""))
     check("an adopt whose file holds only its title and tracking line is not drift",
           "adopt\topen/add-search\t#4\tAdd search" in kv(r.stdout, "item")
           and not any(x.startswith("open/add-search") for x in kv(r.stdout, "differs")))
+    e.setting('[tasks]\nbackend = "local"\nselect = "all-open"\nexclude_labels = ["enhancement"]\n')
+    r = migrate(e, "--open-only")
+    check("migrate never adopts an issue the filter would hide",
+          "exclude_labels" in dict(x.split("\t", 1) for x in kv(r.stdout, "skip")).get("open/add-search", ""))
     (e.repo / "tasks" / "fix-crash.md").write_text("# Fix crash\n\nTracking issue: #5\n")
     e.setting('[tasks]\nbackend = "local"\nselect = "all-open"\n')
     e.gh_state(issues=e.issues() + [issue(5, "Crash on launch", "", label="bug")])
     r = migrate(e, "--open-only")
     check("migrate never adopts onto a name another open issue already answers to",
+          "already answers to fix-crash" in dict(x.split("\t", 1) for x in kv(r.stdout, "skip"))
+          .get("open/fix-crash", ""))
+    e.gh_state(issues=[issue(5, "Fix Crash!", "b", label="bug"), issue(3, "Fix crash", "a", label="bug")])
+    r = migrate(e, "--open-only")
+    check("the clash check sees every issue with that slug, not only the tracking target",
           "already answers to fix-crash" in dict(x.split("\t", 1) for x in kv(r.stdout, "skip"))
           .get("open/fix-crash", ""))
 
@@ -920,12 +925,16 @@ with tempfile.TemporaryDirectory() as d:
     r = e.run("get", str(e.repo), "marked", "--body", "--identity")
     check("get --body --identity reads a lane's task the filter now hides",
           r.returncode == 0 and "body text" in r.stdout)
+    new_body = e.root / "new.md"
+    new_body.write_text("# New\n")
     e.setting('[tasks]\ninclude_labels = ["needs,review"]\n')
+    r = e.run("create", str(e.repo), "new", "--body-file", str(new_body))
     check("an include label gh would split is a config error (2)",
-          e.run("create", str(e.repo), "new", "--body-file", str(e.root / "nope.md")).returncode == 2)
+          r.returncode == 2 and "include_labels[0]" in r.stderr)
     e.setting('[tasks]\ninclude_labels = ["work-system:archived"]\n')
+    r = e.run("create", str(e.repo), "new", "--body-file", str(new_body))
     check("the archived label as include label is a config error (2)",
-          e.run("create", str(e.repo), "new", "--body-file", str(e.root / "nope.md")).returncode == 2)
+          r.returncode == 2 and "archived" in r.stderr)
     e.setting('[tasks]\nselect = "all-open"\ninclude_labels = ["accepted"]\n')
     e.gh_state(issues=[issue(12, "Fix login", "<!-- work-system task: fix-login -->",
                              labels=["accepted"]),

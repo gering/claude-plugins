@@ -29,9 +29,11 @@ ws-settings.py at the main checkout):
           `label` (default) = labelled `work-system:task`, `all-open` = every
           open issue; then `tasks.include_labels` (any of them, when set; new
           task issues get the first) and `tasks.exclude_labels` (none of them)
-          narrow it. `close` ignores exclude_labels (include_labels still count). The task name lives
-          in a body marker `<!-- work-system task: <name> -->`; an issue
-          without one answers to the slug of its title. The branch stays
+          narrow it. `close` ignores exclude_labels; include_labels and the
+          mode still count, except for a pinned #N whose name equals --name
+          (the lane's own issue). The task name lives in a body marker
+          `<!-- work-system task: <name> -->`; an issue without one answers to
+          the slug of its title. The branch stays
           task/<name>. An issue carrying one of `tasks.gate_labels` (default
           definition-only) is listed but gated: `get` prints `gate=` and
           `get --write` (the kickoff copy) refuses it without --allow-gated.
@@ -864,7 +866,7 @@ def migrate_plan(main, repo, public, includes, open_only, sel):
         if found:
             by_key.setdefault((found[-1], has_label(i, ARCHIVED_LABEL)), []).append(i)
         elif i.get("state", "").upper() == "OPEN":
-            unmarked_open.setdefault(issue_name(i), i)
+            unmarked_open.setdefault(issue_name(i), []).append(i)
     if items and sel["select"] == "all-open":
         # Every open issue is a task there, whatever its labels: an unlabelled
         # one already answers to its marker or title slug, so creating that
@@ -874,8 +876,9 @@ def migrate_plan(main, repo, public, includes, open_only, sel):
         # name is only blocked (skip), never handed to a stranger's issue.
         seen = {i["number"] for v in by_key.values() for i in v}
         for i in live(gh_issues(repo, "open", dict(sel, include=[], exclude=[]))):
-            if i["number"] not in seen:
-                unmarked_open.setdefault(issue_name(i), i)
+            if i["number"] not in seen and all(
+                    x["number"] != i["number"] for x in unmarked_open.get(issue_name(i), [])):
+                unmarked_open.setdefault(issue_name(i), []).append(i)
 
     for it in items:
         archived = it["kind"] == "archived"
@@ -953,8 +956,9 @@ def migrate_plan(main, repo, public, includes, open_only, sel):
                 continue
             # The marker makes #n answer to the name; another open issue that
             # already does (by its title slug) would make the name ambiguous.
-            clash = unmarked_open.get(name) if not archived else None
-            if clash and clash["number"] != n:
+            clash = next((i for i in unmarked_open.get(name, []) if i["number"] != n),
+                         None) if not archived else None
+            if clash:
                 it.update(action="skip", reason=f"open issue #{clash['number']} already answers "
                                                 f"to {name} (a task issue without a marker)")
                 continue
@@ -963,7 +967,7 @@ def migrate_plan(main, repo, public, includes, open_only, sel):
             it["differs"] = bool(core) and core not in old
             it.update(action="adopt", body=old)
         elif not archived and name in unmarked_open:
-            it.update(action="skip", reason=f"open issue #{unmarked_open[name]['number']} already "
+            it.update(action="skip", reason=f"open issue #{unmarked_open[name][0]['number']} already "
                                             f"answers to {name} (a task issue without a marker)")
             continue
         if it["hits"] and it["action"] != "adopt" and name not in includes and f"{it['kind']}/{name}" not in includes:
