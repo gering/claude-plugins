@@ -1398,8 +1398,12 @@ _hardened_env_prefix() {
 # decision (it already execs the child, and could run anything in its place), so
 # POST strips the parent's secrets, not the helper's exports. A helper must not
 # export credentials the model process does not need — docs/cc-harness-agents.md.
+# OLDPWD: bash exports it (valueless) at startup, and exec's `cd` into the empty
+# cwd gives it the repo path — so exec saw one name more than `list` (caught on
+# Linux CI; zsh parents already export it). Unset, it also keeps the repo path
+# out of the voice that is meant to start from nowhere.
 HARNESS_PRE=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN
-             -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SSE_PORT
+             -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SSE_PORT -u OLDPWD
              "${GIT_REDIRECTS[@]}")
 HARNESS_POST=()
 _harness_post_filter() {

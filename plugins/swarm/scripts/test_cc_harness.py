@@ -335,6 +335,7 @@ exit 2
         execd = (self.stub / "helper-env-exec").read_text()
         self.assertEqual(listed, execd, "readiness must probe the helper under the exec env")
         self.assertIn(self.SECRET, listed.split())
+        self.assertNotIn("OLDPWD", execd.split(), "exec's cd must not leak the repo path")
         self.assertNotIn("ANTHROPIC_AUTH_TOKEN", listed.split())
 
     def test_helper_that_cannot_route_is_not_ready(self):
