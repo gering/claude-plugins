@@ -1322,12 +1322,14 @@ sys.stdout.write("".join(parts))
 _env_filter_args() {
   # Emit `-u NAME` pairs for secret-shaped env vars: the jail blocks file reads
   # but backends inherit the environment, so a secret in AWS_SECRET_ACCESS_KEY /
-  # *_TOKEN / *_API_KEY would otherwise pass straight through. Backend auth comes
+  # *_TOKEN / *_API_KEY would otherwise pass straight through. Infix forms too: a
+  # gateway keys per profile (CLIPROXY_API_KEY_<PROFILE>, …_CLIENT_ID/_SECRET),
+  # and a suffix-only match missed every one of them. Backend auth comes
   # from its config dir (not env), so stripping these is safe.
   local name
   while IFS='=' read -r name _; do
     case "$name" in
-      AWS_*|*_TOKEN|*_SECRET|*_PASSWORD|*PASSWD*|*_API_KEY|*APIKEY*|*_CREDENTIALS|GH_TOKEN|GITHUB_TOKEN|NPM_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY|XAI_API_KEY|GROK_API_KEY)
+      AWS_*|*_TOKEN|*_SECRET|*_PASSWORD|*PASSWD*|*_API_KEY|*APIKEY*|*_CREDENTIALS|*_API_KEY_*|*_TOKEN_*|*_SECRET_*|*_CLIENT_ID|GH_TOKEN|GITHUB_TOKEN|NPM_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY|XAI_API_KEY|GROK_API_KEY)
         printf '%s\n' "-u" "$name" ;;
     esac
   done < <(env)
@@ -1366,13 +1368,14 @@ sandboxed() {
 # The env half of sandboxed()'s hardening: HARDENED_ENV = env, the secret
 # filter's -u list, then the git config redirects. Options before assignments —
 # env reads the first `-u` after an assignment as the command. (cc-harness splits
-# this filter around its helper: _harness_env_prefix below.)
+# this filter around its helper: HARNESS_PRE/HARNESS_POST below.)
+GIT_REDIRECTS=(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0)
 HARDENED_ENV=()
 _hardened_env_prefix() {
   local _e
   HARDENED_ENV=(env)
   while IFS= read -r _e; do HARDENED_ENV+=("$_e"); done < <(_env_filter_args)
-  HARDENED_ENV+=(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0)
+  HARDENED_ENV+=("${GIT_REDIRECTS[@]}")
 }
 
 # The cc-harness split of that same filter. The helper is the user's own trusted
@@ -1391,12 +1394,16 @@ _hardened_env_prefix() {
 #                  Computed from the parent's env, so the ANTHROPIC_AUTH_TOKEN the
 #                  helper injects survives — it is excluded explicitly too, for a
 #                  parent that already runs through a gateway.
-HARNESS_PRE=(); HARNESS_POST=()
-_harness_env_prefix() {
+# TRUST BOUNDARY: what the helper itself ADDS to the child's env is the helper's
+# decision (it already execs the child, and could run anything in its place), so
+# POST strips the parent's secrets, not the helper's exports. A helper must not
+# export credentials the model process does not need — docs/cc-harness-agents.md.
+HARNESS_PRE=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN
+             -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SSE_PORT
+             "${GIT_REDIRECTS[@]}")
+HARNESS_POST=()
+_harness_post_filter() {
   local _e
-  HARNESS_PRE=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN
-               -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SSE_PORT
-               GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0)
   HARNESS_POST=(env)
   while IFS= read -r _e; do
     case "$_e" in -u|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN) continue ;; esac
@@ -1421,8 +1428,9 @@ PATTERNS = [
     # END). Alternation: END-block first, else base64 run.
     (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----|[A-Za-z0-9+/=\r\n]*)"), "[REDACTED-PRIVATE-KEY]"),
     (re.compile(r"(?i)aws_secret_access_key\s*[=:]\s*[A-Za-z0-9/+]{20,}"), "aws_secret_access_key=[REDACTED]"),
-    # (?<=_) too: `ANTHROPIC_AUTH_TOKEN=…` has no word boundary before TOKEN.
-    (re.compile(r"(?i)(?:(?<=_)|\b)(secret|token|password|passwd|api[_-]?key)\b\s*[=:]\s*[A-Za-z0-9/+._-]{16,}"), r"\1=[REDACTED]"),
+    # (?<=_) too: `ANTHROPIC_AUTH_TOKEN=…` has no word boundary before TOKEN; the
+    # `_<word>` tail catches profile-suffixed names (`CLIPROXY_API_KEY_SOL=…`).
+    (re.compile(r"(?i)(?:(?<=_)|\b)(secret|token|password|passwd|api[_-]?key)(?:_[A-Za-z0-9]+)*\b\s*[=:]\s*[A-Za-z0-9/+._-]{16,}"), r"\1=[REDACTED]"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "[REDACTED-GH-TOKEN]"),
     (re.compile(r"\bsk-[A-Za-z0-9]{20,}"), "[REDACTED-API-KEY]"),
     # JWT-shaped bearer/refresh tokens (Moonshot OAuth): three base64url runs.
@@ -1494,9 +1502,8 @@ _harness_load() {
   # Read whole, THEN cap: a `| head -c` cut would SIGPIPE the helper (rc 141
   # under pipefail) and an oversize listing would read as a failed one. The
   # probe's own deadline bounds how much it can print.
-  # Under the SAME pre-helper env as exec (see _harness_env_prefix): a helper
-  # that cannot route under the exec env must not list as ready.
-  _harness_env_prefix
+  # Under the SAME pre-helper env as exec (HARNESS_PRE): a helper that cannot
+  # route under the exec env must not list as ready.
   out="$(_probe_or_bare "${HARNESS_PRE[@]}" "$HARNESS_BIN" list)" || rc=$?
   _harness_rc="$rc"
   (( rc == 0 )) || return 0
@@ -3365,7 +3372,7 @@ run_cc_harness() {
   # scopes the cd to the empty cwd; stderr (the transcript) is discarded like
   # codex's, it never passes scrub_secrets.
   _init_sandbox "$backend"
-  _harness_env_prefix
+  _harness_post_filter
   local rc=0
   ( cd "$home/cwd" && with_timeout "${HARNESS_PRE[@]}" \
       CLAUDE_CONFIG_DIR="$home/config" \

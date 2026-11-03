@@ -265,6 +265,8 @@ class Harness(unittest.TestCase):
         r = self.source('printf \'{"s":"ANTHROPIC_AUTH_TOKEN=abcdefghijklmnopqrstuv"}\' | scrub_secrets')
         self.assertNotIn("abcdefghijklmnopqrstuv", r.stdout)
         self.assertIn("TOKEN=[REDACTED]", r.stdout)
+        r = self.source('printf \'{"s":"CLIPROXY_API_KEY_SOL=abcdefghijklmnopqrstuv"}\' | scrub_secrets')
+        self.assertNotIn("abcdefghijklmnopqrstuv", r.stdout, "a profile-suffixed key name is still a key")
 
     def test_oversize_listing_truncates_instead_of_failing(self):
         many = "".join(f"cc-harness:v{i}\tgpt-6.1-sol\tyes\t{'x' * 200}\n" for i in range(400))
@@ -310,11 +312,14 @@ exit 2
     def test_helper_sees_env_credentials_but_claude_does_not(self):
         self.secret_helper()
         r = self.run_voice(**{self.SECRET: "dummy-secret", "GH_TOKEN": "dummy-gh",
+                              "CLIPROXY_API_KEY_STUB": "dummy-key",
+                              "CLIPROXY_CF_ACCESS_STUB_CLIENT_ID": "dummy-id",
                               "ANTHROPIC_AUTH_TOKEN": "parent-dummy", "ANTHROPIC_API_KEY": "parent-key"})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout), {"findings": []})
         env = self.claude_env()
-        for name in (self.SECRET, "GH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDECODE"):
+        for name in (self.SECRET, "GH_TOKEN", "CLIPROXY_API_KEY_STUB",
+                     "CLIPROXY_CF_ACCESS_STUB_CLIENT_ID", "ANTHROPIC_API_KEY", "CLAUDECODE"):
             self.assertNotIn(name, env, f"{name} must not reach the jailed claude")
         self.assertEqual(env.get("ANTHROPIC_AUTH_TOKEN"), "helper-routing-dummy",
                          "the helper's routing token survives; the parent's never does")

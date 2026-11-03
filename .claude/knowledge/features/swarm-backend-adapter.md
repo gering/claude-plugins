@@ -855,10 +855,15 @@ obvious from `run_cc_harness`:
   `CLIPROXY_CF_ACCESS_<PROFILE>_CLIENT_SECRET`), and 0.17.0 ran the
   secret-shaped filter before the helper: every exec failed rc=3 "no gateway
   token" while `list`, run unfiltered, said ready (10/10 failed calls in the
-  PR #100 review). Now `_harness_env_prefix` builds HARNESS_PRE (before the
-  helper: only the Anthropic creds it replaces, Claude Code markers, git
-  redirects) and HARNESS_POST (`env -u` for the parent's secret-shaped names,
-  from the same `_env_filter_args`, between `exec <id> --` and the jail).
+  PR #100 review). Now HARNESS_PRE (before the helper: only the Anthropic
+  creds it replaces, Claude Code markers, git redirects) and HARNESS_POST
+  (`_harness_post_filter`: `env -u` for the parent's secret-shaped names, from
+  the same `_env_filter_args`, between `exec <id> --` and the jail). The local
+  review also found the filter had never matched profile-SUFFIXED names
+  (`CLIPROXY_API_KEY_SOL`: `*_API_KEY` is suffix-only, `\bkey\b` in the scrub
+  fails before `_SOL`), so the API key reached every jailed voice even in
+  0.17.0; both now match infix forms. Trust boundary, stated not enforced:
+  POST strips the parent's secrets, not what the helper exports itself.
   POST is computed from the parent's env and skips `ANTHROPIC_AUTH_TOKEN`, so
   the routing token the helper injects survives. Lesson: **readiness must
   probe under the exec env** — `_harness_load` runs `list` under HARNESS_PRE,
