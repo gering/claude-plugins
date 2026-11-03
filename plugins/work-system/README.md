@@ -53,12 +53,24 @@ The backlog is centralized — `/define` adds to it even from inside a linked wo
 | `tasks.backend` | Backlog |
 |-----------------|---------|
 | `auto` (default) | `local` while the repo still has task files in `tasks/` (`/work-system:migrate` moves them to issues, or pin `github`); else `github` when `origin` is on github.com and `gh` is installed; else `local` |
-| `github` | Issues labelled `work-system:task` in origin's repository. The task name (kebab slug) lives in a hidden body marker `<!-- work-system task: <name> -->`, so ordinary issues are never tasks; `/kickoff` takes a name or `#N`, the other skills a name |
+| `github` | Issues in origin's repository — by default those labelled `work-system:task` (see the filter below). The task name (kebab slug) lives in a hidden body marker `<!-- work-system task: <name> -->`; an issue without one answers to the slug of its title (umlauts spelled out, `Müll-Tour` → `muell-tour`; a title with nothing to slug, e.g. CJK, → `issue-<N>`). `/kickoff` takes a name or `#N`, the other skills a name |
 | `local` | One markdown file per task in `tasks/` on the main worktree (`paths.tasks_dir` is not wired yet) |
 
 Every skill reaches the backlog through one script, `scripts/task-store.py` (`backend`, `list`, `get`, `create`, `close`, `ref`, which pins the issue `/close` closes, and `migrate`). A GitHub backend whose `gh` is missing, unauthenticated or unreachable fails with a clear message — work-system never falls back to local files, which would split the backlog. `/define` names the target repository before creating an issue and says when that repository is public. `tasks/ROADMAP.md` (the Manager's open follow-ups) stays local on both backends.
 
-`/work-system:migrate` converts a local backlog: a dry run lists each file as `create`, `adopt` (the file names an existing `Tracking issue: #N`, which gets the label and marker instead of a duplicate), `resume` or `skip`, and holds back files whose secret/private-detail scan hits unless you include them. The real run needs one confirmation that names the count, the repo and its visibility; it is paced, stops cleanly on a rate limit and resumes on the next run. Files move to `tasks/migrated/` (with an `issues.tsv` map), never deleted, and the tool never commits.
+On the GitHub backend a repo decides which open issues are tasks, so a team that already plans in issues needs no extra label:
+
+```toml
+[tasks]
+select = "all-open"                  # default "label": only issues labelled work-system:task
+exclude_labels = ["dependencies"]    # none of these (wins; a running lane's lookups ignore it)
+include_labels = []                  # when set: at least one of these
+gate_labels = ["definition-only"]    # default; listed, but /kickoff needs your explicit go
+```
+
+Tasks work-system creates get the first `include_labels` entry, so they count too. `/list` and `/kickoff` show the same filtered set and mark gated tasks. With `all-open`, anyone who can open an issue can put text into `/list` and into a lane's TASK.md; TASK.md is a description of the work, never authorization, but use `all-open` on repos where you trust who opens issues (a body marker is identity, never selection, so an outsider cannot use one to slip past `include_labels`). A gated issue is kicked off only after you say so in that `/kickoff` — a lane's mandate never lifts a gate. work-system never edits someone's issue to add its marker: a marker-less issue keeps its title slug as task name, and the lane's `issue: #N` pin in TASK.md is what `/close` closes. The `[ws]` statusline counts lanes on this backend, not issues, so the filter does not change it.
+
+`/work-system:migrate` converts a local backlog: a dry run lists each file as `create`, `adopt` (the file names an existing `Tracking issue: #N`, which gets the task label, the first `include_labels` entry and the marker instead of a duplicate), `resume` or `skip`, keeps an adopted issue's own text, and holds back files (except adopts, which publish nothing from the file) whose secret/private-detail scan hits unless you include them. The real run needs one confirmation that names the count, the repo and its visibility; it is paced, stops cleanly on a rate limit and resumes on the next run. Files move to `tasks/migrated/` (with an `issues.tsv` map), never deleted, and the tool never commits.
 
 A task reads the same either way (on GitHub the heading is the issue title):
 

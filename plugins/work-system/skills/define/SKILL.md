@@ -94,7 +94,7 @@ Resolve the main repo path once (step 1) and use it below. Never persist a `cd` 
    - On yes: write the content to a temp file in your scratchpad, run
      `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" create "<main-repo>" "<task-name>" --body-file <tmp>` (the `# <Task Title>`
      heading becomes the issue title), then delete the temp file.
-   - Non-zero exit → show its stderr; exit 5 means the name is taken — propose another.
+   - Non-zero exit → show its stderr; exit 5 means the name is taken (stderr names the issue, which `[tasks]` exclude/include_labels may hide from `/list`) — propose another; exit 2 with `[tasks]` in stderr is a config problem — report it, don't retry.
 
 8. **Confirm creation**:
    ```

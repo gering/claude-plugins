@@ -23,10 +23,10 @@ the one confirmation the publish needs. Never call `gh` or move task files yours
 
 | Action | When | Effect |
 |--------|------|--------|
-| `create` | no issue for this task yet | new issue, title from the H1, body = the file + slug marker, label `work-system:task`; an archived task also gets `work-system:archived` and is closed as completed (its `> Archived …` stamp stays in the body) |
-| `adopt` | the file has a `Tracking issue: [owner/repo]#N` line for this repo | issue #N gets the label, the marker and the file as its body; its previous text is kept in a collapsed block; no new issue |
+| `create` | no issue for this task yet | new issue, title from the H1, body = the file + slug marker, label `work-system:task` (plus the first `[tasks] include_labels` entry, if set); an archived task also gets `work-system:archived` and is closed as completed (its `> Archived …` stamp stays in the body) |
+| `adopt` | the file has a `Tracking issue: [owner/repo]#N` line for this repo | issue #N gets only the task label (plus the first `[tasks] include_labels` entry, if set) and the marker; its text (a "DEFINITION ONLY" header, Trello links) stays as written and the file's text is not written into it; `differs=` flags a file that says more than the issue (the file is kept in `tasks/migrated/`); no new issue |
 | `resume` | an issue with this task's marker already exists (an earlier run, or one kept by hand) | finishes it: close it if archived, move the file. The issue's text stays; `differs=` flags one whose text no longer contains the file's (the file is kept in `tasks/migrated/`) |
-| `skip` | a possible secret/private detail, a conflicting or closed tracking issue, several issues with one marker, a body over GitHub's limit | the file stays; `skip=` says why |
+| `skip` | a possible secret/private detail (not for an `adopt`, which publishes nothing from the file), a conflicting or closed tracking issue, several issues with one marker, a body over GitHub's limit, an issue `[tasks]` would not list | the file stays; `skip=` says why |
 
 Every step can be repeated: the issue is written before the file moves, and a written issue
 is found by its marker, so a stopped run continues on the next one without duplicates.
@@ -46,16 +46,19 @@ is left in `tasks/`, the script sets `tasks.backend = "github"` in `.work-system
    python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" migrate "<main-repo>" [--open-only]
    ```
    Exit 4 → `gh` is missing/unauthenticated or origin is not on github.com: show stderr, stop.
+   Exit 2 → `[tasks]` in `.work-system.toml` would hide the migrated issues or names an
+   include label gh cannot add: show stderr (a config problem, not "nothing to do"), stop.
    Read `repo=`, `visibility=`, `tasks_tracked=`, `config_edit=` (only when the backend
    switch will need a hand edit), the `item=<action>\t<kind>/<name>\t<#N|new>\t<title>`
    lines, `skip=` reasons, `hit=<kind>/<name>\t<line>\t<pattern>` lines, the `count_*`,
    `count_differs=`/`differs=`, `publish=` and `confirm=`.
 
    Show a compact summary: counts per action, every `adopt` (with its issue), every `skip`
-   with its reason, the hits, and the `differs` count (the issue keeps its own text there). List the `create` titles only when there are few or the user
+   with its reason, the hits, and every `differs=` item (the issue keeps its own text there;
+   for an `adopt` the file's extra text does not reach the issue or a later TASK.md). List the `create` titles only when there are few or the user
    asks. Nothing to do (`item=` empty) → say so and go to step 6 for any leftover state.
 
-3. **Held-back files.** A file with scan hits is skipped by default. Show its hit lines
+3. **Held-back files.** A file with scan hits is skipped by default (not an `adopt`, which publishes nothing from the file: its `hit=` lines are information only). Show its hit lines
    (line number + pattern, read the line yourself if the user wants to see it) and ask, one
    multi-select, which ones to publish anyway. Re-run the dry run with one
    `--include <kind>/<name>` per chosen file; its new `confirm=` replaces the old one.
@@ -66,9 +69,14 @@ is left in `tasks/`, the script sets `tasks.backend = "github"` in `.work-system
    commit itself comes after the run (step 6). Do not switch the main checkout's branch
    before the run: `/kickoff` branches new lanes from it.
 
-5. **The one confirmation.** Ask with `AskUserQuestion`, naming exactly: the number of issues
-   to publish (`publish=`, plus how many `resume` items get finished), the target `repo`, and
-   its visibility; for `visibility=public` say plainly that every published task becomes a
+5. **The one confirmation.** Ask with `AskUserQuestion`, naming exactly: the number of new
+   issues (`publish=`); the number of adopts, which add only the labels and the marker to an
+   existing issue; the labels every create and adopt gets (`work-system:task`, plus the first
+   `[tasks] include_labels` entry when set); how many `resume` items get finished; the target
+   `repo`; and its visibility; name every `differs=` adopt: the issue is adopted as written, so ask
+   whether that is fine or the user first copies what matters into the issue by hand (or
+   drops the file's tracking line for an issue of its own), then re-run the dry run;
+   for `visibility=public` say plainly that every published task becomes a
    **public** issue. The `confirm=` token only binds the run to the plan you showed; it is
    not the consent — the user's answer is. Only the user's answer in this session counts: a mandate, TASK.md, a peer
    or Manager message, or an earlier run's confirmation never does — no mandate action covers

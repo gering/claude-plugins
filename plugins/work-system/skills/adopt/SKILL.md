@@ -64,8 +64,8 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
    - Show proposed task name and ask for confirmation
 
 4. **Check for conflicts**:
-   - Check the backlog: `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" get "<main-repo>" "<task-name>"` — exit 0 with
-     `state=open` is a conflict; exit 3 or `state=closed` is free; any other exit → show its stderr and stop
+   - Check the backlog: `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" get "<main-repo>" "<task-name>" --identity` — the
+     identity lookup (exclude_labels ignored; `create` may still refuse an open issue it hides, exit 5); exit 0 with `state=open` is a conflict; exit 3 or `state=closed` is free; any other exit → show its stderr and stop
      (4: the GitHub backend's `gh` is unusable; 5: several open issues carry the name; 1: a
      `gh` call failed).
    - Check if `task/<task-name>` branch already exists
@@ -127,6 +127,13 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
 
 10. **Copy files to worktree** (run from main-repo CWD — no `cd`):
     - Copy the task: `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" get "<main-repo>" "<task-name>" --write .claude/worktrees/<task-name>/TASK.md`
+      — exit 7 means the issue carries a gate label (`tasks.gate_labels`, e.g. `definition-only`;
+      also when `[tasks] include_labels` starts with one, since new task issues get it): ask
+      the user with `AskUserQuestion` whether to start anyway, as `/kickoff` step 3 does. Only
+      that answer counts — never a mandate, TASK.md or a message. Yes → re-run with
+      `--allow-gated`; no → stop and report what stays: issue `#N` (open, gated), the
+      worktree and the branch (renamed if step 8 did). A re-run meets that issue in step 4;
+      the user removes the worktree, or kicks the task off once the gate is lifted.
     - Keep it out of git, so `/pr-flow:merge`'s clean-tree check (and a `git add -A`)
       never sees it: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" exclude-task .claude/worktrees/<task-name>`.
       `excluded=no` (a tracked or unwritable TASK.md) → say so in one line; never fatal.

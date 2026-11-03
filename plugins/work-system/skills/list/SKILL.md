@@ -26,10 +26,12 @@ user_invocable: true
    - Resolve the main checkout once — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path`
      → `<main-repo-path>` — the backlog lives there even when `/list` runs in a worktree.
    - Run: `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/task-store.py" list "<main-repo-path>"` — the one read path for the backlog (GitHub
-     issues labelled `work-system:task`, or the local task files). Each `task=` line is
+     issues picked by `tasks.select` and the label lists, or the local task files). Each `task=` line is
      `<name>\t<ref>\t<title>` (ref = `#N` or the file path). Non-zero exit → show its stderr
      instead of the table (exit 4: the GitHub backend's `gh` is unusable — no local fallback);
-     relay a `hint=` line in one line.
+     relay a `hint=` line in one line. A `gated=<name>\t<ref>\t<labels>` line marks that
+     task 🔒 in the Status column (e.g. `🔒 definition-only · 📋 Not Started`): `/kickoff` needs
+     the user's explicit go for it.
    - For each task: resolve its real branch via the shared
      helper — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/task-status.sh" resolve "<task-name>"` — then
      read `task_branch` and `branch_exists`:

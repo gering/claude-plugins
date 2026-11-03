@@ -136,9 +136,10 @@ def issue_name_of(i):
     return m[-1] if m else ""
 
 
-def issue(n, title, body, state="OPEN", label="work-system:task"):
+def issue(n, title, body, state="OPEN", label="work-system:task", labels=None, url=None):
     return {"number": n, "title": title, "body": body, "state": state,
-            "url": f"https://github.com/o/r/issues/{n}", "labels": [{"name": label}]}
+            "url": url or f"https://github.com/o/r/issues/{n}",
+            "labels": [{"name": l} for l in (labels if labels is not None else [label])]}
 
 
 class Env:
@@ -602,6 +603,8 @@ with tempfile.TemporaryDirectory() as d:
     items = sorted(kv(r.stdout, "item"))
     check("a tracking issue is adopted, shown as its own case",
           "adopt\topen/fix-crash\t#108\tFix crash" in items)
+    check("an adopt whose file says more than the issue is flagged as drift",
+          "open/fix-crash\t#108" in kv(r.stdout, "differs") and kv(r.stdout, "count_differs") == ["1"])
     check("a closed tracking issue is not adopted for an open task",
           "skip\topen/add-search\t#109\tAdd search" in items
           and any(s.startswith("open/add-search\t") and "closed" in s for s in kv(r.stdout, "skip")))
@@ -614,9 +617,9 @@ with tempfile.TemporaryDirectory() as d:
     check("adopt adds the label and the marker without a new issue",
           r.returncode == 0 and {l["name"] for l in i108["labels"]} == {"bug", "work-system:task"}
           and issue_name_of(i108) == "fix-crash" and len(e.issues()) == 3)
-    check("adopt puts the file in the body and keeps the old issue text",
-          "## Goal\nNo crash." in i108["body"] and "Seen on Android 14." in i108["body"]
-          and "Tracking issue" not in i108["body"] and i108["title"] == "Crash on launch")
+    check("adopt keeps the issue's own text and adds only the marker",
+          i108["body"] == "Seen on Android 14.\n\n<!-- work-system task: fix-crash -->\n"
+          and i108["title"] == "Crash on launch")
     check("with tracked task files the moves need a commit (never made by the tool)",
           kv(r.stdout, "commit_needed") == ["tasks"]
           and git(e.repo, "log", "--oneline").stdout.count("\n") == 2)
@@ -736,6 +739,235 @@ with tempfile.TemporaryDirectory() as d:
           "open/creds\t3\tsecret-assignment" in kv(r.stdout, "hit"))
     check("a bare --include naming an open and an archived task is refused",
           migrate(e, "--include", "add-search").returncode == 2)
+
+# ---- issue selection: tasks.select / include / exclude / gate labels ---------
+
+def labelled(n, title, body, *labels, state="OPEN", url=None):
+    return issue(n, title, body, state=state, labels=list(labels), url=url)
+
+
+with tempfile.TemporaryDirectory() as d:
+    e = Env(d)
+    git(e.repo, "-c", "user.email=t@e", "-c", "user.name=T", "commit", "-q", "--allow-empty", "-m", "i")
+    trello = "DEFINITION ONLY\n\nhttps://trello.com/c/abc\n"
+    e.gh_state(issues=[
+        labelled(1, "Marked task", "<!-- work-system task: marked -->", "work-system:task"),
+        labelled(2, "Müll-Tour planen", trello, "Definition-Only"),
+        labelled(3, "Bump lodash", "bot", "dependencies"),
+        labelled(4, "Fix login", "steps", "bug", "work-system:task", "dependencies"),
+        labelled(5, "Old", "x", "work-system:task", "work-system:archived"),
+        labelled(6, "A PR", "x", "bug", url="https://github.com/o/r/pull/6"),
+        labelled(7, "Closed one", "x", "bug", state="CLOSED")])
+    rows = lambda r: [x.split("\t")[1] for x in kv(r.stdout, "task")]
+
+    r = e.run("list", str(e.repo))
+    check("default select is the label, as before",
+          kv(r.stdout, "select") == ["label"] and rows(r) == ["#1", "#4"])
+    check("default: an unlabelled issue is not a task", e.run("get", str(e.repo), "#2").returncode == 3)
+
+    e.setting('[tasks]\nselect = "all-open"\n')
+    r = e.run("list", str(e.repo))
+    check("all-open lists every open issue but archived ones",
+          kv(r.stdout, "select") == ["all-open"] and rows(r) == ["#1", "#2", "#3", "#4"])
+    check("all-open lists without a gh label filter",
+          not any(c[:2] == ["issue", "list"] and "--label" in c for c in e.calls()[-2:]))
+    check("a marker-less title slugs umlauts readably",
+          "muell-tour-planen\t#2\tMüll-Tour planen" in kv(r.stdout, "task"))
+    check("list marks a gated task", kv(r.stdout, "gated") == ["muell-tour-planen\t#2\tdefinition-only"])
+    check("a pull request is never a task", e.run("get", str(e.repo), "#6").returncode == 3)
+
+    e.setting('[tasks]\nselect = "all-open"\nexclude_labels = ["dependencies"]\n')
+    r = e.run("list", str(e.repo))
+    check("exclude_labels drops an issue, even one with the task label", rows(r) == ["#1", "#2"])
+    check("... and get by #N agrees", e.run("get", str(e.repo), "#4").returncode == 3)
+
+    e.setting('[tasks]\nselect = "all-open"\ninclude_labels = ["bug", "definition-only"]\n')
+    check("include_labels keeps only issues with one of them, a body marker does not bypass it",
+          rows(e.run("list", str(e.repo))) == ["#2", "#4"])
+    e.gh_state(labels=["work-system:task", "bug"])
+    body = e.root / "new.md"
+    body.write_text("# New thing\n")
+    r = e.run("create", str(e.repo), "new-thing", "--body-file", str(body))
+    check("create adds the first include label, so its task is listed",
+          r.returncode == 0 and "new-thing" in [x.split("\t")[0] for x in kv(e.run("list", str(e.repo)).stdout, "task")]
+          and any(c[:2] == ["issue", "create"] and "bug" in c for c in e.calls()))
+    e.gh_state(issues=[i for i in e.issues() if issue_name_of(i) != "new-thing"])
+    e.setting('[tasks]\nselect = "all-open"\nexclude_labels = ["dependencies"]\n')
+    r = e.run("create", str(e.repo), "bump-lodash", "--body-file", str(body))
+    check("create counts an excluded issue's name as taken, and names it",
+          r.returncode == 5 and "#3" in r.stderr)
+    e.setting('[tasks]\nexclude_labels = ["work-system:task"]\n')
+    r = e.run("create", str(e.repo), "new-thing", "--body-file", str(body))
+    check("create refuses a task the filter would hide (a config error, exit 2)",
+          r.returncode == 2 and "[tasks]" in r.stderr
+          and not any(issue_name_of(i) == "new-thing" for i in e.issues()))
+
+    e.setting('[tasks]\nselect = "everything"\n')
+    r = e.run("list", str(e.repo))
+    check("an invalid select falls back to the label default with a note",
+          rows(r) == ["#1", "#4"] and "tasks.select" in r.stderr)
+
+    # A marker-less, gated issue through kickoff, close and the idempotent re-close.
+    e.setting('[tasks]\nselect = "all-open"\n')
+    r = e.run("get", str(e.repo), "muell-tour-planen")
+    check("get names the gate", r.returncode == 0 and kv(r.stdout, "gate") == ["definition-only"]
+          and kv(r.stdout, "issue") == ["2"])
+    wt = e.root / "lane-TASK.md"
+    r = e.run("get", str(e.repo), "#2", "--write", str(wt))
+    check("the kickoff copy of a gated issue is refused (exit 7)",
+          r.returncode == 7 and not wt.exists() and "definition-only" in r.stderr)
+    check("--allow-gated needs --write", e.run("get", str(e.repo), "#2", "--allow-gated").returncode == 2)
+    r = e.run("get", str(e.repo), "#2", "--write", str(wt), "--allow-gated")
+    check("--allow-gated writes the copy with the issue pin",
+          r.returncode == 0 and wt.read_text() == "# Müll-Tour planen\n\nissue: #2\n\n" + trello)
+    r = e.run("ref", str(e.repo), "muell-tour-planen", str(wt))
+    check("the marker-less task is pinned by its issue", kv(r.stdout, "ref") == ["#2"])
+    e.setting('[tasks]\nselect = "all-open"\nexclude_labels = ["definition-only"]\n')
+    r = e.run("close", str(e.repo), "#2", "--branch", "task/muell-tour-planen", "--pr", "3",
+              "--name", "muell-tour-planen")
+    i2 = [i for i in e.issues() if i["number"] == 2][0]
+    check("close of the pinned issue works even after the filter changed",
+          r.returncode == 0 and kv(r.stdout, "result") == ["closed"] and i2["state"] == "CLOSED")
+    check("nobody's issue body was rewritten",
+          i2["body"] == trello and not any(c[:2] == ["issue", "edit"] for c in e.calls()))
+    r = e.run("close", str(e.repo), "#2", "--branch", "task/muell-tour-planen", "--pr", "3",
+              "--name", "muell-tour-planen")
+    check("re-close of the marker-less task is idempotent", kv(r.stdout, "result") == ["already-closed"])
+    i4 = [i for i in e.issues() if i["number"] == 4][0]
+    e.gh_state(issues=[i for i in e.issues() if i["number"] != 4] + [dict(i4, title="Login repair")])
+    r = e.run("close", str(e.repo), "#4", "--branch", "task/fix-login", "--name", "fix-login")
+    check("a retitled marker-less pin is a conflict to confirm (5), never 'nothing to close'",
+          r.returncode == 5 and "retitled" in r.stderr)
+    e.setting('[tasks]\nselect = "all-open"\nexclude_labels = ["dependencies"]\n')
+    r = e.run("close", str(e.repo), "#4", "--branch", "task/fix-login")
+    check("the user-confirmed #N closes even when the filter now drops it",
+          r.returncode == 0 and kv(r.stdout, "result") == ["closed"])
+    check("close by #N still refuses a pull request",
+          e.run("close", str(e.repo), "#6", "--branch", "task/x").returncode == 3)
+    e.setting('[tasks]\nexclude_labels = ["dependencies"]\n')
+    check("in label mode close by #N refuses an issue without the task label",
+          e.run("close", str(e.repo), "#3", "--branch", "task/x").returncode == 3)
+    r = e.run("close", str(e.repo), "#3", "--branch", "task/x", "--name", "x")
+    check("in label mode a pinned #N of another name asks (5) instead of 'nothing to close'",
+          r.returncode == 5 and "retitled" in r.stderr)
+    i1 = [i for i in e.issues() if i["number"] == 1][0]
+    e.gh_state(issues=[i for i in e.issues() if i["number"] != 1]
+               + [dict(i1, labels=i1["labels"] + [{"name": "dependencies"}])])
+    r = e.run("close", str(e.repo), "marked", "--branch", "task/marked")
+    check("an unpinned close by name ignores an exclude label added mid-lane",
+          r.returncode == 0 and kv(r.stdout, "issue") == ["1"])
+
+with tempfile.TemporaryDirectory() as d:
+    e = Env(d, origin="git@github.com:acme/pull.git")
+    e.gh_state(issues=[issue(1, "One", "x", url="https://github.com/acme/pull/issues/1")])
+    check("a repo named pull still has issues, not pull requests",
+          kv(e.run("list", str(e.repo)).stdout, "count") == ["1"])
+
+# migrate under all-open: an unlabelled open issue already answers to the name.
+with tempfile.TemporaryDirectory() as d:
+    e = migrate_env(d)
+    (e.repo / "tasks" / "leaky.md").unlink()
+    e.setting('[tasks]\nbackend = "local"\nselect = "all-open"\n')
+    e.gh_state(issues=[issue(3, "Fix crash", "reported by a user", label="bug")])
+    r = migrate(e, "--open-only")
+    skips = dict(x.split("\t", 1) for x in kv(r.stdout, "skip"))
+    check("migrate under all-open does not duplicate an unlabelled issue's name",
+          "already answers to fix-crash" in skips.get("open/fix-crash", ""))
+    (e.repo / "tasks" / "add-search.md").write_text("# Add search\n\nTracking issue: #4\n")
+    e.gh_state(issues=e.issues() + [issue(4, "Search", "the reporter's text", label="enhancement")])
+    r = migrate(e, "--open-only")
+    check("an adopt whose file holds only its title and tracking line is not drift",
+          "adopt\topen/add-search\t#4\tAdd search" in kv(r.stdout, "item")
+          and not any(x.startswith("open/add-search") for x in kv(r.stdout, "differs")))
+    e.setting('[tasks]\nbackend = "local"\nselect = "all-open"\nexclude_labels = ["enhancement"]\n')
+    r = migrate(e, "--open-only")
+    check("migrate never adopts an issue the filter would hide",
+          "exclude_labels" in dict(x.split("\t", 1) for x in kv(r.stdout, "skip")).get("open/add-search", ""))
+    (e.repo / "tasks" / "fix-crash.md").write_text("# Fix crash\n\nTracking issue: #5\n")
+    e.setting('[tasks]\nbackend = "local"\nselect = "all-open"\n')
+    e.gh_state(issues=e.issues() + [issue(5, "Crash on launch", "", label="bug")])
+    r = migrate(e, "--open-only")
+    check("migrate never adopts onto a name another open issue already answers to",
+          "already answers to fix-crash" in dict(x.split("\t", 1) for x in kv(r.stdout, "skip"))
+          .get("open/fix-crash", ""))
+    e.gh_state(issues=[issue(5, "Fix Crash!", "b", label="bug"), issue(3, "Fix crash", "a", label="bug")])
+    r = migrate(e, "--open-only")
+    check("the clash check sees every issue with that slug, not only the tracking target",
+          "already answers to fix-crash" in dict(x.split("\t", 1) for x in kv(r.stdout, "skip"))
+          .get("open/fix-crash", ""))
+
+# Task-filter guards: identity lookups, include label created, migrate edges.
+with tempfile.TemporaryDirectory() as d:
+    e = Env(d)
+    e.gh_state(issues=[issue(1, "Marked", "<!-- work-system task: marked -->",
+                             labels=["work-system:task", "dependencies"]),
+                       issue(2, "Müll-Tour", "x", labels=["bug"])])
+    e.setting('[tasks]\nexclude_labels = ["dependencies"]\n')
+    check("get hides an excluded task", e.run("get", str(e.repo), "marked").returncode == 3)
+    r = e.run("get", str(e.repo), "marked", "--identity")
+    check("get --identity finds it, as close would", r.returncode == 0 and kv(r.stdout, "issue") == ["1"])
+    check("--identity excludes --write", e.run("get", str(e.repo), "marked", "--identity",
+                                               "--write", str(e.root / "T.md")).returncode == 2)
+    r = e.run("close", str(e.repo), "#2", "--branch", "task/muell-tour", "--name", "muell-tour")
+    check("a pinned close of a lane's own issue survives a switch back to label mode",
+          r.returncode == 0 and kv(r.stdout, "result") == ["closed"])
+    nfd = "Müll-Tour"
+    e.gh_state(issues=[issue(3, nfd, "x", labels=["work-system:task"])])
+    check("a decomposed umlaut slugs like a composed one",
+          kv(e.run("get", str(e.repo), "#3").stdout, "task") == ["muell-tour"])
+    e.gh_state(issues=[issue(4, "Исправить вход", "x", labels=["work-system:task"]),
+                       issue(5, "修复登录", "x", labels=["work-system:task"])])
+    check("titles with nothing to slug get distinct names",
+          sorted(l.split("\t")[0] for l in kv(e.run("list", str(e.repo)).stdout, "task"))
+          == ["issue-4", "issue-5"])
+    e.gh_state(issues=[issue(1, "Marked", "body text <!-- work-system task: marked -->",
+                             labels=["work-system:task", "dependencies"])])
+    r = e.run("get", str(e.repo), "marked", "--body", "--identity")
+    check("get --body --identity reads a lane's task the filter now hides",
+          r.returncode == 0 and "body text" in r.stdout)
+    new_body = e.root / "new.md"
+    new_body.write_text("# New\n")
+    e.setting('[tasks]\ninclude_labels = ["needs,review"]\n')
+    r = e.run("create", str(e.repo), "new", "--body-file", str(new_body))
+    check("an include label gh would split is a config error (2)",
+          r.returncode == 2 and "include_labels[0]" in r.stderr)
+    e.setting('[tasks]\ninclude_labels = ["work-system:archived"]\n')
+    r = e.run("create", str(e.repo), "new", "--body-file", str(new_body))
+    check("the archived label as include label is a config error (2)",
+          r.returncode == 2 and "archived" in r.stderr)
+    e.setting('[tasks]\nselect = "all-open"\ninclude_labels = ["accepted"]\n')
+    e.gh_state(issues=[issue(12, "Fix login", "<!-- work-system task: fix-login -->",
+                             labels=["accepted"]),
+                       issue(99, "Spoof", "<!-- work-system task: fix-login -->", labels=[])])
+    r = e.run("get", str(e.repo), "fix-login", "--identity")
+    check("the identity view keeps include_labels: a stranger's marker does not answer",
+          r.returncode == 0 and kv(r.stdout, "issue") == ["12"])
+    e.setting('[tasks]\ninclude_labels = ["ws-ready"]\n')
+    body = e.root / "b.md"
+    body.write_text("# New\n")
+    r = e.run("create", str(e.repo), "new", "--body-file", str(body))
+    check("create makes the include label when the repo lacks it",
+          r.returncode == 0 and "ws-ready" in json.loads(e.state.read_text())["labels"])
+
+with tempfile.TemporaryDirectory() as d:
+    e = migrate_env(d)
+    (e.repo / "tasks" / "leaky.md").unlink()
+    e.setting('[tasks]\nbackend = "local"\nselect = "all-open"\nexclude_labels = ["dependencies"]\n')
+    e.gh_state(issues=[issue(5, "Fix crash", "dup", labels=["dependencies"]),
+                       issue(6, "Search", "## Goal\nFind things.\n\n<!-- work-system task: add-search -->",
+                             labels=[])])
+    r = migrate(e, "--open-only")
+    skips = dict(x.split("\t", 1) for x in kv(r.stdout, "skip"))
+    check("migrate's name clash ignores the label lists",
+          "already answers to fix-crash" in skips.get("open/fix-crash", ""))
+    check("migrate never resumes onto an unlabelled issue's marker under all-open (skips the name)",
+          "already answers to add-search" in dict(x.split("\t", 1) for x in kv(r.stdout, "skip"))
+          .get("open/add-search", ""))
+    e.setting('[tasks]\nbackend = "local"\nselect = "all-open"\nexclude_labels = ["hide"]\n')
+    e.gh_state(issues=[issue(6, "Search", "<!-- work-system task: add-search -->", labels=["hide"])])
+    r = migrate(e, "--open-only")
+    check("migrate never resumes onto an issue the filter hides",
+          "open/add-search" in dict(x.split("\t", 1) for x in kv(r.stdout, "skip")))
 
 if FAILS:
     print("FAIL test_task_store.py:")

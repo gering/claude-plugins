@@ -638,23 +638,34 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
       "closed manually (no merged PR)".
     - **`<task-pinned>=no`** (GitHub backend: the worktree is gone, or its TASK.md has no
       `issue:` line — e.g. a lane kicked off before `/work-system:migrate`) — before either call, run
-      `task-store.py get <main-repo-path> "<task-ref>"`, show the issue it matched (`issue=`,
+      `task-store.py get <main-repo-path> "<task-ref>" --identity` (the lookup `close` itself
+      uses: `[tasks]` exclude labels do not hide it; an issue that lost its include label does
+      drop out, and is exit 3), show the issue it matched (`issue=`,
       `title=`, `state=`) and ask whether that is the issue this lane shipped. Close it as
-      `"#N"` only on a yes; otherwise ask for the right `#N`. Never close an unpinned name
+      `"#N"` only on a yes; otherwise ask for the right `#N`. Exit 3 here is not "never
+      recorded": the issue may only be filtered out (include label removed) — ask the user
+      for its `#N`, or whether there is none. Never close an unpinned name
       unasked, also not on an auto-accepted delegated close.
-    - **Exit 3** ("no such task"): nothing to close (the task was never recorded) — note it in
-      the summary and continue; not a failure.
+    - **Exit 3** ("no such task"): a pinned `#N` with `--name` that answers to this lane
+      is never exit 3 (the lane's own issue counts whatever the filter says). Read stderr. `not a work-system task here: <why>` on a `#N`
+      means the issue exists but the filter no longer selects it (an include label removed,
+      or `tasks.select` changed): say issue `#N` is still open, quote `<why>`, and leave the
+      close to the user. Otherwise nothing to close (the task was never recorded) — note it
+      in the summary and continue; not a failure.
     - **Exit 4** (GitHub backend, `gh` unusable), or **1** on the GitHub backend (a `gh`
       call failed): the issue is still open. Surface stderr and say "closing the task failed
       — `<task-ref>` still open"; the rest of the cleanup (worktree/branch) already happened.
       Never fall back to a file. **1** on the local backend is `archive-task.sh` failing — see
       `backend=local` below.
     - **Exit 5** (several open issues carry this task name, or the pinned `#N` belongs to
-      another task — `--name` checks it) or **2** (the name was refused):
+      another task — `--name` checks it; a marker-less issue retitled since kickoff lands
+      here too) or **2** (the name was refused):
       nothing was closed. Show stderr and the open candidates, ask which issue this lane
       shipped, and close that one with the same call, `"#N"` (quoted) in place of the name
       and **without** `--name` (the user's confirmation replaces that check). Never
-      pick one yourself.
+      pick one yourself. Exit 3 on that retry (an issue without `work-system:task` after
+      `tasks.select` went back to `label`) closes nothing: say issue `#N` is still open and
+      the user closes it by hand.
     - **`backend=github`** → read `issue=` and `result=`: `closed` (closed with a comment naming
       the PR, or the manual-close note) or `already-closed` (not an error). There is no file to
       archive or commit: skip the rest of this step and report "issue #N closed" / "issue #N
