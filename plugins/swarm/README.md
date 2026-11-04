@@ -117,6 +117,8 @@ Scope+gate → Fan-out (session-model lenses ∥ codex|cc-harness:sol ∥ grok|c
    all-untagged consensus, and every Claude-unchecked methodological consensus
    go through an adversarial 3-state verifier (`CONFIRMED`/`PLAUSIBLE`/`REFUTED`;
    only `REFUTED` is dropped); tagged topical-defect consensus is auto-accepted.
+   A finding whose path is not repo-relative (absolute paths inside the repo are
+   normalized first) is not verified but kept as `UNVERIFIED`, never refuted.
    Design findings get an **applicability** prompt instead (is the reuse target
    real? is the simpler form behavior-identical?) — same three states.
 
