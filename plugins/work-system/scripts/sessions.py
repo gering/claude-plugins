@@ -274,6 +274,18 @@ def labels():
     return tabs, wss
 
 
+# A `claude` binary, or the native installer's versioned one: it execs
+# ~/.local/share/claude/versions/<ver>, so the foreground process is named after
+# the version (e.g. "2.1.316"), not "claude". The last segment must be
+# version-shaped, so a `.partial` download or a helper there is not claude.
+CLAUDE_PATH_RE = re.compile(r"(?:.*/)?claude(?:/versions/\d+(?:\.\d+)+)?")
+
+
+def is_claude_path(path):
+    """True for a `claude` binary or the native installer's versioned one."""
+    return CLAUDE_PATH_RE.fullmatch(str(path or "")) is not None
+
+
 def claude_process(pane):
     """(pid, start_ts, cwd) of the pane's foreground claude, or Nones."""
     r = herdr_json(["herdr", "pane", "process-info", "--pane", pane]) or {}
@@ -286,10 +298,7 @@ def claude_process(pane):
         if not isinstance(p, dict) or p.get("pid") != pgid:
             continue
         argv = p.get("argv") if isinstance(p.get("argv"), list) else []
-        names = {os.path.basename(str(p.get("argv0") or ""))}
-        if argv:
-            names.add(os.path.basename(str(argv[0])))
-        if "claude" not in names:
+        if not any(is_claude_path(c) for c in (p.get("argv0"), argv[0] if argv else None)):
             return None, None, None
         rc, out = run(["ps", "-o", "etime=", "-p", str(pgid)])
         secs = parse_etime(out) if rc == 0 else None
