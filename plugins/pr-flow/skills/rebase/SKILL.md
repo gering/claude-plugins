@@ -1,20 +1,20 @@
 ---
 name: rebase
 description: |
-  Rebases against the PR's actual base: proceeds without asking when
-  changed files don't overlap, menu otherwise, aborts on conflicts.
+  Rebases onto the PR's base and force-pushes with lease; asks only
+  on a predicted conflict, aborts cleanly on real ones.
   Trigger: "rebase against main", "sync with base", "am I behind?".
 user_invocable: true
 ---
 
 # PR Rebase Check
 
-> Detect whether the current branch is behind its target/base branch. If yes, show what's new on base, then rebase — proceeding without a prompt when the changed files don't overlap, asking via a menu when they do. Abort cleanly on conflicts. After a successful force-push (standalone use only), wait for an auto-triggered Claude review and present the result.
+> Detect whether the current branch is behind its target/base branch. If yes, show what's new on base, then rebase + force-push — without a prompt unless a real conflict is predicted (menu then). Abort cleanly on conflicts. After a successful force-push (standalone use only), wait for an auto-triggered Claude review and present the result.
 
 ## Arguments
 
 - `--no-poll` — Skip the post-push review polling step. Set automatically when this skill is invoked from `/cycle` or `/open` (the parent does its own polling).
-- `--auto` — Skip the step-5 menu entirely (even when files overlap) — rebase, then force-push if an upstream exists. Used when the parent skill (`/merge`, `/cycle`) has already authorized the rebase+push as part of its own invocation. Conflicts still abort cleanly. Uncommitted changes are auto-stashed and popped afterward (not a stopping condition under `--auto`); other stopping conditions (missing upstream, detached HEAD, etc.) still apply.
+- `--auto` — Skip the step-5 menu entirely (even on a predicted conflict) — rebase, then force-push if an upstream exists. Used when the parent skill (`/merge`, `/cycle`) has already authorized the rebase+push as part of its own invocation. Conflicts still abort cleanly. Uncommitted changes are auto-stashed and popped afterward (not a stopping condition under `--auto`); other stopping conditions (missing upstream, detached HEAD, etc.) still apply.
 
 ## Why this skill exists
 
@@ -53,31 +53,33 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
    - If empty → ✅ "Branch is up-to-date with `<BASE_BRANCH>`. No rebase needed." — stop.
    - If non-empty → continue to step 5.
 
-5. **Assess conflict risk, then proceed or ask**:
+5. **Predict conflicts, then proceed or ask**:
 
    Gather the facts first:
    - Upstream: `git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null` → store as `HAS_UPSTREAM` (true if non-empty).
-   - File overlap between both sides since the merge-base. Pass `--no-renames` so a rename can't hide a conflict: with rename detection on, a base-side rename `foo`→`bar` shows only `bar`, so if the branch edits `foo` the paths miss each other — and a rebase that CAN conflict (when the rename commit also touched those lines) would slip through as "no overlap". `--no-renames` surfaces the old path (`foo` as a delete) so that overlap is caught. This is deliberately conservative: a clean rename git would auto-resolve also gets flagged (an extra menu, never a skipped check). It also pins the result against the user's `diff.renames` config so the classification is deterministic.
+   - Conflict prediction — an in-memory three-way merge (`git merge-tree --write-tree`, git ≥ 2.38) that touches neither worktree, index nor refs:
      ```
-     comm -12 <(git diff --no-renames --name-only HEAD...origin/<BASE_BRANCH> | sort) \
-              <(git diff --no-renames --name-only origin/<BASE_BRANCH>...HEAD | sort)
+     bash "${CLAUDE_PLUGIN_ROOT}/scripts/rebase-predict.sh" origin/<BASE_BRANCH>
      ```
+     Read `prediction=clean|conflict|unknown`; on `conflict`, the `file=` lines name the conflicting paths.
    - Always print the new-commits summary (from step 4) so the user sees what's coming in.
 
-   **Safe path — overlap is empty:** do NOT prompt (beyond step 6's uncommitted-changes guard, which may still ask in standalone mode). Announce in one line and continue to step 6:
-   ```
-   No file overlap with `<BASE_BRANCH>` — proceeding with rebase<if HAS_UPSTREAM> + force-push (--force-with-lease)</if>.
-   ```
-   Invoking `/rebase` is the authorization for this conflict-free case. The actual force-push happens in step 8, after the rebase succeeds — if a conflict surfaces anyway (semantic, or a rename `--no-renames` didn't catch), step 7's clean abort catches it and no force-push occurs.
+   File overlap alone is **not** a reason to ask: in a monorepo nearly every PR touches the same manifests and changelog, and git merges those hunks cleanly.
 
-   **Decision path — overlap is non-empty:** a judgment call is needed, so present a real selection menu via the **AskUserQuestion tool** — never a free-text `y/n/d` prompt:
-   - Question: "Branch `<CURRENT_BRANCH>` is N commit(s) behind `<BASE_BRANCH>`; M overlapping file(s): <list, truncate at 5>. Rebase<if HAS_UPSTREAM> + force-push</if>?"
+   **Safe path — `prediction=clean` or `unknown`:** do NOT prompt (beyond step 6's uncommitted-changes guard, which may still ask in standalone mode). Announce in one line and continue to step 6:
+   ```
+   No conflict predicted with `<BASE_BRANCH>` — proceeding with rebase<if HAS_UPSTREAM> + force-push (--force-with-lease)</if>.
+   ```
+   (On `unknown`, say "Conflict prediction unavailable (<reason>) — proceeding; a conflict still aborts cleanly." instead.) Invoking `/rebase` is the authorization for the rebase and the lease-protected force-push. The push happens in step 8, after the rebase succeeds — the prediction is a merge of the two tips, not a commit-by-commit replay, so if a conflict surfaces anyway step 7's clean abort catches it and no force-push occurs.
+
+   **Decision path — `prediction=conflict`:** a judgment call is needed, so present a real selection menu via the **AskUserQuestion tool** — never a free-text `y/n/d` prompt:
+   - Question: "Branch `<CURRENT_BRANCH>` is N commit(s) behind `<BASE_BRANCH>`; rebasing will likely conflict in M file(s): <list, truncate at 5>. Rebase<if HAS_UPSTREAM> + force-push</if> anyway?"
    - Options:
-     1. **Rebase + force-push** (Recommended) — continue to step 6. This single choice authorizes both the rebase AND the force-push (if `HAS_UPSTREAM`); do NOT re-ask later.
-     2. **Show diff first** — run `git log -p HEAD..origin/<BASE_BRANCH>` for the overlapping files (paginate), then re-present the menu.
-     3. **Leave as-is** — stop with ⚠️ "Rebase skipped — branch remains N commits behind `<BASE_BRANCH>`".
+     1. **Rebase anyway** — continue to step 6; step 7 aborts cleanly on the conflict and offers resolve/merge/leave. This choice authorizes both the rebase AND the force-push (if `HAS_UPSTREAM`); do NOT re-ask later.
+     2. **Show diff first** — run `git log -p HEAD..origin/<BASE_BRANCH> -- <conflicting files>` (paginate), then re-present the menu.
+     3. **Leave as-is** (Recommended) — stop with ⚠️ "Rebase skipped — branch remains N commits behind `<BASE_BRANCH>`; resolve with `git rebase origin/<BASE_BRANCH>` by hand."
 
-   **If `--auto` was passed**: skip the menu even on overlap — print the summary, then proceed as if option 1 was chosen. The parent skill's invocation is the authorization.
+   **If `--auto` was passed**: skip the menu even on a predicted conflict — print the summary, then proceed as if option 1 was chosen. The parent skill's invocation is the authorization; step 7 aborts cleanly and returns to the parent.
 
 6. **Uncommitted changes guard**:
    - Run: `git status --porcelain`
@@ -156,7 +158,7 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
 
 ## Notes
 
-- **Confirmation model**: zero file overlap → proceed without asking about the rebase itself (the `/rebase` invocation is the authorization; conflicts still abort cleanly). Overlap → one menu choice authorizes both rebase and force-push. The step-6 uncommitted-changes guard is independent of overlap and may still prompt on the safe path (standalone only — under `--auto` it auto-stashes instead of prompting). Decisions are always real selection menus (AskUserQuestion), never free-text prompts
+- **Confirmation model**: invoking `/rebase` authorizes the rebase and the `--force-with-lease` push. It asks only when `rebase-predict.sh` predicts a real conflict (one menu choice then authorizes both); file overlap alone never asks, and an unavailable prediction proceeds, because step 7's clean abort is the safety net. A lease-rejected push stops without retry. The step-6 uncommitted-changes guard is independent of the prediction and may still prompt on the safe path (standalone only — under `--auto` it auto-stashes instead of prompting). Decisions are always real selection menus (AskUserQuestion), never free-text prompts
 - Conflicts → abort + suggest, never auto-resolve
 - Safe to run repeatedly: if no rebase is needed, it's a 2-command no-op
 - Designed to be called both standalone and from `/open` / `/cycle`

@@ -70,9 +70,9 @@ If a clear pattern emerges (e.g. 18 of 20 last PRs were squashed), `/merge` sugg
 
 ### Force-push safety
 
-**What it does.** Any force-push inside `/rebase` uses `--force-with-lease`, never `--force`. If the remote advanced since the last fetch (e.g., a teammate pushed), the push fails fast with a clear message. Whether `/rebase` asks first depends on risk: when the files changed on base and on the branch don't overlap, it rebases + force-pushes immediately (invoking the skill is the authorization); when files overlap, it presents a selection menu (rebase / show diff / leave as-is) before touching anything.
+**What it does.** Any force-push inside `/rebase` uses `--force-with-lease`, never `--force`. If the remote advanced since the last fetch (e.g., a teammate pushed), the push fails fast with a clear message. Invoking `/rebase` authorizes the rebase + force-push, so it runs without a prompt — unless `git merge-tree --write-tree` (an in-memory merge, git ≥ 2.38) predicts a real conflict; then it presents a selection menu (rebase anyway / show diff / leave as-is) before touching anything. Mere file overlap doesn't ask: in a monorepo nearly every PR touches the same manifest and changelog, and git merges those hunks cleanly. If the prediction is unavailable it proceeds; an actual conflict still aborts cleanly.
 
-**Why it matters.** `--force` overwrites teammate commits silently. `--force-with-lease` is the safer default. And a conflict-free catch-up rebase shouldn't cost a confirmation round-trip — prompts are reserved for cases where judgment is actually needed.
+**Why it matters.** `--force` overwrites teammate commits silently. `--force-with-lease` is the safer default. And a catch-up rebase that git resolves on its own shouldn't cost a confirmation round-trip — prompts are reserved for a predicted conflict, where judgment is actually needed.
 
 ### Structured review output
 
@@ -112,7 +112,7 @@ If a clear pattern emerges (e.g. 18 of 20 last PRs were squashed), `/merge` sugg
 | `/cycle` | Full loop: stage → commit → push → trigger `@claude review` → poll in background → present structured results. `--loop` auto-fixes agreed findings and re-cycles until clean |
 | `/check` | Read-only snapshot: CI status, human reviews, latest Claude feedback, merge-readiness verdict |
 | `/fix` | Walk through issues from the latest review as a numbered checklist and implement fixes interactively |
-| `/rebase` | Standalone rebase check against the PR's actual base branch; execute cleanly on confirmation |
+| `/rebase` | Rebase + force-push (with lease) onto the PR's actual base branch; asks only on a predicted conflict |
 | `/merge` | Merge the PR safely — detect method, verify CI + reviews + open issues, execute, clean up |
 
 ## Typical workflow
@@ -211,7 +211,7 @@ Each skill runs a preflight check and stops with a clear message if requirements
 
 ## Design principles
 
-- **Interactive by default, silent when risk-free** — no silent commits or fixes without user confirmation; decisions are real selection menus, not free-text prompts. Two deliberate exceptions where the invocation itself is the authorization: `/cycle --loop` (autonomous cycle; the final squash still asks) and `/rebase` with zero file overlap (conflict-free catch-up, aborts cleanly if a conflict appears anyway)
+- **Interactive by default, silent when risk-free** — no silent commits or fixes without user confirmation; decisions are real selection menus, not free-text prompts. Two deliberate exceptions where the invocation itself is the authorization: `/cycle --loop` (autonomous cycle; the final squash still asks) and `/rebase` when no conflict is predicted (catch-up rebase + lease push, aborts cleanly if a conflict appears anyway)
 - **Never re-ask what was already answered** — when work-system's `/kickoff`
   recorded a mandate for the lane (`MANDATE.md`), `/open` and `/cycle` read it and
   treat its pre-authorized actions as settled. A missing work-system yields
