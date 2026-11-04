@@ -1,10 +1,10 @@
 ---
 title: "herdr /kickoff + /continue-reopen Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-10-31
+updatedAt: 2026-11-04
 createdFrom: "PR #17"
-updatedFrom: "session: 2026-10-31 (task/fix-herdr-launch-unverified-on-0-8-2)"
-pluginVersion: 1.29.1
+updatedFrom: "session: 2026-11-04 (task/herdr-agent-name-collision-across-spaces)"
+pluginVersion: 1.34.1
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -205,11 +205,34 @@ pane-run path (cc-harness, kimi) never hit this: it confirms by detection, not b
   before. `unknown` is herdr's first seconds of detection and is polled through.
   Nothing is retried. A timeout is genuinely two-sided: live, a 3s start into a pane
   whose shell was still busy typed **nothing** and left a bare prompt.
-- **Then name it**: `agent rename <pane> <label>` (idempotent, so bounded unlike the
-  launch mutations). Best-effort — `agent_name_taken` (a stale tab holding the label)
-  is reported on stderr plus a `named=no` stdout line `/kickoff` relays (the
-  caller must not advertise a name herdr gave someone else); the launch stays
-  confirmed.
+- **Then name it**: `agent rename <pane> <name>` (idempotent, so bounded unlike the
+  launch mutations), walking the same fallback names as the start (below).
+  Best-effort — if every name is refused it is reported on stderr plus a `named=no`
+  stdout line `/kickoff` relays (the caller must not advertise a name herdr gave
+  someone else); the launch stays confirmed.
+
+### Agent names are server-wide: `agent_name_taken` falls back
+
+herdr agent names are unique per **server**, not per workspace. Two lanes whose
+labels derive from one task title (the server and the app half of a feature, each in
+its own workspace) collided: the second `agent start` got `agent_name_taken`, which
+was classified *ambiguous*, so the launcher reported `blocked=unverified` and left
+an empty shell tab that read as a started lane (incident 2026-11-04).
+
+- **Verified live (herdr 0.9.5)**: the rejection is immediate (exit 1), types
+  nothing — the shell keeps the foreground — and names the holder's pane/cwd. So it
+  is safe to retry, and it is *definitive* (nothing started), not ambiguous.
+- **Fallback, not always-suffix**: the plain label stays the common case; on a taken
+  name the launcher tries `<label>-<repo>` (the main checkout's dir name — what
+  usually tells two spaces apart; not the workspace id, which is opaque `wN`), then
+  `<label>-<repo>-2`, `-3`, bounded by `WORK_SYSTEM_HERDR_NAME_TRIES` (4 names).
+  The retry costs no busy-retry budget. Same walk on the legacy start and the
+  timeout-path rename.
+- A fallback name is reported as a `herdr_name=` stdout line (absent when the plain
+  label took). All names taken → `fail_definitive`: tab rolled back, exit 1, the
+  caller's manual block — a loud failure, never a shell tab posing as a lane.
+- The test models the incident with a *stateful* stub server that registers names
+  across two launches in two workspaces, rather than only canned replies.
 - **Not every startup error is the busy case.** `agent_not_ready` ("blocked during
   startup") is CC's trust dialog in an untrusted cwd — the agent is stuck, not
   working, so it stays ambiguous → `unverified`.
