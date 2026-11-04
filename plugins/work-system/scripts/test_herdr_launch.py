@@ -25,7 +25,11 @@ Covers:
     ambiguous ones, and an unconfirmed rollback downgrading to unverified;
   * herdr 0.8.2 readiness timeouts: the worker detected in the pane → moved=yes
     + named (a refused name → named=no), nothing/wrong kind detected → still
-    unverified.
+    unverified;
+  * server-wide agent names: agent_name_taken retries under `<label>-<repo>`,
+    `-2`, … (start, legacy start and the timeout rename), bounded, reported as
+    `herdr_name=`; all taken → loud failure + tab rollback; and two kickoffs of
+    one label in two workspaces against one stateful stub server.
 """
 import json as jsonlib
 import os
@@ -1022,6 +1026,126 @@ r = e.run("launch", "t", str(e.worktree), "w1")
 check("scalar tab field: still launches", r.returncode == 0)
 check("scalar tab field: both ids survive",
       kv(r.stdout).get("pane") == "w1:p7" and kv(r.stdout).get("tab") == "w1:t7")
+e.close()
+
+# --- agent names are server-wide: a taken one falls back, bounded ----------- #
+# Verified live (herdr 0.9.5): `agent start` with a taken name exits 1 with
+# agent_name_taken at once and types nothing, so a retry under another name is safe.
+NAME_TAKEN = jsonlib.dumps({"error": {"code": "agent_name_taken",
+                                      "message": "agent name t is already used"}})
+
+
+def repo_worktree(e, repo="My App", task="x"):
+    """A worktree path shaped like /kickoff's: <main>/.claude/worktrees/<task>."""
+    wt = Path(e.tmp.name) / repo / ".claude" / "worktrees" / task
+    wt.mkdir(parents=True)
+    return str(wt)
+
+
+e = Env(modern_cases(**{"agent start": [("", NAME_TAKEN, 1), (AGENT_STARTED, "", 0)]}),
+        log_argv=True, api="modern")
+r = e.run("launch", "t", repo_worktree(e), "w1")
+starts = e.call_args("agent start")
+check("name taken: launched under the repo-suffixed name",
+      r.returncode == 0 and kv(r.stdout).get("moved") == "yes"
+      and kv(r.stdout).get("herdr_name") == "t-my-app")
+check("name taken: second start used the fallback name, same pane",
+      [s[2] for s in starts] == ["t", "t-my-app"] and starts[1][starts[1].index("--pane") + 1] == "w1:p7")
+check("name taken: the retry is announced", "retrying as 't-my-app'" in r.stderr)
+check("name taken: the tab was kept", "tab close" not in [n for n, _ in e.calls()])
+e.close()
+
+# --- the plain label stays the common case: no herdr_name= line ------------ #
+e = Env(modern_cases(), log_argv=True, api="modern")
+r = e.run("launch", "t", repo_worktree(e), "w1")
+check("name free: no herdr_name= line", "herdr_name" not in r.stdout)
+e.close()
+
+# --- every candidate taken: loud failure, tab rolled back, bounded --------- #
+e = Env(modern_cases(**{"agent start": ("", NAME_TAKEN, 1)}), log_argv=True, api="modern")
+r = e.run("launch", "t", repo_worktree(e), "w1")
+starts = e.call_args("agent start")
+check("all names taken: exit 1 with no stdout (caller shows the manual block)",
+      r.returncode == 1 and r.stdout == "")
+check("all names taken: tried exactly NAME_TRIES (4) distinct names",
+      [s[2] for s in starts] == ["t", "t-my-app", "t-my-app-2", "t-my-app-3"])
+check("all names taken: the empty tab is rolled back once",
+      len(e.call_args("tab close")) == 1 and "rolled back" in r.stderr)
+check("all names taken: says so and relays herdr's error",
+      "already in use" in r.stderr and "agent_name_taken" in r.stderr)
+e.close()
+
+# --- outside a .claude/worktrees layout (no repo slug): numeric fallbacks -- #
+e = Env(modern_cases(**{"agent start": ("", NAME_TAKEN, 1)}), log_argv=True, api="modern")
+e.env["WORK_SYSTEM_HERDR_NAME_TRIES"] = "2"
+r = e.run("launch", "t", str(e.worktree), "w1")
+check("no repo slug: numeric fallback, bounded by NAME_TRIES",
+      [s[2] for s in e.call_args("agent start")] == ["t", "t-2"] and r.returncode == 1)
+e.close()
+
+# --- a label already ending in the repo slug is not suffixed twice --------- #
+e = Env(modern_cases(**{"agent start": [("", NAME_TAKEN, 1), (AGENT_STARTED, "", 0)]}),
+        log_argv=True, api="modern")
+r = e.run("launch", "t-my-app", repo_worktree(e), "w1")
+check("label ends in slug: falls back to -2, not -my-app-my-app",
+      kv(r.stdout).get("herdr_name") == "t-my-app-2")
+e.close()
+
+# --- legacy herdr: the taken name retries too ------------------------------ #
+e = Env({"agent start": [("", NAME_TAKEN, 1), (LEGACY_STARTED, "", 0)],
+         "pane move": (LEGACY_MOVED, "", 0)}, log_argv=True, api="legacy")
+r = e.run("launch", "t", repo_worktree(e), "w1")
+check("legacy, name taken: moved=yes under the fallback name",
+      kv(r.stdout).get("moved") == "yes" and kv(r.stdout).get("herdr_name") == "t-my-app"
+      and [s[2] for s in e.call_args("agent start")] == ["t", "t-my-app"])
+e.close()
+
+# --- timeout path: the rename walks the fallbacks too ---------------------- #
+e = Env(modern_cases(**{
+    "agent start": ("", TIMEOUT_ERR, 1),
+    "pane get": (pane_get("claude"), "", 0),
+    "agent rename": [("", NAME_TAKEN, 1), (RENAMED, "", 0)]}), log_argv=True, api="modern")
+r = e.run("launch", "t", repo_worktree(e), "w1")
+check("timeout, rename taken once: named under the fallback",
+      kv(r.stdout).get("herdr_name") == "t-my-app" and "named" not in kv(r.stdout)
+      and [a[3] for a in e.call_args("agent rename")] == ["t", "t-my-app"])
+e.close()
+
+# --- two kickoffs, same label, two workspaces: the second one falls back --- #
+# One stateful herdr server: `agent start` registers names server-wide and refuses
+# a taken one the way herdr does, so this is the reported incident end to end.
+e = Env({}, log_argv=True, api="modern")
+reg = Path(e.tmp.name) / "names"
+reg.mkdir()
+(Path(e.tmp.name) / "bin" / "herdr").write_text(f"""#!/usr/bin/env bash
+{{ printf '=== %s\\n' "$1 $2"; printf '%s\\n' "$@"; }} >> "$HERDR_ARGV_LOG"
+case "$1 $2" in
+  "tab create")
+    ws=""; while [ $# -gt 0 ]; do [ "$1" = --workspace ] && ws="$2"; shift; done
+    printf '{{"result":{{"root_pane":{{"pane_id":"%s:p7"}},"tab":{{"tab_id":"%s:t7"}}}}}}' "$ws" "$ws" ;;
+  "agent start")
+    name="$3"; pane=""; while [ $# -gt 0 ]; do [ "$1" = --pane ] && pane="$2"; shift; done
+    if [ -e "{reg}/$name" ]; then
+      printf '{{"error":{{"code":"agent_name_taken","message":"agent name %s is already used"}}}}' "$name" >&2
+      exit 1
+    fi
+    : > "{reg}/$name"
+    printf '{{"result":{{"agent":{{"agent":"claude","pane_id":"%s"}}}}}}' "$pane" ;;
+  *) echo "unhandled: $*" >&2; exit 9 ;;
+esac
+""")
+server = repo_worktree(e, repo="server", task="staging-live-years")
+app = repo_worktree(e, repo="app", task="staging-live-years")
+r1 = e.run("launch", "staging-live-years", server, "w3")
+r2 = e.run("launch", "staging-live-years", app, "w2")
+check("two spaces: the first keeps the plain label",
+      r1.returncode == 0 and kv(r1.stdout).get("moved") == "yes" and "herdr_name" not in r1.stdout)
+check("two spaces: the second starts as <label>-<repo>, not an empty shell",
+      r2.returncode == 0 and kv(r2.stdout).get("moved") == "yes"
+      and kv(r2.stdout).get("tab") == "w2:t7"
+      and kv(r2.stdout).get("herdr_name") == "staging-live-years-app")
+check("two spaces: both names are registered",
+      sorted(p.name for p in reg.iterdir()) == ["staging-live-years", "staging-live-years-app"])
 e.close()
 
 # Invoked by BARE NAME (no slash in $0), sibling helpers must still resolve — a
