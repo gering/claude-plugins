@@ -168,8 +168,16 @@ consumer.
 - An argv allow-list was considered and rejected: it would break the contract
   ("run this routed"), and the sanctioned target `claude` can run arbitrary
   commands itself. A helper author who wants a tighter boundary can pin `exec`
-  to a fixed `claude` target — the plugin only ever asks for that shape — at the
-  cost of the general contract.
+  to a `claude` target at the cost of the general contract — but match the
+  shape swarm actually sends: `exec <id> -- env -u <secret-shaped names> [jail
+  wrapper] claude -p …`. The `env -u` prefix (swarm ≥ 0.17.1) strips the
+  parent's secret-shaped variables after the helper read its own credentials, so
+  a pin on `argv[0] == claude` refuses every swarm voice.
+- **What the helper exports reaches the model process.** swarm filters the
+  *parent's* secrets; anything the helper adds to the child's env is the
+  helper's decision. Export only what `claude` needs to route
+  (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, model vars), never upstream
+  gateway credentials.
 - Gateway liveness should be a *plausibility* check that withholds the token
   from a bare socket listener (e.g. an unauthenticated request must be
   refused), not a bare TCP connect.

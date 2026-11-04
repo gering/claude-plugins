@@ -1,9 +1,9 @@
 ---
 title: "Swarm Backend Adapter Layer"
 createdAt: 2026-07-03
-updatedAt: 2026-11-01
+updatedAt: 2026-11-03
 createdFrom: "PR #21"
-updatedFrom: "branch: task/add-swarm-cc-proxy-voices-for-linux"
+updatedFrom: "branch: task/fix-swarm-cc-harness-env-filter"
 pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
@@ -843,14 +843,38 @@ obvious from `run_cc_harness`:
   `ANTHROPIC_DEFAULT_<TIER>_MODEL` — the helper maps the opus rung to a GPT
   model, so `opus` behind a gateway is not evidence of Claude.
 - **Helper outside, `claude` inside the jail.** `run_cc_harness` runs
-  timeout → env filter → helper (unjailed, it may read its gateway config) →
+  timeout → pre-helper env → helper (unjailed, it may read its gateway config) →
   jail wrapper → claude, so the gateway's credential dir (`~/.cli-proxy-api`)
   is denied to every jailed process, the routed voice included (round 2 of the
   review found the first version, helper inside the jail, had to leave it
-  readable). The env filter strips only the PARENT's tokens; the helper adds
-  the routing token afterwards. cc-router's config dir (`~/.config/cc-router`,
-  the helper's client token) is denied the same way; another helper's token
-  path needs `SWARM_DENY_PATHS`.
+  readable). cc-router's config dir (`~/.config/cc-router`, the helper's
+  client token) is denied the same way; another helper's token path needs
+  `SWARM_DENY_PATHS`.
+- **The env filter is split around the helper (0.17.1).** cc-router's remote
+  route reads its credentials from the ENV (`CLIPROXY_API_KEY_<PROFILE>`,
+  `CLIPROXY_CF_ACCESS_<PROFILE>_CLIENT_SECRET`), and 0.17.0 ran the
+  secret-shaped filter before the helper: every exec failed rc=3 "no gateway
+  token" while `list`, run unfiltered, said ready (10/10 failed calls in the
+  PR #100 review). Now HARNESS_PRE (before the helper: only the Anthropic
+  creds it replaces, Claude Code markers, `OLDPWD`, git redirects) and HARNESS_POST
+  (`_harness_post_filter`: `env -u` for the parent's secret-shaped names, from
+  the same `_env_filter_args`, between `exec <id> --` and the jail). The local
+  review also found the filter had never matched profile-SUFFIXED names
+  (`CLIPROXY_API_KEY_SOL`: `*_API_KEY` is suffix-only, `\bkey\b` in the scrub
+  fails before `_SOL`), so the API key reached every jailed voice even in
+  0.17.0; both now match infix forms. Trust boundary, stated not enforced:
+  POST strips the parent's secrets, not what the helper exports itself.
+  Parity traps (both from review/CI, not from design): `OLDPWD` appeared only in
+  exec (bash exports it valueless; exec's `cd` sets it; zsh parents hide this
+  locally) and `CLAUDE_CONFIG_DIR` was set before the helper — both now keep
+  the helper's env identical across `list` and `exec`, and the test compares
+  the full name sets. Scrub lesson: a widened keyword tail under `(?i)`
+  redacted `token_path`; profile forms are a separate case-sensitive
+  uppercase rule, mirrored in `scrubField` with a test running both.
+  POST is computed from the parent's env and skips `ANTHROPIC_AUTH_TOKEN`, so
+  the routing token the helper injects survives. Lesson: **readiness must
+  probe under the exec env** — `_harness_load` runs `list` under HARNESS_PRE,
+  and a test asserts the helper sees identical env names in `list` and `exec`.
 - **The routing token is in the voice's env, so `/proc` is a read path.**
   bwrap mounts `--proc /proc`, and Read can open `/proc/self/environ`; the
   ephemeral settings deny `Read(//proc/**)` (deny beats `--allowedTools`), and

@@ -266,6 +266,32 @@ class Harness(unittest.TestCase):
         self.assertNotIn("abcdefghijklmnopqrstuv", r.stdout)
         self.assertIn("TOKEN=[REDACTED]", r.stdout)
 
+    SCRUB_CASES = [
+        ("CLIPROXY_API_KEY_SOL=abcdefghijklmnopqrstuv", "CLIPROXY_API_KEY_SOL=[REDACTED]"),
+        ("CLIPROXY_CF_ACCESS_SOL_CLIENT_ID=abcdefghijklmnopqrstuv", "CLIPROXY_CF_ACCESS_SOL_CLIENT_ID=[REDACTED]"),
+        ("ANTHROPIC_AUTH_TOKEN=abcdefghijklmnopqrstuv", "ANTHROPIC_AUTH_TOKEN=[REDACTED]"),
+        ("see token_path: plugins/swarm/scripts/agents.sh line 3", None),
+        ("password_hash: abcdefghijklmnopqrstuvwx", None),
+        ("SWARM_SECRET_PATHS=/Users/someone/foo/bar/baz", None),
+    ]
+
+    def test_scrub_profile_suffixed_names_but_not_identifiers(self):
+        for raw, want in self.SCRUB_CASES:
+            r = self.source("printf '%s' " + json.dumps(json.dumps({"s": raw})) + " | scrub_secrets")
+            self.assertEqual(json.loads(r.stdout)["s"], want or raw, raw)
+
+    def test_js_output_gate_scrubs_like_the_adapter(self):
+        # scrubField (workflow) hand-mirrors scrub_secrets (adapter): same inputs,
+        # same output, or a lens finding leaks what an external one would not.
+        src = (HERE.parent / "workflows" / "swarm-review.js").read_text()
+        start = src.index("function scrubField(s)")
+        fn = src[start:src.index("\n}\n", start) + 2]
+        cases = [raw for raw, _ in self.SCRUB_CASES]
+        js = subprocess.run(["node", "-e", fn + "\nconsole.log(JSON.stringify(" + json.dumps(cases)
+                             + ".map(c => scrubField(c).s)))"], capture_output=True, text=True, timeout=60)
+        self.assertEqual(js.returncode, 0, js.stderr)
+        self.assertEqual(json.loads(js.stdout), [want or raw for raw, want in self.SCRUB_CASES])
+
     def test_oversize_listing_truncates_instead_of_failing(self):
         many = "".join(f"cc-harness:v{i}\tgpt-6.1-sol\tyes\t{'x' * 200}\n" for i in range(400))
         rows = self.rows(STUB_ROWS=many)
@@ -282,6 +308,65 @@ class Harness(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("SWARM_STUB_JAILED=1", (self.stub / "env").read_text())
         self.assertEqual(self.argv()[0], "-p", "the jail wraps claude, after the helper")
+
+    # --- env filter split around the helper --------------------------------
+
+    SECRET = "CLIPROXY_CF_ACCESS_STUB_CLIENT_SECRET"
+
+    def secret_helper(self):
+        # A helper that routes only with an env credential (like cc-router's
+        # remote route), injects its own routing token, and records the env
+        # NAMES it sees per subcommand (values never: dummy or not).
+        helper = self.stub / "cc-harness-agents"
+        helper.write_text(f"""#!/bin/bash
+env | cut -d= -f1 | sort > "$STUB_DIR/helper-env-$1"
+[ -n "${{{self.SECRET}:-}}" ] || exit 3
+case "$1" in
+  list) printf '%s' "$STUB_ROWS"; exit 0 ;;
+  exec) shift; shift; [ "$1" = -- ] && shift
+        export ANTHROPIC_AUTH_TOKEN=helper-routing-dummy; exec "$@" ;;
+esac
+exit 2
+""")
+
+    def claude_env(self):
+        return dict(line.split("=", 1) for line in (self.stub / "env").read_text().splitlines()
+                    if "=" in line)
+
+    def test_helper_sees_env_credentials_but_claude_does_not(self):
+        self.secret_helper()
+        r = self.run_voice(**{self.SECRET: "dummy-secret", "GH_TOKEN": "dummy-gh",
+                              "CLIPROXY_API_KEY_STUB": "dummy-key",
+                              "CLIPROXY_CF_ACCESS_STUB_CLIENT_ID": "dummy-id",
+                              "ANTHROPIC_AUTH_TOKEN": "parent-dummy", "ANTHROPIC_API_KEY": "parent-key"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), {"findings": []})
+        env = self.claude_env()
+        for name in (self.SECRET, "GH_TOKEN", "CLIPROXY_API_KEY_STUB",
+                     "CLIPROXY_CF_ACCESS_STUB_CLIENT_ID", "ANTHROPIC_API_KEY", "CLAUDECODE"):
+            self.assertNotIn(name, env, f"{name} must not reach the jailed claude")
+        self.assertEqual(env.get("ANTHROPIC_AUTH_TOKEN"), "helper-routing-dummy",
+                         "the helper's routing token survives; the parent's never does")
+        self.assertEqual(env.get("GIT_CONFIG_GLOBAL"), "/dev/null")
+
+    def test_readiness_and_exec_see_the_same_env(self):
+        self.secret_helper()
+        env = {self.SECRET: "dummy-secret", "GH_TOKEN": "dummy-gh", "ANTHROPIC_AUTH_TOKEN": "parent-dummy"}
+        self.assertTrue(self.rows(**env)["cc-harness:sol"]["ready"])
+        r = self.run_voice(**env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        listed = (self.stub / "helper-env-list").read_text()
+        execd = (self.stub / "helper-env-exec").read_text()
+        self.assertEqual(listed, execd, "readiness must probe the helper under the exec env")
+        self.assertIn(self.SECRET, listed.split())
+        self.assertNotIn("OLDPWD", execd.split(), "exec's cd must not leak the repo path")
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", listed.split())
+
+    def test_helper_that_cannot_route_is_not_ready(self):
+        self.secret_helper()
+        r = self.sh("ready", "cc-harness:sol")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no gateway token", r.stderr)
 
     def test_jailless_run_is_toolless(self):
         r = self.run_voice(jail=False)
