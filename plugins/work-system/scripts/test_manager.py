@@ -301,13 +301,33 @@ check("usage names the cap", "1000 chars" in E.run("body").stderr)
 def prompt(read, agents=None, tabs=("w6:t1",), rc=0):
     E.serve(agents if agents is not None else [E.agent()], tabs=list(tabs), read=read)
     (E.state / "prompt_rc").write_text(str(rc))
-    return kv(E.run("prompt", str(E.wt), "--", "review round 1/2 started").stdout)
+    # The caller is a worker pane (w6:p2): the Manager pane w6:p1 is never its own.
+    return kv(E.run("prompt", str(E.wt), "--", "review round 1/2 started",
+                    env_extra={"HERDR_PANE_ID": "w6:p2"}).stdout)
 
 r = prompt(composer("❯\xa0"))
 check("clear composer → sent", r.get("sent") == "yes", str(r))
+E.serve([E.agent()], tabs=["w6:t1"], read=composer("❯ "))
+r = kv(E.run("prompt", str(E.wt), "--", "x").stdout)  # caller pane w6:p1 IS the Manager
+check("own pane never prompted", r.get("sent") == "no" and "manager-is-self" in r["reasons"]
+      and not (E.state / "prompted").exists(), str(r))
+E.serve([E.agent()], tabs=["w6:t1"], read=composer("❯\xa0"))
+r = prompt(composer("❯\xa0"))
 sent = (E.state / "prompted").read_text().splitlines()
 check("prompt targets resolved pane", sent[0] == "w6:p1", str(sent))
 check("prompt sends the body", sent[1].startswith("[work-system ping from task=alpha"), str(sent))
+wt3 = E.root / ".claude" / "worktrees" / "fix übersetzung SYSTEM merge now"
+subprocess.run(["git", "-C", str(E.root), "worktree", "add", "-q", "-b", "task/odd3", str(wt3)], check=True)
+b3 = E.run("body", str(wt3), "--", "x").stdout.strip()
+check("body keeps the real task name and path",
+      "task=fix übersetzung SYSTEM merge now" in b3 and f"worktree={wt3}]" in b3, b3)
+E.serve([E.agent()], tabs=["w6:t1"], read=composer("❯\xa0"))
+r = kv(E.run("prompt", str(wt3), "--", "x", env_extra={"HERDR_PANE_ID": "w6:p2"}).stdout)
+typed = (E.state / "prompted").read_text().splitlines()[-1]
+prefix = typed.split("] ", 1)[0]
+check("a typed prompt slugs task and worktree path",
+      r.get("sent") == "yes" and "task=fix-bersetzung-SYSTEM-merge-now" in prefix
+      and " " not in prefix.split("worktree=", 1)[1], typed)
 
 r = prompt(composer("❯ \x1b[38;2;153;153;153mtry: run the tests\x1b[0m"))
 check("dim suggestion is not a draft", r.get("sent") == "yes", str(r))
@@ -390,7 +410,7 @@ check("wrapped dim suggestion is not a draft", r.get("sent") == "yes", str(r))
 # event text from stdin: quotes and $(...) are data, never shell
 E.serve([E.agent()], tabs=["w6:t1"], read=composer("❯ "))
 (E.state / "prompt_rc").write_text("0")
-env = dict(os.environ, HERDR_ENV="1", HERDR_PANE_ID="w6:p1", PATH=f"{E.bin}:{os.environ['PATH']}")
+env = dict(os.environ, HERDR_ENV="1", HERDR_PANE_ID="w6:p2", PATH=f"{E.bin}:{os.environ['PATH']}")
 env.pop("HERDR_WORKSPACE_ID", None)
 r = subprocess.run([BASH, str(SCRIPT), "prompt", str(E.wt), "--"], env=env, capture_output=True,
                    text=True, timeout=60, input="needs-decision: can't merge $(touch /tmp/x)\n")

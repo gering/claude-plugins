@@ -47,9 +47,10 @@
 # guard their own expansions with ${x:-}, so they are correct either way.
 
 # ---- shared realpath cwd↔worktree match (the "prelude") ---------------------
-# A python3 source string, apostrophe-free so it stays single-quotable. Both
+# A python3 source string, apostrophe-free so it stays single-quotable. Its
 # consumers prepend it to their own snippet:
 #     python3 -c "$HERDR_MATCH_PRELUDE"$'\n'"$their_snippet" …
+# (workers.sh exports it instead, and workers.py exec()s it.)
 # so the exact-match philosophy (mirrors herdr-teardown.sh: an agent merely cd'd
 # into a SUBDIR of a worktree/root is neither) lives in exactly one place.
 HERDR_MATCH_PRELUDE='import os
@@ -84,7 +85,8 @@ def classify_cwd(cwd, root, wtdir):
 
 # ---- shared session-name derivation (the "name prelude") --------------------
 # A python3 source string defining session_name(agent_row): the CC SendMessage
-# address of a herdr agent row, used by manager.sh resolve. Kept here, beside
+# address of a herdr agent row, used by manager.sh resolve and (exported by
+# workers.sh, exec()d) workers.py list. Kept here, beside
 # the match prelude, so the sanitizing lives in exactly one place. Apostrophe-
 # free like the match prelude. Needs `import re, unicodedata` (included).
 HERDR_NAME_PRELUDE='import re, unicodedata
@@ -111,8 +113,9 @@ def session_name(a):
 # ---- shared composer draft check (the "composer prelude") -----------------
 # A python3 program string, run as `python3 -I -c "$HERDR_COMPOSER_PY"` (-I: the
 # caller's cwd stays off sys.path, so a planted re.py cannot fake "clear"). Used by
-# manager.sh prompt and sessions.sh refresh before typing into a claude pane:
-# only a composer that reads `clear` is typed into.
+# manager.sh prompt and sessions.sh refresh before typing into a claude pane
+# (only a composer that reads `clear` is typed into), and by workers.py for its
+# read-only `draft` flag.
 # stdin: `herdr agent read --source visible --format ansi`. Prints clear|draft|unknown.
 # The CC composer is the region between the LAST two horizontal rules. A user
 # draft is visible text rendered in a normal style; a prompt suggestion is dim/
@@ -272,7 +275,7 @@ _ha_bounded() {
 # Validate that stdin is JSON whose result.<key> is a list; exit 0/1. Used to
 # reject a malformed/blank blob before a consumer trusts it.
 _ha_validate_list() {
-  python3 -c 'import sys, json
+  python3 -I -c 'import sys, json
 key = sys.argv[1]
 try:
     v = json.load(sys.stdin)["result"][key]
@@ -301,7 +304,7 @@ ha_get() {
   [ -n "$json" ] || return 4
   # Explicit if/exit, NOT assert: `python3 -O` / PYTHONOPTIMIZE strips asserts, so
   # an assert would silently pass a malformed body through in an optimized runtime.
-  printf '%s' "$json" | python3 -c 'import sys, json
+  printf '%s' "$json" | python3 -I -c 'import sys, json
 try:
     d = json.load(sys.stdin)
 except Exception:

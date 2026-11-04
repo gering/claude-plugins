@@ -134,9 +134,13 @@ When a plugin adopts settings, it should:
    `mandate.review_budget`, then `deploy.by`/`deploy.confirm`, `tasks.backend`
    and `tasks.select` (via `task-store.py`) and the string lists
    `mandate.version_paths`, `tasks.include_labels`, `tasks.exclude_labels` and
-   `tasks.gate_labels` (one `item=` line per entry) — read from the main
-   checkout, never the lane's own file). Both resolve the file at the same root as
-   `settings.py` — the git toplevel — so `/settings set` edits what they read.
+   `tasks.gate_labels` (one `item=` line per entry), and `events.enabled` /
+   `events.escalate_after` (via `workers.sh events`) — read from the main
+   checkout, never the lane's own file, so set them with `/settings set` in the
+   main checkout). Otherwise both resolve the file at the same root as
+   `settings.py` — the git toplevel — so `/settings set` edits what they read;
+   in a linked worktree that is the worktree's own file, which `events` does
+   not read.
    One exception: `mandate.version_paths` is read only as committed on the main
    branch, so a `/settings set` takes effect once it is committed and merged.
 2. **Fall back to the default, always.** The resolver guarantees a value even

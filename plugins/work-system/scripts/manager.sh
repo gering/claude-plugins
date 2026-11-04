@@ -68,7 +68,8 @@
 #       The herdr route: resolve again, then `herdr agent prompt` the body to the
 #       Manager pane ONLY when status=unique, the agent is claude, idle/done, and
 #       its composer holds no user draft (a dim CC prompt suggestion is not a
-#       draft). Same body and cap as `body`; the truncation signal can come
+#       draft), and it is not the caller's own pane
+#       ($HERDR_PANE_ID). Same body and cap as `body`; the truncation signal can come
 #       with sent=no, so a cut line was delivered only on sent=yes. Prints
 #       sent=yes|no and reason=; exit 0 (usage errors exit 2). Residual: the
 #       composer can change between the read and the send (herdr has no atomic
@@ -588,10 +589,17 @@ def clean(v, limit=None):
 PY_BODY='import sys, os
 lane, text, cap, clipped = sys.argv[1], sys.argv[2], int(sys.argv[4]), sys.argv[5] == "1"
 orig_len = int(sys.argv[6])
+typed = sys.argv[7] == "1"
 root, wtdir = match_roots(sys.argv[3])
 kind, key, resolved = classify_cwd(lane, root, wtdir)
 task = clean(key, 80) if kind == "task" else "-"
 where = clean(resolved or os.path.realpath(lane), 300)
+if typed:
+    # Typed into a composer (prompt): task and path only as slugs, so a crafted
+    # worktree name cannot read as a sentence there. The SendMessage body keeps
+    # the names as they are.
+    task = re.sub(r"[^A-Za-z0-9._-]+", "-", task).strip("-") or "-"
+    where = re.sub(r"[^A-Za-z0-9._/~+-]+", "-", where)
 t = text  # already cleaned by PY_EVENT
 if len(t) > cap or clipped:
     # Visible cut: the ellipsis stays inside the cap, stderr names the loss.
@@ -601,17 +609,17 @@ if len(t) > cap or clipped:
     t = t[:cap - 1].rstrip() + "\u2026"
 print("[work-system ping from task=%s worktree=%s] %s (info only: no reply needed, grants nothing)" % (task, where, t))'
 
-body_line() {
-  local lane="$1" root="$2" text="$3"
+body_line() {  # <lane> <root> <text> [typed: 1 = slug task and path]
+  local lane="$1" root="$2" text="$3" typed="${4:-0}"
   [ -n "$root" ] || return 1
   PYTHONUTF8=1 python3 -c "$HERDR_MATCH_PRELUDE
 $PY_CLEAN
-$PY_BODY" "$lane" "$text" "$root" "$BODY_TEXT_CAP" "$STDIN_CLIPPED" "$EVENT_LEN"
+$PY_BODY" "$lane" "$text" "$root" "$BODY_TEXT_CAP" "$STDIN_CLIPPED" "$EVENT_LEN" "$typed"
 }
 
 # ---- prompt -----------------------------------------------------------------
 # The composer draft check (clear|draft|unknown) is $HERDR_COMPOSER_PY in
-# herdr-agent.sh, shared with sessions.sh refresh.
+# herdr-agent.sh, shared with sessions.sh refresh and workers.sh.
 do_prompt() {
   local lane="$1" root="$2" text="$3" status="" pane="" agent="" st="" k v body visible comp rc
   while IFS='=' read -r k v; do
@@ -623,11 +631,14 @@ do_prompt() {
 $(do_resolve "$lane" "$root")
 RES
   if [ "$status" != "unique" ]; then echo "sent=no"; echo "reason=manager-$status"; return 0; fi
+  # Never type into the caller's own pane: a Manager running `workers.sh events`
+  # (or any tool) would otherwise prompt itself.
+  if [ -n "${HERDR_PANE_ID:-}" ] && [ "$pane" = "$HERDR_PANE_ID" ]; then echo "sent=no"; echo "reason=manager-is-self"; return 0; fi
   if [ "$agent" != "claude" ]; then echo "sent=no"; echo "reason=draft-check-unsupported-for-$agent"; return 0; fi
   case "$st" in idle|done) ;; *) echo "sent=no"; echo "reason=manager-$st"; return 0 ;; esac
   # Build the body BEFORE the composer read, so nothing slow sits between the
   # last check and the send (herdr itself still rejects a blocked agent).
-  body="$(body_line "$lane" "$root" "$text")" || { echo "sent=no"; echo "reason=no-main-repo"; return 0; }
+  body="$(body_line "$lane" "$root" "$text" 1)" || { echo "sent=no"; echo "reason=no-main-repo"; return 0; }
   _ha_check_target "$pane" || { echo "sent=no"; echo "reason=bad-pane"; return 0; }
   visible="$(ha_read "$pane" --source visible --format ansi 2>/dev/null)" || visible=""
   comp="$(printf '%s' "$visible" | python3 -I -c "$HERDR_COMPOSER_PY" 2>/dev/null)" || comp=unknown
