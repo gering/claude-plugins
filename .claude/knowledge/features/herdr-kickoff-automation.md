@@ -220,14 +220,20 @@ was classified *ambiguous*, so the launcher reported `blocked=unverified` and le
 an empty shell tab that read as a started lane (incident 2026-11-04).
 
 - **Verified live (herdr 0.9.5)**: the rejection is immediate (exit 1), types
-  nothing — the shell keeps the foreground — and names the holder's pane/cwd. So it
-  is safe to retry, and it is *definitive* (nothing started), not ambiguous.
+  nothing — the shell keeps the foreground — and names the holder's pane/cwd
+  (`herdr agent get <name>` returns it structured). Older builds were not checked,
+  so each retry is still gated on evidence: our pane back at its bare shell prompt
+  (else `blocked=unverified`, tab left alone) and the holder in **another**
+  worktree. A holder in this worktree is a live worker of this lane — falling back
+  would start a second one — and an unreadable holder is no evidence; both roll the
+  tab back and exit 1. Modern path only: the legacy placer was never observed
+  refusing a name, so it keeps its single loud failure instead of a blind retry.
 - **Fallback, not always-suffix**: the plain label stays the common case; on a taken
   name the launcher tries `<label>-<repo>` (the main checkout's dir name — what
   usually tells two spaces apart; not the workspace id, which is opaque `wN`), then
   `<label>-<repo>-2`, `-3`, bounded by `WORK_SYSTEM_HERDR_NAME_TRIES` (4 names).
-  The retry costs no busy-retry budget. Same walk on the legacy start and the
-  timeout-path rename.
+  The retry costs no busy-retry budget. Same walk on the timeout-path rename (no
+  holder check there: the worker is already confirmed in our pane).
 - A fallback name is reported as a `herdr_name=` stdout line (absent when the plain
   label took). All names taken → `fail_definitive`: tab rolled back, exit 1, the
   caller's manual block — a loud failure, never a shell tab posing as a lane.

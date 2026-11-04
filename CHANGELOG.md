@@ -52,6 +52,9 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.34.1 — 2026-11-10
+- `/kickoff` in two herdr workspaces no longer collides on the agent name: herdr agent names are server-wide, so a second lane with the same task-derived label got `agent_name_taken`, which the launcher read as ambiguous, leaving an empty shell tab reported as `blocked=unverified`. On modern herdr the launcher now retries as `<label>-<repo>`, then `-2`, `-3` (`WORK_SYSTEM_HERDR_NAME_TRIES`, default 4, clamped 1..10), and reports a fallback as `herdr_name=`. Each retry needs the holder in another worktree (`herdr agent get`) and our pane back at its bare shell prompt; a holder in this worktree, an unreadable holder or every name taken rolls the tab back and exits 1, a pane that left its prompt stays `blocked=unverified`. The timeout-path rename walks the same names; legacy herdr (0.7.0–0.7.4) never retries.
+
 ### 1.34.0 — 2026-11-08
 - `/kickoff #N` on an issue without the `work-system:task` label warns and offers to start with the label, without it, or to cancel, before any worktree exists; unattended runs refuse and name the fix (`task-store.py get` exit 8, `--allow-unlabeled`, new `label` command). Excluded and gated issues keep their rules.
 - `/list` and `/kickoff` state the active task backend and why; `#N` on a local backend refuses and names the setting to change. README documents the minimal per-repo config.

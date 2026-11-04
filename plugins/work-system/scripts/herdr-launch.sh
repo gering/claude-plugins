@@ -66,7 +66,9 @@
 #                    Pass it PLAIN — this helper prefixes the task's state glyph
 #                    (○ ● ◇ ◆ ✓, via herdr-tab-glyph.sh) itself, best-effort,
 #                    onto the TAB LABEL only; the agent and session names keep
-#                    the plain label (see the stamping block below).
+#                    the plain label (see the stamping block below). herdr agent
+#                    names are server-wide: on modern herdr a label another lane
+#                    holds is retried as <label>-<repo>, -2, -3 (herdr_name= below).
 #     worktree       absolute path to the worktree (becomes the new pane's cwd)
 #     workspace-id   herdr workspace to open the tab in (e.g. $HERDR_WORKSPACE_ID)
 #     agent-selector (launch only) agent-registry selector: cc-harness:<id> (an
@@ -83,6 +85,8 @@
 #                     resume: always yes — its own tab)
 #   agent=<name>     (launch only) the resolved CLI×model (e.g. codex:gpt-5.6-sol,
 #                     or plain `claude` for the legacy no-selector path)
+#   herdr_name=<n>   (launch only, only when it differs from <label>) the herdr
+#                     agent name the worker got, because another lane held the label
 #   named=no         (launch only, rare) a worker confirmed after a readiness
 #                     timeout did not get its herdr agent name — address it by pane
 # launch selector errors (nothing spawned): exit 2 = unknown selector; exit 3 =
@@ -276,6 +280,14 @@ BUSY_SECONDS="${WORK_SYSTEM_HERDR_BUSY_SECONDS:-45}"
 IDLE_STREAK="${WORK_SYSTEM_HERDR_IDLE_STREAK:-8}"
 IDLE_MIN_SECONDS="${WORK_SYSTEM_HERDR_IDLE_MIN_SECONDS:-3}"
 UNKNOWN_TRIES="${WORK_SYSTEM_HERDR_UNKNOWN_TRIES:-8}"   # unreadable answers before degrading
+# Agent names tried on agent_name_taken (the label + fallbacks; see
+# build_name_candidates). Clamped to 1..10: a typo must neither silently turn the
+# fallback off through a failing integer test nor build an unbounded list.
+NAME_TRIES="${WORK_SYSTEM_HERDR_NAME_TRIES:-4}"
+case "$NAME_TRIES" in ''|*[!0-9]*) NAME_TRIES=4 ;; esac
+NAME_TRIES=$((10#$NAME_TRIES))
+[ "$NAME_TRIES" -ge 1 ] || NAME_TRIES=1
+[ "$NAME_TRIES" -le 10 ] || NAME_TRIES=10
 # Legacy path only: how long to let a wrapper worker prove it did not die on the
 # spot before its tab is reported as running (see the pane_alive check there).
 WRAPPER_ALIVE_TRIES="${WORK_SYSTEM_HERDR_ALIVE_TRIES:-6}"
@@ -553,12 +565,13 @@ pane_agent_state() {
 # feature, each in its own workspace) collide, and herdr answers the second
 # `agent start` with `agent_name_taken`. Verified live (herdr 0.9.5): that
 # rejection is immediate (exit 1) and types NOTHING into the pane — the shell keeps
-# the foreground — so retrying under another name cannot start a second worker.
-# Candidates: `<label>`, `<label>-<repo>` (the main checkout's dir name, which is
-# what usually tells two such spaces apart), then `<label>-<repo>-2`, `-3`, …
-# up to $NAME_TRIES names in all. The plain label stays the common case.
-NAME_TRIES="${WORK_SYSTEM_HERDR_NAME_TRIES:-4}"
-
+# the foreground. Older builds were not checked, so every retry is still gated on
+# process state and on who holds the name (take_fallback_name). Candidates:
+# `<label>`, `<label>-<repo>` (the main checkout's dir name, which is what usually
+# tells two such spaces apart), then `<label>-<repo>-2`, `-3`, … up to $NAME_TRIES
+# names in all. The plain label stays the common case. MODERN path only: the
+# legacy placer (0.7.0-0.7.4) was never observed rejecting a name, so it keeps
+# failing loudly on the first refusal instead of retrying blind.
 # repo_slug → the main checkout's directory name as a name-safe slug, or empty.
 repo_slug() {
   local main=""
@@ -596,6 +609,48 @@ next_agent_name() {
   [ $((name_idx + 1)) -lt "${#name_candidates[@]}" ] || return 1
   name_idx=$((name_idx + 1))
   herdr_name="${name_candidates[$name_idx]}"
+}
+
+# name_holder_cwd <name> → the cwd of the agent that holds <name>, or empty when
+# herdr cannot say (bounded read).
+extract_agent_cwd='import sys, json
+try:
+    print(json.load(sys.stdin)["result"]["agent"]["cwd"] or "")
+except Exception:
+    pass'
+name_holder_cwd() {
+  run_bounded "$PROBE_SECONDS" herdr agent get "$1" 2>/dev/null \
+    | python3 -c "$extract_agent_cwd" 2>/dev/null || true
+}
+
+# take_fallback_name — after `agent start` into $pane answered agent_name_taken:
+# switch $herdr_name to the next candidate and return 0, or end the launch. Each
+# retry needs evidence that it cannot start a second worker:
+#   * the holder runs in THIS worktree → a worker for this lane already exists, so
+#     stop (rollback, exit 1) instead of starting another one under a new name;
+#   * the holder cannot be read → no evidence either way, stop the same way;
+#   * our pane is not back at its bare shell prompt → herdr may have typed
+#     something before refusing (an unverified herdr build): fail closed
+#     (blocked=unverified, tab left alone) — never retry or roll back over it.
+# Only then is the next name tried; with none left the launch fails loudly.
+take_fallback_name() {
+  local holder taken="$herdr_name"
+  holder="$(name_holder_cwd "$taken")"
+  if [ -z "$holder" ]; then
+    fail_definitive "herdr agent name '$taken' is taken, and herdr did not say by whom — not retrying under another name, nothing was started in pane $pane"
+  fi
+  if [ "${holder%/}" = "${worktree%/}" ]; then
+    fail_definitive "a worker named '$taken' already runs in this worktree — not starting a second one (nothing was started in pane $pane)"
+  fi
+  if [ "$(pane_shell_state "$pane")" != ready ]; then
+    echo "herdr refused the agent name '$taken', and pane $pane is no longer at its bare shell prompt — something may have started there, so the tab was left alone" >&2
+    emit_unverified
+    exit 0
+  fi
+  if ! next_agent_name; then
+    fail_definitive "every herdr agent name tried is already in use by other lanes (${name_candidates[*]}) — nothing was started in pane $pane"
+  fi
+  echo "herdr agent name '$taken' is already in use by another lane — retrying as '$herdr_name'" >&2
 }
 
 # emit_launched — the confirmed-launch stdout contract. `herdr_name=` appears only
@@ -813,20 +868,10 @@ EOF_RESOLVE
       # Spawn the worker as argv and read back the pane id. stderr is captured (not
       # discarded) so a failure can surface herdr's actual error.code/message instead
       # of only the generic "no pane id" guard below.
-      # A taken name is rejected before herdr places anything, so it retries under
-      # the next fallback name (bounded by $NAME_TRIES); nothing else retries.
-      while : ; do
-        start_err="$(mktemp)"
-        start_json="$(herdr agent start "$herdr_name" --workspace "$workspace" \
-          --cwd "$worktree" --no-focus -- "${worker_argv[@]}" 2>"$start_err" || true)"
-        pane="$(printf '%s' "$start_json" | python3 -c "$extract_agent_pane" 2>/dev/null || true)"
-        [ -z "$pane" ] || break
-        [ "$(herdr_error_code "$(cat "$start_err")")" = agent_name_taken ] || break
-        taken="$herdr_name"
-        next_agent_name || break
-        rm -f "$start_err"
-        echo "herdr agent name '$taken' is already in use (another lane, possibly in another workspace) — retrying as '$herdr_name'" >&2
-      done
+      start_err="$(mktemp)"
+      start_json="$(herdr agent start "$label" --workspace "$workspace" \
+        --cwd "$worktree" --no-focus -- "${worker_argv[@]}" 2>"$start_err" || true)"
+      pane="$(printf '%s' "$start_json" | python3 -c "$extract_agent_pane" 2>/dev/null || true)"
 
       # Empty pane id → the agent did not start (broken socket / bad response).
       # Print herdr's own error first when captured — the generic message stays as
@@ -836,7 +881,6 @@ EOF_RESOLVE
         rm -f "$start_err"
         [ -n "$diag" ] && printf '%s\n' "$diag" >&2
         echo "herdr agent start did not return a pane id" >&2
-        [ "$name_idx" -gt 0 ] && echo "tried the agent names: ${name_candidates[*]}" >&2
         exit 1
       fi
       rm -f "$start_err"
@@ -892,7 +936,6 @@ EOF_RESOLVE
         [ -n "$diag" ] && printf '%s\n' "$diag" >&2
         echo "herdr pane move --new-tab failed for pane $pane (worker still running; no dedicated tab)" >&2
         printf 'pane=%s\ntab=\nmoved=no\nagent=%s\n' "$pane" "$agent_name"
-        if [ "$herdr_name" != "$label" ]; then printf 'herdr_name=%s\n' "$herdr_name"; fi
       fi
       exit 0
     fi
@@ -971,14 +1014,13 @@ EOF_RESOLVE
 
         start_code="$(herdr_error_code "$start_blob")"
         # The name is server-wide, so another lane — possibly in another workspace —
-        # may hold it. herdr rejects that before typing anything (verified live), so
-        # move on to the next fallback name; it costs no busy-retry budget.
+        # may hold it: move on to the next fallback name, or end the launch (see
+        # take_fallback_name). It costs no busy-retry budget.
         if [ "$start_code" = agent_name_taken ]; then
-          taken="$herdr_name"
-          if next_agent_name; then
-            echo "herdr agent name '$taken' is already in use (another lane, possibly in another workspace) — retrying as '$herdr_name'" >&2
-            continue
-          fi
+          diag="$(herdr_diag "$start_blob" "$workspace" 0)"
+          [ -n "$diag" ] && printf '%s\n' "$diag" >&2
+          take_fallback_name
+          continue
         fi
         class="$(classify_start_failure "$start_rc" "$start_code")"
         # Retry ONLY the "shell not ready yet" rejection, bounded. Everything else
@@ -1000,9 +1042,6 @@ EOF_RESOLVE
         fi
         if [ "$class" = busy ]; then
           fail_definitive "pane $pane never reached an interactive shell prompt (herdr kept reporting agent_pane_busy for ${BUSY_SECONDS}s / $BUSY_TRIES retries) — nothing was started"
-        fi
-        if [ "$start_code" = agent_name_taken ]; then
-          fail_definitive "every herdr agent name tried is already in use (${name_candidates[*]}) — nothing was started in pane $pane"
         fi
         if [ "$class" = definitive ]; then
           fail_definitive "herdr agent start --kind $herdr_kind was rejected before starting anything in pane $pane"

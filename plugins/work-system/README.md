@@ -620,7 +620,11 @@ keeps the original branch name rather than renaming it to `task/<name>`:
 - The tab is **named after the task** (shortened for a readable sidebar — see
   `skills/kickoff/SKILL.md` step 14 for the exact rule), so the sidebar shows one
   clear entry per task instead of a wall of identical agents. The same short label
-  names the herdr agent (and, for a claude worker, the `-n` session); the task's
+  names the herdr agent (and, for a claude worker, the `-n` session). herdr agent
+  names are unique per herdr *server*, so when another lane already holds the label
+  (often the same task title in another workspace) the worker is named
+  `<label>-<repo>` (then `-2`, `-3`) and `/kickoff` reports that name; a worker of
+  *this* worktree holding it stops the launch instead of starting a second one. The task's
   branch — `task/<name>` from `/kickoff`, or the original branch `/adopt` kept — is
   unchanged, so the resume flow still resolves the task.
 - The real CLI process is what herdr's agent-state detection ends up watching. A
