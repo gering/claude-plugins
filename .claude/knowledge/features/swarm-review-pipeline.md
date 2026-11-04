@@ -1,9 +1,9 @@
 ---
 title: "Swarm Review Pipeline (/swarm:review)"
 createdAt: 2026-07-08
-updatedAt: 2026-11-01
+updatedAt: 2026-11-04
 createdFrom: "PR #24"
-updatedFrom: "branch: task/add-swarm-cc-proxy-voices-for-linux"
+updatedFrom: "branch: task/fix-swarm-abs-path-refuted"
 pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
@@ -97,6 +97,24 @@ truth** — every voice's fan-out units come from it, Claude and externals alike
   into an unverified "maintainability" section would have surfaced unchecked
   suggestions from precisely the noisiest lenses. Methodological lenses are
   factual → normal defect verify; defect consensus stays auto-accepted.
+- **Unsafe path = UNVERIFIED, never REFUTED** (swarm 0.17.2). Voices often cite
+  absolute paths inside the repo; `repoSafePath` rejects every absolute path,
+  and the verifier prompt said "REFUTE unless you can confirm without opening
+  it" — so in-repo findings were counted as disproved unchecked and a review
+  that verified nothing read as clean (wgwohnen-tech PR #3: 5 REFUTED, 1
+  PLAUSIBLE skipped by `--fix`). Fix in two parts: (1) the skill passes
+  `repoRoot` and `repoRelPath` rewrites `<root>/x` to `x` *before* the gate, at
+  the pool AND on the merge agent's free-text cluster `file`; the result still
+  goes through `repoSafePath`, so `<root>/../x` → `../x` is still rejected, and
+  a missing/non-canonical root disables the rewrite (never widens the gate).
+  Pure string containment: an alias of the root (symlinked checkout,
+  `/var` vs `/private/var`, case on APFS) does not match and stays unsafe — the
+  safe direction. (2) A still-unsafe path skips the verifier call entirely and
+  is kept with `verifier: 'UNVERIFIED'` + `balance.unverified`; "could not
+  check" and "checked and wrong" must be different states, or absence of
+  evidence reads as a clean review. Auto-accepted consensus clusters keep
+  CONFIRMED (no verify ran anyway); their `pathSafe:false` still stops `--fix`.
+  Tested by `test_path_gate.py` (regions `path-gate`, `verdict-tally`).
 - **Report keeps kinds apart**: defects table first, then a same-format
   `Design` table (shared numbering — the workflow sorts defects first);
   `balance.design` counts the subset. Lens prefixes are parsed with `[\w-]`

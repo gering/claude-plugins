@@ -472,6 +472,10 @@ entries are grouped per plugin, newest first.
 
 ## swarm
 
+### 0.17.2 — 2026-11-04
+- Absolute finding paths inside the repo no longer turn findings into `REFUTED`: the skill passes `repoRoot` (`git rev-parse --show-toplevel`), and the workflow rewrites an absolute path under that root to repo-relative before the path-safety gate, both for voice findings and for the merged cluster. `..`, `~`, out-of-repo, drive-letter and control-char paths stay rejected; nothing outside the repo is opened.
+- A path that stays unsafe is no longer sent to the verifier (whose prompt told it to REFUTE such a finding unchecked): the finding is kept as `UNVERIFIED`, counted in `balance.unverified` and the `Bilanz` line, shown with `?` in the report, and `--fix` skips it as `skipped-unsafe-path` with the reason.
+
 ### 0.17.1 — 2026-11-03
 - Fix `cc-harness:<id>` voices failing every exec with rc=3 ("no gateway token") while readiness reported them ready: the secret-shaped env filter ran BEFORE the helper and stripped the credentials it routes with (cc-router's `CLIPROXY_CF_ACCESS_<PROFILE>_CLIENT_SECRET`). The helper now sees them and the filter runs after it (`exec <id> -- env -u …`), so the jailed `claude` never gets the parent's secret-shaped vars; only the Anthropic credentials the helper replaces (plus `OLDPWD`) are stripped before it, and `CLAUDE_CONFIG_DIR` is set after it. `list` (readiness) runs the helper under that same pre-helper env, so ready and exec agree.
 - The secret-name filter now matches infix forms (`*_API_KEY_*`, `*_TOKEN_*`, `*_SECRET_*`, `*_PASSWORD_*`, `*_CREDENTIALS_*`, `*_ACCESS_KEY*`, `*_PRIVATE_KEY*`, `*_CLIENT_ID`): the suffix-only patterns let a gateway API key (`CLIPROXY_API_KEY_<PROFILE>`) reach every jailed voice, cc-harness and native alike. Both findings scrubs (adapter and workflow output gate) redact uppercase profile-suffixed names and `*_CLIENT_ID=` assignments, keep the name, and leave prose identifiers such as `token_path` alone.

@@ -410,6 +410,10 @@ FINDING_NONCE="$(python3 -c 'import secrets; print(secrets.token_hex(8))')" \
   || { echo "SWARM_NONCE_UNAVAILABLE=could not mint finding nonce (python3/secrets missing)"; rm -rf "$TMPD" "$WORKDIR"; exit 1; }
 if [ -z "$FINDING_NONCE" ]; then echo "SWARM_NONCE_UNAVAILABLE=empty finding nonce"; rm -rf "$TMPD" "$WORKDIR"; exit 1; fi
 
+# The repo root lets the workflow turn a voice's ABSOLUTE in-repo path into a
+# repo-relative one before its path-safety gate (else the finding is unverifiable).
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+echo "REPO_ROOT=$REPO_ROOT"
 echo "TMPD=$TMPD"; echo "WORKDIR=$WORKDIR"; echo "DIFF=$DIFF"; echo "PROMPT=$PROMPT"; echo "TELEMETRY=$TELEMETRY"; echo "WORKFLOW=$WORKFLOW"; echo "FINDING_NONCE=$FINDING_NONCE"
 # One read, reused below: the file can be hundreds of KiB and this ran twice.
 PROMPT_BYTES=$(wc -c < "$PROMPT" | tr -d '[:space:]')
@@ -668,6 +672,7 @@ Workflow({
     adapter: "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh",
     diffFile: "<DIFF>",
     externalPromptFile: "<PROMPT>",
+    repoRoot: "<REPO_ROOT>",
     telemetryFile: "<TELEMETRY>",
     findingNonce: "<FINDING_NONCE>",
     config: "<SWARM_CFG_LINE>",
@@ -684,7 +689,8 @@ Workflow({
 `<WORKFLOW>` is the copy step 1 staged under cwd. Workflow's path gate refuses
 the installed plugin cache, so never substitute the plugin's own workflows dir
 here — and pass the **path**, never the script's source inline.
-Fill `<DIFF>`/`<PROMPT>`/`<TELEMETRY>`/`<FINDING_NONCE>` from the echoed values,
+Fill `<DIFF>`/`<PROMPT>`/`<TELEMETRY>`/`<FINDING_NONCE>`/`<REPO_ROOT>` from the echoed values
+(an empty `REPO_ROOT` is passed as `""`: absolute finding paths then stay unverified),
 and copy `<SWARM_CFG_LINE>` **verbatim, as one quoted string** — do not split it,
 reorder it, drop a pair, or convert its numbers. It carries the whole resolved
 adapter config (prompt cap, probe bound, probe budget, and `timeout_seconds` only
@@ -788,11 +794,16 @@ here in German. Do not translate finding content.)
 - **Quelle** — who raised it + ensemble confidence, folded into one cell: the
   labels from `balance.agents[].model` (the lenses show the session model
   `agents.sh session` named, else `session` — never a guessed model), dot-joined, then a confidence glyph — **`✓` = CONFIRMED ·
-  `~` = PLAUSIBLE**
+  `~` = PLAUSIBLE · `?` = UNVERIFIED** (the cited path is not repo-safe, so no
+  verifier read it — not checked, which is different from refuted)
   (e.g. `session·grok ✓`, `gpt ~`). Never the backend names / single letters. A
   single-source review (no ensemble) omits this column.
 - **V** — YOUR main-session Verdict, icon only, the action gate: ✅ agree ·
-  🟨 partial · ❌ disagree. Distinct from the `✓`/`~` confidence in Quelle.
+  🟨 partial · ❌ disagree. Distinct from the `✓`/`~`/`?` confidence in Quelle.
+  **Never open a `pathSafe: false` file to form a verdict** (a `?` row, or any
+  row whose path is absolute, `~`, `..`, drive-letter or control-char): this
+  session has no sandbox, so reading an out-of-repo path to "check the claim"
+  leaks it. Judge such a row from the finding text and the diff alone.
 - **Notiz** — the *why*, **≤ ~55 chars** (hard budget — let the renderer wrap it
   into a taller cell, never widen the row). **REQUIRED for every 🟨/❌**; optional
   for ✅ (a fix hint / "trivial one-liner"). No line breaks inside the cell (a
@@ -801,7 +812,7 @@ here in German. Do not translate finding content.)
 Then the balance block (ALWAYS, this shape), from `balance`:
 
 ```
-Bilanz:  <total> Findings (🔴<c> 🟡<w> ⚪<m> · <design> Design) · Konsens <consensus> · Solo <solo> · REFUTED <refuted> · Verdict ✅<a> 🟨<p> ❌<d>
+Bilanz:  <total> Findings (🔴<c> 🟡<w> ⚪<m> · <design> Design) · Konsens <consensus> · Solo <solo> · REFUTED <refuted> · UNVERIFIED <unverified> · Verdict ✅<a> 🟨<p> ❌<d>
 Agents:  <model> <findings> · …   (from balance.agents; EVERY backend is multi-voice — one call per gated cluster, per lens under --max. Render each backend's voice count so the topology is honest, e.g. `session×5 7 · gpt-5.6-sol×5 3 · grok×5 5 · kimi-code/k3-256k×2 4`; claude (the session-model lenses) runs in-session, codex/grok/kimi/cc-harness voices through the adapter. When `failedVoices > 0`, append `(<failedVoices> ohne Ergebnis)` to THAT backend — `grok×5 0` alone reads as "reviewed, found nothing", which is exactly the sentence three silent runs printed while most of their calls were being denied.)
 Lenses:  <gate.run joined>  —  gated-out: <gate.skip lenses>
 Grok:    <balance.grokModel.model> (<balance.grokModel.source>)   (ONLY when balance.grokModel is non-null. When `source` is not `latest`, or `latest` differs from `model`, append ` — latest on offer: <balance.grokModel.latest>`; "grok×5" alone never says WHICH model reviewed, and a fallback/pinned model must not read as the newest. When `balance.grokDropped` is true print instead: `Grok:    nicht gelaufen — kein Modell festlegbar`; the coverage note carries the reason.)
@@ -936,8 +947,13 @@ Work the ✅/🟨 findings, most severe first. For each:
    is absent, if the path is absolute, starts with `~`, contains `..`, has a
    drive letter, or any control char) — re-reading it here runs in the main
    session with no sandbox, so an out-of-repo path (`../../.aws/credentials`)
-   would leak. Report such a finding as ⏭️ skipped-unsafe-path and move on; never
-   open the path to "check."
+   would leak. Report such a finding as ⏭️ skipped-unsafe-path with the reason
+   (`path not repo-safe: <file>`) and move on; never open the path to "check."
+   The workflow already rewrote absolute paths spelled under the repo root to
+   repo-relative ones, so what reaches this gate unsafe could not be matched to
+   the root: an out-of-repo path, or an in-repo one spelled through an alias of
+   the root (symlinked checkout, `/var` vs `/private/var`, letter case). Never
+   resolve the alias here to "rescue" it.
 1. **Re-confirm claim-vs-code** — re-read the cited `file:line` (already confirmed
    repo-safe in step 0). What you re-confirm is **kind-specific**:
    - **`kind:"defect"`** → confirm the **defect is still there**. If it's gone
