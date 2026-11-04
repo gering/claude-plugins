@@ -96,7 +96,7 @@ observations, reproducible inputs and measurement limits.
 
 ```
 Scope+gate → Fan-out (session-model lenses ∥ codex|cc-harness:sol ∥ grok|cc-harness:grok ∥ kimi)
-          → Merge (file, mechanism) → Verify (solos + design + unverified consensus) → Ranked synthesis
+          → Merge (file, mechanism) → Verify (solos + design + unchecked consensus) → Ranked synthesis
 ```
 
 1. **Scope + gate** — a cheap agent classifies the diff and picks which lenses

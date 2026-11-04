@@ -19,7 +19,7 @@ export const meta = {
 // args.claude             false → external-only control run (no Claude lenses)
 // args.profile            quick | default | max (exact strings; anything else → default)
 // args.codex / args.grok  the run's frozen model selection, one `k=v;…` token each (prep step)
-// args.repoRoot         absolute repo root (git rev-parse --show-toplevel); lets in-repo absolute finding paths be normalized
+// args.repoRoot           absolute repo root (git rev-parse --show-toplevel); lets in-repo absolute finding paths be normalized
 // Normalize: the runtime may deliver `args` as an object OR a JSON string.
 let INPUT = args
 if (typeof INPUT === 'string') { try { INPUT = JSON.parse(INPUT) } catch { INPUT = {} } }

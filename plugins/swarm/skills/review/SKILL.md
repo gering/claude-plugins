@@ -799,7 +799,11 @@ here in German. Do not translate finding content.)
   (e.g. `session·grok ✓`, `gpt ~`). Never the backend names / single letters. A
   single-source review (no ensemble) omits this column.
 - **V** — YOUR main-session Verdict, icon only, the action gate: ✅ agree ·
-  🟨 partial · ❌ disagree. Distinct from the `✓`/`~` confidence in Quelle.
+  🟨 partial · ❌ disagree. Distinct from the `✓`/`~`/`?` confidence in Quelle.
+  **Never open a `pathSafe: false` file to form a verdict** (a `?` row, or any
+  row whose path is absolute, `~`, `..`, drive-letter or control-char): this
+  session has no sandbox, so reading an out-of-repo path to "check the claim"
+  leaks it. Judge such a row from the finding text and the diff alone.
 - **Notiz** — the *why*, **≤ ~55 chars** (hard budget — let the renderer wrap it
   into a taller cell, never widen the row). **REQUIRED for every 🟨/❌**; optional
   for ✅ (a fix hint / "trivial one-liner"). No line breaks inside the cell (a
@@ -945,8 +949,11 @@ Work the ✅/🟨 findings, most severe first. For each:
    session with no sandbox, so an out-of-repo path (`../../.aws/credentials`)
    would leak. Report such a finding as ⏭️ skipped-unsafe-path with the reason
    (`path not repo-safe: <file>`) and move on; never open the path to "check."
-   The workflow already rewrote absolute paths inside the repo root to
-   repo-relative ones, so what reaches this gate unsafe really points elsewhere.
+   The workflow already rewrote absolute paths spelled under the repo root to
+   repo-relative ones, so what reaches this gate unsafe could not be matched to
+   the root: an out-of-repo path, or an in-repo one spelled through an alias of
+   the root (symlinked checkout, `/var` vs `/private/var`, letter case). Never
+   resolve the alias here to "rescue" it.
 1. **Re-confirm claim-vs-code** — re-read the cited `file:line` (already confirmed
    repo-safe in step 0). What you re-confirm is **kind-specific**:
    - **`kind:"defect"`** → confirm the **defect is still there**. If it's gone

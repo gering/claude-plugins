@@ -14,9 +14,11 @@ the report read like a clean review. This test pins the fix:
 
 Like test_voice_accounting.py it lifts the marked regions out of the source
 verbatim and runs them under node, so it tests behaviour, not source lines.
-Not skippable: without node it fails (CI installs node).
+Not skippable: without node it fails (CI installs node). The small region/node
+harness is copied, not imported: each plugin test stays self-contained.
 """
 
+import functools
 import json
 import shutil
 import subprocess
@@ -29,8 +31,14 @@ ROOT = "/work/repo"
 failures = []
 
 
+@functools.lru_cache(maxsize=None)
+def _source():
+    return SOURCE.read_text(encoding="utf-8")
+
+
+@functools.lru_cache(maxsize=None)
 def region(name):
-    text = SOURCE.read_text(encoding="utf-8")
+    text = _source()
     start = f"// swarm-test-region: {name}\n"
     if start not in text:
         sys.exit(f"FATAL: region '{name}' not found in {SOURCE.name} — restore the marker, do not delete this test.")
@@ -138,7 +146,7 @@ check("tally", tally["unverifiedCount"] == 1, f"unverifiedCount {tally['unverifi
 # --- wiring: the verify step short-circuits before any verifier call -----------
 # The two lines are outside the regions (they sit inside the agent fan-out), so
 # pin their order: the skip must come before the agent() call of the thunk.
-src = SOURCE.read_text(encoding="utf-8")
+src = _source()
 thunk = src.split("const verified = await parallel(verifyClusters.map((c) => () => {", 1)
 check("wiring", len(thunk) == 2, "verify fan-out not found")
 if len(thunk) == 2:
