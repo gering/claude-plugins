@@ -358,6 +358,9 @@ entries are grouped per plugin, newest first.
 
 ## pr-flow
 
+### 1.9.1 — 2026-11-04
+- `/rebase` no longer asks just because the branch and the base touched the same files (in this monorepo every PR touches `marketplace.json` and `CHANGELOG.md`). Invoking it authorizes the rebase + `--force-with-lease` push; the menu appears only when the new `scripts/rebase-predict.sh` (`git merge-tree --write-tree`, an in-memory merge that leaves worktree, index and refs alone) predicts a real conflict. An unavailable prediction (git < 2.38, bad ref, merge commits on the branch, which a rebase drops and replays) proceeds; step 7's clean abort on an actual conflict stays the safety net. `/open` stops when the user leaves a predicted conflict as-is, instead of opening a conflicting PR. Hermetic test: `test_rebase_predict.py`.
+
 ### 1.9.0 — 2026-10-28
 - `/merge` step 6b: on `changed-since-review` the delta is read in full from a file and summarized per file (kind, size, reviewed-logic impact) instead of printed; the prompt is `[a]cknowledge — merge this change without a re-review / [d]iff / [r]e-review / [s]top`. Kind labels other than version renumbering and from-main are the model's reading of the code, never taken from what the lane text says about itself. With a work-system older than 1.29 (no ack ceiling) the shim answers `delta`/`acknowledged` with `verdict=old-work-system`, so `/merge` stops instead of offering an ack: an older `acknowledged` would accept a short delta holding one long line whose payload no summary shows.
 

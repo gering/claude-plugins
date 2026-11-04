@@ -67,7 +67,7 @@ user, not that they said no.
    - Invoke the `/rebase` skill **with the `--no-poll` flag** (this skill handles post-creation review polling itself in step 10). Since no PR exists yet, `/rebase` falls back to upstream tracking or repo default to detect the base branch.
    - If `/rebase` rebased successfully → continue
    - If user declined the rebase → continue but remember to flag ⚠️ "Branch is N commits behind `<BASE_BRANCH>` (rebase declined)" in the readiness summary (step 4)
-   - If conflicts aborted the rebase → stop this skill; user resolves manually, then re-runs `/open`
+   - If conflicts aborted the rebase, **or** the user chose "Leave as-is" on a predicted conflict (`/rebase` step 5) → stop this skill; the PR would open as conflicting. User resolves manually, then re-runs `/open`
 
 3. **Readiness checks — collect a status list**:
    Run each check and collect results into a summary table. **Do NOT stop on failure** — present everything, let the user decide.
