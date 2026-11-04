@@ -1,9 +1,9 @@
 ---
 title: "Worker Autonomy Mandate (MANDATE.md)"
 createdAt: 2026-09-07
-updatedAt: 2026-10-28
+updatedAt: 2026-11-04
 createdFrom: "branch: task/extend-worker-autonomy"
-updatedFrom: "branch: task/summarize-merge-delta-ack"
+updatedFrom: "branch: task/improve-land-armed-and-inline-ack"
 pluginVersion: 1.9.0
 prime: false
 ---
@@ -471,7 +471,9 @@ covers. Why it is built this way:
   names the form, not the version). The `-U3` forms keep the old argv,
   unpinned: pinning the inter-hunk context there broke records made under a
   user's non-default diff config (review round 1).
-- **A user ack, never a worker one** (`delta` + `acknowledged`). For a small
+- **A user ack, never a worker one** (`delta` + `acknowledged`). `/land` (1.33.0)
+  asks it inline as one `AskUserQuestion` whose four options map 1:1 to `/merge`'s
+  `[a]/[d]/[r]/[s]`, before any armed wait; `/merge` then sees `via=user-ack`. For a small
   real delta, `/merge`/`/land` show `delta` (a diff of the reviewed lane diff
   against the head's — so unrelated main edits show nothing) and ask. The ack
   binds that exact id (`acked_diff`), dies with the next change, and a new
