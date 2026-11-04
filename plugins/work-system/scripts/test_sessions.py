@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
@@ -222,9 +223,16 @@ elif a[:2] == ["pane", "process-info"]:
     if not pr:
         out({"process_info": {"foreground_processes": []}})
     else:
-        out({"process_info": {"foreground_process_group_id": pr["pid"], "foreground_processes": [
-            {"pid": pr["pid"], "argv0": pr.get("argv0", "claude"), "argv": [pr.get("argv0", "claude")],
-             "cwd": pr["cwd"]}]}})
+        # An explicit "argv" sets argv alone (herdr omits argv0 for the native
+        # installer's binary); otherwise argv0 (default claude) fills both.
+        if "argv" in pr:
+            fp = {"pid": pr["pid"], "argv": pr["argv"], "cwd": pr["cwd"]}
+            if "argv0" in pr:
+                fp["argv0"] = pr["argv0"]
+        else:
+            name = pr.get("argv0", "claude")
+            fp = {"pid": pr["pid"], "argv0": name, "argv": [name], "cwd": pr["cwd"]}
+        out({"process_info": {"foreground_process_group_id": pr["pid"], "foreground_processes": [fp]}})
 elif a[:2] == ["tab", "list"]:
     out({"tabs": [{"tab_id": x["tab_id"], "label": "tab-\u009b\u202e" + x["pane_id"]} for x in cfg["agents"]]})
 elif a[:2] == ["workspace", "list"]:
@@ -498,6 +506,36 @@ p = sh("refresh", "--json", "--wait-ms", "1000", extra={"SESSIONS_READ_LINES": "
 res = {r["pane"]: r for r in json.loads(p.stdout)["results"]} if p.returncode == 0 else {}
 check("full read window + changing panel → confirmed via the stable anchor",
       res.get("w1:panelsat", {}).get("result") == "reloaded", p.stderr[-300:] + str(res.get("w1:panelsat")))
+reset()
+
+# The native installer runs ~/.local/share/claude/versions/<ver>: herdr then
+# reports no argv0 and argv[0] is the versioned path, named after the version.
+NATIVE = "/home/u/.local/share/claude/versions/2.1.316"
+for path, want in (("claude", True), ("/usr/local/bin/claude", True), (NATIVE, True),
+                   ("claude/versions/2.1.316", True), ("/usr/bin/2.1.316", False),
+                   ("2.1.316", False), ("node", False), ("/x/claude/versions/", False),
+                   ("/x/notclaude/versions/2.1.316", False), (NATIVE + ".partial", False),
+                   ("/opt/claude/versions/helper", False), ("claude\n", False),
+                   (NATIVE + "\n", False), (None, False)):
+    check(f"is_claude_path({path!r}) → {want}", sessions.is_claude_path(path) is want)
+native = dict(CFG, agents=[agent("w1:native"), agent("w1:usrbin"), agent("w1:bare"), agent("w1:node")],
+              procs={"w1:native": {"pid": 5001, "cwd": OTHER, "argv": [NATIVE]},
+                     "w1:usrbin": {"pid": 5002, "cwd": OTHER, "argv0": "/usr/bin/2.1.316"},
+                     "w1:bare": {"pid": 5003, "cwd": OTHER, "argv": ["2.1.316"]},
+                     "w1:node": {"pid": 5004, "cwd": OTHER, "argv0": "node"}},
+              etime={str(n): STALE_START for n in range(5001, 5005)})
+(STUB / "cfg.json").write_text(json.dumps(native))
+with mock.patch.dict(os.environ, {"PATH": f"{BIN}:{os.environ['PATH']}", "STUB_DIR": str(STUB)}):
+    got = {pane: sessions.claude_process(pane) for pane in native["procs"]}
+pid, start, cwd = got["w1:native"]
+check("native-installer claude → pid + start like `claude`",
+      pid == 5001 and start is not None and cwd == OTHER, str(got["w1:native"]))
+for pane in ("w1:usrbin", "w1:bare", "w1:node"):
+    check(f"{pane} is not claude → Nones", got[pane] == (None, None, None), str(got[pane]))
+p = sh("inventory", "--json")
+nrows = {r["pane"]: r for r in json.loads(p.stdout)["sessions"]} if p.returncode == 0 else {}
+check("inventory: native-installer claude is not unknown",
+      nrows.get("w1:native", {}).get("pid") == 5001, p.stderr[-300:] + str(nrows.get("w1:native")))
 reset()
 
 check("refresh outside herdr → exit 3", sh("refresh", herdr=False).returncode == 3)

@@ -1,9 +1,9 @@
 ---
 title: "Session plugin staleness + /reload-plugins refresh (sessions.sh)"
 createdAt: 2026-10-19
-updatedAt: 2026-10-20
+updatedAt: 2026-11-03
 createdFrom: "branch: task/add-session-plugin-refresh"
-updatedFrom: "branch: task/add-session-plugin-refresh"
+updatedFrom: "branch: task/fix-sessions-native-claude-path"
 pluginVersion: 1.9.0
 prime: false
 ---
@@ -38,6 +38,10 @@ than the marketplace version. A reload cannot fix the second case.
 - **Session start** comes from `herdr pane process-info` (the foreground claude:
   pid == the foreground process group) plus `ps -o etime=`, which is locale-free.
   `lstart` would need date parsing.
+  "Is claude" is `is_claude_path()` on `argv0`/`argv[0]`, not a basename check
+  alone: the native installer execs `~/.local/share/claude/versions/<ver>`, and
+  herdr then reports no `argv0` and the version as the name. A bare version
+  string is deliberately not claude (too unspecific).
 - **Startup grace (10s).** Claude Code writes a worktree's `local` install record
   during its own startup (observed ~1s after process start). Without the grace,
   every fresh worktree session read `stale`. The grace covers only that record
