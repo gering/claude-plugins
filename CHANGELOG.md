@@ -52,6 +52,9 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.31.2 — 2026-11-04
+- `/kickoff` in two herdr workspaces no longer collides on the agent name: herdr agent names are server-wide, so a second lane with the same task-derived label got `agent_name_taken`, which the launcher read as ambiguous, leaving an empty shell tab reported as `blocked=unverified`. On modern herdr the launcher now retries as `<label>-<repo>`, then `-2`, `-3` (`WORK_SYSTEM_HERDR_NAME_TRIES`, default 4, clamped 1..10), and reports a fallback as `herdr_name=`. Each retry needs the holder in another worktree (`herdr agent get`) and our pane back at its bare shell prompt; a holder in this worktree, an unreadable holder or every name taken rolls the tab back and exits 1, a pane that left its prompt stays `blocked=unverified`. The timeout-path rename walks the same names; legacy herdr (0.7.0–0.7.4) never retries.
+
 ### 1.31.1 — 2026-11-03
 - `/sessions` recognises a Claude session started by the native installer: herdr reports its foreground process with no `argv0`, `argv[0]` `~/.local/share/claude/versions/<ver>` and the version as its name, so `sessions.py` read it as no claude, every plugin as `unknown`, and never reloaded it. `is_claude_path()` accepts a `claude` basename or a path ending in `claude/versions/<ver>` with a version-shaped `<ver>`; a bare version string (`2.1.316`, `/usr/bin/2.1.316`) or another file under `versions/` (a `.partial` download) still is not claude.
 

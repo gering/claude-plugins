@@ -66,7 +66,9 @@
 #                    Pass it PLAIN — this helper prefixes the task's state glyph
 #                    (○ ● ◇ ◆ ✓, via herdr-tab-glyph.sh) itself, best-effort,
 #                    onto the TAB LABEL only; the agent and session names keep
-#                    the plain label (see the stamping block below).
+#                    the plain label (see the stamping block below). herdr agent
+#                    names are server-wide: on modern herdr a label another lane
+#                    holds is retried as <label>-<repo>, -2, -3 (herdr_name= below).
 #     worktree       absolute path to the worktree (becomes the new pane's cwd)
 #     workspace-id   herdr workspace to open the tab in (e.g. $HERDR_WORKSPACE_ID)
 #     agent-selector (launch only) agent-registry selector: cc-harness:<id> (an
@@ -83,6 +85,8 @@
 #                     resume: always yes — its own tab)
 #   agent=<name>     (launch only) the resolved CLI×model (e.g. codex:gpt-5.6-sol,
 #                     or plain `claude` for the legacy no-selector path)
+#   herdr_name=<n>   (launch only, only when it differs from <label>) the herdr
+#                     agent name the worker got, because another lane held the label
 #   named=no         (launch only, rare) a worker confirmed after a readiness
 #                     timeout did not get its herdr agent name — address it by pane
 # launch selector errors (nothing spawned): exit 2 = unknown selector; exit 3 =
@@ -276,6 +280,14 @@ BUSY_SECONDS="${WORK_SYSTEM_HERDR_BUSY_SECONDS:-45}"
 IDLE_STREAK="${WORK_SYSTEM_HERDR_IDLE_STREAK:-8}"
 IDLE_MIN_SECONDS="${WORK_SYSTEM_HERDR_IDLE_MIN_SECONDS:-3}"
 UNKNOWN_TRIES="${WORK_SYSTEM_HERDR_UNKNOWN_TRIES:-8}"   # unreadable answers before degrading
+# Agent names tried on agent_name_taken (the label + fallbacks; see
+# build_name_candidates). Clamped to 1..10: a typo must neither silently turn the
+# fallback off through a failing integer test nor build an unbounded list.
+NAME_TRIES="${WORK_SYSTEM_HERDR_NAME_TRIES:-4}"
+case "$NAME_TRIES" in ''|*[!0-9]*) NAME_TRIES=4 ;; esac
+NAME_TRIES=$((10#$NAME_TRIES))
+[ "$NAME_TRIES" -ge 1 ] || NAME_TRIES=1
+[ "$NAME_TRIES" -le 10 ] || NAME_TRIES=10
 # Legacy path only: how long to let a wrapper worker prove it did not die on the
 # spot before its tab is reported as running (see the pane_alive check there).
 WRAPPER_ALIVE_TRIES="${WORK_SYSTEM_HERDR_ALIVE_TRIES:-6}"
@@ -471,8 +483,9 @@ herdr_error_code() {
 #   definitive herdr rejected the call before touching the pane, so nothing was
 #              started and the created tab can be rolled back: a usage error (exit
 #              2, plain text — "unsupported interactive agent kind", "missing
-#              required --pane", "unknown option: …") or a no-such-pane/placement
-#              error code.
+#              required --pane", "unknown option: …"), a no-such-pane/placement
+#              error code, or agent_name_taken (the launch retries that one under a
+#              fallback name first — see build_name_candidates).
 #   ambiguous  anything else, INCLUDING a readiness timeout: the worker may be
 #              coming up in that pane. Never rolled back, never retried. The
 #              native-start caller confirms a `timeout` from process state
@@ -483,7 +496,7 @@ classify_start_failure() {
   [ "$rc" = 2 ] && { printf 'definitive\n'; return 0; }
   case "$code" in
     agent_pane_busy) printf 'busy\n' ;;
-    agent_pane_not_found|agent_target_not_found|agent_placement_not_found|pane_not_found)
+    agent_pane_not_found|agent_target_not_found|agent_placement_not_found|pane_not_found|agent_name_taken)
       printf 'definitive\n' ;;
     *) printf 'ambiguous\n' ;;
   esac
@@ -546,23 +559,131 @@ pane_agent_state() {
   run_bounded "$PROBE_SECONDS" herdr pane get "$1" 2>/dev/null | python3 -c "$extract_pane_agent_state" 2>/dev/null | tr -dc '[:print:]\n' || true
 }
 
-# name_agent <pane> <name> — give a confirmed worker the herdr agent name its
-# timed-out `agent start` never registered, so `agent read/prompt <label>` works.
-# Best-effort: the worker is confirmed either way, so a failure (e.g.
-# agent_name_taken by a stale tab) is reported and returns 1, which the caller
-# turns into a `named=no` line. A rename is idempotent,
-# which is why — unlike the launch mutations — it may be bounded.
-name_agent() {
-  local diag rc=0
-  rename_err="$(mktemp)"   # global, so the EXIT trap removes it on a signal
-  run_bounded "$PROBE_SECONDS" herdr agent rename "$1" "$2" >/dev/null 2>"$rename_err" || rc=$?
-  if [ "$rc" != 0 ]; then
-    diag="$(herdr_diag "$(cat "$rename_err")" "$workspace" 0)"
-    [ -n "$diag" ] && printf '%s\n' "$diag" >&2
-    echo "the worker in pane $1 is running, but herdr did not take the agent name '$2' — address it by pane" >&2
+# ---- herdr agent name: label first, then bounded fallbacks -----------------
+# herdr agent names are unique per SERVER, not per workspace: two lanes whose
+# labels derive from the same task title (e.g. the server and the app half of one
+# feature, each in its own workspace) collide, and herdr answers the second
+# `agent start` with `agent_name_taken`. Verified live (herdr 0.9.5): that
+# rejection is immediate (exit 1) and types NOTHING into the pane — the shell keeps
+# the foreground. Older builds were not checked, so every retry is still gated on
+# process state and on who holds the name (take_fallback_name). Candidates:
+# `<label>`, `<label>-<repo>` (the main checkout's dir name, which is what usually
+# tells two such spaces apart), then `<label>-<repo>-2`, `-3`, … up to $NAME_TRIES
+# names in all. The plain label stays the common case. MODERN path only: the
+# legacy placer (0.7.0-0.7.4) was never observed rejecting a name, so it keeps
+# failing loudly on the first refusal instead of retrying blind.
+# repo_slug → the main checkout's directory name as a name-safe slug, or empty.
+repo_slug() {
+  local main=""
+  case "$worktree" in
+    */.claude/worktrees/*) main="${worktree%/.claude/worktrees/*}" ;;
+    *) main="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+       main="${main%/.git}" ;;
+  esac
+  [ -n "$main" ] || return 0
+  printf '%s' "${main##*/}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' \
+    | sed -e 's/--*/-/g' -e 's/^-//' -e 's/-$//'
+}
+
+# build_name_candidates → fills name_candidates[], sets name_idx=0, herdr_name.
+build_name_candidates() {
+  local slug base n=2
+  name_candidates=("$label")
+  base="$label"
+  slug="$(repo_slug)"
+  if [ -n "$slug" ] && [ "${#name_candidates[@]}" -lt "$NAME_TRIES" ]; then
+    case "$label" in
+      "$slug"|*-"$slug") : ;;
+      *) base="$label-$slug"; name_candidates+=("$base") ;;
+    esac
   fi
-  rm -f "$rename_err"
-  return "$rc"
+  while [ "${#name_candidates[@]}" -lt "$NAME_TRIES" ]; do
+    name_candidates+=("$base-$n"); n=$((n + 1))
+  done
+  name_idx=0
+  herdr_name="$label"
+}
+
+# next_agent_name → advance herdr_name to the next candidate; 1 when none is left.
+next_agent_name() {
+  [ $((name_idx + 1)) -lt "${#name_candidates[@]}" ] || return 1
+  name_idx=$((name_idx + 1))
+  herdr_name="${name_candidates[$name_idx]}"
+}
+
+# name_holder_cwd <name> → the cwd of the agent that holds <name>, or empty when
+# herdr cannot say (bounded read).
+extract_agent_cwd='import sys, json
+try:
+    print(json.load(sys.stdin)["result"]["agent"]["cwd"] or "")
+except Exception:
+    pass'
+name_holder_cwd() {
+  run_bounded "$PROBE_SECONDS" herdr agent get "$1" 2>/dev/null \
+    | python3 -c "$extract_agent_cwd" 2>/dev/null || true
+}
+
+# take_fallback_name — after `agent start` into $pane answered agent_name_taken:
+# switch $herdr_name to the next candidate and return 0, or end the launch. Each
+# retry needs evidence that it cannot start a second worker:
+#   * the holder runs in THIS worktree → a worker for this lane already exists, so
+#     stop (rollback, exit 1) instead of starting another one under a new name;
+#   * the holder cannot be read → no evidence either way, stop the same way;
+#   * our pane is not back at its bare shell prompt → herdr may have typed
+#     something before refusing (an unverified herdr build): fail closed
+#     (blocked=unverified, tab left alone) — never retry or roll back over it.
+# Only then is the next name tried; with none left the launch fails loudly.
+take_fallback_name() {
+  local holder taken="$herdr_name"
+  holder="$(name_holder_cwd "$taken")"
+  if [ -z "$holder" ]; then
+    fail_definitive "herdr agent name '$taken' is taken, and herdr did not say by whom — not retrying under another name, nothing was started in pane $pane"
+  fi
+  if [ "${holder%/}" = "${worktree%/}" ]; then
+    fail_definitive "a worker named '$taken' already runs in this worktree — not starting a second one (nothing was started in pane $pane)"
+  fi
+  if [ "$(pane_shell_state "$pane")" != ready ]; then
+    echo "herdr refused the agent name '$taken', and pane $pane is no longer at its bare shell prompt — something may have started there, so the tab was left alone" >&2
+    emit_unverified
+    exit 0
+  fi
+  if ! next_agent_name; then
+    fail_definitive "every herdr agent name tried is already in use by other lanes (${name_candidates[*]}) — nothing was started in pane $pane"
+  fi
+  echo "herdr agent name '$taken' is already in use by another lane — retrying as '$herdr_name'" >&2
+}
+
+# emit_launched — the confirmed-launch stdout contract. `herdr_name=` appears only
+# when herdr registered the worker under a fallback name, so the caller can say
+# which name `agent read/prompt` answers to.
+emit_launched() {
+  printf 'pane=%s\ntab=%s\nmoved=yes\nagent=%s\n' "$pane" "$tab" "$agent_name"
+  if [ "${herdr_name:-$label}" != "$label" ]; then printf 'herdr_name=%s\n' "$herdr_name"; fi
+}
+
+# name_agent <pane> — give a confirmed worker the herdr agent name its timed-out
+# `agent start` never registered, so `agent read/prompt <name>` works. Starts at
+# the current $herdr_name and walks the fallbacks on agent_name_taken, like the
+# start does. Best-effort: the worker is confirmed either way, so a failure is
+# reported and returns 1, which the caller turns into a `named=no` line. A rename
+# is idempotent, which is why — unlike the launch mutations — it may be bounded.
+name_agent() {
+  local diag rc blob
+  while : ; do
+    rc=0
+    rename_err="$(mktemp)"   # global, so the EXIT trap removes it on a signal
+    run_bounded "$PROBE_SECONDS" herdr agent rename "$1" "$herdr_name" >/dev/null 2>"$rename_err" || rc=$?
+    blob="$(cat "$rename_err")"
+    rm -f "$rename_err"
+    [ "$rc" = 0 ] && return 0
+    if [ "$(herdr_error_code "$blob")" = agent_name_taken ] && next_agent_name; then
+      continue
+    fi
+    diag="$(herdr_diag "$blob" "$workspace" 0)"
+    [ -n "$diag" ] && printf '%s\n' "$diag" >&2
+    echo "the worker in pane $1 is running, but herdr did not take the agent name '$herdr_name' — address it by pane" >&2
+    return "$rc"
+  done
 }
 
 # pane_state <pane> → present | gone | unverified. Used on the LEGACY path, where a
@@ -678,6 +799,7 @@ case "$mode" in
     tab=""
     tab_created=no
     argv_shell=""
+    build_name_candidates
     # Modern-herdr transport, declared by the registry (never inferred here). The
     # no-selector legacy default IS a canonical `claude` invocation, so it carries
     # the same agent-start/claude contract.
@@ -807,7 +929,7 @@ EOF_RESOLVE
               ;;
           esac
         fi
-        printf 'pane=%s\ntab=%s\nmoved=yes\nagent=%s\n' "$pane" "$tab" "$agent_name"
+        emit_launched
       else
         diag="$(herdr_diag "$(cat "$move_err")" "$workspace" 0)"
         rm -f "$move_err"
@@ -882,7 +1004,7 @@ EOF_RESOLVE
         # Built once. The `--` and its arguments are appended only when there ARE
         # any, because a bash 3.2 `"${empty[@]}"` is an unbound-variable error under
         # `set -u` — which is the whole reason this used to be written out twice.
-        start_cmd=(herdr agent start "$label" --kind "$herdr_kind" --pane "$pane"
+        start_cmd=(herdr agent start "$herdr_name" --kind "$herdr_kind" --pane "$pane"
                    --timeout "$START_TIMEOUT_MS")
         [ "${#native_argv[@]}" -gt 0 ] && start_cmd+=(-- "${native_argv[@]}")
         start_json="$("${start_cmd[@]}" 2>"$start_err")" || start_rc=$?
@@ -891,6 +1013,15 @@ EOF_RESOLVE
         [ "$start_rc" = 0 ] && break
 
         start_code="$(herdr_error_code "$start_blob")"
+        # The name is server-wide, so another lane — possibly in another workspace —
+        # may hold it: move on to the next fallback name, or end the launch (see
+        # take_fallback_name). It costs no busy-retry budget.
+        if [ "$start_code" = agent_name_taken ]; then
+          diag="$(herdr_diag "$start_blob" "$workspace" 0)"
+          [ -n "$diag" ] && printf '%s\n' "$diag" >&2
+          take_fallback_name
+          continue
+        fi
         class="$(classify_start_failure "$start_rc" "$start_code")"
         # Retry ONLY the "shell not ready yet" rejection, bounded. Everything else
         # falls straight through — a retry loop over an unrelated error is how a
@@ -945,9 +1076,14 @@ EOF_RESOLVE
             case "$status" in
               working|idle|done)
                 named=yes
-                name_agent "$pane" "$label" || named=no
-                printf 'pane=%s\ntab=%s\nmoved=yes\nagent=%s\n' "$pane" "$tab" "$agent_name"
-                if [ "$named" = no ]; then printf 'named=no\n'; fi
+                name_agent "$pane" || named=no
+                if [ "$named" = no ]; then
+                  herdr_name="$label"   # nothing registered: no fallback name to report
+                  emit_launched
+                  printf 'named=no\n'
+                else
+                  emit_launched
+                fi
                 exit 0 ;;
             esac
           fi
@@ -979,7 +1115,7 @@ EOF_RESOLVE
       # `moved=yes` = the verified worker is in its own dedicated tab. On this path
       # no physical move happened (the tab was created first); the key is kept for
       # caller compatibility.
-      printf 'pane=%s\ntab=%s\nmoved=yes\nagent=%s\n' "$pane" "$tab" "$agent_name"
+      emit_launched
       exit 0
     fi
 
