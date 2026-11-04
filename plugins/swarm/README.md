@@ -447,8 +447,13 @@ non-interactive ssh shell. The 600 s per-call ceiling still applies; prefer
 `--quick` for large diffs. The jail denies the gateway's credentials
 (`~/.cli-proxy-api`) and cc-router's config (`~/.config/cc-router`, where the
 helper keeps its client token) to every voice; a helper that stores its token
-elsewhere needs `SWARM_DENY_PATHS`. A harness voice's own routing token lives in
-its env: its settings deny `Read(//proc/**)`, and the scrub redacts `*_TOKEN=`.
+elsewhere needs `SWARM_DENY_PATHS`. The helper itself receives the parent's
+environment (it may route with env credentials, e.g. `CLIPROXY_*`); the secret
+filter runs after it (`exec <id> -- env -u …`), so the jailed `claude` never
+sees the parent's secret-shaped variables, profile-suffixed forms
+(`*_API_KEY_<P>`, `*_CLIENT_ID`) included. A harness voice's own routing token
+lives in its env: its settings deny `Read(//proc/**)`, and the scrub redacts
+`*_TOKEN=` and uppercase profile-suffixed names.
 
 ## Requirements
 

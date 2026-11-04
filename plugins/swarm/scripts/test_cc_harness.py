@@ -265,8 +265,32 @@ class Harness(unittest.TestCase):
         r = self.source('printf \'{"s":"ANTHROPIC_AUTH_TOKEN=abcdefghijklmnopqrstuv"}\' | scrub_secrets')
         self.assertNotIn("abcdefghijklmnopqrstuv", r.stdout)
         self.assertIn("TOKEN=[REDACTED]", r.stdout)
-        r = self.source('printf \'{"s":"CLIPROXY_API_KEY_SOL=abcdefghijklmnopqrstuv"}\' | scrub_secrets')
-        self.assertNotIn("abcdefghijklmnopqrstuv", r.stdout, "a profile-suffixed key name is still a key")
+
+    SCRUB_CASES = [
+        ("CLIPROXY_API_KEY_SOL=abcdefghijklmnopqrstuv", "CLIPROXY_API_KEY_SOL=[REDACTED]"),
+        ("CLIPROXY_CF_ACCESS_SOL_CLIENT_ID=abcdefghijklmnopqrstuv", "CLIPROXY_CF_ACCESS_SOL_CLIENT_ID=[REDACTED]"),
+        ("ANTHROPIC_AUTH_TOKEN=abcdefghijklmnopqrstuv", "ANTHROPIC_AUTH_TOKEN=[REDACTED]"),
+        ("see token_path: plugins/swarm/scripts/agents.sh line 3", None),
+        ("password_hash: abcdefghijklmnopqrstuvwx", None),
+        ("SWARM_SECRET_PATHS=/Users/someone/foo/bar/baz", None),
+    ]
+
+    def test_scrub_profile_suffixed_names_but_not_identifiers(self):
+        for raw, want in self.SCRUB_CASES:
+            r = self.source("printf '%s' " + json.dumps(json.dumps({"s": raw})) + " | scrub_secrets")
+            self.assertEqual(json.loads(r.stdout)["s"], want or raw, raw)
+
+    def test_js_output_gate_scrubs_like_the_adapter(self):
+        # scrubField (workflow) hand-mirrors scrub_secrets (adapter): same inputs,
+        # same output, or a lens finding leaks what an external one would not.
+        src = (HERE.parent / "workflows" / "swarm-review.js").read_text()
+        start = src.index("function scrubField(s)")
+        fn = src[start:src.index("\n}\n", start) + 2]
+        cases = [raw for raw, _ in self.SCRUB_CASES]
+        js = subprocess.run(["node", "-e", fn + "\nconsole.log(JSON.stringify(" + json.dumps(cases)
+                             + ".map(c => scrubField(c).s)))"], capture_output=True, text=True, timeout=60)
+        self.assertEqual(js.returncode, 0, js.stderr)
+        self.assertEqual(json.loads(js.stdout), [want or raw for raw, want in self.SCRUB_CASES])
 
     def test_oversize_listing_truncates_instead_of_failing(self):
         many = "".join(f"cc-harness:v{i}\tgpt-6.1-sol\tyes\t{'x' * 200}\n" for i in range(400))
@@ -295,7 +319,7 @@ class Harness(unittest.TestCase):
         # NAMES it sees per subcommand (values never: dummy or not).
         helper = self.stub / "cc-harness-agents"
         helper.write_text(f"""#!/bin/bash
-env | cut -d= -f1 | grep -v '^CLAUDE_CONFIG_DIR$' | sort > "$STUB_DIR/helper-env-$1"
+env | cut -d= -f1 | sort > "$STUB_DIR/helper-env-$1"
 [ -n "${{{self.SECRET}:-}}" ] || exit 3
 case "$1" in
   list) printf '%s' "$STUB_ROWS"; exit 0 ;;

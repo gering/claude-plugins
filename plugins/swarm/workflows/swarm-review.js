@@ -606,6 +606,10 @@ function scrubField(s) {
     // JWT-shaped bearer/refresh tokens (Moonshot OAuth): three base64url runs.
     [/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, '[REDACTED-JWT]'],
     [/(?<key>(?:(?<=_)|\b)(?:secret|token|password|passwd|api[_-]?key)\b)\s*[=:]\s*[A-Za-z0-9/+._-]{16,}/gi, '$<key>=[REDACTED]'],
+    // Env-style names with a profile segment after the keyword
+    // (`CLIPROXY_API_KEY_SOL=…`) or ending in CLIENT_ID. Case-SENSITIVE and
+    // uppercase-only (prose like token_path survives); mirrors scrub_secrets.
+    [/\b([A-Z][A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|CLIENT_ID)(?:_[A-Z0-9]+)*)\s*[=:]\s*(?![/~])[A-Za-z0-9/+._-]{16,}/g, '$1=[REDACTED]'],
   ]
   for (const [re, repl] of rules) {
     const next = s.replace(re, repl)

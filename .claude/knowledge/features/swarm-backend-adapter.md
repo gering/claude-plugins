@@ -856,7 +856,7 @@ obvious from `run_cc_harness`:
   secret-shaped filter before the helper: every exec failed rc=3 "no gateway
   token" while `list`, run unfiltered, said ready (10/10 failed calls in the
   PR #100 review). Now HARNESS_PRE (before the helper: only the Anthropic
-  creds it replaces, Claude Code markers, git redirects) and HARNESS_POST
+  creds it replaces, Claude Code markers, `OLDPWD`, git redirects) and HARNESS_POST
   (`_harness_post_filter`: `env -u` for the parent's secret-shaped names, from
   the same `_env_filter_args`, between `exec <id> --` and the jail). The local
   review also found the filter had never matched profile-SUFFIXED names
@@ -864,6 +864,13 @@ obvious from `run_cc_harness`:
   fails before `_SOL`), so the API key reached every jailed voice even in
   0.17.0; both now match infix forms. Trust boundary, stated not enforced:
   POST strips the parent's secrets, not what the helper exports itself.
+  Parity traps (both from review/CI, not from design): `OLDPWD` appeared only in
+  exec (bash exports it valueless; exec's `cd` sets it; zsh parents hide this
+  locally) and `CLAUDE_CONFIG_DIR` was set before the helper — both now keep
+  the helper's env identical across `list` and `exec`, and the test compares
+  the full name sets. Scrub lesson: a widened keyword tail under `(?i)`
+  redacted `token_path`; profile forms are a separate case-sensitive
+  uppercase rule, mirrored in `scrubField` with a test running both.
   POST is computed from the parent's env and skips `ANTHROPIC_AUTH_TOKEN`, so
   the routing token the helper injects survives. Lesson: **readiness must
   probe under the exec env** — `_harness_load` runs `list` under HARNESS_PRE,

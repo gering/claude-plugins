@@ -1329,7 +1329,7 @@ _env_filter_args() {
   local name
   while IFS='=' read -r name _; do
     case "$name" in
-      AWS_*|*_TOKEN|*_SECRET|*_PASSWORD|*PASSWD*|*_API_KEY|*APIKEY*|*_CREDENTIALS|*_API_KEY_*|*_TOKEN_*|*_SECRET_*|*_CLIENT_ID|GH_TOKEN|GITHUB_TOKEN|NPM_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY|XAI_API_KEY|GROK_API_KEY)
+      AWS_*|*_TOKEN|*_SECRET|*_PASSWORD|*PASSWD*|*_API_KEY|*APIKEY*|*_CREDENTIALS|*_API_KEY_*|*_TOKEN_*|*_SECRET_*|*_PASSWORD_*|*_CREDENTIALS_*|*_ACCESS_KEY*|*_PRIVATE_KEY*|*_CLIENT_ID|GH_TOKEN|GITHUB_TOKEN|NPM_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY|XAI_API_KEY|GROK_API_KEY)
         printf '%s\n' "-u" "$name" ;;
     esac
   done < <(env)
@@ -1397,7 +1397,8 @@ _hardened_env_prefix() {
 # TRUST BOUNDARY: what the helper itself ADDS to the child's env is the helper's
 # decision (it already execs the child, and could run anything in its place), so
 # POST strips the parent's secrets, not the helper's exports. A helper must not
-# export credentials the model process does not need — docs/cc-harness-agents.md.
+# export credentials the model process does not need (work-system's
+# docs/cc-harness-agents.md).
 # OLDPWD: bash exports it (valueless) at startup, and exec's `cd` into the empty
 # cwd gives it the repo path — so exec saw one name more than `list` (caught on
 # Linux CI; zsh parents already export it). Unset, it also keeps the repo path
@@ -1432,9 +1433,13 @@ PATTERNS = [
     # END). Alternation: END-block first, else base64 run.
     (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----|[A-Za-z0-9+/=\r\n]*)"), "[REDACTED-PRIVATE-KEY]"),
     (re.compile(r"(?i)aws_secret_access_key\s*[=:]\s*[A-Za-z0-9/+]{20,}"), "aws_secret_access_key=[REDACTED]"),
-    # (?<=_) too: `ANTHROPIC_AUTH_TOKEN=…` has no word boundary before TOKEN; the
-    # `_<word>` tail catches profile-suffixed names (`CLIPROXY_API_KEY_SOL=…`).
-    (re.compile(r"(?i)(?:(?<=_)|\b)(secret|token|password|passwd|api[_-]?key)(?:_[A-Za-z0-9]+)*\b\s*[=:]\s*[A-Za-z0-9/+._-]{16,}"), r"\1=[REDACTED]"),
+    # (?<=_) too: `ANTHROPIC_AUTH_TOKEN=…` has no word boundary before TOKEN.
+    (re.compile(r"(?i)(?:(?<=_)|\b)(secret|token|password|passwd|api[_-]?key)\b\s*[=:]\s*[A-Za-z0-9/+._-]{16,}"), r"\1=[REDACTED]"),
+    # Env-style names whose keyword is followed by a profile segment
+    # (`CLIPROXY_API_KEY_SOL=…`) or that end in CLIENT_ID. CASE-SENSITIVE and
+    # uppercase-only, so prose identifiers (token_path, password_hash) survive;
+    # the whole name is kept; a value starting with / or ~ is a path, not a key.
+    (re.compile(r"\b([A-Z][A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|CLIENT_ID)(?:_[A-Z0-9]+)*)\s*[=:]\s*(?![/~])[A-Za-z0-9/+._-]{16,}"), r"\1=[REDACTED]"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "[REDACTED-GH-TOKEN]"),
     (re.compile(r"\bsk-[A-Za-z0-9]{20,}"), "[REDACTED-API-KEY]"),
     # JWT-shaped bearer/refresh tokens (Moonshot OAuth): three base64url runs.
@@ -3378,9 +3383,10 @@ run_cc_harness() {
   _init_sandbox "$backend"
   _harness_post_filter
   local rc=0
+  # CLAUDE_CONFIG_DIR rides in POST, after the helper: the helper sees exactly the
+  # env `list` saw, and only claude is pointed at the ephemeral config dir.
   ( cd "$home/cwd" && with_timeout "${HARNESS_PRE[@]}" \
-      CLAUDE_CONFIG_DIR="$home/config" \
-      "$HARNESS_BIN" exec "$id" -- "${HARNESS_POST[@]}" \
+      "$HARNESS_BIN" exec "$id" -- "${HARNESS_POST[@]}" CLAUDE_CONFIG_DIR="$home/config" \
       ${SANDBOX_CMD[@]+"${SANDBOX_CMD[@]}"} claude -p \
       --output-format json --json-schema "$schema_json" \
       "${tool_args[@]}" ${dir_args[@]+"${dir_args[@]}"} \
