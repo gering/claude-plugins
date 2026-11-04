@@ -710,6 +710,21 @@ r = E.run("list", "--all")
 check("list: bidi override blanked", "\u202e" not in r.stdout, r.stdout)
 E.close()
 
+# A run killed mid-loop keeps what it already delivered (state saved per outlet).
+E = Env()
+E.serve([E.agent("w2:p2", "fix-x", status="blocked"),
+         E.agent("w2:p3", "fix-y", status="blocked", uuid=UUID2)], {"w2:p2": DIALOG, "w2:p3": DIALOG})
+kill = E.d / "kill-hook.sh"
+kill.write_text('#!/usr/bin/env bash\np=$(cat)\nprintf "%%s\\n" "$p" >> "%s"\n'
+                'case "$p" in *\'"pane": "w2:p3"\'*) kill -9 "$PPID" ;; esac\nexit 0\n' % E.hook_out)
+kill.chmod(0o755)
+r1 = E.run("events", "--all", "--state", E.state, "--on-blocked", str(kill))
+E.run("events", "--all", "--state", E.state, "--on-blocked", E.hook)
+panes = [h["pane"] for h in E.hooks()]
+check("events: a run killed mid-loop does not re-send a delivered event",
+      r1.returncode != 0 and panes.count("w2:p2") == 1 and panes.count("w2:p3") == 2, str(panes))
+E.close()
+
 check("nothing ever wrote to a pane", ALL_SENT == [], str(ALL_SENT))
 
 if FAILS:

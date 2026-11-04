@@ -834,10 +834,12 @@ is retried on at most three runs, and its output is discarded. It is read only f
 `~/.config/work-system/events.toml` (`on_blocked = ["my-notify", "--quiet"]`; a
 regular file of yours, not group/world-writable) — never from a repo, so a cloned
 repo cannot run commands. The main checkout's `.work-system.toml` may set `[events]
-enabled` and `escalate_after` (a lane's own copy is ignored, so a worker cannot
-silence itself). The payload holds pane text from other sessions (`last_line`, the
+enabled` and `escalate_after` (a lane's own copy is ignored as defense in depth; a
+worker under the same user could still edit the main checkout). The payload holds pane text from other sessions (`last_line`, the
 cwd): untrusted for every receiver, and possibly secret — send it on only to a
-receiver you would show the screen to. Use one `--state` file per timer.
+receiver you would show the screen to. Use one `--state` file per timer. The state
+is saved after every ping or hook run, so a run killed mid-loop does not re-send
+what it already delivered.
 
 Example crontab entry, every two minutes. cron's environment is minimal: give it a
 `PATH` that finds `herdr`, `gh` and a Python 3.11+ (`tomllib`, for the user file

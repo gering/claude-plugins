@@ -89,7 +89,9 @@ Usage:
                       a cloned repo must not run commands. The plugin ships no
                       command.
       Per-repo settings (the MAIN checkout's .work-system.toml via
-      ws-settings.py, never a lane's own copy; harmless values only): events.enabled (false: the lane's events are tracked, not sent),
+      ws-settings.py; a lane's own copy is ignored as defense in depth, since a
+      worker under the same user could still edit the main checkout; harmless
+      values only): events.enabled (false: the lane's events are tracked, not sent),
       events.escalate_after (seconds; the CLI flag wins).
       Payload keys: event, workspace, label, tab, pane, task, agent, status,
       session, cwd, last_line, ts, manager_ping (sent|failed|off), plus pr and
@@ -599,7 +601,8 @@ def save_state(path, st):
 
 def setting(root, key):
     """A per-repo events setting, read at the MAIN checkout: a lane's own
-    (worker-writable) .work-system.toml must not silence its own events."""
+    (worker-writable) .work-system.toml is ignored. Defense in depth, not a
+    boundary: a worker under the same user could still edit the main checkout."""
     env = dict(os.environ, SETTINGS_PROJECT_ROOT=root)
     rc, out = run([sys.executable, "-I", os.path.join(HERE, "ws-settings.py"), "get", root, key],
                   env=env)
@@ -900,6 +903,15 @@ def cmd_events(args):
         rec["ws"] = r["workspace"]  # prune only within the scope that saw it
         st[key] = rec
 
+    def checkpoint(actions):
+        # Save right after an outlet ran (atomic, as at the end): a run killed
+        # mid-loop (timer timeout, reboot) must not re-send what it delivered.
+        if any(a.startswith(("ping=", "hook=")) for a in actions):
+            try:
+                save_state(state, st)
+            except OSError as e:
+                state_die(state, e)
+
     for r in rows:
         if r["role"] != "worker" or not r["pane"]:
             continue  # never self, a manager or another agent
@@ -919,6 +931,7 @@ def cmd_events(args):
                 enabled, esc = lane_cfg(r["cwd"])
                 actions = deliver(base(r, "blocked"), rec, ping, hook, esc, now, enabled)
                 remember(key, rec, r)
+                checkpoint(actions)
                 if new and not actions:
                     actions = ["outlets=none" if enabled else "outlets=disabled"]
                 if actions:
@@ -956,6 +969,7 @@ def cmd_events(args):
         ev = dict(base(r, "ready-for-merge"), pr=pr, head=head)
         actions = deliver(ev, rec, ping, hook, esc, now, enabled)
         remember(key, rec, r)
+        checkpoint(actions)
         if new and not actions:
             actions = ["outlets=none" if enabled else "outlets=disabled"]
         if actions:
