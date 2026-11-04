@@ -50,11 +50,14 @@ check("refuses outside a task worktree", "main-repo-path.sh\" linked" in step1
       and "on_main=yes" in step1 and "detached=yes" in step1)
 check("a PR that cannot be merged stops before the report",
       all(f"`pr_state={s}`" in step1 for s in ("none", "nogh", "CLOSED")))
-check("an open or merged PR runs the head check before the report",
-      "`pr_state=OPEN` or `MERGED` → run step 4's **head check** block now" in step1)
+check("a merged PR runs the head check before the report",
+      "`pr_state=MERGED` → run step 4's **head check** block now" in step1)
+check("an open PR runs the gate script before the report",
+      "`pr_state=OPEN` → **the gate**" in step1
+      and 'land-gate.py" probe --pr <pr_number>' in step1)
 check("/land refuses arguments", "`/land` takes no arguments" in LAND)
-check("an open PR without upstream stops before the merge",
-      "`OPEN` only — **an upstream**" in step1 and "no upstream" in step1)
+check("an open PR whose branch is not on the remote stops before the merge",
+      "`remote-missing`" in step1 and "not on the remote" in step1)
 check("pr-flow presence is checked first", at(step1, "pr-flow installed?") < at(step1, "assess"))
 check("a missing pr-flow stops before anything runs",
       "pr-flow is not installed" in step1 and "**before** anything else runs" in step1)
@@ -83,13 +86,13 @@ check("the merge is confirmed via assess, not a message",
       "Assess again" in step4 and "confidence=confirmed" in step4)
 check("an unconfirmed merge closes nothing", "Nothing was closed" in step4)
 check("an open PR left after /merge is never closed", "do **not** run `/close`" in step4)
-check("an open PR needs the exact head; a merged one may be ahead of HEAD",
-      "**Before a merge** (step 1, `OPEN`): only `head=same` passes" in step4
-      and "`head=same` or `head=behind` (the PR carries everything here) passes" in step4)
+check("a merged PR may be ahead of HEAD; before a merge the gate decides",
+      "`head=same` or `head=behind` (the PR carries everything here) passes" in step4
+      and "Before a merge the gate classifies the head instead" in step4)
 check("a diverged branch is not reported as ahead", "head=diverged" in step4)
 check("the merged head must contain HEAD, fail-closed", "head=unreadable" in step4)
 check("local commits after a merge get their own message",
-      "After a merge, `head=ahead` or `head=diverged` →" in step4)
+      "`head=ahead` or `head=diverged` → \"This worktree has commits merged PR" in step4)
 
 
 step5 = LAND[close:]
@@ -101,7 +104,7 @@ check("the land summary is printed before /close, whose output stays last",
 
 # ------------------------------------------------ landing marker + gone lane
 check("step 1 records the landing marker after every check passed",
-      at(step1, "a merged PR's deleted remote") < at(step1, "landing.sh\" begin --pr <pr_number>"))
+      at(step1, "(its step 6b) is the authoritative one") < at(step1, "landing.sh\" begin --pr <pr_number>"))
 check("the marker is best-effort, never a stop", "`recorded=no` is one line, never a stop" in step1)
 check("step 1 keeps the main-repo path for a vanished lane", "<main-repo-path>" in step1)
 check("every stop clears the marker",
@@ -132,7 +135,7 @@ check("the gone-lane recipient is sent unasked only as the kicker session",
 check("a gone lane without recipient names the Manager-side /close",
       "In the main checkout run `/close <task_name>`" in gone)
 check("the MERGED shortcut records the landing too",
-      "record the landing (the last bullet below)" in step1)
+      "record the landing (below)" in step1)
 check("an adopted branch is not handed over by name",
       "cannot be resolved by name" in gone)
 check("step 5 marks the hand-over before /close --delegate",
@@ -332,6 +335,35 @@ check("the file list's path is the rest of the line", "then `path=`, shell-quote
 check("refusals keep their place",
       all(k in s6b for k in ("`baseline=approximate`", "`binary_changes=yes`",
                              "`unreadable=yes`", "`too_large=yes`")))
+
+# ============================================ armed /land + inline ack (step 1)
+GATE_SRC = (HERE / "land-gate.py").read_text()
+hard = set(re.findall(r'out\("stop", "([a-z-]+)"\)', GATE_SRC))
+hard |= set(re.findall(r'"reason": "([a-z-]+)"\}', GATE_SRC))
+hard |= {"remote-behind", "remote-diverged"}   # built as "remote-" + relation
+hard -= {"remote-"}
+stops = step1[at(step1, "**Gate stops**"):]
+check("every hard reason land-gate.py can print has a line in the stops table",
+      all(f"`{r}`" in stops for r in hard if r not in ("nogh", "head-unreadable",
+          "status-unreadable")) and "anything else" in stops)
+check("the prose relays the class, it does not classify",
+      "this prose only relays its class" in step1 and "`class=hard`" in step1
+      and "`class=transient`" in step1)
+check("questions come before the armed wait",
+      at(step1, "**a local review covers this head**") < at(step1, "**Armed wait**"))
+check("the armed wait arms with the script and waits in bounded calls",
+      "land-gate.py\" arm --pr <pr_number> --head '<head_sha>'" in step1
+      and "land-gate.py\" wait --pr <pr_number> --arm-id '<arm_id>'" in step1
+      and "never sleep or poll by other means" in step1
+      and "exited non-zero" in step1)
+check("only a typed /land arms, and only this run waits",
+      "Only a `/land` the user typed arms" in step1
+      and "do not call `wait` again" in step1 and "There is no daemon" in step1)
+check("the inline ack is one AskUserQuestion with /merge's four options",
+      "ask **one** question with `AskUserQuestion`" in step1
+      and "Only the user's own answer to that question in this session counts" in step1)
+check("landing.sh end also clears the armed state",
+      "armed" in (HERE / "landing.sh").read_text().split("cmd_end()")[1].split("cmd_status")[0])
 
 # ============================================ head check, executed (not grepped)
 # The classification decides whether /close may delete the branch, so run the

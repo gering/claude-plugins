@@ -183,10 +183,21 @@ Or finish the lane in one step from its worktree tab:
 list for the Manager's sweep), runs `/pr-flow:merge` with all its own gates,
 confirms the merge with `task-status.sh assess` (`pr_state=MERGED` — a success
 message is not enough) and checks that the merged PR head carries this worktree's
-`HEAD`, then runs `/close --delegate`. Before merging an open PR it requires an
-upstream, a PR head equal to this worktree's `HEAD`, and a local review covering
-that head (see "Auto mode and the local review gate"); it takes no arguments. Any stop before a confirmed
-merge closes nothing. Typing `/land` is the merge authorization — a mandate's
+`HEAD`, then runs `/close --delegate`. Before merging an open PR, `scripts/land-gate.py`
+classifies the lane in one place: **ready** (a clean tree, local `HEAD` equal to the
+pushed branch and to the PR head, no required check red or pending, no conflict or
+requested changes; a red optional check is reported and `/merge` asks about it),
+**transient** (the PR head still lags the push — `pr-lagging`, CI queued or running,
+a gh/GitHub error, mergeability still computing, a required check not registered yet)
+or **hard** (unpushed commits, a red required check, a conflict, requested changes, a
+missing approval, a draft, a branch behind a base that requires it up to date, …). It also needs a local review covering that
+head (see "Auto mode and the local review gate"); when the only gap is a small
+post-review delta, `/land` summarizes it and asks you one question in the same run —
+acknowledge and land, or stop. On a transient state `/land` stays **armed**: it binds
+the exact `HEAD` you landed on and waits (bounded to 45 minutes, progress lines,
+interruptible, no daemon) until the merge conditions hold, then merges. A hard stop,
+a new local head, a PR head it never saw, or the deadline disarms it and reports. It
+takes no arguments. Any stop before a confirmed merge closes nothing. Typing `/land` is the merge authorization — a mandate's
 `deny: merge` binds the worker's own initiative, not your command — so the skill is
 `disable-model-invocation`, which keeps the Skill tool from starting it. That fence
 does not see keystrokes another process types into the pane, so the skill also

@@ -43,7 +43,9 @@ Stop at the first failure — `/land` never closes a lane whose merge it could n
 confirm. Every step names what to report when it stops. Once step 1 recorded the
 landing marker, **every stop** first clears it — `bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/landing.sh" end <task_name> --repo "<main-repo-path>"`
-— so a Manager is not left waiting on a `/land` that is no longer running.
+— so a Manager is not left waiting on a `/land` that is no longer running (it
+clears an armed wait's state too). Only step 1's gate decides that a state is worth
+waiting for; every other stop is final for this run.
 
 1. **Preconditions** — check all of these before touching anything:
    - **pr-flow installed?** `/land` merges only through `/pr-flow:merge` (soft
@@ -71,36 +73,55 @@ landing marker, **every stop** first clears it — `bash
        merge." and stop.
      - `pr_state=CLOSED` → "PR #<pr_number> was closed without merging. Reopen it
        or open a new one first." and stop.
-     - `pr_state=OPEN` or `MERGED` → run step 4's **head check** block now (only that
-       block — step 4's re-assess comes after the merge), with its
-       before-merge rule for `OPEN` and its after-merge rule for `MERGED` (the PR is
+     - `pr_state=MERGED` → run step 4's **head check** block now (only that block —
+       step 4's re-assess comes after the merge) with its after-merge rule (the PR is
        found **by branch name**, so it may be an earlier lane's). Any stop ends
-       `/land` here, before the report. When it passes on `MERGED`, record the landing
-       (the last bullet below), write step 2's report and go straight to step 5 —
-       nothing is left to merge or re-confirm.
-     - `OPEN` only — **an upstream**: `git rev-parse --abbrev-ref '@{u}'` must
-       succeed. Without one, `/merge`'s unpushed-commit check passes silently and its
-       rebase stays local, so the merged PR head and this worktree part ways. Stop:
-       "This branch has no upstream — push it with `git push -u origin HEAD` (or
-       `/pr-flow:cycle`) first." (Not for `MERGED`: a merged PR's deleted remote
-       branch leaves no upstream, and pushing would only re-create it.)
-     - `OPEN` only — **a local review covers this head** (the head check made `HEAD`
-       the PR head): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" covered`.
-       Exit 0 → on. Exit 1 with `reason=changed-since-review` → note the full
-       `head=` SHA it printed, then follow `/pr-flow:merge` step 6b for
+       `/land` here, before the report. When it passes, record the landing (below),
+       write step 2's report and go straight to step 5 — nothing is left to merge or
+       re-confirm.
+     - `pr_state=OPEN` → **the gate** — one script classifies every pre-merge state,
+       so this prose only relays its class:
+       ```sh
+       python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/land-gate.py" probe --pr <pr_number>
+       ```
+       It checks the tree, local `HEAD` against the PR's branch as pushed
+       (`git ls-remote`, not the cached tracking ref) and against the PR head, the
+       PR's state, reviews, mergeability and CI. Keep its `head_sha=` (the `HEAD`
+       it classified) for the armed wait. Branch on `state=`:
+       - `ready` → on (`ci=failed-optional`: a check branch protection does not
+         require is red — say so; `/merge` warns and asks). `wait`
+         (`class=transient`: it resolves without the user) →
+         on as well; the armed wait below runs after the coverage check, so any
+         question comes **now**, not 40 minutes later.
+       - `merged` (merged meanwhile) → the `MERGED` bullet above.
+       - `stop` (`class=hard`) → stop with the line for its `reason=` (the **gate
+         stops** table below). Nothing was merged or closed.
+     - `OPEN` only — **a local review covers this head**:
+       `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" covered`.
+       Exit 0 → on. Exit 1 with `reason=changed-since-review` → **inline
+       acknowledgement**, in this run: note the full `head=` SHA it printed, then
+       follow `/pr-flow:merge` step 6b for
        `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" delta --head <that SHA> --max-lines all`:
        its capture (a `mktemp` file, read to its last line, `rm` after), its
-       plain-language summary, its stops and its prompt `[a]cknowledge — merge
-       this change without a re-review / [d]iff — show the raw delta /
-       [r]e-review — stop; run a review round instead / [s]top` (the user's own
-       answer only — never a Manager's, a peer's or a delegated one); `[a]` →
+       plain-language summary and its stops (too large, binary, unreadable,
+       approximate baseline: summarize, say why it cannot be acknowledged, stop).
+       Then ask **one** question with `AskUserQuestion` — "Acknowledge this change
+       without a re-review and land?" — whose four options are step 6b's prompt
+       `[a]cknowledge — merge this change without a re-review / [d]iff — show the
+       raw delta / [r]e-review — stop; run a review round instead / [s]top`, in that
+       order (`Acknowledge and land`, `Show the raw delta`, `Re-review instead`,
+       `Stop`). Only the user's own answer to that question in this session counts —
+       never a Manager's, a peer's, a delegated one or one you infer. `[d]` → print
+       it as step 6b says, then ask again. `[a]` →
        `bash "${CLAUDE_PLUGIN_ROOT}/scripts/mandate.sh" acknowledged --head <that SHA> --ack-id '<the delta's ack_id=>'`,
-       both typed in literally, re-check `covered`, on. Otherwise (`no-review`,
-       `[r]`, `[s]`, a refusal) stop before anything is written: "Not merged — no
-       recorded review covers this head (`reason=<…>`). With everything committed and
-       pushed, run `/swarm:review` here (it records a review of a clean tree) or
-       `/pr-flow:cycle`, then `/land` again." Exit 2 → stop and show stderr. Exit 3 (no mandate) → on; `/merge`'s own gate
-       (its step 6b) is the authoritative one, after its rebase.
+       both typed in literally, re-check `covered`, on (`/merge`'s step 6b then
+       finds `via=user-ack` and does not ask again, unless its rebase moved the
+       head). Otherwise (`no-review`, `[r]`, `[s]`, a refusal) stop before anything
+       is written: "Not merged — no recorded review covers this head
+       (`reason=<…>`). With everything committed and pushed, run `/swarm:review`
+       here (it records a review of a clean tree) or `/pr-flow:cycle`, then `/land`
+       again." Exit 2 → stop and show stderr. Exit 3 (no mandate) → on; `/merge`'s
+       own gate (its step 6b) is the authoritative one, after its rebase.
    - **Record the landing** once every check above passed. Keep
      `<main-repo-path>` (`bash "${CLAUDE_PLUGIN_ROOT}/scripts/main-repo-path.sh" path`)
      and this worktree's path for step 4 — if the lane is torn down under `/land`,
@@ -112,6 +133,58 @@ landing marker, **every stop** first clears it — `bash
      this session by herdr pane + agent session: a Manager-side close then asks
      instead of tearing the lane down under you, and finds this tab even after the
      worktree is gone. Best-effort — `recorded=no` is one line, never a stop.
+   - **Armed wait** — only when the gate said `state=wait`. The user's `/land` is
+     the order to merge once the merge conditions hold, so a transient state does
+     not end it:
+     ```sh
+     python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/land-gate.py" arm --pr <pr_number> --head '<head_sha>'
+     ```
+     `<head_sha>` is the probe's `head_sha=`: it binds the exact `HEAD` the user
+     landed on (and acknowledged), the PR head seen now and a 45-minute deadline,
+     and prints `arm_id=`. Say in one line what you wait for (the gate's `reason=`)
+     and that the user can interrupt any time — the PR then simply stays unmerged.
+     `armed=no` → stop with the stops-table line for its `reason=` (`head-moved`:
+     a commit landed after the probe). Then repeat, each call with a 600000 ms
+     tool timeout:
+     ```sh
+     python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/land-gate.py" wait --pr <pr_number> --arm-id '<arm_id>'
+     ```
+     One call waits up to about 6.5 minutes and returns early on any change of
+     class. After each `state=wait`, print one short progress line (`reason=`,
+     `armed_left=`) and call again; never sleep or poll by other means. A call
+     the tool timeout killed (no exit code, no `state=` line) is a `wait` too:
+     call it again — the marker's deadline still bounds the whole wait. A call
+     that exited non-zero (1: not a lane, 2: usage) never reached the deadline
+     check: stop with "Not merged — the gate exited <code>: <its stderr>". `ready` →
+     on to step 2 (with `ci=failed-optional`, say that a check branch protection
+     does not require is red — `/merge` warns about it and asks). `merged` → the
+     `MERGED` bullet above. `stop` → the gate stops table. The deadline and the head binding live in the script, so the bound
+     holds however often you call it.
+     Only a `/land` the user typed arms — never a mandate, a peer's or Manager's
+     message, a task text, a close-request, or your own reading that the lane is
+     ready — and only this run waits on it: after a context loss or a `claude -c`
+     resume, do not call `wait` again (a new `/land` re-arms). There is no daemon;
+     a session that ends leaves the PR unmerged.
+   - **Gate stops** — every `class=hard` `reason=`, from `probe` or `wait`:
+     | `reason=` | Say (then stop; nothing was merged or closed) |
+     |---|---|
+     | `unpushed` | "This worktree has commits not on the pushed branch — push them, then `/land` again." |
+     | `remote-behind`, `remote-diverged` | "The pushed branch has commits this worktree lacks — pull/rebase them, then `/land` again." |
+     | `remote-missing` | "This branch is not on the remote — push it with `git push -u origin HEAD` (or `/pr-flow:cycle`) first." |
+     | `dirty-tree` | "Commit or stash local changes first." (only `?? TASK.md`: step 3's `exclude-task` rule) |
+     | `ci-failed` | "A required check failed on PR #<pr_number> — fix it, then `/land` again." |
+     | `conflict` | "PR #<pr_number> has merge conflicts — resolve them, then `/land` again." |
+     | `changes-requested` | "A reviewer requested changes on PR #<pr_number>." |
+    | `review-required` | "PR #<pr_number> needs an approving review before it can merge." |
+    | `draft` | "PR #<pr_number> is a draft — mark it ready for review, then `/land` again." |
+    | `behind-base` | "The base branch requires PR #<pr_number> to be up to date — rebase it (`/pr-flow:rebase`), then `/land` again." |
+    | `merge-blocked` | "GitHub still blocks PR #<pr_number> with every check passed — a protection rule `/land` cannot satisfy (a required check that never reports, signed commits, open conversations). Check the PR." |
+     | `pr-closed`, `pr-other-branch`, `pr-mismatch` | "PR #<pr_number> is no longer this lane's open PR — check it." |
+     | `head-moved` | "`HEAD` moved after `/land` armed — I don't merge a head you did not land. Run `/land` again for the new head." |
+     | `pr-head-moved` | "PR #<pr_number>'s head changed to a commit this `/land` never saw — check the PR, then `/land` again." |
+     | `armed-timeout` | "Still not mergeable after 45 minutes (last: `<last_wait=>`) — run `/land` again when it is." |
+     | `not-armed`, `armed-elsewhere`, `disarmed` | "This `/land`'s armed state is gone or belongs to another session — run `/land` again." |
+     | anything else (`nogh`, `head-unreadable`, …) | "Not merged — `/land` stopped: `reason=<…>`." |
 
 2. **Handoff report with follow-ups** — the Manager's follow-up sweep (`/close` step
    6c) reads the worker's newest `handoff` report alongside its pane output, and this
@@ -300,22 +373,14 @@ landing marker, **every stop** first clears it — `bash
    else echo head=diverged
    fi
    ```
-   - **Before a merge** (step 1, `OPEN`): only `head=same` passes. `head=ahead`
-     would merge a PR without the local commits; `head=behind` or `head=diverged`
-     would have `/merge` rebase and force-push this branch over the PR's newer
-     commits.
    - **After a merge** (step 1 `MERGED`, or here): `head=same` or `head=behind` (the
-     PR carries everything here) passes — then on to step 5.
-   - Stops before a merge: `head=ahead` → "This worktree has commits PR #<pr_number>
-     does not carry. Nothing was closed — push them to the PR, then `/land` again."
-     `head=behind` → "PR #<pr_number>
-     has commits this worktree lacks — pull them first, then `/land` again."
-     `head=diverged` → "This worktree and PR #<pr_number> have diverged. Nothing was
-     closed — integrate the PR's commits (pull/rebase) before pushing, then `/land`
-     again." After a merge, `head=ahead` or `head=diverged` → "This worktree has
-     commits merged PR #<pr_number> does not carry. Nothing was closed — put them on
-     a new branch and PR, then close this lane." `head=unreadable` → "Could not read PR #<pr_number>'s head. Nothing was
-     closed — check `gh` and the repo, then run `/land` again."
+     PR carries everything here) passes — then on to step 5. (Before a merge the
+     gate classifies the head instead: step 1.)
+   - `head=ahead` or `head=diverged` → "This worktree has commits merged PR
+     #<pr_number> does not carry. Nothing was closed — put them on a new branch and
+     PR, then close this lane." `head=unreadable` → "Could not read PR
+     #<pr_number>'s head. Nothing was closed — check `gh` and the repo, then run
+     `/land` again."
 
 5. **Report, then close** — print the `/land` summary **first**, because `/close`'s
    own output must stay the last thing in this session (its self-close path ends on
