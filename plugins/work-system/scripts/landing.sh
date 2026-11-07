@@ -24,8 +24,9 @@
 #       stays so a Manager-side close can still find the worker's tab, but no
 #       longer reads as "landing in progress". Prints updated=yes|no.
 #   end <task> [--repo <main>]
-#       Remove the marker (/land stopped, or a close finished). Prints
-#       removed=yes|no. Never fails on a missing marker.
+#       Remove the marker (/land stopped, or a close finished), and
+#       land-gate.py's armed state with it (disarmed=yes when one existed).
+#       Prints removed=yes|no. Never fails on a missing marker.
 #   status <task> [--repo <main>]
 #       Prints landing=none|live|stale|unverified|invalid, and with a marker:
 #       phase=, pr=, branch=, worktree=, worktree_state=present|gone,
@@ -315,6 +316,13 @@ cmd_end() {
   shift; take_repo "$@"
   resolve_repo "$REPO_ARG" || exit 1
   read_marker "$task"
+  # land-gate.py's "land armed" state ends with the landing: no stop may leave
+  # a head + deadline behind for a later session to pick up.
+  local armed
+  armed="$(dirname -- "$(marker_dir 2>/dev/null || echo /nonexistent/x)")/armed/$task"
+  if [ -e "$armed" ] || [ -L "$armed" ]; then
+    if rm -f "$armed" 2>/dev/null; then echo "disarmed=yes"; else echo "disarmed=no"; echo "reason=armed-unremovable"; fi
+  fi
   if [ -e "$MARKER_FILE" ] || [ -L "$MARKER_FILE" ]; then
     if rm -f "$MARKER_FILE" 2>/dev/null; then echo "removed=yes"; else echo "removed=no"; echo "reason=unremovable"; fi
   else

@@ -1,9 +1,9 @@
 ---
 title: "herdr /close Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-10-19
+updatedAt: 2026-11-04
 createdFrom: "PR #18"
-updatedFrom: "session: 2026-10-19 (task/auto-delegate-close-without-kicker-prompt)"
+updatedFrom: "session: 2026-11-04 (task/improve-land-armed-and-inline-ack)"
 pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
@@ -266,6 +266,82 @@ header, `/land` steps 1/3/4/5, `/close` 1a/4/7/10a.
   checkout, so a guard inside it would never fire; the effective guard is pr-flow's
   auto-loaded `enforce-merge-skill` rule (lane PRs merge from their worktree, never with
   `--delete-branch` from main). A PreToolUse hook on `gh pr merge` was considered and left out.
+
+## Armed `/land`: one classifier, transient states wait (1.33.0)
+
+Trigger: PR #100 — the push landed (origin branch == local), GitHub still showed the
+old PR head and ran no CI; `/land`'s inline head check said `head=diverged` and aborted.
+
+- **One classifier, in code.** `scripts/land-gate.py probe` decides `ready` / `wait`
+  (`class=transient`) / `stop` (`class=hard`) / `merged`; the prose only relays the class
+  and has a stops table that `test_land.py` cross-checks against every hard `reason=` the
+  script can print (a new reason without a line fails the test).
+- **`pr-lagging` = local == the pushed branch, PR head differs** — read with
+  `git ls-remote`, not the cached tracking ref, and regardless of ancestry (an amend +
+  force-push makes the stale PR head look `diverged`, which is what misfired).
+  `unpushed` (local ahead of the remote) stays hard: `/land` never pushes.
+- **Head binding.** `arm` records the exact `HEAD` and the PR head seen at that moment.
+  Waiting continues only while local `HEAD` is the armed head and the PR head is one of
+  those two; anything new disarms (`head-moved`, `pr-head-moved`) — a /land never merges
+  a head the user did not land on. Decided default; the alternative (accepting the lane's
+  own pushed amend) was rejected because the script cannot tell an amend from a new change.
+- **Only required checks block — like `/merge`.** A red check is hard only when branch
+  protection requires it (`gh pr checks --required --json name`; gh says "no required
+  checks" on stderr with rc 1, which means the empty set, while unreadable output means
+  "every check counts"). A red optional check is `ci=failed-optional` → ready, and
+  `/merge` warns and asks as it always did; a first version stopped on it and would have
+  refused PRs `/merge` merges (review round 1). Pending checks are waited for while
+  nothing is required (the CI run is then the only signal), else only required ones;
+  `STALE` never blocks. The required set is cached per process (it does not change during
+  one `/land`), and a red check while gh cannot say which are required is `wait`
+  (`ci-required-unknown`), not a stop: one gh timeout in a 45-minute wait must not end it
+  (review round 2).
+- **`mergeStateStatus` beyond DIRTY/UNKNOWN** (review round 2): the first version read
+  `BLOCKED`/`BEHIND`/`DRAFT` as ready and handed them to `/merge`, which stopped. `gh pr
+  checks --required` only lists checks that already reported, so a required check that has
+  not registered yet is invisible except as `BLOCKED` with every check green: that waits
+  for the CI grace, then stops as `merge-blocked`. `REVIEW_REQUIRED` is hard and checked
+  before CI (a pending check would hide it behind the 45-minute wait). `DRAFT` and `BEHIND`
+  were hard in round 2 and are ready since round 3: `/merge` owns both (it asks to mark a
+  draft ready and rebases a branch that is behind), so stopping on them took a step away
+  from the user. Rule: the gate stops only on what `/merge` cannot resolve itself.
+- **Compare against the PR's branch, not the upstream.** `branch.<b>.merge` can track
+  another branch (a branch cut from `origin/main` and pushed without `-u`), which read as
+  `unpushed`; the gate now reads `refs/heads/<branch>` on the branch's remote (else
+  `origin`). But `/merge` still checks unpushed commits against `@{u}` and pushes its
+  rebase only with one, so round 3 made a missing or foreign upstream hard
+  (`upstream-mismatch`) instead of ready: compare against the PR's branch, and require
+  `@{u}` to be that branch.
+- **gh lists only required checks that already reported** (round 3): "no required checks
+  reported" also means "not registered yet", so the required set is asked on every probe;
+  the last answer stands in only while gh fails.
+- **`arm --head`** takes the probe's `head_sha=`, so the armed head is the one probed and
+  acknowledged, not whatever `HEAD` is when `arm` runs.
+- **A running `wait` re-reads its marker every probe.** It held the marker in memory, so
+  a `landing.sh end` mid-slice was undone by the next `synced_at` write and the slice
+  could still say ready. Now writes go through `update_marker` (only while the same
+  `arm_id` is on file) and a vanished marker ends the wait as `disarmed`.
+- **Slice length is budgeted against the tool cap**: 390 s plus one final probe's network
+  timeouts (gh + ls-remote + two fetches) stays under 600 s; a call killed anyway prints
+  no `state=`, and the prose treats that as `wait`.
+- **Residual: outside herdr nothing binds the session** — only arm_id, head binding and
+  deadline. Accepted: the marker grants nothing, and the prose forbids `wait` after a
+  context loss.
+- **No CI vs not-yet-CI.** An empty check rollup is `ci-not-started` only in a repo with
+  `.github/workflows/*.yml`, and only for 180 s after the PR head synced (`synced_at` in
+  the marker); then it counts as "no CI", so a workflow that never triggers on PRs cannot
+  hold a merge for 45 minutes.
+- **Bounded without a daemon.** Claude Code blocks a foreground `sleep`, and a tool call
+  caps at 10 min, so the loop lives in the script: `wait` re-probes for up to 390 s and
+  returns early on any class change; the skill re-calls it. The 45-min deadline is in the
+  marker, so the bound holds however often the prose loops.
+- **The armed state is loop state, not authority.** `<common>/work-system/armed/<task>`
+  (separate dir: a `<task>.armed` file in `landing/` could collide with a task named
+  that), strict key parser, `arm_id` nonce the caller must present, herdr pane must match
+  and the landing marker's pane must not host another session (`landing.sh status`
+  `stale`). `landing.sh end` removes it with the landing marker, so every existing stop
+  path disarms without a new prose step. Questions (the inline delta ack) come before
+  arming, so the user is never asked 40 minutes later.
 
 ## Design decisions
 
