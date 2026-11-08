@@ -123,6 +123,15 @@ not in SKILL.md.
   torn down unasked). The 1.31 slug change (umlauts spelled out) renames a
   pre-1.31 marker-less lane with a non-ASCII title; its `/close` meets exit 5
   and asks.
+- **A `#N` lacking only the task label is exit 8, an offer, not a miss.** `/kickoff`
+  warns and asks (label / no label / cancel) before the worktree; `--allow-unlabeled`
+  makes the copy deliberate and `label` adds it. The test is "would the task label
+  alone make it a task" (`task_label_missing`), so excludes, includes and PRs stay
+  exit 3. Only the kickoff path offers: `--identity`/`--body`/close keep exit 3, since
+  3 there means "nothing to close". Closed issues and issues with a body marker get
+  no offer: the label is the triage-access signal, so without it a marker would let
+  any author pick the lane's name. `label` tries the edit first and creates the label
+  only on "not found", since triage may label but not create.
 - **Gate labels are enforced in the script, not just the prose.** `get --write`
   is the kickoff copy and refuses with exit 7 without `--allow-gated`. `get`
   prints `gate=` so `/kickoff` stops before it creates the worktree. The prose
@@ -196,7 +205,21 @@ not-started issues uncounted. `close-request.sh` asks the store whether a gone
 lane's task is still open; an unreadable backlog counts as a record, because a
 gone lane is only ever `ask`.
 
+## Why a repo resolves to `local`
+
+`backend`/`list` print `source=` and `reason=`. The routes: an explicit
+`tasks.backend = "local"`; any task file in `tasks/` of the main checkout (untracked
+ones count, so two clones of one repo can differ); a non-github.com origin; gh absent.
+A `#N` on local is exit 2 naming the route and the fix. The dev-1 report (app repo
+local, server repo github, 2026-11-04) was never checked on the host; these routes
+are read from the code.
+
 ## Residuals
+
+A lane started without the label is invisible to by-name lookups: once its worktree
+is gone (no TASK.md pin) `close-request.sh` answers not-a-lane and the issue stays
+open. `/kickoff` recommends adding the label for that reason. A title slug is still
+author-chosen text, which is why the offer shows title, author and task name.
 
 `paths.tasks_dir` is not read: `archive-task.sh` and the statusline hardcode
 `tasks/`, so the store does too (wiring it is `wire-work-system-paths-to-settings`);

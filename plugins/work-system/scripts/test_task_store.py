@@ -46,6 +46,8 @@ if cmd == ["label", "create"]:
     if "--force" in args:
         print("stub: --force would overwrite the label", file=sys.stderr); sys.exit(2)
     st.setdefault("labels", [])
+    if st.get("label_create_denied"):
+        print("HTTP 403: Must have admin rights", file=sys.stderr); sys.exit(1)
     if args[2] in st["labels"]:
         print(f"label with name \"{args[2]}\" already exists", file=sys.stderr); sys.exit(1)
     st["labels"].append(args[2]); save(); sys.exit(0)
@@ -98,6 +100,10 @@ if cmd == ["issue", "create"]:
 if cmd == ["issue", "edit"]:
     write_call()
     n = int(args[2])
+    if st.get("strict_labels"):
+        for l in opts("--add-label"):
+            if l not in st.get("labels", []):
+                print(f"failed to update: '{l}' not found", file=sys.stderr); sys.exit(1)
     for i in issues:
         if i["number"] == n:
             for l in ",".join(opts("--add-label")).split(","):
@@ -321,7 +327,7 @@ with tempfile.TemporaryDirectory() as d:
     check("get by #N", kv(e.run("get", str(e.repo), "#3").stdout, "task") == ["fix-login-flow"])
     check("an unmarked task answers to its title slug",
           kv(e.run("get", str(e.repo), "fix-login-flow").stdout, "issue") == ["3"])
-    check("a non-task issue is not a task", e.run("get", str(e.repo), "#2").returncode == 3)
+    check("a non-task issue is not a task", e.run("get", str(e.repo), "#2", "--body").returncode == 3)
     check("an unknown name exits 3", e.run("get", str(e.repo), "nope").returncode == 3)
     check("a bare number is a name, not an issue ref",
           e.run("get", str(e.repo), "3").returncode == 3)
@@ -763,7 +769,7 @@ with tempfile.TemporaryDirectory() as d:
     r = e.run("list", str(e.repo))
     check("default select is the label, as before",
           kv(r.stdout, "select") == ["label"] and rows(r) == ["#1", "#4"])
-    check("default: an unlabelled issue is not a task", e.run("get", str(e.repo), "#2").returncode == 3)
+    check("default: an unlabelled issue is not a task", e.run("get", str(e.repo), "#2", "--body").returncode == 3)
 
     e.setting('[tasks]\nselect = "all-open"\n')
     r = e.run("list", str(e.repo))
@@ -968,6 +974,94 @@ with tempfile.TemporaryDirectory() as d:
     r = migrate(e, "--open-only")
     check("migrate never resumes onto an issue the filter hides",
           "open/add-search" in dict(x.split("\t", 1) for x in kv(r.stdout, "skip")))
+
+with tempfile.TemporaryDirectory() as d:
+    e = Env(d)
+    e.gh_state(issues=[issue(7, "Müll Tour", "text", labels=["refined"]),
+                       issue(8, "Hidden", "text", labels=["dependencies"]),
+                       issue(9, "Other", "text", labels=[], url="https://github.com/o/r/pull/9"),
+                       issue(10, "Done", "text", state="CLOSED", labels=[]),
+                       issue(11, "Claims", "<!-- work-system task: fix-login -->", labels=[])])
+    check("a closed unlabeled issue gets no offer", e.run("get", str(e.repo), "#10").returncode == 3)
+    check("a marker on an unlabeled issue gets no offer", e.run("get", str(e.repo), "#11").returncode == 3)
+    check("... and cannot be labelled", e.run("label", str(e.repo), "#11").returncode == 3)
+    wt = e.root / "TASK.md"
+    r = e.run("get", str(e.repo), "#7")
+    check("unlabeled #N: exit 8 with its name and the label", r.returncode == 8
+          and kv(r.stdout, "task") == ["muell-tour"] and kv(r.stdout, "unlabeled") == ["work-system:task"])
+    check("... the refusal names the label and the fix",
+          "work-system:task" in r.stderr and 'label <checkout> "#7"' in r.stderr)
+    r = e.run("get", str(e.repo), "#7", "--write", str(wt))
+    check("unlabeled copy refused, nothing written", r.returncode == 8 and not wt.exists())
+    check("--allow-unlabeled needs --write",
+          e.run("get", str(e.repo), "#7", "--allow-unlabeled").returncode == 2)
+    r = e.run("get", str(e.repo), "#7", "--write", str(wt), "--allow-unlabeled")
+    check("--allow-unlabeled copies", r.returncode == 0 and "issue: #7" in wt.read_text())
+    check("unlabeled start edits no issue", "--add-label" not in e.log.read_text())
+    check("identity view stays exit 3", e.run("get", str(e.repo), "#7", "--identity").returncode == 3)
+    r = e.run("get", str(e.repo), "no-such-task")
+    check("a name miss points at #N", r.returncode == 3 and "#N" in r.stderr)
+    e.setting('[tasks]\nexclude_labels = ["dependencies"]\n')
+    check("an excluded issue gets no offer", e.run("get", str(e.repo), "#8").returncode == 3)
+    check("... and cannot be labelled", e.run("label", str(e.repo), "#8").returncode == 3)
+    check("a pull request gets no offer", e.run("get", str(e.repo), "#9").returncode == 3)
+    e.setting('[tasks]\ninclude_labels = ["team"]\n')
+    check("a not-included issue gets no offer", e.run("get", str(e.repo), "#7").returncode == 3)
+    e.setting("")
+    e.gh_state(strict_labels=True)
+    r = e.run("label", str(e.repo), "#7")
+    st = json.loads(e.state.read_text())
+    check("label creates the missing repo label and attaches it", r.returncode == 0
+          and kv(r.stdout, "labeled") == ["yes"] and "work-system:task" in st["labels"]
+          and "work-system:task" in [x["name"] for x in st["issues"][0]["labels"]])
+    check("a labelled issue needs no flag", e.run("get", str(e.repo), "#7").returncode == 0)
+    r = e.run("label", str(e.repo), "#7")
+    check("label is idempotent", kv(r.stdout, "labeled") == ["already"])
+    e.gh_state(labels=["work-system:task"], label_create_denied=True, strict_labels=True,
+               issues=[issue(7, "T", "x", labels=[])])
+    r = e.run("label", str(e.repo), "#7")
+    check("labelling an existing label needs no create rights", r.returncode == 0 and kv(r.stdout, "labeled") == ["yes"])
+    e.gh_state(labels=[], label_create_denied=True, strict_labels=True, issues=[issue(7, "T", "x", labels=[])])
+    r = e.run("label", str(e.repo), "#7")
+    check("a label that cannot be created is exit 1", r.returncode == 1)
+    e.gh_state(label_create_denied=False, strict_labels=False)
+    check("label needs #N", e.run("label", str(e.repo), "muell-tour").returncode == 2)
+    e.gh_state(issues=[issue(7, "Gated", "x", labels=["definition-only"])])
+    r = e.run("get", str(e.repo), "#7")
+    check("unlabeled and gated: both reported",
+          r.returncode == 8 and kv(r.stdout, "gate") == ["definition-only"])
+    r = e.run("get", str(e.repo), "#7", "--write", str(wt), "--allow-unlabeled")
+    check("--allow-unlabeled does not lift a gate", r.returncode == 7)
+    e.setting('[tasks]\nselect = "all-open"\n')
+    e.gh_state(issues=[issue(7, "T", "x", labels=[])])
+    check("all-open needs no label", e.run("get", str(e.repo), "#7").returncode == 0)
+    e.setting('[tasks]\nselect = "all-open"\ninclude_labels = ["work-system:task"]\n')
+    check("all-open: include of the task label still needs the go", e.run("get", str(e.repo), "#7").returncode == 8)
+    e.setting('[tasks]\nbackend = "github"\n')
+    check("an explicit github backend states why", "tasks.backend" in " ".join(kv(e.run("list", str(e.repo)).stdout, "reason")))
+    e.setting('[tasks]\nbackend = "local"\n')
+    r = e.run("get", str(e.repo), "#7")
+    check("local by setting: #N names the setting",
+          r.returncode == 2 and 'tasks.backend = "local"' in r.stderr and 'tasks.backend = "github"' in r.stderr)
+    check("list states why local", 'in .work-system.toml' in " ".join(kv(e.run("list", str(e.repo)).stdout, "reason")))
+    e.setting("")
+    (e.repo / "tasks").mkdir()
+    (e.repo / "tasks" / "a.md").write_text("# A\n")
+    r = e.run("get", str(e.repo), "#7")
+    check("local by task files: #N names the files and the way out",
+          r.returncode == 2 and "1 task file" in r.stderr and "/work-system:migrate" in r.stderr)
+    r = e.run("label", str(e.repo), "#7")
+    check("label on local refuses", r.returncode == 2 and "/work-system:migrate" in r.stderr)
+
+with tempfile.TemporaryDirectory() as d:
+    e = Env(d, with_gh=False)
+    r = e.run("get", str(e.repo), "#7")
+    check("gh absent: #N names the prerequisite", r.returncode == 2 and "install gh" in r.stderr)
+
+with tempfile.TemporaryDirectory() as d:
+    e = Env(d, origin="https://gitlab.com/o/r.git")
+    r = e.run("get", str(e.repo), "#7")
+    check("non-GitHub origin: #N says so", r.returncode == 2 and "needs an origin on github.com" in r.stderr)
 
 if FAILS:
     print("FAIL test_task_store.py:")

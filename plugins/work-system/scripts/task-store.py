@@ -4,7 +4,8 @@
 Usage:
   task-store.py backend <dir>
   task-store.py list    <dir>
-  task-store.py get     <dir> <name|#N> [--write <path> [--allow-gated] | --body] [--identity]
+  task-store.py get     <dir> <name|#N> [--write <path> [--allow-gated] [--allow-unlabeled] | --body]
+                        [--identity]
                         (an issue ref needs the #; --identity: the lookup close
                         uses, ignoring exclude_labels — a lane's own task;
                         not with --write)
@@ -12,6 +13,7 @@ Usage:
   task-store.py close   <dir> <name|#N> --branch <task-branch> [--pr <n>] [--sha <sha>]
                         [--name <task>]   (with #N: refuse an issue of another task)
   task-store.py ref     <dir> <name> [<TASK.md>]
+  task-store.py label   <dir> <#N>   (add the task label, creating it only when missing)
   task-store.py migrate <dir> [--apply <token>] [--include <name>]... [--open-only]
                         [--pace <seconds>]
 
@@ -50,7 +52,9 @@ Output is key=value lines on stdout; `list` prints one `task=<name>\\t<ref>\\t<t
 line per task (ref = #N or the file path relative to the main checkout).
 On github, `backend` and `list` also print `select=<mode>`; `list` prints one
 `gated=<name>\\t<ref>\\t<labels>` line per gated task, and `get` one `gate=<label>`
-per gate label the issue carries.
+per gate label the issue carries. A `#N` whose only obstacle is the missing task
+label is exit 8 with the usual `get` lines plus `unlabeled=<label>`; `get --write`
+copies it only with --allow-unlabeled. --body and --identity stay exit 3.
 
 `migrate` moves a local backlog (tasks/*.md and tasks/archive/*.md) into
 origin's GitHub issues: see cmd_migrate. Without --apply it is a dry run that
@@ -61,7 +65,8 @@ Exit: 0 ok · 1 a call failed (gh, git, settings, writing a file) · 2 usage ·
 3 no such task · 4 backend unavailable · 5 conflict (name taken, ambiguous, or a
 pinned issue that is not this task) · 6 migrate stopped by a GitHub rate limit
 (re-run the dry run later; it resumes) · 7 gated: the issue carries a gate label
-and --allow-gated was not passed.
+and --allow-gated was not passed · 8 unlabeled: the issue lacks only the task
+label and --allow-unlabeled was not passed.
 """
 import hashlib
 import json
@@ -240,7 +245,9 @@ def resolve(d):
     rel = TASKS_DIR
     want = setting(main, "tasks.backend") or "auto"
     if want == "local":
-        return "local", main, {"source": "setting", "tasks_dir": rel}
+        return "local", main, {"source": "setting", "tasks_dir": rel,
+                               "reason": "tasks.backend = \"local\" in .work-system.toml",
+                               "fix": "set tasks.backend = \"github\" in .work-system.toml to use GitHub Issues"}
     if want == "github":
         repo = github_repo(main)
         if not repo:
@@ -249,7 +256,8 @@ def resolve(d):
         if why:
             raise Fail(4, f"tasks.backend = \"github\" but {why} — fix gh (gh auth login); "
                           "work-system does not fall back to local tasks")
-        return "github", main, {"source": "setting", "repo": repo}
+        return "github", main, {"source": "setting", "repo": repo,
+                                "reason": "tasks.backend = \"github\" in .work-system.toml"}
     files = task_files(main, rel)
     if files:
         return "local", main, {
@@ -261,10 +269,12 @@ def resolve(d):
     repo = github_repo(main)
     if not repo:
         return "local", main, {"source": "auto", "tasks_dir": rel,
-                               "reason": "origin is not a github.com repository"}
+                               "reason": "origin is not a github.com repository",
+                               "fix": "a GitHub backlog needs an origin on github.com"}
     why = gh_ready()
     if why == "gh is not installed":
-        return "local", main, {"source": "auto", "tasks_dir": rel, "reason": why}
+        return "local", main, {"source": "auto", "tasks_dir": rel, "reason": why,
+                               "fix": "install gh and run gh auth login to use GitHub Issues"}
     if why:
         raise Fail(4, f"origin is on GitHub, so tasks live in its issues, but {why} — fix gh "
                       "(gh auth login), or set tasks.backend = \"local\" in .work-system.toml")
@@ -326,7 +336,7 @@ def issue_ref(ref):
 
 # ---- github ----------------------------------------------------------------
 
-FIELDS = "number,title,body,state,url,labels"
+FIELDS = "number,title,body,state,url,labels,author"
 
 
 def label_names(issue):
@@ -361,6 +371,16 @@ def unselected(issue, sel):
     return None
 
 
+def task_label_missing(issue, sel):
+    """True when the task label is all that keeps this open issue from being a
+    task: an excluded or not-included issue stays out, labelled or not. An issue
+    with a body marker gets no offer: without the label (triage access) any
+    author could pick the task name, branch and worktree that way."""
+    if issue.get("state", "").upper() != "OPEN" or markers(issue) or unselected(issue, sel) is None:
+        return False
+    return unselected(dict(issue, labels=(issue.get("labels") or []) + [{"name": LABEL}]), sel) is None
+
+
 def gates(issue, sel):
     """The configured gate labels this issue carries, in config order."""
     have = label_names(issue)
@@ -383,12 +403,13 @@ def gh_issues(repo, state, sel, search=None):
     return [i for i in issues if unselected(i, sel) is None]
 
 
-def gh_find(repo, sel, ref, lane=None):
+def gh_find(repo, sel, ref, lane=None, offer=False):
     """The issue for a name or #N under `sel` (close passes the identity view).
     `lane` (close --name): a #N that IS that task counts even if the mode
     changed since its kickoff — TASK.md's pin plus the name are its identity;
     one that answers to another name (retitled) is exit 5 (ask), never 3
-    ("nothing to close")."""
+    ("nothing to close"). `offer`: a #N lacking only the task label is returned
+    for the caller to warn about (kickoff asks; everything else stays exit 3)."""
     n = issue_ref(ref)
     if n is not None:
         r = run(["gh", "issue", "view", str(n), "--json", FIELDS, "-R", repo])
@@ -406,7 +427,7 @@ def gh_find(repo, sel, ref, lane=None):
             raise Fail(5, f"#{n} is not a work-system task here ({why}) and is task "
                           f"{issue_name(issue)}, not {lane} — check which issue this lane "
                           "shipped (retitled?)")
-        if why:
+        if why and not (offer and task_label_missing(issue, sel)):
             raise Fail(3, f"#{n} is not a work-system task here: {why}")
         return issue
     name = check_name(ref)
@@ -427,7 +448,9 @@ def gh_find(repo, sel, ref, lane=None):
             if issue_name(i) == name]
     if hits:
         return max(hits, key=lambda i: (not has_label(i, ARCHIVED_LABEL), i["number"]))
-    raise Fail(3, f"no task {name} in {repo}")
+    hint = f" (an existing issue without the {LABEL} label is found only as #N)" \
+        if sel["select"] != "all-open" else ""
+    raise Fail(3, f"no task {name} in {repo}{hint}")
 
 
 def strip_marker(body):
@@ -504,8 +527,9 @@ def repo_visibility(repo):
 def cmd_list(d):
     backend, main, info = resolve(d)
     print(f"backend={backend}")
-    if info.get("hint"):
-        print(f"hint={info['hint']}")
+    for k in ("source", "reason", "hint"):
+        if info.get(k):
+            print(f"{k}={info[k]}")
     rows, gated = [], []
     if backend == "github":
         sel = selection(main)
@@ -531,21 +555,41 @@ def cmd_list(d):
     print(f"count={len(rows)}")
 
 
-def cmd_get(d, ref, write, body, allow_gated=False, identity=False):
+def local_refusal(ref, info):
+    """Why a #N cannot be served here, and the one change that would allow it."""
+    fix = info.get("fix") or info.get("hint", "")
+    return f"{ref} is a GitHub issue, but this repo's task backend is local ({info.get('reason', '')}) — {fix}"
+
+
+def unlabeled_refusal(issue):
+    n = issue["number"]
+    return (f"#{n} has no {LABEL} label, which marks an issue as a task for /list, /define's name "
+            f"check and name lookups — nothing was started. Run /kickoff #{n} interactively to "
+            f"confirm, or add the label: task-store.py label <checkout> \"#{n}\" (creates it when missing), "
+            "or set tasks.select = \"all-open\" in .work-system.toml")
+
+
+def cmd_get(d, ref, write, body, allow_gated=False, identity=False, allow_unlabeled=False):
     backend, main, info = resolve(d)
-    gate = []
+    gate, unlabeled = [], False
     if backend == "github":
         # --identity: the lookup close does, for callers deciding whether a
         # lane's task still exists (an exclude label added mid-lane must not
         # make it "gone"). It reads no gate labels: it never starts work.
         sel = selection(main, lists=not identity)
-        issue = gh_find(info["repo"], sel, ref)
+        offer = not identity and not body
+        issue = gh_find(info["repo"], sel, ref, offer=offer)
+        unlabeled = offer and task_label_missing(issue, sel)
         doc = issue_doc(issue)
         gate = gates(issue, sel)
         meta = [("task", issue_name(issue)), ("issue", issue["number"]),
                 ("url", issue.get("url", "")), ("state", issue.get("state", "").lower()),
-                ("title", oneline(issue["title"]))] + [("gate", oneline(g)) for g in gate]
+                ("title", oneline(issue["title"]))] + [("gate", oneline(g)) for g in gate] \
+            + ([("unlabeled", LABEL), ("author", (issue.get("author") or {}).get("login", ""))]
+               if unlabeled else [])
     else:
+        if issue_ref(ref) is not None:
+            raise Fail(2, local_refusal(ref, info))
         name = check_name(ref, local=True)
         path = local_path(main, info["tasks_dir"], name)
         if not os.path.isfile(path):
@@ -560,6 +604,8 @@ def cmd_get(d, ref, write, body, allow_gated=False, identity=False):
     print(f"backend={backend}")
     for k, v in meta:
         print(f"{k}={v}")
+    if unlabeled and not allow_unlabeled:
+        raise Fail(8, unlabeled_refusal(issue))
     if write:
         if gate and not allow_gated:
             # The kickoff copy is the start of work; a gate label means the
@@ -567,6 +613,26 @@ def cmd_get(d, ref, write, body, allow_gated=False, identity=False):
             raise Fail(7, f"#{issue['number']} carries the gate label {gate[0]} (tasks.gate_labels) — "
                           "no kickoff without an explicit go; --allow-gated only on the user's word")
         write_out(write, doc)
+
+
+def cmd_label(d, ref):
+    backend, main, info = resolve(d)
+    if backend == "local":
+        raise Fail(2, local_refusal(ref, info))
+    issue = gh_find(info["repo"], selection(main), ref, offer=True)
+    print(f"issue={issue['number']}")
+    if LABEL in label_names(issue):
+        print("labeled=already")
+        return
+    # Edit first: creating needs more rights (write) than labelling (triage).
+    edit = ["issue", "edit", str(issue["number"]), "--add-label", LABEL]
+    r = run(["gh", *edit, "-R", info["repo"]])
+    if r is None or r.returncode != 0:
+        if r is None or "not found" not in r.stderr.lower():
+            raise Fail(1, f"gh issue edit failed: {oneline(r.stderr if r else '')[:300]}")
+        ensure_label(info["repo"], LABEL, LABEL_COLOR, LABEL_DESC)
+        gh(edit, info["repo"])
+    print("labeled=yes")
 
 
 def split_title(text, title):
@@ -1234,10 +1300,10 @@ def cmd_migrate(d, token, includes, open_only, pace):
 
 def usage():
     raise Fail(2, "usage: task-store.py backend|list <dir> · get <dir> <name|#N>"
-                  " [--write <path> [--allow-gated]|--body] [--identity]"
+                  " [--write <path> [--allow-gated] [--allow-unlabeled]|--body] [--identity]"
                   " · create <dir> <name> --body-file <file> [--title <t>]"
                   " · close <dir> <name|#N> --branch <b> [--pr <n>] [--sha <s>] [--name <task>]"
-                  " · ref <dir> <name> [<TASK.md>]"
+                  " · ref <dir> <name> [<TASK.md>] · label <dir> <#N>"
                   " · migrate <dir> [--apply <token>] [--include <name>]... [--open-only]"
                   " [--pace <s>]")
 
@@ -1246,7 +1312,7 @@ def opts(rest, allowed):
     out, i = {}, 0
     while i < len(rest):
         k = rest[i]
-        if k in ("--body", "--allow-gated", "--identity") and k in allowed:
+        if k in ("--body", "--allow-gated", "--allow-unlabeled", "--identity") and k in allowed:
             out[k] = True
             i += 1
             continue
@@ -1266,13 +1332,13 @@ def main(argv):
             usage()
         (cmd_backend if cmd == "backend" else cmd_list)(d)
     elif cmd == "get" and rest:
-        o = opts(rest[1:], {"--write", "--body", "--allow-gated", "--identity"})
+        o = opts(rest[1:], {"--write", "--body", "--allow-gated", "--allow-unlabeled", "--identity"})
         if sum(k in o for k in ("--write", "--body")) > 1 \
                 or ("--identity" in o and "--write" in o) \
-                or ("--allow-gated" in o and "--write" not in o):
+                or (("--allow-gated" in o or "--allow-unlabeled" in o) and "--write" not in o):
             usage()
         cmd_get(d, rest[0], o.get("--write"), o.get("--body", False), o.get("--allow-gated", False),
-                o.get("--identity", False))
+                o.get("--identity", False), o.get("--allow-unlabeled", False))
     elif cmd == "create" and rest:
         o = opts(rest[1:], {"--body-file", "--title"})
         if "--body-file" not in o:
@@ -1280,6 +1346,8 @@ def main(argv):
         cmd_create(d, rest[0], o["--body-file"], o.get("--title"))
     elif cmd == "ref" and rest and len(rest) <= 2:
         cmd_ref(d, rest[0], rest[1] if len(rest) == 2 else None)
+    elif cmd == "label" and len(rest) == 1 and issue_ref(rest[0]) is not None:
+        cmd_label(d, rest[0])
     elif cmd == "close" and rest:
         o = opts(rest[1:], {"--branch", "--pr", "--sha", "--name"})
         if "--branch" not in o or not re.fullmatch(r"[0-9]*", o.get("--pr", "")):

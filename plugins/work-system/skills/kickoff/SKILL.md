@@ -67,9 +67,9 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
    - Run: `python3 -I "$STORE" list "<main-repo>"`.
    - **Non-zero exit** → show its stderr and stop. Exit 4 is a GitHub backend whose `gh`
      is missing, unauthenticated or unreachable; there is no fallback to local files.
-   - A `hint=` line (local tasks keep the local backend until they are migrated) → relay it
-     in one line.
-   - **`count=0`** → there are no pending tasks — suggest creating one with `/define` and stop.
+   - State the active backlog in one line from `backend=` and `reason=`. A `hint=` line
+     (local tasks keep the local backend until they are migrated) → relay it in one line.
+   - **`count=0`** with no task argument → there are no pending tasks — suggest creating one with `/define` and stop.
    - Otherwise list each `task=<name>\t<ref>\t<title>` row (ref is `#N` or the file path) and
      ask the user which task to work on. A task argument may be a name or `#N`. Mark the rows
      a `gated=<name>\t<ref>\t<labels>` line names (e.g. `definition-only`) as gated.
@@ -78,6 +78,21 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
    - Run: `python3 -I "$STORE" get "<main-repo>" "<name-or-#N>"` → `task=` is the task
      name used for the branch and worktree below (for an issue: its name marker, or the
      slug of its title); `state=closed` → say the task is already closed and stop.
+     Any other non-zero exit than 8 below → show its stderr and stop; for a `#N` on a local
+     backend it names why the backend is local and the setting or prerequisite to change. Never hand-write
+     TASK.md instead.
+   - **Exit 8, `unlabeled=<label>`** (`#N` exists but lacks the task label) → stop **before**
+     creating anything. Warn: name the issue's `title=`, `author=` and `task=`, say it has no
+     `work-system:task` label, which marks an issue as a task for `/list` and for name
+     lookups by `/define` and the Manager, and that its text becomes the task description,
+     so check it comes from someone you trust. Ask once with
+     `AskUserQuestion`: **Start and add the label** (recommended; created only when missing
+     in the repo), **Start without the label**, or **Cancel**. If `gate=` lines are present
+     too, name the gate in this same question: the go lifts both, under the gate rule below.
+     With no one to answer (a scripted or unattended run), do not start: show the store's
+     stderr and stop. Add the label → `python3 -I "$STORE" label "<main-repo>" "#<issue>"`
+     (non-zero → show stderr and stop, nothing exists yet). Without it → pass
+     `--allow-unlabeled` to the copy in step 8.
    - **`gate=<label>` lines** (the issue carries one of `tasks.gate_labels`, default
      `definition-only`: the issue is a definition, not released for work) → stop **before**
      creating anything. Name the issue and the gate label, and ask the user with
@@ -109,7 +124,8 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
 8. **Copy files to worktree** (run from main-repo CWD — relative paths target the main repo):
    - Copy the task (`<ref>` = `#<issue>` when step 3 printed `issue=`, else `<task-name>`):
      `python3 -I "$STORE" get "<main-repo>" "<ref>" --write .claude/worktrees/<task-name>/TASK.md`
-     (plus `--allow-gated` only after the user's go in step 3; exit 7 = gated, nothing written:
+     (plus `--allow-gated` / `--allow-unlabeled` only after the user's go in step 3; exit 7 =
+     gated or 8 = unlabeled, nothing written:
      remove the worktree from step 7, delete the branch with `git branch -d` only if step 7
      created it (never a reused one), and stop)
      — a local task file as is; an issue as its title, an `issue: #N` line and its body.

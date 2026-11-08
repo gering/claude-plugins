@@ -29,7 +29,7 @@ user_invocable: true
      issues picked by `tasks.select` and the label lists, or the local task files). Each `task=` line is
      `<name>\t<ref>\t<title>` (ref = `#N` or the file path). Non-zero exit → show its stderr
      instead of the table (exit 4: the GitHub backend's `gh` is unusable — no local fallback);
-     relay a `hint=` line in one line. A `gated=<name>\t<ref>\t<labels>` line marks that
+     state the active backlog in one line from `backend=` and `reason=`; relay a `hint=` line in one line. A `gated=<name>\t<ref>\t<labels>` line marks that
      task 🔒 in the Status column (e.g. `🔒 definition-only · 📋 Not Started`): `/kickoff` needs
      the user's explicit go for it.
    - For each task: resolve its real branch via the shared
