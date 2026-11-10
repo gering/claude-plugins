@@ -56,7 +56,14 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
 5. **Predict conflicts, then proceed or ask**:
 
    Gather the facts first:
-   - Upstream: `git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null` → store as `HAS_UPSTREAM` (true if non-empty).
+   - Upstream + lease — record the remote branch state **now**, before anything is rewritten:
+     ```
+     bash "${CLAUDE_PLUGIN_ROOT}/scripts/rebase-lease.sh" record
+     ```
+     - `lease=pinned` → `HAS_UPSTREAM` = true; store `sha=` as `LEASE_SHA`.
+     - `lease=absent` (upstream configured, no remote-tracking ref) → `HAS_UPSTREAM` = true; `LEASE_SHA` = `absent` (the push must then find no remote branch).
+     - `lease=none` → `HAS_UPSTREAM` = false (no upstream, detached, or a local upstream).
+     - `lease=diverged` (exit 3) → the remote branch has `missing=` commit(s) the local branch does not contain — usually a teammate's push you fetched but never pulled. A force-push would drop them. Stop: ❌ "Remote `<CURRENT_BRANCH>` has N commit(s) you don't have — integrate them first (`git pull --rebase`), then re-run `/rebase`." No menu, not even under `--auto`.
    - Conflict prediction — an in-memory three-way merge (`git merge-tree --write-tree`, git ≥ 2.38) that touches neither worktree, index nor refs:
      ```
      bash "${CLAUDE_PLUGIN_ROOT}/scripts/rebase-predict.sh" origin/<BASE_BRANCH>
@@ -109,9 +116,14 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
    - **On any other failure** (non-zero exit that is neither clean success nor a merge conflict — e.g. a leftover `rebase-apply`/`rebase-merge` dir, a rejecting pre-rebase hook, an unreachable base): if a rebase is in progress, `git rebase --abort`; then if auto-stash was used, `git stash pop` so the changes are never stranded — and if that pop conflicts, surface the stash-pop markers (parent must not `git add -A` over them), same as the other branches; stop with the raw error. **Never leave an auto-stash dangling.**
 
 8. **Post-rebase: remote state**:
-   - If `HAS_UPSTREAM` is true: execute `git push --force-with-lease` directly — step 5 already authorized this (safe path: the `/rebase` invocation; decision path: option 1; `--auto`: the parent's invocation). Do NOT ask again.
-     - Set `FORCE_PUSHED = true` on success.
-     - If the push is rejected (remote advanced since the last fetch), stop with the error and suggest re-running `/rebase` — do NOT auto-retry with `--force`.
+   - If `HAS_UPSTREAM` is true: push with the lease pinned in step 5 — directly, step 5 already authorized this (safe path: the `/rebase` invocation; decision path: option 1; `--auto`: the parent's invocation). Do NOT ask again.
+     ```
+     bash "${CLAUDE_PLUGIN_ROOT}/scripts/rebase-lease.sh" push <LEASE_SHA>
+     ```
+     It runs `git push --force-with-lease=<ref>:<LEASE_SHA> <remote> HEAD:<ref>`. Never substitute a bare `git push --force-with-lease`: that compares against the remote-tracking ref *at push time*, so an IDE or background fetch during the rebase lets it overwrite a teammate's commit.
+     - `push=ok` → set `FORCE_PUSHED = true`.
+     - `push=rejected reason=lease` (exit 3) → the remote branch changed since step 5. Stop: ❌ "Remote `<CURRENT_BRANCH>` changed during the rebase — not pushed. Your rebased branch is local only; fetch, integrate the new commit(s), then re-run `/rebase`." Do NOT auto-retry, and never fall back to `--force` or a bare lease.
+     - `push=failed` (exit 1) → stop with the git error the script passed through.
    - If `HAS_UPSTREAM` is false: no push needed, branch is local only (`FORCE_PUSHED = false`)
 
 9. **Wait for auto-triggered review** (standalone only):
@@ -139,7 +151,7 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
 
     Replayed N commits. Base moved forward by M commits.
     <if upstream existed and pushed>    Force-pushed to origin.
-    <if upstream existed but not pushed> Next: `git push --force-with-lease` when ready.
+    <if upstream existed but not pushed> Not pushed — see the error above; re-run `/rebase` once resolved.
     <if auto-trigger detected>          Review polling in background — results will be presented when complete.
     <if pushed but no auto-trigger>     No auto-triggered review — <per REVIEW-ROUTING.md: run `/cycle` / run `/swarm:review --pr <N>` / both named>.
     <if used by /open or /cycle>        Continuing with the parent skill.
@@ -158,7 +170,7 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
 
 ## Notes
 
-- **Confirmation model**: invoking `/rebase` authorizes the rebase and the `--force-with-lease` push. It asks only when `rebase-predict.sh` predicts a real conflict (one menu choice then authorizes both); file overlap alone never asks, and an unavailable prediction proceeds, because step 7's clean abort is the safety net. A lease-rejected push stops without retry. The step-6 uncommitted-changes guard is independent of the prediction and may still prompt on the safe path (standalone only — under `--auto` it auto-stashes instead of prompting). Decisions are always real selection menus (AskUserQuestion), never free-text prompts
+- **Confirmation model**: invoking `/rebase` authorizes the rebase and the `--force-with-lease` push, pinned to the remote SHA recorded before the rebase (`rebase-lease.sh`). It asks only when `rebase-predict.sh` predicts a real conflict (one menu choice then authorizes both); file overlap alone never asks, and an unavailable prediction proceeds, because step 7's clean abort is the safety net. A lease-rejected push stops without retry; a remote that already holds commits the branch lacks stops before the rebase. The step-6 uncommitted-changes guard is independent of the prediction and may still prompt on the safe path (standalone only — under `--auto` it auto-stashes instead of prompting). Decisions are always real selection menus (AskUserQuestion), never free-text prompts
 - Conflicts → abort + suggest, never auto-resolve
 - Safe to run repeatedly: if no rebase is needed, it's a 2-command no-op
 - Designed to be called both standalone and from `/open` / `/cycle`
