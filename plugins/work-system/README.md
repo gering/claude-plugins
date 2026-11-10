@@ -57,7 +57,18 @@ The backlog is centralized — `/define` adds to it even from inside a linked wo
 | `github` | Issues in origin's repository — by default those labelled `work-system:task` (see the filter below). The task name (kebab slug) lives in a hidden body marker `<!-- work-system task: <name> -->`; an issue without one answers to the slug of its title (umlauts spelled out, `Müll-Tour` → `muell-tour`; a title with nothing to slug, e.g. CJK, → `issue-<N>`). `/kickoff` takes a name or `#N`, the other skills a name |
 | `local` | One markdown file per task in `tasks/` on the main worktree (`paths.tasks_dir` is not wired yet) |
 
-Every skill reaches the backlog through one script, `scripts/task-store.py` (`backend`, `list`, `get`, `create`, `close`, `ref`, which pins the issue `/close` closes, and `migrate`). A GitHub backend whose `gh` is missing, unauthenticated or unreachable fails with a clear message — work-system never falls back to local files, which would split the backlog. `/define` names the target repository before creating an issue and says when that repository is public. `tasks/ROADMAP.md` (the Manager's open follow-ups) stays local on both backends.
+Every skill reaches the backlog through one script, `scripts/task-store.py` (`backend`, `list`, `get`, `create`, `close`, `ref`, which pins the issue `/close` closes, `label` and `migrate`). A GitHub backend whose `gh` is missing, unauthenticated or unreachable fails with a clear message — work-system never falls back to local files, which would split the backlog. `/define` names the target repository before creating an issue and says when that repository is public. `tasks/ROADMAP.md` (the Manager's open follow-ups) stays local on both backends.
+
+**GitHub issues as backlog, per repo:** nothing to configure when `tasks/` on the main checkout holds no task files (an untracked file counts), `origin` is on github.com and `gh` is logged in. A repo that still resolves to `local` needs `/work-system:migrate`, or pin it in `.work-system.toml`:
+
+```toml
+[tasks]
+backend = "github"
+```
+
+`/list` and `/kickoff` state the active backend and why; `/kickoff #N` on a local backend refuses and names the setting or prerequisite to change.
+
+`/kickoff #N` on an existing issue without the `work-system:task` label (a hand-made one, say) warns before anything exists and offers to start with the label, without it, or to cancel. The label is created only when the repo lacks it, under the logged-in `gh` account. An unattended run refuses and names the fix. A closed or excluded issue is never offered, nor one carrying a body marker (without the label, anyone could name a lane that way). Without the label, name lookups do not find the lane's issue: `/close` in the lane still closes it through TASK.md's `issue: #N` pin, but once the worktree is gone a delegated close reads it as "not a lane", so prefer adding the label.
 
 On the GitHub backend a repo decides which open issues are tasks, so a team that already plans in issues needs no extra label:
 
