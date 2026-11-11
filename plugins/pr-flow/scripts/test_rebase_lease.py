@@ -91,7 +91,7 @@ check("record: sha = tracking ref", rec.get("sha") == git(me, "rev-parse", "orig
 rebase(me)
 rc, out, _ = lease(me, "push", rec["sha"])
 check("unchanged: exit 0", rc == 0)
-check("unchanged: push=ok", out.get("push") == "ok")
+check("unchanged: push=ok", out.get("push") == "ok" and out.get("remote") == "origin")
 check("unchanged: remote updated",
       git(origin, "rev-parse", "refs/heads/task/x") == git(me, "rev-parse", "HEAD"))
 
@@ -107,7 +107,8 @@ git(me, "fetch", "-q", "origin")            # the IDE's background fetch
 check("moved: tracking ref moved", git(me, "rev-parse", "origin/task/x") == theirs)
 rc, out, err = lease(me, "push", rec["sha"])
 check("moved: exit 3", rc == 3)
-check("moved: push=rejected", out.get("push") == "rejected" and out.get("reason") == "lease")
+check("moved: push=rejected", out.get("push") == "rejected" and out.get("reason") == "lease"
+      and out.get("branch") == "task/x" and out.get("remote") == "origin")
 check("moved: git's error passed through", "stale info" in err)
 check("moved: teammate commit kept", git(origin, "rev-parse", "refs/heads/task/x") == theirs)
 # ...and the bare lease this replaces would have overwritten it (the bug).
@@ -124,7 +125,8 @@ git(mate, "push", "-q", "origin", "task/x")
 git(me, "fetch", "-q", "origin")
 rc, rec, _ = lease(me, "record")
 check("diverged: exit 3", rc == 3)
-check("diverged: lease=diverged", rec.get("lease") == "diverged" and rec.get("missing") == "1")
+check("diverged: lease=diverged", rec.get("lease") == "diverged" and rec.get("missing") == "1"
+      and rec.get("remote") == "origin" and rec.get("ref") == "refs/heads/task/x")
 
 # 4) Upstream configured but the tracking ref is gone → absent; the push must
 #    find no remote branch: succeeds when it is gone, rejects when it reappeared.
@@ -142,6 +144,7 @@ rc, out, _ = lease(me, "push", "absent")
 check("absent but exists: rejected", rc == 3 and out.get("push") == "rejected")
 
 # 5) No upstream / detached HEAD → none, nothing to push.
+origin, me, _ = setup()
 git(me, "checkout", "-q", "-b", "local-only")
 rc, rec, _ = lease(me, "record")
 check("no upstream: none", rc == 0 and rec.get("lease") == "none"
@@ -150,7 +153,90 @@ git(me, "checkout", "-q", "--detach")
 rc, rec, _ = lease(me, "record")
 check("detached: none", rc == 0 and rec.get("reason") == "detached")
 
-# 6) Usage errors: no args, unknown mode, a non-sha expect value.
+# 6) Our OWN rewritten commit (amend after pushing, or a rebase whose push
+#     failed) is not a teammate's: the branch's reflog held it → pinned.
+origin, me, _ = setup()
+pushed = git(me, "rev-parse", "HEAD")
+(me / "mine.txt").write_text("mine amended\n")
+git(me, "commit", "-q", "-a", "--amend", "--no-edit")
+rc, rec, _ = lease(me, "record")
+check("amend: pinned", rc == 0 and rec.get("lease") == "pinned"
+      and rec.get("sha") == pushed and rec.get("rewritten") == "yes")
+rebase(me)
+rc, out, _ = lease(me, "push", rec["sha"])
+check("amend: push=ok", rc == 0 and out.get("push") == "ok")
+
+# 7) Upstream with ANOTHER name (branch cut from origin/main, never pushed):
+#     simple push refuses that, so must we — never force-push onto main. It is
+#     `none` (rebase locally, `git push -u` comes next), not a stop.
+origin, me, _ = setup()
+git(me, "checkout", "-q", "-b", "feat", "origin/main")
+commit(me, "f.txt", "f\n", "feat")
+main_before = git(origin, "rev-parse", "refs/heads/main")
+rc, rec, _ = lease(me, "record")
+check("name mismatch: none", rc == 0 and rec.get("lease") == "none"
+      and rec.get("reason") == "upstream-name-mismatch:main" and rec.get("remote") == "origin")
+rc, out, _ = lease(me, "push", git(me, "rev-parse", "origin/main"))
+check("name mismatch: push refused", rc == 4 and out.get("push") == "unresolved")
+check("name mismatch: main untouched", git(origin, "rev-parse", "refs/heads/main") == main_before)
+# ...but once that branch is published under its own name (pushed without -u),
+# the same-named remote branch is the target: pinned, diverged check active.
+git(me, "push", "-q", "origin", "feat")
+git(me, "fetch", "-q", "origin")
+rc, rec, _ = lease(me, "record")
+check("name mismatch published: pinned to same name", rc == 0 and rec.get("lease") == "pinned"
+      and rec.get("ref") == "refs/heads/feat" and rec.get("branch") == "feat"
+      and rec.get("sha") == git(me, "rev-parse", "origin/feat"))
+# push.default=current pushes the same name, not the upstream's
+git(me, "config", "push.default", "current")
+rc, rec, _ = lease(me, "record")
+check("current: own name", rc == 0 and rec.get("lease") == "pinned"
+      and rec.get("ref") == "refs/heads/feat")
+# push.default=upstream/tracking would push to the upstream (main), but a
+# differently named upstream is never a force-push target: same name instead
+git(me, "config", "push.default", "tracking")
+rc, rec, _ = lease(me, "record")
+check("tracking: own name, not main", rc == 0 and rec.get("lease") == "pinned"
+      and rec.get("ref") == "refs/heads/feat")
+# ...and unpublished, it is `none` — never a pinned lease on main
+git(me, "config", "push.default", "upstream")
+git(me, "checkout", "-q", "-b", "feat2", "origin/main")
+commit(me, "f2.txt", "f2\n", "feat2")
+main_before = git(origin, "rev-parse", "refs/heads/main")
+rc, rec, _ = lease(me, "record")
+check("upstream unpublished: none", rc == 0 and rec.get("lease") == "none"
+      and rec.get("reason") == "upstream-name-mismatch:main")
+rc, out, _ = lease(me, "push", main_before)
+check("upstream unpublished: push refused, main untouched", rc == 4
+      and git(origin, "rev-parse", "refs/heads/main") == main_before)
+git(me, "checkout", "-q", "feat")
+# a remote.<name>.push refspec is a target this script does not mirror → stop
+git(me, "config", "push.default", "simple")
+git(me, "config", "remote.origin.push", "refs/heads/feat:refs/heads/review")
+rc, rec, _ = lease(me, "record")
+check("push refspec: unresolved exit 4", rc == 4 and rec.get("lease") == "unresolved"
+      and rec.get("reason") == "push-refspec")
+
+# 8) Fork (triangular) setup: upstream on `origin`, pushRemote = `fork` →
+#     the push goes to the fork, the lease reads the fork's tracking ref.
+origin, me, _ = setup()
+fork = origin.parent / "fork.git"
+git(origin.parent, "init", "-q", "--bare", "-b", "main", str(fork))
+git(me, "remote", "add", "fork", str(fork))
+git(me, "push", "-q", "fork", "task/x")
+git(me, "fetch", "-q", "fork")
+git(me, "config", "branch.task/x.pushRemote", "fork")
+rc, rec, _ = lease(me, "record")
+check("fork: remote=fork", rc == 0 and rec.get("remote") == "fork"
+      and rec.get("sha") == git(me, "rev-parse", "fork/task/x"))
+origin_before = git(origin, "rev-parse", "refs/heads/task/x")
+rebase(me)
+rc, out, _ = lease(me, "push", rec["sha"])
+check("fork: pushed to fork", rc == 0 and git(fork, "rev-parse", "refs/heads/task/x")
+      == git(me, "rev-parse", "HEAD"))
+check("fork: origin untouched", git(origin, "rev-parse", "refs/heads/task/x") == origin_before)
+
+# 9) Usage errors: no args, unknown mode, a non-sha expect value.
 check("no args: exit 2", lease(me)[0] == 2)
 check("bad mode: exit 2", lease(me, "force")[0] == 2)
 check("bad sha: exit 2", lease(me, "push", "HEAD")[0] == 2)
