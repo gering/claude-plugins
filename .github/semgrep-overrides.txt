@@ -1,0 +1,11 @@
+# uv overrides for .github/semgrep-requirements.txt: lift Semgrep's exact pins on mcp and
+# OpenTelemetry past the versions with open advisories (mcp < 1.30.0, opentelemetry-api <= 1.45.0).
+# Versions match semgrep/semgrep#12057, which bumps only these pins. Once a Semgrep release
+# declares them itself, delete this file, drop `--override` from the compile command and
+# `--no-deps` from the install step in security.yml.
+mcp==1.30.0
+opentelemetry-api~=1.45.1
+opentelemetry-sdk~=1.45.1
+opentelemetry-exporter-otlp-proto-http~=1.45.1
+opentelemetry-instrumentation-requests~=0.66b1
+opentelemetry-instrumentation-threading~=0.66b1
