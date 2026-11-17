@@ -14,7 +14,7 @@ user_invocable: true
 ## Arguments
 
 - `--no-poll` — Skip the post-push review polling step. Set automatically when this skill is invoked from `/cycle` or `/open` (the parent does its own polling).
-- `--auto` — Skip the step-5 menu entirely (even on a predicted conflict) — rebase, then force-push if an upstream exists. Used when the parent skill (`/merge`, `/cycle`) has already authorized the rebase+push as part of its own invocation. Conflicts still abort cleanly. Uncommitted changes are auto-stashed and popped afterward (not a stopping condition under `--auto`); other stopping conditions (missing upstream, detached HEAD, etc.) still apply.
+- `--auto` — Skip the step-5 menu entirely (even on a predicted conflict) — rebase, then force-push when step 5 pinned a lease (a branch with no upstream, or a differently named one, is rebased locally only). Used when the parent skill (`/merge`, `/cycle`) has already authorized the rebase+push as part of its own invocation. Conflicts still abort cleanly. Uncommitted changes are auto-stashed and popped afterward (not a stopping condition under `--auto`); other stopping conditions (detached HEAD, a diverged or unresolved lease, a rejected or failed push) still apply.
 
 ## Why this skill exists
 
@@ -56,7 +56,17 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
 5. **Predict conflicts, then proceed or ask**:
 
    Gather the facts first:
-   - Upstream: `git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null` → store as `HAS_UPSTREAM` (true if non-empty).
+   - Upstream + lease — record the remote branch state **now**, before anything is rewritten:
+     ```
+     bash "${CLAUDE_PLUGIN_ROOT}/scripts/rebase-lease.sh" record
+     ```
+     - `lease=pinned` → `HAS_UPSTREAM` = true; store `sha=` as `LEASE_SHA`. A `rewritten=yes` line means the remote tip is a commit this branch held and has since rewritten itself (amend, autosquash, an earlier rebase whose push failed). The push replaces it, which is intended.
+     - `lease=absent` (upstream configured, no remote-tracking ref) → `HAS_UPSTREAM` = true; `LEASE_SHA` = `absent` (the push must then find no remote branch).
+     - `lease=none reason=detached` → stop: "Not on a branch."
+     - `lease=none reason=no-upstream` or `local-upstream` → `HAS_UPSTREAM` = false: nothing to push, the rebase is local (not `LOCAL_ONLY`; `/open` or `/cycle` publish it with `git push -u`).
+     - `lease=none reason=upstream-name-mismatch:<name>` → `HAS_UPSTREAM` = false, `LOCAL_ONLY` = true: the branch tracks a differently named branch (e.g. cut from `origin/main`) and no same-named remote branch exists yet (once one is published, the script targets it and pins as usual). A differently named upstream is never force-pushed to, so the rebase stays local; the next push is `git push -u <remote> <CURRENT_BRANCH>` with the `remote=` the script printed (which `/open` does anyway).
+     - `lease=diverged` (exit 3) → the remote branch has `missing=` commit(s) the local branch neither contains nor ever held. That is someone else's push, which you fetched but never integrated, and a force-push would drop it. Stop: ❌ "`<remote>/<branch>` has N commit(s) you don't have — integrate them first (`git pull --rebase <remote> <branch>`), then re-run `/rebase`." Use the `remote=` and `branch=` the script printed: with a pushRemote (a fork) it is not the upstream, and a bare `git pull --rebase` would report "up to date". No menu, not even under `--auto`. (Only if those commits are your own old ones whose reflog entry expired — an amend pushed long ago — is a force-push by hand right; `git pull --rebase` would replay the amend onto its own original.)
+     - `lease=unresolved` (exit 4) → a push target the script does not mirror exactly: `push-default:<mode>` (`matching`/`nothing`) or `push-refspec` (a `remote.<name>.push` refspec). Stop before rebasing: ❌ "Can't tell where `<CURRENT_BRANCH>` would be force-pushed (<reason>) — rebase and push by hand." Never force-push to a guessed target.
    - Conflict prediction — an in-memory three-way merge (`git merge-tree --write-tree`, git ≥ 2.38) that touches neither worktree, index nor refs:
      ```
      bash "${CLAUDE_PLUGIN_ROOT}/scripts/rebase-predict.sh" origin/<BASE_BRANCH>
@@ -109,9 +119,15 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
    - **On any other failure** (non-zero exit that is neither clean success nor a merge conflict — e.g. a leftover `rebase-apply`/`rebase-merge` dir, a rejecting pre-rebase hook, an unreachable base): if a rebase is in progress, `git rebase --abort`; then if auto-stash was used, `git stash pop` so the changes are never stranded — and if that pop conflicts, surface the stash-pop markers (parent must not `git add -A` over them), same as the other branches; stop with the raw error. **Never leave an auto-stash dangling.**
 
 8. **Post-rebase: remote state**:
-   - If `HAS_UPSTREAM` is true: execute `git push --force-with-lease` directly — step 5 already authorized this (safe path: the `/rebase` invocation; decision path: option 1; `--auto`: the parent's invocation). Do NOT ask again.
-     - Set `FORCE_PUSHED = true` on success.
-     - If the push is rejected (remote advanced since the last fetch), stop with the error and suggest re-running `/rebase` — do NOT auto-retry with `--force`.
+   - If `HAS_UPSTREAM` is true: push with the lease pinned in step 5 — directly, step 5 already authorized this (safe path: the `/rebase` invocation; decision path: option 1; `--auto`: the parent's invocation). Do NOT ask again.
+     ```
+     bash "${CLAUDE_PLUGIN_ROOT}/scripts/rebase-lease.sh" push <LEASE_SHA>
+     ```
+     It runs `git push --force-with-lease=<ref>:<LEASE_SHA> <remote> HEAD:<ref>`, with the remote and branch resolved as `git push` would (pushRemote, `push.default`). Never substitute a bare `git push --force-with-lease`: that compares against the remote-tracking ref *at push time*, so an IDE or background fetch during the rebase lets it overwrite a teammate's commit.
+     - `push=ok` → set `FORCE_PUSHED = true`; keep its `remote=`/`ref=` for the summary.
+     - `push=rejected reason=lease` (exit 3) → the remote branch changed since step 5. Stop: ❌ "Remote `<CURRENT_BRANCH>` changed during the rebase — not pushed. Your rebased branch is local only; `git pull --rebase <remote> <branch>` (the `remote=`/`branch=` this output printed) to integrate the new commit(s), then re-run `/rebase`." Do NOT auto-retry, and never fall back to `--force` or a bare lease.
+     - `push=unresolved` (exit 4) → the push target changed since step 5 (a config edit). Stop and show `reason=`; a retry would fail the same way.
+     - `push=failed` (exit 1) → stop with the git error the script passed through, and name the retry: once the cause is fixed (network, auth), `bash "${CLAUDE_PLUGIN_ROOT}/scripts/rebase-lease.sh" push <LEASE_SHA>` with the same SHA. Re-running `/rebase` would not push: the branch is already on top of the base, so step 4 stops at "up-to-date".
    - If `HAS_UPSTREAM` is false: no push needed, branch is local only (`FORCE_PUSHED = false`)
 
 9. **Wait for auto-triggered review** (standalone only):
@@ -138,8 +154,9 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
     ✅ Rebased `<CURRENT_BRANCH>` onto `<BASE_BRANCH>`
 
     Replayed N commits. Base moved forward by M commits.
-    <if upstream existed and pushed>    Force-pushed to origin.
-    <if upstream existed but not pushed> Next: `git push --force-with-lease` when ready.
+    <if upstream existed and pushed>    Force-pushed to <remote>/<branch> (from `push=ok`).
+    <if HAS_UPSTREAM, push not ok>      Not pushed — see the error and the retry step 8 named.
+    <if LOCAL_ONLY>                     Rebased locally only (upstream `<name>` has another name). Next: `git push -u <remote> <CURRENT_BRANCH>`.
     <if auto-trigger detected>          Review polling in background — results will be presented when complete.
     <if pushed but no auto-trigger>     No auto-triggered review — <per REVIEW-ROUTING.md: run `/cycle` / run `/swarm:review --pr <N>` / both named>.
     <if used by /open or /cycle>        Continuing with the parent skill.
@@ -158,7 +175,7 @@ This skill is also used internally by `/open` (step 2) and `/cycle` (step 2) —
 
 ## Notes
 
-- **Confirmation model**: invoking `/rebase` authorizes the rebase and the `--force-with-lease` push. It asks only when `rebase-predict.sh` predicts a real conflict (one menu choice then authorizes both); file overlap alone never asks, and an unavailable prediction proceeds, because step 7's clean abort is the safety net. A lease-rejected push stops without retry. The step-6 uncommitted-changes guard is independent of the prediction and may still prompt on the safe path (standalone only — under `--auto` it auto-stashes instead of prompting). Decisions are always real selection menus (AskUserQuestion), never free-text prompts
+- **Confirmation model**: invoking `/rebase` authorizes the rebase and the `--force-with-lease` push, pinned to the remote SHA recorded before the rebase (`rebase-lease.sh`). It asks only when `rebase-predict.sh` predicts a real conflict (one menu choice then authorizes both); file overlap alone never asks, and an unavailable prediction proceeds, because step 7's clean abort is the safety net. A lease-rejected push stops without retry; a remote that holds someone else's commits the branch lacks, or a push target that can't be resolved unambiguously, stops before the rebase. The step-6 uncommitted-changes guard is independent of the prediction and may still prompt on the safe path (standalone only — under `--auto` it auto-stashes instead of prompting). Decisions are always real selection menus (AskUserQuestion), never free-text prompts
 - Conflicts → abort + suggest, never auto-resolve
 - Safe to run repeatedly: if no rebase is needed, it's a 2-command no-op
 - Designed to be called both standalone and from `/open` / `/cycle`

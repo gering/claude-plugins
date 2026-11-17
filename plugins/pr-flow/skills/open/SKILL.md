@@ -65,7 +65,8 @@ user, not that they said no.
 
 2. **Check if rebase is needed** — delegate to `/rebase --no-poll`:
    - Invoke the `/rebase` skill **with the `--no-poll` flag** (this skill handles post-creation review polling itself in step 10). Since no PR exists yet, `/rebase` falls back to upstream tracking or repo default to detect the base branch.
-   - If `/rebase` rebased successfully → continue
+   - If `/rebase` rebased successfully → continue (a rebase that stayed local because the branch has no same-named upstream is success too: step 6 publishes it with `git push -u`)
+   - If `/rebase` stopped on its lease or push (diverged, unresolved, rejected, failed) → stop this skill with its message
    - If user declined the rebase → continue but remember to flag ⚠️ "Branch is N commits behind `<BASE_BRANCH>` (rebase declined)" in the readiness summary (step 4)
    - If conflicts aborted the rebase, **or** the user chose "Leave as-is" on a predicted conflict (`/rebase` step 5) → stop this skill; the PR would open as conflicting. User resolves manually, then re-runs `/open`
 
@@ -163,7 +164,7 @@ user, not that they said no.
 5. *(merged into step 4)*
 
 6. **Ensure branch is pushed**:
-   - Run: `git push -u origin HEAD` (or `git push` if upstream exists)
+   - Run: `git push <remote> HEAD` if the branch's upstream carries its own name, else `git push -u <remote> HEAD` (no upstream, or one with another name such as `origin/main`), with `<remote>` from `git for-each-ref --format='%(push:remotename)' refs/heads/<branch>` (`origin` when empty), so a pushRemote fork is honored. Never a bare `git push`: under `push.default=upstream` it would push a branch cut from `origin/main` onto `main`.
    - If push fails, show error and stop
 
 7. **Generate PR title & body**:

@@ -47,6 +47,7 @@ user_invocable: true
    - The working tree is already clean (step 2), so `/rebase --auto` won't stash/pop anything.
    - `/rebase --auto` still aborts cleanly on conflicts (no destructive behavior skipped — only the routine confirmation is skipped).
    - If `/rebase` aborts due to conflicts → stop this skill: "Merge requires up-to-date branch. Resolve conflicts, then re-run `/merge`."
+   - Proceed **only** when `/rebase` returned cleanly (up-to-date, or rebased and force-pushed). Any other stop — a diverged or unresolved lease, a rejected or failed push — stops this skill with `/rebase`'s message: the PR head is not the branch you meant to merge.
 
 4. **Refresh PR state** (GitHub recomputes after push/rebase):
    - Wait ~5s if anything was pushed/rebased in step 3

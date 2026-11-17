@@ -48,7 +48,7 @@ Strip the flags first; whatever is left over is the commit message.
      - `--no-poll`: this skill handles review polling itself in step 8.
      - `--auto`: the user invoked `/cycle`; that invocation authorizes rebase + force-push as preparation. Asking again would be a redundant prompt.
    - `/rebase` will determine the PR's base branch (authoritative: `gh pr view`), detect divergence, rebase + force-push if needed, and abort cleanly on conflicts.
-   - Proceed with this skill only if `/rebase` returned cleanly (up-to-date or rebased successfully).
+   - Proceed with this skill only if `/rebase` returned cleanly (up-to-date, or rebased and force-pushed). Any other stop — a diverged or unresolved lease, a rejected or failed push, a detached HEAD, or `LOCAL_ONLY` (rebased but not pushed, so the PR head is stale) — stops this cycle with `/rebase`'s message and its next step.
    - If conflicts aborted the rebase: stop this cycle, let the user resolve manually, then re-run `/cycle`.
 
 3. **Handle uncommitted changes**:
@@ -64,8 +64,7 @@ Strip the flags first; whatever is left over is the commit message.
    - If no changes, skip to step 4
 
 4. **Push to remote**:
-   - Run: `git push`
-   - If push fails (no upstream), run: `git push -u origin HEAD`
+   - Run: `git push <remote> HEAD` (plus `-u` when the branch has no upstream yet), with `<remote>` from `git for-each-ref --format='%(push:remotename)' refs/heads/<branch>` (`origin` when empty). Always this explicit form, never a bare `git push`: `HEAD` pushes to the remote branch of the same name, while a bare push follows `push.default` and, under `upstream`, would push a branch cut from `origin/main` straight onto `main`.
    - If already up-to-date, continue
 
 5. **Hide previous review comments**:
@@ -255,11 +254,14 @@ The review wait is a background Bash poll, so the user can interject at any time
      `/merge` will stop on this head. Exit 2 or 4 → show stderr.
 2. **Offer to squash** — only if `FIX_COMMITS >= 2`:
    - Ask: "Squash the `<FIX_COMMITS>` review-loop fix commits into one? (Rewrites history + force-pushes.)"
-   - On yes: `git reset --soft HEAD~<FIX_COMMITS>`, then a single commit:
+   - On yes: first pin the lease, before rewriting anything:
+     `bash "${CLAUDE_PLUGIN_ROOT}/scripts/rebase-lease.sh" record`
+     → `lease=pinned` (store `sha=` as `LEASE_SHA`) or `lease=absent` (`LEASE_SHA` = `absent`); any other answer (`diverged`, `unresolved`, `none`) → do not squash, report it and leave history as-is.
+     Note the pre-squash head (`git rev-parse HEAD`) now, then `git reset --soft HEAD~<FIX_COMMITS>` and a single commit:
      ```
      Apply review-loop fixes (<FIX_COMMITS> rounds, <FIXES_TOTAL> fixes)
      ```
-     Then `git push --force-with-lease`. This collapses only the loop's fix commits — the original feature commits are untouched. `HEAD~<FIX_COMMITS>` stays correct even if `/rebase` ran mid-loop, because a rebase replays our commits without changing how many sit on top of the base.
+     Then `bash "${CLAUDE_PLUGIN_ROOT}/scripts/rebase-lease.sh" push <LEASE_SHA>`, never a bare `git push --force-with-lease`: a fetch during the loop's review waits would let a bare lease overwrite a teammate's push. Anything but `push=ok` → stop and report, and leave the squashed commit in place (do not reset). `push=failed` (network, auth) → name the retry with the same `LEASE_SHA`, run on that squashed commit; `push=rejected`/`push=unresolved` → no retry. To drop the squash instead, the user can `git reset --hard <pre-squash head>`. This collapses only the loop's fix commits — the original feature commits are untouched. `HEAD~<FIX_COMMITS>` stays correct even if `/rebase` ran mid-loop, because a rebase replays our commits without changing how many sit on top of the base.
    - On no: leave history as-is.
    - If `FIX_COMMITS < 2`: skip the offer silently (nothing to squash).
 3. **Sync task-tab glyphs** — run step 11 above, once, now (the loop's rounds

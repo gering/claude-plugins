@@ -20,7 +20,10 @@ jobs:
     env:
       GITLEAKS_VERSION: 8.30.1
       GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
-      # uv only installs the hash-pinned Semgrep from .github/semgrep-requirements.txt.
+      # uv only installs the hash-pinned Semgrep from .github/semgrep-requirements.txt. That lock is the
+      # full dependency closure, compiled with .github/semgrep-overrides.txt to carry patched
+      # mcp/OpenTelemetry past Semgrep's own exact pins, so it installs with --no-deps (uv would
+      # otherwise re-check Semgrep's pins and reject the lock).
       UV_VERSION: 0.13.4
       UV_SHA256: 28d4385f9f9d1d1c7654d85b3855e0e2615b2f6cc13136a2edff858bbdc16ff1
       SEMGREP_CONFIGS: p/python p/javascript p/secrets
@@ -56,7 +59,7 @@ jobs:
           export UV_CACHE_DIR="$RUNNER_TEMP/uv-cache" UV_PYTHON_INSTALL_DIR="$RUNNER_TEMP/uv-python"
           "$uv" venv --quiet --python 3.12 --managed-python "$venv"
           "$uv" pip install --quiet --python "$venv/bin/python" --require-hashes --only-binary :all: \
-            -r .github/semgrep-requirements.txt
+            --no-deps -r .github/semgrep-requirements.txt
           "$venv/bin/semgrep" --version
           printf '%s\n' "$venv/bin" >> "$GITHUB_PATH"
       # Fails on ERROR-severity findings and on every scan error, including rule timeouts and parse errors:
