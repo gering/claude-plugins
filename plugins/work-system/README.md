@@ -383,7 +383,7 @@ scope: dark-mode theming only; no design-system refactor
 terminal_gate: reviewed-pr
 allow: commit,push-own-branch,open-pr,local-review,agreed-fixes,rebase-own-branch
 deny: merge,deploy,force-push-shared,destructive
-review_budget: 3
+review_budget: 5
 review_rounds_used: 0
 ---
 ```
@@ -417,9 +417,9 @@ Three properties are load-bearing:
   `claude -c` after a context loss does not silently restart its allowance.
 
 A repo sets the budget its new lanes get with `[mandate] review_budget` in
-`.work-system.toml` (default 3, 0–100; `/settings set
-work-system.mandate.review_budget 5` writes it, and settings 0.1.1+ refuses a
-value outside 0–100; an out-of-range value still falls back to 3). It is read
+`.work-system.toml` (default 5, 0–100; `/settings set
+work-system.mandate.review_budget 8` writes it, and settings 0.1.1+ refuses a
+value outside 0–100; an out-of-range value still falls back to 5). It is read
 at `SETTINGS_PROJECT_ROOT` if set, else the git toplevel of the lane being set
 up — the settings plugin's own root rule. A lane is cut
 from committed history, so **commit** the file: an uncommitted edit in the main

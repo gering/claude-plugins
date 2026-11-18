@@ -106,7 +106,7 @@
       "properties": {
         "review_budget": {
           "type": "integer",
-          "default": 3,
+          "default": 5,
           "minimum": 0,
           "maximum": 100,
           "description": "Review rounds new lanes in this repo record for every preset that authorizes a review (standard, merge-delegated); draft-only always records 0; an explicit review_budget= at init wins. Existing lanes keep their recorded budget."
