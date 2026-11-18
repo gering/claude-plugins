@@ -5,7 +5,8 @@
 
 Scope: the flag-routing logic behind /close step 10's opt-in
 (`.claude/work-system-close-autocommit`) — the part that is actually
-script-testable. The `archive`/`commit-push` subcommands are exercised
+script-testable, plus commit-push/roadmap-push's handling of a tracked
+tasks/ROADMAP.md. The rest of `archive`/`commit-push` is exercised
 manually via /close; their design rationale lives in
 `.claude/knowledge/features/task-archiving-on-close.md`.
 
@@ -507,6 +508,82 @@ with tempfile.TemporaryDirectory() as tmp:
           not any(f.startswith("tasks/archive/x-decoy") for f in committed))
     check("decoy edits stay uncommitted",
           "x-decoy-1.md" in git(grepo, "status", "--porcelain").stdout)
+
+    # --- tasks/ROADMAP.md rides along only once the repo tracks it ----------- #
+    rrepo = new_repo(root, "rrepo")
+    rbranch = git(rrepo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    (rrepo / "tasks").mkdir()
+    rmap = rrepo / "tasks" / "ROADMAP.md"
+    rmap.write_text("# Roadmap\n- private note\n")
+    (rrepo / "tasks" / "a.md").write_text("# A\n")
+    archived = kv(run("archive", str(rrepo), "a", "task/a").stdout).get("archived_path")
+    r = kv(run("commit-push", str(rrepo), "a", archived, rbranch).stdout)
+    committed = git(rrepo, "show", "--name-only", "--format=", "HEAD").stdout.split()
+    check("an untracked roadmap is never added", "tasks/ROADMAP.md" not in committed
+          and r.get("roadmap_committed") == "no")
+    check("roadmap-push leaves an untracked roadmap alone",
+          kv(run("roadmap-push", str(rrepo), rbranch).stdout).get("result") == "untracked")
+
+    origin = root / "rorigin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)], capture_output=True)
+    git(rrepo, "remote", "add", "origin", str(origin))
+    git(rrepo, "add", "tasks/ROADMAP.md")
+    git(rrepo, "commit", "-qm", "track the roadmap")
+    git(rrepo, "push", "-q", "origin", rbranch)
+    rmap.write_text("# Roadmap\n- F1 recorded\n")
+    (rrepo / "tasks" / "b.md").write_text("# B\n")
+    (rrepo / "tasks" / "unrelated.md").write_text("# not this close\n")
+    archived = kv(run("archive", str(rrepo), "b", "task/b").stdout).get("archived_path")
+    r = kv(run("commit-push", str(rrepo), "b", archived, rbranch).stdout)
+    committed = git(rrepo, "show", "--name-only", "--format=", "HEAD").stdout.split()
+    check("a tracked roadmap rides along in the archive commit",
+          "tasks/ROADMAP.md" in committed and r.get("roadmap_committed") == "yes")
+    check("...which is pushed as a fast-forward", r.get("result") == "committed-pushed")
+    check("...and sweeps in no other task file", "tasks/unrelated.md" not in committed)
+
+    check("roadmap-push with nothing changed commits nothing",
+          kv(run("roadmap-push", str(rrepo), rbranch).stdout).get("result") == "nothing-to-commit")
+    rmap.write_text("# Roadmap\n")
+    r = kv(run("roadmap-push", str(rrepo), rbranch).stdout)
+    committed = git(rrepo, "show", "--name-only", "--format=", "HEAD").stdout.split()
+    check("roadmap-push commits and pushes the roadmap alone",
+          r.get("result") == "committed-pushed" and committed == ["tasks/ROADMAP.md"])
+    (rrepo / "seed.txt").write_text("unpushed\n")
+    git(rrepo, "commit", "-qam", "local work")
+    rmap.write_text("# Roadmap\n- F2\n")
+    r = kv(run("roadmap-push", str(rrepo), rbranch).stdout)
+    check("roadmap-push never pushes other unpushed commits",
+          r.get("result") == "committed-local" and r.get("reason") == "unpushed-history")
+    check("roadmap-push refuses another branch",
+          kv(run("roadmap-push", str(rrepo), "nope").stdout).get("result") == "wrong-branch")
+    check("roadmap-push without args is a usage error",
+          run("roadmap-push").returncode == 2)
+
+    # A secret or local path in a tracked roadmap (hand edits included) keeps
+    # the file out of the commit; the archive itself still goes in.
+    git(rrepo, "reset", "-q", "--hard", f"origin/{rbranch}")
+    rmap.write_text("# Roadmap\n- deploy from /Users/me/app\n")
+    r = kv(run("roadmap-push", str(rrepo), rbranch).stdout)
+    check("roadmap-push refuses a roadmap holding a local path",
+          r.get("result") == "refused" and "local-path" in r.get("roadmap_note", ""))
+    (rrepo / "tasks" / "c.md").write_text("# C\n")
+    archived = kv(run("archive", str(rrepo), "c", "task/c").stdout).get("archived_path")
+    r = kv(run("commit-push", str(rrepo), "c", archived, rbranch).stdout)
+    committed = git(rrepo, "show", "--name-only", "--format=", "HEAD").stdout.split()
+    check("commit-push leaves a leaking roadmap out and says why",
+          "tasks/ROADMAP.md" not in committed and r.get("roadmap_committed") == "no"
+          and "local-path" in r.get("roadmap_note", ""))
+    (rrepo / "tasks" / "d.md").write_text("# D\n")
+    git(rrepo, "add", "tasks/d.md"); git(rrepo, "commit", "-qm", "track d")
+    archived = kv(run("archive", str(rrepo), "d", "task/d").stdout).get("archived_path")
+    git(rrepo, "add", "-A", "tasks/archive", "tasks/d.md"); git(rrepo, "commit", "-qm", "archive d by hand")
+    r = kv(run("commit-push", str(rrepo), "d", archived, rbranch).stdout)
+    check("the refusal note survives a nothing-to-commit result",
+          r.get("result") == "nothing-to-commit" and "local-path" in r.get("roadmap_note", ""))
+    rmap.write_text("# Roadmap\n")
+    git(rrepo, "rm", "-q", "--cached", "tasks/ROADMAP.md")
+    check("a staged rm --cached is the opt-out: roadmap-push leaves it alone",
+          kv(run("roadmap-push", str(rrepo), rbranch).stdout).get("result") == "untracked")
 
 
 if FAILS:

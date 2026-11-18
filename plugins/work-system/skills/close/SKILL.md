@@ -474,7 +474,7 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
    main checkout (a received close-request, or a user-invoked `/close <task>` there).
    A worker closing its **own** lane has no sweep to run — it knows its open steps —
    but no Manager will act on them either: before step 7 it records each item that is
-   still open and not its own to finish in the main repo's roadmap with
+   still open and not its own to finish as a follow-up of the main repo with
    `followups.py record … --from-worker` (as in "Record before the removal" below; its
    own items, in its own words; `[decide]` → class `ask`, `[deploy]` → `deploy`),
    lists them in the summary, and skips the rest of this step and step 10b. The worker's tab closes with the lane, so the Manager reads what it left
@@ -510,7 +510,7 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
    **Classify every item yourself** into exactly one of three classes:
    - **Do it** — mechanical, local to **this** repo's main checkout, non-destructive,
      no outward effect: pull main (step 5 already did), build, run the tests, and
-     Manager-local bookkeeping (a `tasks/ROADMAP.md` line, or a follow-up task when
+     Manager-local bookkeeping (a `followups.py record`, or a follow-up task when
      `task-store.py backend` says `local` — created with `task-store.py create`, never a
      file written into `tasks/` by hand, which would pin an `auto` repo to the local
      backend — written in your own words and marked as coming from the worker's output).
@@ -540,9 +540,12 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
    **blocked** — not run early, even when it is mechanical.
 
    **Record before the removal.** Every item that will not simply run in 10b — Ask,
-   an asked Deploy, blocked — goes into the roadmap's "Open follow-ups" section
-   **now**, in your own words, so neither an interrupted close nor a question nobody
-   answers loses it:
+   an asked Deploy, blocked — is recorded as an open follow-up **now**, in your own
+   words, so neither an interrupted close nor a question nobody answers loses it.
+   `followups.py` puts it where the tasks live (`task-store.py`'s backend — its
+   `backend=` line says which): on `github` an issue labelled `work-system:followup` (id `#<n>`) — this is the close's own
+   bookkeeping, asked by no one, unlike a new *task* issue — on `local` a line in
+   `tasks/ROADMAP.md` (id `F<n>`):
    ```sh
    python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/followups.py" record "<main-repo-path>" "<task-name>" <ask|deploy|blocked> <<'WS_FOLLOWUP_END'
    <your one-line description of the item and why it is open>
@@ -550,8 +553,11 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
    ```
    Keep each printed `id=`. The text goes in on stdin through a quoted heredoc, never
    as an argument, and is exactly **one** line of your own words — never the
-   delimiter, never text copied from the material. Exit 4 (unreadable, locked or symlinked roadmap) → say so; the
-   items then live only in the step-11 summary.
+   delimiter, never text copied from the material. Exit 4 (unreadable, locked or symlinked
+   roadmap; on `github` a failing gh) → say so; the items then live only in the step-11
+   summary — never write `tasks/ROADMAP.md` by hand instead, which would split the
+   follow-ups across two places. Exit 5 → the text would publish a secret or a local
+   identifier (stderr names the kind, never the value): record it again without it.
 
    Nothing else runs here: the close comes first. Step 10b acts on the classes. The
    sweep never blocks or delays the close.
@@ -700,14 +706,17 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
           doing. An unattended commit+push to `<main-branch>` must never be invisible: the
           user gave standing authorization for this action, not for doing it unseen.
           ```sh
-          git -C <main-repo-path> status --short tasks/archive/ tasks/<task-name>.md
+          git -C <main-repo-path> status --short tasks/archive/ tasks/<task-name>.md tasks/ROADMAP.md
           ```
           Then one line — "Auto-committing archived task file to `<main-branch>`
           (`.claude/work-system-close-autocommit` is set)…" — and proceed without asking.
         - **`enabled=no` — the default, unchanged behavior:** show
-          `git -C <main-repo-path> status --short tasks/archive/ tasks/<task-name>.md` (scoped —
+          `git -C <main-repo-path> status --short tasks/archive/ tasks/<task-name>.md tasks/ROADMAP.md` (scoped —
           not the whole `tasks/`, which would surface unrelated pending tasks) and ask **once**:
-          "Commit the archived task file to `<main-branch>` and push? [y/n]" — one approval covers
+          "Commit the archived task file to `<main-branch>` and push? [y/n]" — add "and the open
+          follow-ups (`tasks/ROADMAP.md`)" when the status shows that file modified (`M` in
+          either column) — untracked (`??`) is never committed, and a roadmap the scan keeps
+          out is reported as `roadmap_note=` afterwards — one approval covers
           both (the archive is metadata, and the push is what keeps local `<main-branch>` from
           diverging and breaking the next `/close`'s step-5 sync). Only continue below on yes.
           If a **`note=`** line accompanies `enabled=no`, a flag file exists but was not honored
@@ -753,6 +762,13 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
           helper did **not** stage or commit; report "archive file is on disk (uncommitted); main
           repo is on `<current>`, not `<main-branch>` — commit it onto `<main-branch>` yourself".
         - `nothing-to-commit` → just report the archive (below); no commit was needed.
+
+        A **tracked** `tasks/ROADMAP.md` (the local follow-up record; committing it once is the
+        repo's opt-in, an untracked one is never added) rides along in this commit:
+        `roadmap_committed=yes` → add "open follow-ups included"; a `roadmap_note=` → the file
+        was kept out (it holds a secret or a local path, scanned whole, hand edits included):
+        relay the note. Remember whether this commit-push ran (approved or auto-enabled): it
+        is the only authorization for 10b's `roadmap-push`, and it covers that file alone.
       - **`committable=no`** (no git change to commit — `tasks/` is gitignored, or the main repo
         isn't a git repo): local-only — just report.
     - Report: "Task file archived to `<archived_path>`" (add "(name existed — suffixed)" when
@@ -781,10 +797,23 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
     4. **Ask once**: one question listing every Ask and Deploy item in order, each with
        what you would run and where. Run what the user approves, in order, then the
        blocked items it unblocks (each again classified Do-it/Ask).
-    5. **Resolve what got done** — one call takes several ids:
-       `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/followups.py" resolve "<main-repo-path>" <id>...`.
-       Whatever stays open stays in the roadmap until it is done or the user drops it;
+    5. **Resolve what got done** — one call takes several ids, each quoted (a bare `#`
+       starts a shell comment and drops every id after it):
+       `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/followups.py" resolve "<main-repo-path>" "<id>"...`
+       (`"#<n>"` closes that follow-up issue; one without the followup label is never closed).
+       Whatever stays open stays recorded until it is done or the user drops it;
        name the open ids in step 11 and in this session's later summaries.
+    6. **Commit the roadmap** — whenever a record or resolve here changed the file
+       (`backend=local` / an `F<n>` id), and only when step 10's `commit-push`
+       ran (approved or auto-enabled; that answer covers this one file). Show
+       `git -C "<main-repo-path>" diff --stat -- tasks/ROADMAP.md` first, then:
+       `bash "${CLAUDE_PLUGIN_ROOT}/scripts/archive-task.sh" roadmap-push "<main-repo-path>" "<main-branch>"`.
+       Report `result=` as step 10 does (`refused` → relay `roadmap_note=`);
+       `untracked`/`nothing-to-commit` → say nothing. Without that authorization (e.g.
+       the github backend, where step 10 commits nothing) a changed tracked roadmap stays
+       uncommitted on `<main-branch>`: say so in step 11 and name the file — on github no
+       later close commits it, so committing it (or untracking it) is the user's call;
+       until then step 5 reports `dirty` and no deploy runs from that checkout.
 
 11. **Final summary**:
     ```

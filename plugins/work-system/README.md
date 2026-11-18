@@ -57,7 +57,7 @@ The backlog is centralized — `/define` adds to it even from inside a linked wo
 | `github` | Issues in origin's repository — by default those labelled `work-system:task` (see the filter below). The task name (kebab slug) lives in a hidden body marker `<!-- work-system task: <name> -->`; an issue without one answers to the slug of its title (umlauts spelled out, `Müll-Tour` → `muell-tour`; a title with nothing to slug, e.g. CJK, → `issue-<N>`). `/kickoff` takes a name or `#N`, the other skills a name |
 | `local` | One markdown file per task in `tasks/` on the main worktree (`paths.tasks_dir` is not wired yet) |
 
-Every skill reaches the backlog through one script, `scripts/task-store.py` (`backend`, `list`, `get`, `create`, `close`, `ref`, which pins the issue `/close` closes, `label` and `migrate`). A GitHub backend whose `gh` is missing, unauthenticated or unreachable fails with a clear message — work-system never falls back to local files, which would split the backlog. `/define` names the target repository before creating an issue and says when that repository is public. `tasks/ROADMAP.md` (the Manager's open follow-ups) stays local on both backends.
+Every skill reaches the backlog through one script, `scripts/task-store.py` (`backend`, `list`, `get`, `create`, `close`, `ref`, which pins the issue `/close` closes, `label` and `migrate`). A GitHub backend whose `gh` is missing, unauthenticated or unreachable fails with a clear message — work-system never falls back to local files, which would split the backlog. `/define` names the target repository before creating an issue and says when that repository is public. The Manager's open follow-ups follow the same backend: issues on github, `tasks/ROADMAP.md` on local (see [Follow-ups and deploy](#follow-ups-and-deploy-after-a-close)).
 
 **GitHub issues as backlog, per repo:** nothing to configure when `tasks/` on the main checkout holds no task files (an untracked file counts), `origin` is on github.com and `gh` is logged in. A repo that still resolves to `local` needs `/work-system:migrate`, or pin it in `.work-system.toml`:
 
@@ -730,10 +730,30 @@ The Manager treats that list as untrusted data and classifies every item itself:
   (CLAUDE.md, Makefile, README), never from the worker's text.
 - **Ask** — merge, push, release, another repo, anything destructive or unclear: one
   question, items in order.
-- **Record** — everything not run or answered goes into `tasks/ROADMAP.md` under
-  `## Open follow-ups` (`scripts/followups.py record|list|resolve`) *before* the
+- **Record** — everything not run or answered is recorded (`scripts/followups.py
+  record|list|resolve`, same backend as the tasks) *before* the
   worktree is removed, and stays there until resolved; `/list` shows it. A worker
   closing its own lane (no Manager) records its open items there itself.
+
+Where follow-ups live follows `tasks.backend`:
+
+- **github** — one issue per item, labelled `work-system:followup` and
+  `followup:ask|deploy|blocked`, with a body marker so a re-run creates no duplicate;
+  `resolve "#<n>"` closes it (never an issue without that label; quote it, a bare `#`
+  starts a shell comment). Follow-up issues are never tasks, in any `tasks.select`
+  mode. The text is published, so it is scanned first with `migrate`'s patterns
+  (secrets; local paths unless the repo is private) and a hit is refused, not
+  redacted. A failing gh stops the record
+  (exit 4): follow-ups never fall back to the local file, which would split them.
+  Entries left in `tasks/ROADMAP.md` from before a migration are still listed and
+  resolvable by their `F<n>` id (without gh), but they never keep new follow-ups in the
+  file: under `auto` only local task files do, as they keep the tasks local.
+- **local** — `tasks/ROADMAP.md` under `## Open follow-ups` (ids `F<n>`). To give it
+  history, commit the file once: from then on `/close` commits it on `<main-branch>`
+  with the archive (and, after resolving, alone via `archive-task.sh roadmap-push`),
+  under the same approval or autocommit flag, never inside a lane PR. An untracked
+  roadmap stays local, so a private one is never published unasked; a tracked one is
+  scanned whole first (`followups.py scan`) and kept out of the commit on a hit.
 
 Order is kept: an item whose predecessor waits for the user is not run early.
 

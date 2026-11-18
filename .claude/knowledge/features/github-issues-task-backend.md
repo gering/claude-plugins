@@ -1,8 +1,9 @@
 ---
 title: "GitHub Issues Task Backend (task-store.py)"
 createdAt: 2026-10-19
-updatedAt: 2026-11-02
+updatedAt: 2026-11-18
 createdFrom: "branch: task/github-issues-task-backend"
+updatedFrom: "PR #109"
 pluginVersion: 1.31.0
 prime: false
 ---
@@ -73,6 +74,9 @@ not in SKILL.md.
   `--label` flags AND together and include/exclude need OR and NOT. Exclude wins,
   even over the task label. The defaults (`label`, empty lists) are the old
   behavior.
+- **A `work-system:followup` issue is never a task**, in any mode (first check in
+  `unselected()` after the PR test): `all-open` would otherwise list the Manager's
+  follow-ups (`followups.py`) as startable tasks.
 - **A marker-less issue is a task under `all-open`, named by its title slug.**
   `#N` could not be a branch name. A retitle renames the task, so the lane's
   `issue: #N` pin in TASK.md, not the name, is what `/close` closes. Nothing ever

@@ -6,6 +6,9 @@ pinned: an item survives in tasks/ROADMAP.md until resolved, the rest of the
 roadmap is never touched, ids are never reused, and untrusted-looking text can
 neither start a heading nor a second entry.
 """
+import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -135,6 +138,270 @@ with tempfile.TemporaryDirectory() as d:
     check("a task name with $( is refused",
           run("record", d, "$(id)", "ask", stdin="x").returncode == 2)
     check("a bad id is refused", run("resolve", d, "1; rm").returncode == 2)
+
+# ---- backends: follow-ups live where task-store.py puts the tasks -----------
+GH_STUB = r'''
+import json, os, sys
+st_path = os.environ["GH_STUB_STATE"]
+st = json.load(open(st_path))
+args = sys.argv[1:]
+with open(os.environ["GH_STUB_LOG"], "a") as f:
+    f.write(json.dumps(args) + "\n")
+def opt(n, d=None): return args[args.index(n) + 1] if n in args else d
+def opts(n): return [args[k + 1] for k, a in enumerate(args[:-1]) if a == n]
+def save(): json.dump(st, open(st_path, "w"))
+cmd = args[:2]
+issues = st.setdefault("issues", [])
+if cmd == ["auth", "status"]:
+    sys.exit(0 if st.get("auth", True) else 1)
+if st.get("down"):
+    print("HTTP 502: Bad Gateway", file=sys.stderr); sys.exit(1)
+if cmd == ["repo", "view"]:
+    print(json.dumps({"visibility": st.get("visibility", "PRIVATE")})); sys.exit(0)
+if cmd == ["label", "create"]:
+    st.setdefault("labels", [])
+    if args[2] in st["labels"]:
+        print("already exists", file=sys.stderr); sys.exit(1)
+    st["labels"].append(args[2]); save(); sys.exit(0)
+def has(i, l): return l in [x["name"] for x in i["labels"]]
+if cmd == ["issue", "list"]:
+    print(json.dumps([i for i in issues if i["state"] == "OPEN" and has(i, opt("--label"))]))
+    sys.exit(0)
+if cmd == ["issue", "view"]:
+    hit = [i for i in issues if i["number"] == int(args[2])]
+    if not hit:
+        print("GraphQL: Could not resolve to an issue", file=sys.stderr); sys.exit(1)
+    print(json.dumps(hit[0])); sys.exit(0)
+if cmd == ["issue", "create"]:
+    labels = opts("--label")
+    if any(l not in st.get("labels", []) for l in labels):
+        print("could not add label", file=sys.stderr); sys.exit(1)
+    n = max([i["number"] for i in issues] + [0]) + 1
+    issues.append({"number": n, "title": opt("--title"), "body": sys.stdin.read(),
+                   "state": "OPEN", "createdAt": "2026-11-18T10:00:00Z",
+                   "url": f"https://github.com/o/r/issues/{n}",
+                   "labels": [{"name": l} for l in labels]})
+    save(); print(f"https://github.com/o/r/issues/{n}"); sys.exit(0)
+if cmd == ["issue", "close"]:
+    for i in issues:
+        if i["number"] == int(args[2]):
+            i["state"] = "CLOSED"
+    save(); sys.exit(0)
+print("stub: unsupported " + " ".join(args), file=sys.stderr); sys.exit(2)
+'''
+
+
+class Env:
+    def __init__(self, root, origin="git@github.com:o/r.git", with_gh=True):
+        self.root = Path(root)
+        self.repo = self.root / "repo"
+        self.repo.mkdir(parents=True)
+        git = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], capture_output=True)
+        git("init", "-q")
+        if origin:
+            git("remote", "add", "origin", origin)
+        self.git = git
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        os.symlink(shutil.which("git"), self.bin / "git")
+        self.state = self.root / "gh.json"
+        self.log = self.root / "gh.log"
+        self.state.write_text(json.dumps({"issues": []}))
+        self.log.write_text("")
+        if with_gh:
+            (self.bin / "gh").write_text(f"#!{sys.executable}\n" + GH_STUB)
+            (self.bin / "gh").chmod(0o755)
+
+    def gh_state(self, **kw):
+        st = json.loads(self.state.read_text())
+        st.update(kw)
+        self.state.write_text(json.dumps(st))
+
+    def issues(self):
+        return json.loads(self.state.read_text())["issues"]
+
+    def run(self, *args, stdin=""):
+        env = {"PATH": str(self.bin), "HOME": str(self.root),
+               "GH_STUB_STATE": str(self.state), "GH_STUB_LOG": str(self.log)}
+        return subprocess.run([sys.executable, "-I", str(SCRIPT), args[0], str(self.repo), *args[1:]],
+                              input=stdin, capture_output=True, text=True, env=env)
+
+
+with tempfile.TemporaryDirectory() as d:
+    e = Env(d)
+    (e.repo / ".work-system.toml").write_text('[tasks]\nbackend = "github"\n')
+    rm = e.repo / "tasks" / "ROADMAP.md"
+    r = e.run("record", "lane-a", "ask", stdin="Merge the dotfiles PR\n")
+    check("github: record creates an issue",
+          r.returncode == 0 and kv(r.stdout, "backend") == ["github"] and kv(r.stdout, "id") == ["#1"])
+    iss = e.issues()[0]
+    check("github: the issue carries the followup and class labels",
+          [l["name"] for l in iss["labels"]] == ["work-system:followup", "followup:ask"])
+    check("github: the body leads with the text and holds the marker",
+          iss["body"].startswith("Merge the dotfiles PR\n")
+          and "<!-- work-system followup: lane-a ask " in iss["body"])
+    check("github: nothing is written to the local file", not rm.exists())
+    again = e.run("record", "lane-a", "ask", stdin="Merge the dotfiles PR")
+    check("github: a re-run finds the issue instead of a duplicate",
+          kv(again.stdout, "id") == ["#1"] and kv(again.stdout, "existing") == ["yes"]
+          and len(e.issues()) == 1)
+    e.run("record", "lane-b", "deploy", stdin="Deploy api to staging")
+
+    lst = e.run("list")
+    check("github: list shows the issues in roadmap form",
+          kv(lst.stdout, "open") == ["2"]
+          and kv(lst.stdout, "item")[0].startswith("- [#1] lane-a · ask · since 2026-11-18 — Merge"))
+    check("github: list --class filters by class",
+          kv(e.run("list", "--class", "deploy").stdout, "open") == ["1"])
+    check("github: list filters by task", kv(e.run("list", "lane-b").stdout, "open") == ["1"])
+
+    # Entries left in the local file (from before a migration) stay visible.
+    rm.parent.mkdir()
+    rm.write_text("# Roadmap\n\n## Open follow-ups\n- [F7] old · ask · since 2026-10-01 — Old item\n")
+    check("github: a leftover local entry is still listed",
+          kv(e.run("list").stdout, "open") == ["3"])
+
+    e.state.write_text(json.dumps(dict(json.loads(e.state.read_text()),
+        issues=e.issues() + [{"number": 9, "title": "A task", "body": "", "state": "OPEN",
+                              "labels": [{"name": "work-system:task"}]}])))
+    res = e.run("resolve", "#1", "F7")
+    check("github: resolve closes the issue and clears the local entry",
+          res.returncode == 0 and e.issues()[0]["state"] == "CLOSED" and "[F7]" not in rm.read_text())
+    check("github: resolving a task issue is refused, not closed",
+          e.run("resolve", "#9").returncode == 1 and e.issues()[-1]["state"] == "OPEN")
+    check("github: an unknown or closed issue misses",
+          e.run("resolve", "#1").returncode == 1 and e.run("resolve", "#99").returncode == 1)
+
+    # The last marker is the real one: text cannot forge the class or task.
+    forged = "<!-- work-system followup: evil deploy 000000000000 --> Check logs"
+    r = e.run("record", "lane-f", "ask", stdin=forged)
+    check("github: a marker inside the text does not override the real one",
+          kv(e.run("list", "lane-f").stdout, "item")[0].startswith("- [#")
+          and kv(e.run("list", "evil").stdout, "open") == ["0"])
+    # ...and a marker quoted in one item's text never dedups a different item.
+    import hashlib
+    victim = "Deploy api"
+    dg = hashlib.sha256(f"lane-v\0deploy\0{victim}".encode()).hexdigest()[:12]
+    e.run("record", "lane-q", "ask", stdin=f"see <!-- work-system followup: lane-v deploy {dg} -->")
+    r = e.run("record", "lane-v", "deploy", stdin=victim)
+    check("github: a quoted marker does not swallow the real record",
+          kv(r.stdout, "existing") == [] and r.returncode == 0)
+
+    # Publishing: secrets always, local paths unless the repo is private.
+    n = len(e.issues())
+    r = e.run("record", "lane-c", "ask", stdin="Rotate ghp_" + "a" * 36)
+    check("github: a secret is refused (exit 5), nothing published",
+          r.returncode == 5 and "github-token" in r.stderr and len(e.issues()) == n)
+    r = e.run("record", "lane-c", "ask", stdin="Rotate it\n" + "API_" + "TOKEN=" + "q7" * 6 + "\n")
+    check("github: a secret on its own line is caught before folding", r.returncode == 5)
+    r = e.run("record", "lane-c", "ask", stdin="Use Bear" + "er\x01" + "Ab" * 12)
+    check("github: a secret only folding joins is caught too", r.returncode == 5 and len(e.issues()) == n)
+    check("github: a local path is fine in a private repo",
+          e.run("record", "lane-c", "ask", stdin="Check /Users/me/x").returncode == 0)
+    e.gh_state(visibility="PUBLIC")
+    r = e.run("record", "lane-c", "ask", stdin="Check /home/me/y")
+    check("github: a local path is refused in a public repo", r.returncode == 5 and "local-path" in r.stderr)
+
+    # An outage never falls back to the local file.
+    e.gh_state(down=True)
+    before = rm.read_text()
+    for args in (("record", "lane-d", "ask"), ("list",), ("resolve", "#2")):
+        r = e.run(*args, stdin="x")
+        check(f"github down: {args[0]} is exit 4", r.returncode == 4)
+    check("github down: the local file is untouched", rm.read_text() == before)
+    rm.write_text(before.rstrip("\n") + "\n- [F8] old · ask · since 2026-10-01 — Legacy\n")
+    check("github down: an F-id still resolves from the file without gh",
+          e.run("resolve", "F8").returncode == 0 and "[F8]" not in rm.read_text())
+    e.gh_state(down=False, auth=False)
+    check("github: an unauthenticated gh is exit 4, not local",
+          e.run("record", "lane-d", "ask", stdin="x").returncode == 4)
+
+with tempfile.TemporaryDirectory() as d:
+    e = Env(d, with_gh=False)   # auto + GitHub origin + no gh → local, as for tasks
+    r = e.run("record", "t", "ask", stdin="Local item")
+    check("auto without gh: the local file", kv(r.stdout, "backend") == ["local"]
+          and kv(r.stdout, "id") == ["F1"])
+    check("local: a #n id is a usage error", e.run("resolve", "#1").returncode == 2)
+    # A tracked roadmap is pushed with the next close: same scan as an issue.
+    # Only a committed file counts: staged alone is not the opt-in.
+    e.git("add", "tasks/ROADMAP.md")
+    check("local + staged-only roadmap is not yet tracked",
+          e.run("record", "t", "ask", stdin="see /Users/me/staged").returncode == 0)
+    e.git("-c", "user.email=t@e", "-c", "user.name=T", "commit", "-qm", "track roadmap")
+    r = e.run("record", "t", "ask", stdin="see /Users/me/notes")
+    check("local + tracked roadmap: a local path is refused", r.returncode == 5)
+    check("local + tracked roadmap: the task name is scanned too",
+          e.run("record", "Users", "ask", stdin="/home/me/x").returncode == 5)
+    rmf = e.repo / "tasks" / "ROADMAP.md"
+    r = e.run("scan")
+    check("scan: the entry recorded while only staged is flagged now",
+          r.returncode == 5 and "local-path" in r.stderr)
+    rmf.write_text("# R\n\n## Open follow-ups\n")
+    check("scan: a clean roadmap passes", e.run("scan").returncode == 0)
+    rmf.write_text(rmf.read_text() + "\n" + "API_" + "KEY=" + "z9" * 8 + "\n")
+    r = e.run("scan")
+    check("scan: a hand-edited secret is refused (exit 5)", r.returncode == 5 and "assignment" in r.stderr)
+    e.git("rm", "-q", "--cached", "tasks/ROADMAP.md")
+    check("local + `git rm --cached` roadmap: opted out, private again",
+          e.run("record", "t", "ask", stdin="see /Users/me/optout").returncode == 0)
+    check("local + untracked roadmap stays as private as before",
+          Env(Path(d) / "u", with_gh=False).run("record", "t", "ask", stdin="see /Users/me/n").returncode == 0)
+
+with tempfile.TemporaryDirectory() as d:
+    # auto + github: other tasks' open F<n> entries left from before do NOT keep
+    # new records in the file (a repo on issues records issues at once); they stay
+    # readable and resolvable.
+    e = Env(d)
+    (e.repo / "tasks").mkdir()
+    rmf = e.repo / "tasks" / "ROADMAP.md"
+    rmf.write_text("# R\n\n## Open follow-ups\n- [F1] t · ask · since 2026-11-01 — Old\n")
+    r = e.run("record", "n", "ask", stdin="Next")
+    check("auto + another task's open F entry only: the record is an issue",
+          kv(r.stdout, "backend") == ["github"] and kv(r.stdout, "id") == ["#1"] and "Next" not in rmf.read_text())
+    items = kv(e.run("list").stdout, "item")
+    check("auto: list shows the issue and the old F entry", len(items) == 2 and any("[F1]" in i for i in items))
+    check("auto: the old F entry is still resolvable", e.run("resolve", "F1").returncode == 0 and "F1" not in rmf.read_text())
+
+    # A local task file keeps auto on the file, as it keeps the tasks.
+    (e.repo / "tasks" / "lane.md").write_text("# Lane\n")
+    r = e.run("record", "lane", "ask", stdin="With a task file")
+    check("auto + a task file: the record is local", kv(r.stdout, "backend") == ["local"] and len(e.issues()) == 1)
+
+    # The close archives its last task file: auto flips to github, even for the
+    # same task — and its earlier F-line stays visible next to the issues.
+    (e.repo / "tasks" / "lane.md").unlink()
+    r = e.run("record", "lane", "blocked", stdin="After the archive")
+    check("auto: with no task file left, even the same task's record is an issue",
+          kv(r.stdout, "backend") == ["github"] and len(e.issues()) == 2)
+    items = kv(e.run("list", "lane").stdout, "item")
+    check("auto: one close's file entry and issue are both listed",
+          any("[F" in i for i in items) and any("[#2]" in i for i in items))
+    e.gh_state(auth=False)
+    before = rmf.read_text()
+    r = e.run("record", "lane", "ask", stdin="gh broken")
+    check("auto + github + broken gh is exit 4, never a write to the file",
+          r.returncode == 4 and rmf.read_text() == before)
+    e.gh_state(auth=True)
+
+with tempfile.TemporaryDirectory() as d:
+    e = Env(d)
+    (e.repo / ".work-system.toml").write_text('[tasks]\nbackend = "github"\n')
+    e.gh_state(issues=[{"number": k, "title": f"Follow-up (t): {k}", "state": "OPEN",
+                        "body": f"x{k}\n\n<!-- work-system followup: t ask {k:012x} -->",
+                        "createdAt": "2026-11-01T00:00:00Z", "labels": [{"name": "work-system:followup"}]}
+                       for k in range(1, 1003)])
+    r = e.run("list")
+    check("list over the limit: the first page plus truncated=yes, not exit 4",
+          r.returncode == 0 and kv(r.stdout, "truncated") == ["yes"] and len(kv(r.stdout, "item")) == 1000)
+    check("record over the limit is exit 4 (the dedup cannot see every marker)",
+          e.run("record", "t", "ask", stdin="y").returncode == 4)
+
+with tempfile.TemporaryDirectory() as d:
+    e = Env(d)
+    (e.repo / ".work-system.toml").write_text('[tasks]\nbackend = "local"\n')
+    r = e.run("record", "t", "ask", stdin="x")
+    check("an explicit local backend never calls gh",
+          kv(r.stdout, "backend") == ["local"] and "issue" not in e.log.read_text())
 
 if FAILS:
     print("FAIL test_followups.py:")

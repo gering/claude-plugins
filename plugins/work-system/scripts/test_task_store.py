@@ -763,7 +763,8 @@ with tempfile.TemporaryDirectory() as d:
         labelled(4, "Fix login", "steps", "bug", "work-system:task", "dependencies"),
         labelled(5, "Old", "x", "work-system:task", "work-system:archived"),
         labelled(6, "A PR", "x", "bug", url="https://github.com/o/r/pull/6"),
-        labelled(7, "Closed one", "x", "bug", state="CLOSED")])
+        labelled(7, "Closed one", "x", "bug", state="CLOSED"),
+        labelled(8, "Follow-up (x): deploy", "y", "work-system:followup", "followup:deploy")])
     rows = lambda r: [x.split("\t")[1] for x in kv(r.stdout, "task")]
 
     r = e.run("list", str(e.repo))
@@ -781,6 +782,7 @@ with tempfile.TemporaryDirectory() as d:
           "muell-tour-planen\t#2\tMüll-Tour planen" in kv(r.stdout, "task"))
     check("list marks a gated task", kv(r.stdout, "gated") == ["muell-tour-planen\t#2\tdefinition-only"])
     check("a pull request is never a task", e.run("get", str(e.repo), "#6").returncode == 3)
+    check("a Manager follow-up issue is never a task", e.run("get", str(e.repo), "#8").returncode == 3)
 
     e.setting('[tasks]\nselect = "all-open"\nexclude_labels = ["dependencies"]\n')
     r = e.run("list", str(e.repo))
