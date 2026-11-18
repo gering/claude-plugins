@@ -52,6 +52,11 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.35.0 — 2026-11-18
+- New lanes get `review_budget: 5` (was 3) for the `standard` and `merge-delegated` presets; `draft-only` stays 0, recorded mandates and a repo's `[mandate] review_budget` keep their value.
+- Manager follow-ups follow `tasks.backend`: on github each one is a `work-system:followup` issue (plus `followup:ask|deploy|blocked`, deduplicated by a body marker; `resolve #N` closes only such issues), scanned with `migrate`'s patterns before publishing (exit 5 on a hit); a failing gh is exit 4, never a write to the local file. Under `auto` only local task files keep follow-ups in the file; legacy `F<n>` entries do not, but stay listed and resolvable on github. Follow-up issues are never tasks, in any `tasks.select` mode. On local, `tasks/ROADMAP.md` stays the record, and `/close` commits it with the archive (and via `archive-task.sh roadmap-push` after 10b) once the repo has committed it, after scanning the whole file.
+- `/close` step 5's main sync is a script (`sync-main.sh`): fetch, ahead/behind, fast-forward only; divergence, unpushed commits (`ahead`), another checked-out branch, tracked local edits (`dirty`) or files in the way are reported and leave main untouched, and only `in-sync`/`fast-forwarded` allow a deploy.
+
 ### 1.34.1 — 2026-11-10
 - `/kickoff` in two herdr workspaces no longer collides on the agent name: herdr agent names are server-wide, so a second lane with the same task-derived label got `agent_name_taken`, which the launcher read as ambiguous, leaving an empty shell tab reported as `blocked=unverified`. On modern herdr the launcher now retries as `<label>-<repo>`, then `-2`, `-3` (`WORK_SYSTEM_HERDR_NAME_TRIES`, default 4, clamped 1..10), and reports a fallback as `herdr_name=`. Each retry needs the holder in another worktree (`herdr agent get`) and our pane back at its bare shell prompt; a holder in this worktree, an unreadable holder or every name taken rolls the tab back and exits 1, a pane that left its prompt stays `blocked=unverified`. The timeout-path rename walks the same names; legacy herdr (0.7.0–0.7.4) never retries.
 
