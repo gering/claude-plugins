@@ -306,22 +306,26 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
        `<branch>` holds commits the merged PR lacks / could not be compared — delete
        it anyway?"); step 8 runs only on a yes.
 
-5. **Sync local main with remote** (fast-forward check) — only when an `origin` remote exists:
-   - **If there is no `origin` remote** (`git remote get-url origin` fails — a purely local repo,
-     where step 2 may have confirmed a local-only ancestor merge): skip this step, there is
-     nothing to fetch.
-   - When the merge landed via a GitHub PR, `origin/<main-branch>` is ahead of local
-     `<main-branch>` until pulled. Syncing now avoids a confusing "not fully merged" error from
-     `git branch -d` in step 8 and leaves the workspace ready for the next task.
-   - Operate against the main repo path identified in step 4 (not the task worktree):
-     - Fetch: `git -C <main-repo-path> fetch origin <main-branch> --quiet`
-     - Behind count: `git -C <main-repo-path> rev-list --count <main-branch>..origin/<main-branch>`
-     - Ahead count: `git -C <main-repo-path> rev-list --count origin/<main-branch>..<main-branch>`
-   - **Behind == 0**: already in sync — proceed silently.
-   - **Behind > 0 AND Ahead == 0**: fast-forward cleanly:
-     `git -C <main-repo-path> merge --ff-only origin/<main-branch>`
-     Log: "main fast-forwarded (<N> commits pulled from origin)".
-   - **Behind > 0 AND Ahead > 0** (divergence — local main has unpushed commits): do NOT auto-pull. Surface a warning with both counts and the suggested command (`git pull --rebase`), then continue cleanup — divergence is a separate concern from closing the task.
+5. **Sync local main with remote** — the main checkout, not the task worktree. A merged
+   PR leaves `origin/<main-branch>` ahead of local `<main-branch>`; syncing now avoids a
+   "not fully merged" error from `git branch -d` in step 8 and leaves main ready for the
+   next task. One script does fetch, ahead/behind and the fast-forward (never a rebase):
+   ```sh
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/sync-main.sh" "<main-repo-path>" "<main-branch>"
+   ```
+   Report by `result=` and continue the close in every case — none of these blocks it:
+   - `fast-forwarded` → "main fast-forwarded (<behind> commits pulled from origin)".
+   - `in-sync`, `no-origin` → nothing to say.
+   - `diverged` → warn with `behind=`/`ahead=` and suggest `git pull --rebase`; local
+     main has unpushed commits, the user's call.
+   - `ahead` → nothing to pull, but local main has `ahead=` unpushed commits: say so.
+   - `dirty` (`files=`) → tracked files in the main checkout have local changes; nothing
+     was moved: name them.
+   - `wrong-branch` (`current=`), `ff-failed` (`error=`, e.g. an untracked file in the
+     way), `fetch-failed` → say main was not synced and why.
+   Only `fast-forwarded` and `in-sync` mean the checkout is on `<main-branch>`, equal to
+   `origin/<main-branch>` and free of tracked local edits — the condition 10b checks
+   before a deploy.
 
 6. **Handle current location**:
    - If currently in the worktree being deleted:
@@ -787,8 +791,9 @@ Manager's "Receiving a close-request" path takes its task from the helper instea
        reported and recorded (`ask`), and every dependent item after it is recorded as
        `blocked` (naming the failed id) — nothing is fixed here.
     2. **Deploy only from a synced main.** If step 5 did not leave local main equal to
-       `origin/<main-branch>` (divergence, no fetch), no deploy runs — not even an
-       `auto` one: record it as `deploy` and say why.
+       `origin/<main-branch>` (any other `sync-main.sh` result), or step 10 left a commit
+       unpushed (`committed-local`), no deploy runs — not even an `auto` one: record it
+       as `deploy` and say why.
     3. **Batch the deploys.** Before asking about a deploy, list this repo's other
        open deploys:
        `python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/followups.py" list "<main-repo-path>" --class deploy`.
