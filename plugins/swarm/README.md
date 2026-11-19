@@ -34,8 +34,23 @@ findings + design suggestions, presents one ranked report, and — with `--fix` 
   after a single confirmation, post the output-gated result as a PR comment via
   `gh pr comment` — the codex/grok/kimi/Claude ensemble on GitHub with no CI, repo
   secrets, or API-token cost. Read-only (never edits the tree); mutually
-  exclusive with `--fix`/`--loop`. The comment is posted under your own `gh`
+  exclusive with `--fix`. The comment is posted under your own `gh`
   identity, so it does not disturb pr-flow's `@claude` review polling.
+- `/swarm:review --loop[=N] --pr [<number>]` — run the normal local loop on the
+  PR's checked-out branch, then post **one** loop report to the PR (after one
+  confirmation): rounds, fixes and open findings per severity, the open items,
+  the end state (the loop's termination reason) and the full head SHA.
+  The loop's fixes must be committed and pushed first, so the report names a head
+  the PR actually shows (`--fix --loop --pr` is the same mode: `--loop` absorbs `--fix`). A re-run updates your earlier report instead of adding
+  a second one. Secret and local-path shapes are redacted before posting. The
+  body opens with a machine-readable marker for merge gates:
+  `<!-- swarm-loop-report:v1 pr=<n> head=<sha> rounds=<n> end=<reason> clean=yes|no rereviewed=yes|no degraded=yes|no open=<n> fixed=<n> -->`.
+  Only a PR into the default branch qualifies (the loop reviews the delta to it).
+  It is advisory, not proof (unsigned, and re-runs edit it): a gate that trusts it
+  checks the comment's author itself. The report is posted only when the pushed
+  commit holds exactly the tree the loop left, so a hook or a pull in between
+  blocks it, and an end that claims a final review (`0-findings`, `nothing-agreed`,
+  `no-change`) is refused when the tree changed after that review.
 - `/swarm:agents` — show which review backends are installed, authenticated,
   and ready.
 

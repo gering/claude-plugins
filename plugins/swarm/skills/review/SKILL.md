@@ -27,9 +27,12 @@ branch delta).
   the publish step (step 5). **Requires the local checkout to BE the PR head** —
   the in-session verifier reads `file:line` from disk, so the block hard-stops if
   `HEAD` ≠ the PR head (check it out first: `gh pr checkout <n>`). **Incompatible
-  with `--fix`/`--loop`** — those edit the local tree, which has no defined meaning
-  against a remote PR diff; the step-1 block enforces this deterministically (it
-  refuses the combination), not just in prose. A `--pr` review is otherwise
+  with `--fix`** — it edits the local tree, which has no defined meaning against a
+  remote PR diff; the step-1 block enforces this deterministically (it refuses the
+  combination), not just in prose. **`--loop --pr [<number>]` is a different mode:**
+  the loop reviews and fixes the *local* tree as usual and the PR is only where its
+  one final **loop report** goes (step 4, "Loop report") — no PR diff, no step 5.
+  A `--pr` review is otherwise
   **read-only** (it never edits the tree); its only side effect is the confirmed
   comment. If a scope argument is also present it is ignored for `--pr` (the PR
   defines the diff) — say so.
@@ -116,8 +119,13 @@ Decide what to review from the user's argument, then run the block:
   message and do NOT run the block — never interpolate a raw argument into the
   assignment (`--pr '1; rm -rf …'` would otherwise execute at assignment time,
   before the in-block numeric `case` guard, which stays as belt-and-suspenders).
-  Also prefix `FIX_OR_LOOP=1;` whenever `--fix`/`--loop` was given, so the block can
-  deterministically refuse the read-only-vs-edit-loop combination. The block reads
+  Also prefix `FIX_OR_LOOP=1;` when `--fix` was given **without** `--loop`, so the
+  block can deterministically refuse the read-only-vs-edit combination. **Any run
+  with `--loop` and `--pr` (with or without `--fix`, which `--loop` absorbs) takes
+  none of these prefixes** (no `REVIEW_PR`, no `PR_ARG`, no `FIX_OR_LOOP`): its
+  rounds review the local tree with the default scope. **Before round 0's prep
+  block**, run step 4's `loop-target` and `loop-tree` preflight ("With `--pr`"):
+  a wrong head or a stacked PR must stop the run before any review is paid for. The block reads
   them via `${REVIEW_PR:-0}` / `${PR_ARG:-}` / `${FIX_OR_LOOP:-0}`, so a pre-set
   value survives and the `if [ "$REVIEW_PR" = 1 ]` branch resolves the PR and fills
   `$DIFF`; with no prefix it defaults to a local review.
@@ -129,7 +137,7 @@ if [ "${SWARM_QUICK:-0}" = 1 ] && [ "${SWARM_MAX:-0}" = 1 ]; then
   echo "SWARM_PROFILE_ERR=--quick cannot combine with --max"; exit 0
 fi
 if [ "${REVIEW_PR:-0}" = 1 ] && [ "${FIX_OR_LOOP:-0}" = 1 ]; then
-  echo "SWARM_PR_ERR=--pr cannot combine with --fix/--loop (read-only review); re-run with one or the other"; exit 0
+  echo "SWARM_PR_ERR=--pr cannot combine with --fix (read-only review); --loop --pr reviews the local tree and posts one loop report instead"; exit 0
 fi
 PROFILE=default
 if [ "${SWARM_QUICK:-0}" = 1 ]; then PROFILE=quick; fi
@@ -208,10 +216,10 @@ echo "PROFILE=$PROFILE"
 # Bash call (tool calls don't persist shell state). The skill sets these two
 # BEFORE running the block when `--pr` was given; both default safe, so a verbatim
 # run with no --pr takes the local path — no literal placeholder ever executes:
-REVIEW_PR="${REVIEW_PR:-0}"      # 1 iff --pr was given (set by the caller's prefix). Read via
+REVIEW_PR="${REVIEW_PR:-0}"      # 1 iff --pr was given without --loop (caller's prefix). Read via
 PR_ARG="${PR_ARG:-}"             # ${VAR:-default} so a caller-set value SURVIVES — a plain
 INCLUDE_UNTRACKED=1              # REVIEW_PR=0 here would clobber the prefix and revert to local.
-FIX_OR_LOOP="${FIX_OR_LOOP:-0}"  # caller sets 1 when --fix/--loop was given (same prefix mechanism)
+FIX_OR_LOOP="${FIX_OR_LOOP:-0}"  # caller sets 1 with REVIEW_PR when --fix (no --loop) was given
 # Kimi opt-in: `--kimi` prefixes SWARM_KIMI=1 (same mechanism); an operator's
 # exported SWARM_KIMI survives the default. EXPORTED because the adapter's
 # readiness probe (`list --json` below) is what gates the metered voice.
@@ -572,7 +580,7 @@ echo "SESSION_RUN=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" session)"
   underlying `gh` stderr when relevant) and **stop** — a `--pr` review has no local
   diff to fall back to. Causes: `gh` missing/unauthenticated, a non-numeric `--pr`
   value, no PR for the branch, an unreadable PR/diff, `--pr` combined with
-  `--fix`/`--loop` (read-only, mutually exclusive), or the **local checkout not being
+  `--fix` (read-only, mutually exclusive), or the **local checkout not being
   the PR head** (verification reads local files, so the user must `gh pr checkout <n>`
   first). On success the block echoes `PR_NUM`, `PR_HEAD_OID` (the reviewed SHA), and
   `PR_META` (number, title, url, base/head/headRefOid) — carry them into the report
@@ -592,11 +600,16 @@ echo "SESSION_RUN=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/agents.sh" session)"
   **writable working directory**: a read-only mount, a full disk or a root-owned
   clone fails here) or the copy itself failed. Surface the message and stop;
   never fall back to the plugin-cache path, which Workflow refuses to execute.
+- `SWARM_EMPTY` in a `--loop` re-review (round ≥ 1) → the fixes emptied the
+  delta: go to the close-out as `0-findings` (append `0` to `OPEN[]`), so a
+  `--loop --pr` run still posts its report. Otherwise:
 - `SWARM_EMPTY` → tell the user there is nothing to review (clean working tree /
   no branch delta) and stop.
 - `SWARM_NONCE_UNAVAILABLE=…` → the finding-fence nonce could not be minted
   (python3/secrets missing). Do NOT fall back to an unfenced run: tell the user
   the second-order fence can't be provisioned on this host and stop.
+- `SWARM_WARN=…` under `--loop --pr` → surface it and **stop**: the report would
+  claim the whole PR, but this scope covers only uncommitted changes.
 - `SWARM_WARN=…` → surface that line: the scope narrowed to uncommitted changes
   because no default-branch ancestor was found. Then continue.
 - `externalVoices` is the `voices=` line split on commas (empty → `[]`) —
@@ -926,8 +939,8 @@ commit, then review again | the PR does not target the default branch | the PR
 head moved during the review>."
 
 After presenting:
-- `--pr` given → proceed to **step 5** (offer to publish the report as a PR
-  comment). `--pr` never fixes, so step 4 is skipped.
+- `--pr` given without `--loop` → proceed to **step 5** (offer to publish the
+  report as a PR comment). `--pr` never fixes, so step 4 is skipped.
 - `--fix` or `--loop` given → proceed to **step 4**.
 - neither → the review is read-only. Offer to fix the ✅/🟨 findings (or to
   re-run with `--fix` / `--loop`) and wait — change nothing on your own.
@@ -1001,6 +1014,17 @@ instead. In `--fix` (no loop): stop here.
 Wrap `--fix` in the `/cycle` loop state machine, run **locally** (no push, no
 `@claude` poll — everything happens in-session on the working tree). Parse
 `--loop=N` for the cap (default `10`).
+
+**With `--pr` (loop report):** before round 0's prep block, resolve the target once:
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/pr-post.py" loop-target [--pr <n>]` (the same
+model-layer `^[0-9]+$` check as step 1 first). `LOOP_PR_NUM=` + `LOOP_PR_HEAD_OID=` →
+keep both; `SWARM_PR_ERR=…` → surface it and **stop** before any review (not an open
+PR, a PR into a branch other than the default one, or the local `HEAD` isn't its
+head: the report would not cover what the PR shows). Ignore a scope argument (say so): the report speaks for the whole lane, so
+every round uses the default scope. Also keep a per-severity tally of applied fixes
+(🔴/🟡/⚪ defects, design by `kind`) for the report, and run
+`pr-post.py loop-tree` right before **each** round's prep block, keeping the last
+`LOOP_TREE` as `REVIEWED_TREE` (the tree that round's review saw).
 
 Setup: `ROUND = 0`, `FIXES_TOTAL = 0`, and `OPEN[]` — the per-round OPEN-findings
 count, R0 first, held in-session. **Open = every finding this round left
@@ -1101,9 +1125,65 @@ When fixes were applied after the last recorded review, record them once here:
 `review-record.sh fixed --after '<RECORD_HEAD of the last recorded review>'`. A rise in the box (a fix surfaced new findings) is
 legitimate — the script shows it; don't explain it away.
 
+#### Loop report (`--loop --pr` only)
+
+After the close-out, publish **one** comment summarizing the run — never one per
+round. Rendering, redaction, the gates and create-vs-update are deterministic in
+`pr-post.py` (`loop-build` / `loop-post`); do not re-implement them.
+
+1. **Pin the tree, then the pushed head.** Right after the close-out box, before
+   anything is committed: `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/pr-post.py" loop-tree`
+   → keep `LOOP_TREE` (the working tree the loop left; `SWARM_PR_ERR=` → no report).
+   The report may only name a commit holding exactly that tree, which the PR shows.
+   If fixes are uncommitted or unpushed, ask once to commit and push them (a caller
+   already authorized for both — e.g. a work-system lane whose mandate allows
+   `commit` and `push-own-branch` — just does it). Declined → no report; say so.
+   Then `HEAD_OID=$(git rev-parse HEAD)`.
+2. **Assemble the input JSON** (Write tool, scratch dir) from in-session state:
+   ```json
+   {
+     "pr_num": <LOOP_PR_NUM>, "head_oid": "<HEAD_OID, full SHA>",
+     "tree": "<LOOP_TREE at close-out>", "reviewed_tree": "<REVIEWED_TREE>",
+     "end": "<the terminate= reason>", "cap": <CAP>, "fixes_total": <FIXES_TOTAL>,
+     "open_trajectory": [<OPEN[], R0 first>],
+     "fixed": {"critical": 0, "warning": 0, "minor": 0, "design": 0},
+     "open_rows": [{"num":"2","sev":"🟡","ort":"file:line","befund":"…","status":"❌ disagree","kind":"defect","lens":"…"}],
+     "agents": <balance.participants of the last round, verbatim>,
+     "coverage_notes": [<the last round's balance.coverageNotes, verbatim; [] if none>]
+   }
+   ```
+   `open_rows` = exactly the findings counted in the last `OPEN[]` entry (the script
+   refuses a mismatch), cells **raw**. `fixed` buckets each applied fix once —
+   design by `kind`, defects by `sev` — and must sum to `fixes_total`. The script derives rounds, open counts,
+   `clean`, `rereviewed` and `degraded` (lost voices) itself — and refuses a reason that claims the last
+   review saw the final tree (`0-findings`, `nothing-agreed`, `no-change`) when
+   `tree` ≠ `reviewed_tree` — redacts secret and local-path shapes, and
+   sanitizes every cell like step 5.
+3. **Render + confirm once:** `pr-post.py loop-build --input "<json>"`, show the body,
+   scan it for steered content (as step 5.2), ask *post this loop report to PR #<n>?*
+4. **Post:** `pr-post.py loop-post --input "<json>"`. It re-checks that the local
+   `HEAD` is `head_oid` with a clean tree whose commit holds `tree`, and that the
+   live PR head matches, then
+   **updates** this user's earlier loop report on the PR (found by its marker) or
+   creates the first one. Tokens: `SWARM_PR_POSTED=<url>` / `SWARM_PR_UPDATED=<url>`
+   → report the URL; `SWARM_PR_LOCAL_MISMATCH=`, `SWARM_PR_TREE_MISMATCH=`
+   (a hook, pull or other commit changed the tree after the close-out: re-run the
+   loop), `SWARM_PR_STALE=`,
+   `SWARM_PR_LOCAL_UNVERIFIED=`, `SWARM_PR_HEAD_UNVERIFIED=` → nothing was posted:
+   fix the stated cause (usually push), rebuild, re-confirm; `SWARM_PR_POST_ERR=` →
+   report it, the close-out stays on screen. Delete the temp JSON.
+
+The body's first line is a hidden marker a merge gate can read:
+`<!-- swarm-loop-report:v1 pr=<n> head=<full sha> rounds=<n> end=<reason> clean=yes|no rereviewed=yes|no degraded=yes|no open=<n> fixed=<n> -->`
+(`clean=yes` only for `0-findings`).
+It is **advisory evidence, not proof**: unsigned, editable by maintainers, and its
+counts come from this session's tallies. Re-runs edit the same comment, so a gate
+trusting it must check the comment's author itself (and that the marker's `head=`
+is the head it gates); the lane's merge gate stays `review-record.sh`.
+
 ### 5. Publish to the PR (`--pr` only)
 
-Only when `--pr` was given, after presenting the report (step 3). Posting is an
+Only when `--pr` was given without `--loop`, after presenting the report (step 3). Posting is an
 **outward-facing action** — the `--pr` flag authorized the *review*, not silent
 publishing, so **confirm once** before posting. Body assembly, the per-cell
 sanitizer, the stale-head gate, and the `gh` post are **deterministic and
@@ -1279,6 +1359,7 @@ post. Do **not** re-implement the sanitize/gate/post logic inline.
   Posting confirms once, goes out via `gh pr comment` under the user's own
   identity (so pr-flow's `claude`-authored poll ignores it), and only ever
   carries **output-gated** findings. `--pr` is **read-only** and mutually
-  exclusive with `--fix`/`--loop` (a local-edit loop has no meaning against a
-  remote diff); auto-review-on-push is a deliberate non-goal (see the task's
+  exclusive with `--fix` (a local edit has no meaning against a remote diff);
+  `--loop --pr` instead loops on the local tree and posts one updatable loop
+  report pinned to the pushed head; auto-review-on-push is a deliberate non-goal (see the task's
   residual note).
