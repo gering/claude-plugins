@@ -740,8 +740,17 @@ check("repeated unanswered @claude mentions route local", r.get("route") == "loc
 check("as evidence, not proof", r.get("source") == "evidence"
       and "not proof" in r.get("why", "") and r.get("has_bot") == "unknown")
 check("evidence is never remembered", not memory_file(repo).exists())
-check("any bot comment defeats the evidence",
-      route(str(repo), env=gh_env("bot", asked + [comment("ci[bot]", "green", kind="Bot")]))
+# Only the Claude App vetoes the evidence: a third-party review bot on the repo
+# (oskar-portmann[bot], PR #101) used to disable it for good.
+r = route(str(repo), env=gh_env("foreign", asked + [
+    comment("oskar-portmann[bot]", "LGTM", "2026-01-03T00:00:00Z", "Bot"),
+    comment("ci[bot]", "green", kind="Bot")]))
+check("a foreign bot comment does not defeat the evidence",
+      r.get("route") == "local" and r.get("source") == "evidence"
+      and "Claude App never replied" in r.get("why", ""))
+check("a Claude App reply defeats the evidence",
+      route(str(repo), env=gh_env("claude", asked + [
+          comment("claude[bot]", "**Claude finished**", "2026-01-03T00:00:00Z", "Bot")]))
       .get("route") == "bot")
 check("a single mention is not enough",
       route(str(repo), env=gh_env("one", asked[:1])).get("route") == "bot")
