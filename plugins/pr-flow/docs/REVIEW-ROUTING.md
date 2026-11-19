@@ -105,7 +105,7 @@ exits 0. Decided in this order:
 | `setting` | `route = "github"` — clears the memory | `bot` |
 | `probe` | `auto` and `has_bot=yes` — clears the memory | `bot` |
 | `memory` | `auto`, a recorded "no bot answered on <date> (PR #N)", and no Claude bot comment in the repo since | `local` |
-| `evidence` | `auto`: in the repo's last 100 comments, owners/members/collaborators asked `@claude` ≥2× and **no** bot account ever wrote | `local` |
+| `evidence` | `auto`: in the repo's last 100 comments, owners/members/collaborators asked `@claude` ≥2× and the Claude App (`claude[bot]`) **never** replied — other bots do not count | `local` |
 | `default` | everything else (`auto` + `unknown`) | `bot`, `record=yes` |
 
 `--offline` (the never-block consumers) skips the network step — no evidence, no

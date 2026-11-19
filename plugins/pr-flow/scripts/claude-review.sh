@@ -605,8 +605,11 @@ PY
 }
 
 # One page of the repo's most recent issue/PR comments, read once per networked
-# `route`. Prints "<total> <bots> <asks> <last_claude_reply>" (the last field is
-# `-` when none), or nothing when gh cannot answer.
+# `route`. Prints "<total> <claude_replies> <asks> <last_claude_reply>" (the last
+# field is `-` when none), or nothing when gh cannot answer.
+#   claude_replies   comments by the Claude App (CLAUDE_JQ's claude_author). Only
+#          these veto the evidence: counting every Bot account let any third-party
+#          bot on the repo (a review or CI bot) disable it for good.
 #   asks   `@claude` mentions by people the bot would actually obey (owner,
 #          member, collaborator) — an outsider's mention is ignored by the bot,
 #          so counting it let anyone on a public repo force the local route.
@@ -620,7 +623,7 @@ route_evidence() {
       def ask: (bot | not)
         and ((.author_association // "") | IN("OWNER", "MEMBER", "COLLABORATOR"))
         and ((.body // "") | test("(^|\\s)@claude\\b"; "i"));
-      "\(length) \([.[] | select(bot)] | length) \([.[] | select(ask)] | length) \(([.[] | select(claude_author) | .created_at] | max) // "-")"
+      "\(length) \([.[] | select(claude_author)] | length) \([.[] | select(ask)] | length) \(([.[] | select(claude_author) | .created_at] | max) // "-")"
     ' 2>/dev/null ) || true
 }
 
@@ -628,7 +631,7 @@ ROUTE_EVIDENCE_MIN_ASKS=2
 
 subcmd_route() {
   local dir="." branch="" lane_source="" offline=false root setting note
-  local mem at pr probe="" hb="" ev="" total bots asks last cleared=""
+  local mem at pr probe="" hb="" ev="" total replies asks last cleared=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --offline) offline=true; shift ;;
@@ -676,7 +679,7 @@ subcmd_route() {
   $offline || ev="$(route_evidence "$root")"
   [[ "$ev" =~ ^([0-9]+)\ ([0-9]+)\ ([0-9]+)\ (.+)$ ]] || ev=""
   if [[ -n "$ev" ]]; then
-    total="${BASH_REMATCH[1]}"; bots="${BASH_REMATCH[2]}"; asks="${BASH_REMATCH[3]}"; last="${BASH_REMATCH[4]}"
+    total="${BASH_REMATCH[1]}"; replies="${BASH_REMATCH[2]}"; asks="${BASH_REMATCH[3]}"; last="${BASH_REMATCH[4]}"
   fi
   mem="$(route_memory "$root")"
   if [[ -n "$mem" ]]; then
@@ -694,8 +697,8 @@ subcmd_route() {
       return 0
     fi
   fi
-  if [[ -n "$ev" ]] && (( bots == 0 && asks >= ROUTE_EVIDENCE_MIN_ASKS )); then
-    emit_route local no evidence "likely no bot: @claude was asked $asks times in the last $total comments on this repo and no bot account ever replied (not proof; a claude-code-action workflow on the default branch or review.route = github overrides it)"
+  if [[ -n "$ev" ]] && (( replies == 0 && asks >= ROUTE_EVIDENCE_MIN_ASKS )); then
+    emit_route local no evidence "likely no bot: @claude was asked $asks times in the last $total comments on this repo and the Claude App never replied (not proof; a claude-code-action workflow on the default branch or review.route = github overrides it)"
     return 0
   fi
   emit_route bot yes default "has_bot=$hb — try the bot; a timed-out poll switches this repo to local"
