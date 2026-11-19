@@ -90,7 +90,7 @@ waiting for; every other stop is final for this run.
        re-confirm. With `--as <app>`, no probe runs here; read
        `gh pr view <pr_number> --json mergedBy --jq .mergedBy.login` instead, and when
        it is neither `<app>` nor `<app>[bot]`, add "⚠️ merged by `<login>`, not
-       `<app>`" to step 5's summary (a queued merge someone else completed).
+       `<app>`" to step 5's summary.
      - `pr_state=OPEN` with `--as <app>` → first probe the identity switch, so an armed
        wait never ends on a merge that cannot run as asked:
        `GH_APP_MERGE='<app>' gh __shim-probe` (the app name typed in literally) must
@@ -258,10 +258,6 @@ waiting for; every other stop is final for this run.
 3. **Merge** — invoke `/pr-flow:merge` and let it run with all its own gates and
    questions (preflight, rebase, CI, reviews, method, doc warnings). Do not answer its
    questions for the user and do not pass flags that skip them.
-   - `/merge` reports the PR **queued, not merged** (a merge queue) → stop: "Queued,
-     not merged yet. Nothing was closed. Run `/land --as <app>` again once the PR has
-     merged — it then checks who merged it and closes." Never re-run `/merge` on a
-     queued PR.
    - With `--as <app>` from the user's `/land`, invoke it as `/pr-flow:merge --as <app>`
      — the only argument `/land` ever passes. When the skill loads, check that its
      `## Arguments` section lists `--as` (pr-flow 1.10.0 and later). An older `/merge`
@@ -423,10 +419,14 @@ waiting for; every other stop is final for this run.
    ```
    Landing task '<task_name>'
    - Handoff report: <report_id> | skipped (<reason>)
-   - Merged: PR #<pr_number> (confirmed)
+   - Merged: PR #<pr_number> (confirmed)[ — ⚠️ merged by <login>, not <app>]
    - Follow-ups: <step 2's list plus step 3's, one item per line | none>
    - Closing: /close --delegate follows
    ```
+   With `--as <app>`, the merge line carries `/merge`'s `mergedBy` warning; when
+   `/merge` never reached its check (it errored after its merge command ran), read
+   `gh pr view <pr_number> --json mergedBy --jq .mergedBy.login` here and compare as
+   step 1 does.
    The follow-ups go on screen every time: a self-close never runs the Manager's
    sweep, and without insights the report that carries them was never written.
    When the list holds an item no report carries — the report was skipped, or the

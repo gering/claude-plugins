@@ -336,23 +336,22 @@ argument-hint: "[--as <github-app>]"
     - **Never pass `--admin`.** If branch protection blocks the merge: stop and surface the error. Root-cause over workaround.
     - **Permission denied** (the auto-mode classifier refused `gh pr merge`, e.g.
       "Merge Without Review") → stop; do not retry or rephrase the command. Report the
-      denial and step 6b's verdict, and say: "Type `/pr-flow:merge` yourself (with
-      the same `--as <app>`, if you gave one) — an
+      denial and step 6b's verdict, and say: "Type `/pr-flow:merge` yourself — an
       explicit command clears this denial. To allow it for lanes with a covering local
       review, see work-system's README, 'Auto mode and the local review gate'." With
-      `MERGE_AS`, leave out that README pointer: a merge under another identity is
-      meant to be confirmed by hand each time.
-    - Capture output + exit code
+      `MERGE_AS`, say instead: "Type `/pr-flow:merge --as <MERGE_AS>` yourself — a merge
+      under another identity is meant to be confirmed by hand each time."
+    - Capture output + exit code. A non-zero exit is a failed merge: stop and surface
+      its error (with `MERGE_AS` too — never report it as anything else).
 
 15. **Post-merge actions**:
     - With `MERGE_AS`: `gh pr view <N> --json state,mergedBy --jq '[.state, .mergedBy.login] | @tsv'`.
       Only on `MERGED` compare the login: if it is neither `<MERGE_AS>` nor
       `<MERGE_AS>[bot]`, put "⚠️ merged by `<login>`, not `<MERGE_AS>`" into the
       final summary (it cannot be undone: report it, do not retry). Any other state
-      (queued, still open) is not a merge — report that state, never as a merge by
-      someone else. End the skill there with "⏳ PR #<N> is queued, not merged yet —
-      the `mergedBy` check runs once it has merged (`/land --as <MERGE_AS>` does it)":
-      no branch cleanup, no `/close` offer, no deploy, and none of steps 16–17.
+      after a zero exit (e.g. a merge queue or auto-merge accepted it) → stop: "PR
+      #<N> is `<state>`, not merged yet — no `mergedBy` check ran." No branch cleanup,
+      no `/close` offer, no deploy, and none of steps 16–17.
     - If checkout base chosen: `git checkout <BASE> && git pull origin <BASE>`
     - **Local branch handling** — detect backup convention and execute directly (no prompt):
       - Run: `git for-each-ref --format='%(refname:short)' refs/heads/ | grep -E '^(backup|archive|old)/' | head -5`

@@ -26,8 +26,8 @@ A shim earlier on `PATH` than the real `gh` must:
 
 `/merge --as` always binds the merge to the head it checked (`--match-head-commit`).
 After the merge it reads `mergedBy` and warns in its summary when it is not
-`<app>` / `<app>[bot]`. A merge queue can answer with a queued PR instead: `/merge`
-then reports it as queued, and `/land --as <app>` checks `mergedBy` once it merged.
+`<app>` / `<app>[bot]`. A PR that a merge queue or auto-merge only accepted is
+reported by its state, not as merged, and no `mergedBy` check runs.
 
 ## Reference shim (example, not shipped)
 
@@ -35,18 +35,27 @@ Assumptions, adapt to your setup: each app's private key lives at
 `~/.config/github-app-<app>/private-key.pem`; a helper `gh-as <app> <gh args…>`
 mints an installation token for that app and runs the **real** `gh` (by absolute
 path, never `gh` from `PATH`, which would re-enter the shim) with it as
-`GH_TOKEN`; the real `gh` is `/usr/local/bin/gh`; the allowlist
+`GH_TOKEN` (on GitHub Enterprise Server: `GH_ENTERPRISE_TOKEN`); the real `gh` is `/usr/local/bin/gh`; the allowlist
 `~/.config/gh-shim/merge-allow` holds one app name per line and is required.
 
 ```sh
 #!/bin/sh
 # ~/.local/bin/gh — must come before the real gh on PATH
+export LC_ALL=C   # the name check below must not depend on the locale
 REAL_GH=/usr/local/bin/gh
 CFG="$HOME/.config/gh-shim"
 GH_AS="$HOME/.local/bin/gh-as"
 app="${GH_APP_MERGE:-}"
 
-if [ "${1:-}" = __shim-probe ] || { [ -n "$app" ] && [ "${1:-}" = pr ] && [ "${2:-}" = merge ]; }; then
+if [ -n "$app" ] && [ "${1:-}" != __shim-probe ] && { [ "${1:-}" != pr ] || [ "${2:-}" != merge ]; }; then
+  # GH_APP_MERGE on anything but a plain `gh pr merge …` (a global flag such as
+  # -R first, another subcommand) is refused, never run as you.
+  echo "gh-shim: GH_APP_MERGE is only honored on 'gh pr merge'. No fallback." >&2; exit 2
+fi
+if [ "${1:-}" = __shim-probe ] || [ -n "$app" ]; then
+  for a in "$@"; do
+    [ "$a" = --admin ] && { echo "gh-shim: --admin is refused under GH_APP_MERGE" >&2; exit 2; }
+  done
   case "$app" in -*|*[!a-z0-9-]*|"") echo "gh-shim: invalid app name '$app'" >&2; exit 2;; esac
   if [ ! -r "$CFG/merge-allow" ] || ! grep -qxF -- "$app" "$CFG/merge-allow"; then
     echo "gh-shim: '$app' is not listed in $CFG/merge-allow. No fallback." >&2; exit 2
