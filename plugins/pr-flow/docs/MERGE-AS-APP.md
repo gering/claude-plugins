@@ -49,12 +49,12 @@ if [ "${1:-}" = __shim-probe ] || { [ -n "$app" ] && [ "${1:-}" = pr ] && [ "${2
   if [ ! -r "$CFG/merge-allow" ] || ! grep -qxF -- "$app" "$CFG/merge-allow"; then
     echo "gh-shim: '$app' is not listed in $CFG/merge-allow. No fallback." >&2; exit 2
   fi
-  if [ ! -r "$HOME/.config/github-app-$app/private-key.pem" ] || [ ! -x "$GH_AS" ]; then
+  if [ ! -f "$HOME/.config/github-app-$app/private-key.pem" ] || [ ! -f "$GH_AS" ] || [ ! -x "$GH_AS" ]; then
     echo "gh-shim: app '$app' is not set up on this machine. No fallback." >&2; exit 2
   fi
   [ "$1" = __shim-probe ] && { echo "merge_app=$app"; exit 0; }
   unset GH_APP_MERGE
-  exec "$GH_AS" "$app" "$@" || exit 2
+  exec "$GH_AS" "$app" "$@"
 fi
 exec "$REAL_GH" "$@"
 ```
@@ -75,6 +75,12 @@ Notes:
 - Claude Code usually asks before running a command with an env prefix, even when
   `Bash(gh:*)` is allowed. That prompt is the visible confirmation of a merge under
   another identity; don't allowlist it away.
-- Approving needs no plugin change: with the shim, extend the `pr merge` match to
-  `pr review` and type `GH_APP_MERGE=<app> gh pr review <N> --approve` yourself.
-  GitHub refuses only an approval of the app's own PR.
+- The key file is the real boundary. Any process running as your user can call
+  the shim (or `gh-as`) directly, so on a machine shared by several agents or people
+  the allowlist and the permission prompt are prompt-level fences only. Use a
+  dedicated merge app with the least permissions (*Contents* + *Pull requests*
+  write), and keep its key readable only by the account that should merge.
+- `--as` changes who merges, not whether the merge was reviewed. Use it only where
+  branch protection (a required approving review) still gates the merge; the app's
+  identity must never stand in for a second person's approval, so do not approve
+  with the same app either.
