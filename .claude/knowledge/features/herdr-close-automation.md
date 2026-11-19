@@ -1,9 +1,9 @@
 ---
 title: "herdr /close Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-11-04
+updatedAt: 2026-11-18
 createdFrom: "PR #18"
-updatedFrom: "session: 2026-11-04 (task/improve-land-armed-and-inline-ack)"
+updatedFrom: "PR #109"
 pluginVersion: 1.9.0
 prime: false
 reindexedAt: 2026-07-12
@@ -198,13 +198,38 @@ failed with `manager-working`, and the Manager only ever *listed* sweep items.
   documented command → Ask), Ask, Deploy; 10b runs them in order after the archive.
   Order: an item behind one awaiting the user is `blocked`, never run early.
 - **Record before the removal.** An unanswered question used to leave no trace. 6c
-  writes every not-yet-run item to `tasks/ROADMAP.md` `## Open follow-ups` via
+  records every not-yet-run item (an issue on github, else `tasks/ROADMAP.md`
+  `## Open follow-ups`) via
   `followups.py` *before step 7* (an interrupted close keeps them too); 10b acts and
   resolves; a self-closing worker records its own open items; `/list` shows them. A
   script, not prose: flock'd read-modify-write (concurrent closes), ids never reused
   (counter marker inside the section only), text folded to one line so stdin cannot
   forge a heading or entry, symlinked roadmap refused. `ROADMAP.md` is excluded from
   every task glob, or it would count as a pending task.
+- **Follow-ups follow the task backend** (work-system 1.35.0). The file had no
+  history, so follow-ups could not be audited. `followups.py` imports task-store's
+  `resolve` (not a copy): github → one `work-system:followup` issue per item (body
+  marker = sha of task+class+text, so a lost create reply or re-run dedups), a gh
+  failure is exit 4 and never a write to the file (split backlog); local → the file,
+  committed by `/close` only once the repo **tracks** it. "Not ignored" was rejected
+  as the trigger: in this public repo `tasks/*.md` is untracked but not ignored, so
+  the first close would have published a private roadmap. Published text is refused
+  on a scan hit (exit 5) rather than redacted — the Manager rewrites its own words.
+  Recording an issue is close bookkeeping, not the outward "new task issue" that 6c
+  asks about. Under `auto` only local task files keep follow-ups in the file, like
+  the tasks. Pins on open F-lines were tried and dropped (PR #109 rounds 1–4): any
+  open F-line kept repos already on issues recording into the file forever (a
+  downstream repo carried dozens of legacy lines); a `backend` read the model carries
+  as `record --backend` was lost on a resume and skipped by a worker's self-close; a
+  same-task F-line matched stale lines under a reused task name and vanished when a
+  line was resolved mid-close. A close that archives its last task file may record
+  its later items as issues — harmless, since on github the file's entries are still
+  listed and resolvable. Other review lessons (PR #109): scan the raw text, since
+  folding to one line defeats `^KEY=` patterns; "tracked" = in HEAD, not staged; the
+  whole tracked file is scanned before a commit (hand edits); follow-up issues are
+  never tasks, in any `tasks.select` mode; `"#N"` must be quoted in commands; reads
+  (`list`, `resolve "#N"`) are never pinned, or open issues vanish from
+  `list --class deploy`.
 - **Deploy is the Manager's** (user decision 2026-10-17). `deny: deploy` only binds
   the worker's initiative; a user-invoked merge plus a project's "deploy after merge"
   slipped past it. `mandate.sh deploy-owner` (pr-flow via its shim) answers from the

@@ -81,6 +81,7 @@ from urllib.parse import urlsplit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LABEL = "work-system:task"
+FOLLOWUP_LABEL = "work-system:followup"   # followups.py; never a task, in any select mode
 LABEL_COLOR, LABEL_DESC = "5319e7", "A work-system task (managed by task-store.py)"
 # One name alphabet for names, markers and refs: a marker that cannot parse a
 # name create accepted would lose the task.
@@ -361,6 +362,8 @@ def unselected(issue, sel):
     have = label_names(issue)
     if is_pull_request(issue):
         return "it is a pull request"
+    if FOLLOWUP_LABEL in have:
+        return f"it is a Manager follow-up ({FOLLOWUP_LABEL}), not a task"
     if sel["select"] != "all-open" and LABEL not in have:
         return f"no {LABEL} label (tasks.select = \"label\")"
     hit = sorted(have & lowered(sel["exclude"]))

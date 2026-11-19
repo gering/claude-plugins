@@ -40,7 +40,13 @@
 #       tracked — never a blanket `git add tasks/`), commit ONLY those paths (a
 #       pathspec commit, so unrelated pre-staged work is never swept in), and
 #       fast-forward push to origin. Refuses if the main repo isn't on
-#       <main-branch>. Never force-pushes.
+#       <main-branch>. Never force-pushes. A TRACKED tasks/ROADMAP.md (the
+#       local follow-up record, see followups.py) rides along when it changed:
+#       tracking it is the repo's opt-in; an untracked one is never added.
+#   roadmap-push <main-repo-path> <main-branch>
+#       The same commit+push for a tracked tasks/ROADMAP.md alone, for the
+#       follow-ups /close resolves or records after the archive commit (step
+#       10b). Run only under the approval (or autocommit flag) step 10 used.
 #   autocommit get <main-repo-path> [<main-branch>]
 #       Print `enabled=yes` iff the repo opts into skipping /close's commit+push
 #       prompt, else `enabled=no`. FAIL-SAFE: anything unresolved or suspicious
@@ -97,6 +103,12 @@
 #   archive_committed=yes|no (no = a gitignored archive whose commit recorded only
 #   the source removal). Pushes only when the archive commit is the sole one ahead
 #   of origin/<main-branch>, never sweeping unrelated unpushed commits onto it.
+#   The committed-* results also emit roadmap_committed=yes|no.
+# `roadmap-push` output: result=committed-pushed | committed-local [reason=…] |
+#   commit-failed | nothing-to-commit | untracked | refused roadmap_note=… (the
+#   file holds a secret or local path, see `followups.py scan`) | wrong-branch
+#   [current=…]. commit-push adds roadmap_note=… on every result when that scan
+#   kept the roadmap out.
 # Exit 0 on success; 2 on a usage error; 3 when the task file does not exist.
 set -eu
 
@@ -287,22 +299,30 @@ commit_push() {
   if [ "$archive_ignored" = no ]; then paths+=("$archived"); fi
   git -C "$repo" check-ignore -q -- "tasks/archive/_index.md" || paths+=("tasks/archive/_index.md")
   if git -C "$repo" ls-files --error-unmatch -- "$(lit "$src_rel")" >/dev/null 2>&1; then paths+=("$src_rel"); fi
-  [ "${#paths[@]}" -eq 0 ] && { echo "result=nothing-to-commit"; return 0; }
+  local roadmap_note=""
+  if roadmap_tracked "$repo" && roadmap_changed "$repo"; then
+    if roadmap_note="$(roadmap_scan "$repo")"; then paths+=("$ROADMAP"); fi
+  fi
+  # The note must survive every early return below: it is the only way /close
+  # learns that the roadmap was kept out.
+  note() { [ -z "$roadmap_note" ] || printf 'roadmap_note=%s\n' "$roadmap_note"; }
+  [ "${#paths[@]}" -eq 0 ] && { echo "result=nothing-to-commit"; note; return 0; }
 
   # Stage each path INDEPENDENTLY: `git add -A a b` aborts wholesale on one
   # non-matching element (e.g. a stale archived_path), which would silently drop
   # the valid source-deletion too. Then commit ONLY the paths that actually carry a
   # staged change — a pathspec commit, so unrelated pre-staged work is never swept
   # in, and a bad/empty element is simply absent from the commit.
-  local p staged=() archive_committed=no
+  local p staged=() archive_committed=no roadmap_committed=no
   for p in "${paths[@]}"; do
     git -C "$repo" add -A -- "$(lit "$p")" 2>/dev/null || true
     if ! git -C "$repo" diff --cached --quiet -- "$(lit "$p")"; then
       staged+=("$(lit "$p")")
       if [ "$p" = "$archived" ]; then archive_committed=yes; fi
+      if [ "$p" = "$ROADMAP" ]; then roadmap_committed=yes; fi
     fi
   done
-  [ "${#staged[@]}" -eq 0 ] && { echo "result=nothing-to-commit"; return 0; }
+  [ "${#staged[@]}" -eq 0 ] && { echo "result=nothing-to-commit"; note; return 0; }
 
   # Integrity guard: when the archive file WAS meant to be committed (not ignored)
   # but failed to stage (lost/moved/stale archived_path), do NOT report success —
@@ -311,39 +331,108 @@ commit_push() {
   # it, so nothing half-staged lingers) and surface it so /close can warn instead.
   if [ "$archive_ignored" = no ] && [ "$archive_committed" = no ]; then
     git -C "$repo" reset -q HEAD -- "${staged[@]}" 2>/dev/null || true
-    echo "result=archive-not-staged"
+    echo "result=archive-not-staged"; note
     return 0
   fi
 
+  local res
+  res="$(commit_and_push "$repo" "$mainbr" "Archive task $safe" \
+    "archive_committed=$archive_committed" "roadmap_committed=$roadmap_committed" \
+    -- "${staged[@]}")"
+  printf '%s\n' "$res"; note
+}
+
+ROADMAP="tasks/ROADMAP.md"
+
+# The follow-up record is committed only once the repo tracks it: tracking is
+# the opt-in, so a private roadmap in a public repo is never published unasked.
+# Committed at HEAD (a staged-only or `add -N` file is not the opt-in) AND still
+# in the index (a staged `git rm --cached` is the opt-out).
+roadmap_tracked() {
+  [ ! -L "$1/$ROADMAP" ] && git -C "$1" cat-file -e "HEAD:$ROADMAP" 2>/dev/null \
+    && git -C "$1" ls-files --error-unmatch -- "$(lit "$ROADMAP")" >/dev/null 2>&1
+}
+
+# Only a changed roadmap is committed, so only a changed one is scanned: an
+# unchanged file needs no interpreter start and no refusal note.
+roadmap_changed() {
+  ! git -C "$1" diff --quiet HEAD -- "$(lit "$ROADMAP")" 2>/dev/null
+}
+
+# The whole file is scanned, hand edits included, with the patterns followups.py
+# applies to each record: a hit keeps the roadmap out of the commit. Prints the
+# reason (for roadmap_note=) and fails on a hit or when the scan cannot run.
+roadmap_scan() {
+  local out
+  if out="$(python3 -I "$SCRIPT_DIR/followups.py" scan "$1" 2>&1)"; then return 0; fi
+  printf '%s' "$out" | tr '\n' ' ' | sed 's/^followups.py: //' | cut -c1-300
+  return 1
+}
+
+# commit_and_push <repo> <main-branch> <message> <extra k=v>... -- <staged pathspec>...
+# Commit exactly the staged pathspecs, then push only a clean single-commit
+# fast-forward. Prints result= plus the extra k=v lines on the committed-* results.
+commit_and_push() {
+  local repo="$1" mainbr="$2" msg="$3" extra=()
+  shift 3
+  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do extra+=("$1"); shift; done
+  shift
   # A non-zero exit here (these paths DO have staged changes) is a REAL failure — a
   # rejecting pre-commit hook, GPG signing misconfig, locked index — NOT an empty
   # commit; surface it instead of masking it as "nothing-to-commit".
-  if ! git -C "$repo" commit -m "Archive task $safe" -- "${staged[@]}" >/dev/null 2>&1; then
+  if ! git -C "$repo" commit -m "$msg" -- "$@" >/dev/null 2>&1; then
     echo "result=commit-failed"
     return 0
   fi
+  local x
+  emit() { printf '%s\n' "$@"; for x in ${extra[@]+"${extra[@]}"}; do printf '%s\n' "$x"; done; }
 
   # archive_committed lets /close word the outcome honestly: =no means a gitignored
   # archive whose commit recorded only the source removal (the archive stays local).
-  git -C "$repo" remote get-url origin >/dev/null 2>&1 || { printf 'result=committed-local\nreason=no-origin\narchive_committed=%s\n' "$archive_committed"; return 0; }
+  git -C "$repo" remote get-url origin >/dev/null 2>&1 || { emit result=committed-local reason=no-origin; return 0; }
 
-  # Push ONLY when our archive commit is the SOLE commit ahead of origin/<main-branch>
+  # Push ONLY when this commit is the SOLE commit ahead of origin/<main-branch>
   # (step 5 ff'd local <main-branch> to origin, so ahead should be exactly 1). If the
   # user had other unpushed commits on <main-branch>, pushing the whole branch would
-  # publish them under this archive-scoped approval — leave them for the user.
+  # publish them under this bookkeeping-scoped approval — leave them for the user.
   local ahead; ahead="$(git -C "$repo" rev-list --count "origin/$mainbr..$mainbr" 2>/dev/null || echo unknown)"
   if [ "$ahead" != "1" ]; then
-    printf 'result=committed-local\nreason=unpushed-history\narchive_committed=%s\n' "$archive_committed"
+    emit result=committed-local reason=unpushed-history
     return 0
   fi
 
   # Clean fast-forward. Never force-push; a rejected push (offline, protected, or
   # origin moved since step 5) is non-fatal.
   if git -C "$repo" push origin "$mainbr" >/dev/null 2>&1; then
-    printf 'result=committed-pushed\narchive_committed=%s\n' "$archive_committed"
+    emit result=committed-pushed
   else
-    printf 'result=committed-local\nreason=push-failed\narchive_committed=%s\n' "$archive_committed"
+    emit result=committed-local reason=push-failed
   fi
+}
+
+roadmap_push() {
+  local repo="${1:-}" mainbr="${2:-}"
+  if [ -z "$repo" ] || [ -z "$mainbr" ]; then
+    echo "usage: ${0##*/} roadmap-push <main-repo-path> <main-branch>" >&2
+    exit 2
+  fi
+  git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || { echo "result=nothing-to-commit"; return 0; }
+  local cur; cur="$(git -C "$repo" branch --show-current 2>/dev/null || true)"
+  if [ "$cur" != "$mainbr" ]; then
+    printf 'result=wrong-branch\ncurrent=%s\n' "$cur"
+    return 0
+  fi
+  roadmap_tracked "$repo" || { echo "result=untracked"; return 0; }
+  roadmap_changed "$repo" || { echo "result=nothing-to-commit"; return 0; }
+  local note
+  if ! note="$(roadmap_scan "$repo")"; then
+    printf 'result=refused\nroadmap_note=%s\n' "$note"; return 0
+  fi
+  git -C "$repo" add -- "$(lit "$ROADMAP")" 2>/dev/null || true
+  if git -C "$repo" diff --cached --quiet -- "$(lit "$ROADMAP")"; then
+    echo "result=nothing-to-commit"; return 0
+  fi
+  commit_and_push "$repo" "$mainbr" "Update open follow-ups" -- "$(lit "$ROADMAP")"
 }
 
 # Resolve <repo> to the MAIN checkout root: the opt-in flag must live in the main
@@ -717,6 +806,7 @@ autocommit() {
 case "${1:-}" in
   archive)     shift; archive "$@" ;;
   commit-push) shift; commit_push "$@" ;;
+  roadmap-push) shift; roadmap_push "$@" ;;
   autocommit)  shift; autocommit "$@" ;;
-  *) echo "usage: ${0##*/} {archive <repo> <name> <branch> [--pr <n>] [--sha <s>] | commit-push <repo> <name> <archived-rel-path> <main-branch> | autocommit {get|set|unset} <repo> [<main-branch>]}" >&2; exit 2 ;;
+  *) echo "usage: ${0##*/} {archive <repo> <name> <branch> [--pr <n>] [--sha <s>] | commit-push <repo> <name> <archived-rel-path> <main-branch> | roadmap-push <repo> <main-branch> | autocommit {get|set|unset} <repo> [<main-branch>]}" >&2; exit 2 ;;
 esac

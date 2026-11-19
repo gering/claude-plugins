@@ -320,9 +320,9 @@ check("the action vocabulary is published", "open-pr" in known and "merge" in kn
 
 # --- presets carry the choice the user actually made ------------------------
 for preset, gate, may_open_pr, may_merge, budget in [
-    ("standard", "reviewed-pr", True, False, "3"),
+    ("standard", "reviewed-pr", True, False, "5"),
     ("draft-only", "pushed-branch", False, False, "0"),
-    ("merge-delegated", "merged", True, True, "3"),
+    ("merge-delegated", "merged", True, True, "5"),
 ]:
     p = make_repo()
     r = run("init", str(p), "--preset", preset, "task=t", "authorized_by=user")
@@ -1094,21 +1094,21 @@ def init_budget(d, preset, *extra):
     return r, kv(run("show", str(d)).stdout).get("review_budget")
 
 
-FIVE = "[mandate]\nreview_budget = 5\n"
-for preset, want in (("standard", "5"), ("merge-delegated", "5"), ("draft-only", "0")):
-    r, got = init_budget(budget_repo(FIVE), preset)
+SEVEN = "[mandate]\nreview_budget = 7\n"
+for preset, want in (("standard", "7"), ("merge-delegated", "7"), ("draft-only", "0")):
+    r, got = init_budget(budget_repo(SEVEN), preset)
     check(f"setting: {preset} records {want}", got == want)
     check(f"setting: {preset} reports its source",
-          kv(r.stdout).get("review_budget_source") == ("setting" if want == "5" else "preset"))
+          kv(r.stdout).get("review_budget_source") == ("setting" if want == "7" else "preset"))
     check(f"setting: presets shows {preset} as init writes it",
-          presets_of(budget_repo(FIVE))[preset].get("review_budget") == want)
+          presets_of(budget_repo(SEVEN))[preset].get("review_budget") == want)
 
-r, got = init_budget(budget_repo(FIVE), "standard", "review_budget=2")
+r, got = init_budget(budget_repo(SEVEN), "standard", "review_budget=2")
 check("setting: an explicit review_budget= wins", got == "2")
 check("setting: ...and is reported as explicit",
       kv(r.stdout).get("review_budget_source") == "explicit")
 r, got = init_budget(budget_repo(), "standard")
-check("setting: unset records the schema default", got == "3")
+check("setting: unset records the schema default", got == "5")
 check("setting: unset reports the preset as source",
       kv(r.stdout).get("review_budget_source") == "preset")
 r, got = init_budget(budget_repo("[mandate]\nreview_budget = 0\n"), "standard")
@@ -1118,27 +1118,27 @@ for bad, why in (("[mandate]\nreview_budget = -1\n", "negative"),
                  ("[mandate]\nreview_budget = \"5\"\n", "a string"),
                  ("[mandate]\nreview_budget = true\n", "a boolean"),
                  ("[mandate]\nreview_budget = 18446744073709551616\n", "past the maximum"),
-                 ("[mandate\nreview_budget = 5\n", "unparsable TOML")):
+                 ("[mandate\nreview_budget = 7\n", "unparsable TOML")):
     r, got = init_budget(budget_repo(bad), "standard")
     check(f"setting: {why} falls back to the schema default",
-          kv(r.stdout).get("written") == "yes" and got == "3")
+          kv(r.stdout).get("written") == "yes" and got == "5")
     check(f"setting: {why} says why on stderr", ".work-system.toml" in r.stderr)
     std = presets_of(budget_repo(bad))["standard"]
     check(f"setting: {why} is named on presets' stdout",
-          std.get("review_budget") == "3"
+          std.get("review_budget") == "5"
           and ".work-system.toml" in std.get("review_budget_note", ""))
 check("setting: a usable file adds no note",
-      "review_budget_note" not in presets_of(budget_repo(FIVE))["standard"])
+      "review_budget_note" not in presets_of(budget_repo(SEVEN))["standard"])
 
 sym = budget_repo()
-(sym / "real.toml").write_text(FIVE)
+(sym / "real.toml").write_text(SEVEN)
 (sym / ".work-system.toml").symlink_to(sym / "real.toml")
 r, got = init_budget(sym, "standard")
-check("setting: a symlinked config is ignored", got == "3" and "symlink" in r.stderr)
-env_root = budget_repo(FIVE)
+check("setting: a symlinked config is ignored", got == "5" and "symlink" in r.stderr)
+env_root = budget_repo(SEVEN)
 ENV["SETTINGS_PROJECT_ROOT"] = str(env_root)
 check("setting: SETTINGS_PROJECT_ROOT wins, as in settings.py",
-      init_budget(budget_repo(), "standard")[1] == "5")
+      init_budget(budget_repo(), "standard")[1] == "7")
 del ENV["SETTINGS_PROJECT_ROOT"]
 
 fifo = budget_repo()
@@ -1146,7 +1146,7 @@ os.mkfifo(fifo / ".work-system.toml")
 try:
     r, got = init_budget(fifo, "standard")  # would hang on a blocking open()
     check("setting: a FIFO config falls back instead of hanging",
-          got == "3" and "not a regular file" in r.stderr)
+          got == "5" and "not a regular file" in r.stderr)
 except subprocess.TimeoutExpired:
     check("setting: a FIFO config falls back instead of hanging", False)
 
@@ -1160,10 +1160,10 @@ subprocess.run(["git", "-C", str(mc), "worktree", "add", "-q", str(lw), "-b", "x
 (lw / ".work-system.toml").write_text("[mandate]\nreview_budget = 9\n")
 check("setting: a lane reads its own checkout's config",
       init_budget(lw, "standard")[1] == "9")
-sub = budget_repo(FIVE)
+sub = budget_repo(SEVEN)
 (sub / "deep").mkdir()
 check("setting: a subdirectory resolves to the repo's toplevel",
-      presets_of(sub / "deep")["standard"].get("review_budget") == "5")
+      presets_of(sub / "deep")["standard"].get("review_budget") == "7")
 
 # The preset table's budgets are only the no-python3 floor; the schema default
 # is authoritative, and the two must not drift.
