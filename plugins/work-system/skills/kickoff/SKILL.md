@@ -480,8 +480,10 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     The helper resolves `SELECTOR` through the registry, feature-detects which
     `agent start` contract this herdr speaks, and opens the worker's own background
     tab — on herdr 0.7.5+ by creating the tab first and starting the worker in its
-    root pane, on older herdr by spawning the agent and moving it. Either way the
-    worker never has to survive a shell-startup keystroke race. It is the **single
+    root pane, on older herdr by spawning the agent and moving it. Shell startup is
+    herdr's to wait out; a shell that still reads input while it starts can eat the
+    command (herdrdev/herdr#3046), which the helper reports as unconfirmed rather
+    than as a launch. It is the **single
     source of truth** for the launch (resolution, transport, robust JSON parsing,
     rollback, exit codes); do not re-implement the herdr commands or the resolution
     inline. Branch on its result **in this order**:

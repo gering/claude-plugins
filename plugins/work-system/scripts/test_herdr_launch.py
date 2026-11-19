@@ -581,8 +581,8 @@ for selector, kind, expect_head, expect_len in (
 e = Env(modern_cases(), log_argv=True, api="modern")
 r = e.run("launch", "mylabel", str(e.worktree), "w1")
 create = e.call_args("tab create")[0]
-check("modern: tab create targets the worktree",
-      create[create.index("--cwd") + 1] == str(e.worktree))
+check("modern: tab create targets the worktree, in git's own spelling",
+      create[create.index("--cwd") + 1] == os.path.realpath(e.worktree))
 check("modern: tab create passes the workspace",
       create[create.index("--workspace") + 1] == "w1")
 check("modern: agent name stays plain (no glyph)",
@@ -1133,13 +1133,19 @@ check("pane busy after a refusal: blocked=unverified, tab left alone, started on
 e.close()
 
 # --- outside a .claude/worktrees layout: the slug comes from git ---------- #
-# (A path with no git repo at all is refused before any herdr call, so "no slug"
-# is no longer reachable.)
 e = Env(taken_cases(("", NAME_TAKEN, 1)), log_argv=True, api="modern")
 e.env["WORK_SYSTEM_HERDR_NAME_TRIES"] = "2"
 r = e.run("launch", "t", str(e.worktree), "w1")
 check("plain repo: slug from the git common dir, bounded by NAME_TRIES",
       [s[2] for s in e.call_args("agent start")] == ["t", "t-wt"] and r.returncode == 1)
+e.close()
+
+# --- a repo dir name with no slug characters: numeric fallbacks ------------ #
+e = Env(taken_cases(("", NAME_TAKEN, 1)), log_argv=True, api="modern")
+e.env["WORK_SYSTEM_HERDR_NAME_TRIES"] = "2"
+r = e.run("launch", "t", repo_worktree(e, repo="___"), "w1")
+check("no repo slug: numeric fallback, bounded by NAME_TRIES",
+      [s[2] for s in e.call_args("agent start")] == ["t", "t-2"] and r.returncode == 1)
 e.close()
 
 # --- NAME_TRIES is validated: junk → default, huge → clamped --------------- #
@@ -1227,7 +1233,7 @@ check("two spaces: the second starts as <label>-<repo>, not an empty shell",
       and kv(r2.stdout).get("herdr_name") == "staging-live-years-app")
 check("two spaces: both names are registered, each to its own worktree",
       sorted(q.name for q in reg.glob("name-*")) == ["name-staging-live-years", "name-staging-live-years-app"]
-      and (reg / "name-staging-live-years-app").read_text() == app)
+      and (reg / "name-staging-live-years-app").read_text() == os.path.realpath(app))
 r3 = e.run("launch", "staging-live-years", server, "w3")
 check("two spaces: re-launching the first lane stops instead of a second worker",
       r3.returncode == 1 and "already runs in this worktree" in r3.stderr
@@ -1268,10 +1274,79 @@ for what in ("plain dir", "subdir"):
         target.mkdir()
         r = e.run(mode, "t", str(target), "w1")
         check(f"{what} ({mode}): exit 1, no stdout", r.returncode == 1 and r.stdout == "")
-        check(f"{what} ({mode}): says it is not a worktree root",
-              "not a git worktree root" in r.stderr)
+        expect = "not a git repository:" if what == "plain dir" else "not a git worktree root:"
+        check(f"{what} ({mode}): says why the path was refused", expect in r.stderr)
         check(f"{what} ({mode}): no herdr call at all", e.calls() == [])
         e.close()
+
+# --- the path reaches herdr as the kernel resolves it ---------------------- #
+# A logical `cd && pwd` folds `link/..` to the link's parent, while `[ -d ]`
+# (and herdr's own chdir) follow the link. /a/link -> /b/nested: `/a/link/..`
+# IS /b, and the launch must target /b, not /a.
+e = Env(modern_cases(), log_argv=True, api="modern")
+other = Path(e.tmp.name) / "b"
+(other / "nested").mkdir(parents=True)
+git_init(other)
+(e.worktree / "link").symlink_to(other / "nested")
+r = e.run("launch", "t", str(e.worktree / "link" / ".."), "w1")
+creates = e.call_args("tab create")
+cwd_sent = creates[0][creates[0].index("--cwd") + 1] if creates else ""
+check("symlink/..: the launch targets the directory the kernel resolves",
+      r.returncode == 0 and bool(cwd_sent) and os.path.samefile(cwd_sent, other))
+e.close()
+
+# --- resume types a cd to the SAME directory the tab was created in -------- #
+# The pane's shell runs `cd` LOGICALLY, so handing it `/a/link/..` would land in
+# /a while the tab (and the check) resolved /b.
+e = Env({"tab create": (TAB_CREATED, "", 0), "pane list": (PANE_LIST_GONE, "", 0),
+         "pane process-info": (SHELL_READY, "", 0),
+         "pane run": ('{"result":{"type":"ok"}}', "", 0),
+         "tab focus": ('{"result":{"type":"ok"}}', "", 0)}, log_argv=True, api="modern")
+other = Path(e.tmp.name) / "b"
+(other / "nested").mkdir(parents=True)
+git_init(other)
+(e.worktree / "link").symlink_to(other / "nested")
+r = e.run("resume", "t", str(e.worktree / "link" / ".."), "w1")
+runs = e.call_args("pane run")
+typed = runs[0][-1] if runs else ""
+check("symlink/.. (resume): the typed cd names the canonical directory",
+      r.returncode == 0 and typed.startswith("cd ") and os.path.realpath(other) in typed
+      and "link" not in typed)
+e.close()
+
+# --- a `.` spelling of this worktree still finds its own name holder ------- #
+e = Env({}, log_argv=True, api="modern")
+wt = repo_worktree(e)
+e2 = Env(taken_cases(("", NAME_TAKEN, 1), **{"agent get": (holder(wt), "", 0)}),
+         log_argv=True, api="modern")
+r = e2.run("launch", "t", ".", "w1", cwd=wt)
+check("holder in this worktree, passed as '.': no fallback name, no second worker",
+      r.returncode == 1 and len(e2.call_args("agent start")) == 1
+      and "already runs in this worktree" in r.stderr)
+e2.close(); e.close()
+
+# --- an inherited GIT_DIR/GIT_WORK_TREE cannot vouch for a plain dir ------- #
+e = Env(modern_cases(), log_argv=True, api="modern")
+plain = Path(e.tmp.name) / "plain"
+plain.mkdir()
+e.env["GIT_DIR"] = str(e.worktree / ".git")
+e.env["GIT_WORK_TREE"] = str(plain)
+r = e.run("launch", "t", str(plain), "w1")
+check("GIT_DIR/GIT_WORK_TREE: a plain dir is still refused, no herdr call",
+      r.returncode == 1 and "not a git repository:" in r.stderr and e.calls() == [])
+r = e.run("launch", "t", str(e.worktree), "w1")
+check("GIT_DIR/GIT_WORK_TREE: the real root is still accepted",
+      r.returncode == 0 and "moved=yes" in r.stdout)
+e.close()
+
+# --- another spelling of the same root (case-insensitive FS) is accepted --- #
+e = Env(modern_cases(), log_argv=True, api="modern")
+swapped = str(e.worktree).swapcase()
+if os.path.isdir(swapped) and os.path.samefile(swapped, e.worktree):
+    r = e.run("launch", "t", swapped, "w1")
+    check("case-insensitive FS: a differently-cased root is accepted",
+          r.returncode == 0 and "moved=yes" in r.stdout)
+e.close()
 
 # ========================================================================== #
 # a CLEAN agent start (rc=0) is confirmed from process state too

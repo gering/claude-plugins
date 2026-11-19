@@ -137,7 +137,11 @@ the prefix-stripped task name) — comparing the raw argument instead misroutes.
      socket, or no pane id). **Relay the helper's stderr to the user first** — on a
      broken-socket/no-pane-id failure it carries herdr's own error (code/message, and
      a stale-workspace hint when applicable), the actual reason this happened, not
-     just the generic guard text. Then show the manual block (b).
+     just the generic guard text. Then show the manual block (b) — unless stderr
+     starts with `not a git repository:`: then `<worktree>` is no usable worktree
+     (a leftover directory, or a broken `.git` link — git's own reason follows), so
+     `claude -c` there has nothing to resume; point at `/list` to see the task's
+     state (and `/kickoff <task>` if the worktree has to be recreated).
 
    Success report for the `reused=no resumed=yes` case (fill `Tab` from the `tab=`
    line; drop the line if `tab=` is empty):
