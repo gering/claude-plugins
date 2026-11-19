@@ -38,7 +38,7 @@ Generic task and worktree workflow system for Claude Code. Keep tasks as GitHub 
 | `/continue` | Resume the current task (in a worktree); or `/continue <task>` from the main session reopens the task's herdr tab and resumes it |
 | `/status` | Check task status (PRs, branches, commits) |
 | `/close` | Clean up after merge (worktree, branches; closes the issue or archives the task file). `--delegate` preselects handing the close to the Manager |
-| `/land` | In the worktree tab: handoff report → `/pr-flow:merge` → confirmed merge → `/close --delegate` |
+| `/land` | In the worktree tab: handoff report → `/pr-flow:merge` → confirmed merge → `/close --delegate`; `--as <app>` merges as a GitHub App |
 | `/list` | Overview of all tasks, worktrees, and status |
 | `/migrate` | (invoke as `/work-system:migrate`; knowledge-system has its own `/migrate`) Move local task files (open → open issues, archived → closed issues) to GitHub Issues, then switch `tasks.backend` to `github`; dry run, secret scan and one confirmation first |
 | `/manager` | (invoke as `/work-system:manager`) Status of this herdr space's workers: who works, who waits on a question, which PR is ready for merge — shown to you, never answered or merged |
@@ -534,7 +534,9 @@ with its `acked_at`).
 
 Without the rule, a denied merge makes `/land` stop with the exact follow-up: type
 `/pr-flow:merge` yourself (an explicit command clears the denial), then `/land` again
-to confirm and close.
+to confirm and close — both with the same `--as <app>` if you landed with one. A
+merge under `--as` runs as `GH_APP_MERGE='<app>' gh pr merge …`; write the rule so it
+covers that prefixed form, or expect the denial.
 
 ## Insight reports at handoff and close (optional)
 

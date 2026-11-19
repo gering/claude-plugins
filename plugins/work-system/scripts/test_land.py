@@ -60,8 +60,12 @@ check("--as is taken only from the user's typed line",
       "Only the user's own typed `/land` line counts" in LAND)
 check("--as is probed before the report and the armed wait",
       at(step1, "gh __shim-probe") < at(step1, "assess"))
-check("--as is the only argument passed to /merge",
-      "`/pr-flow:merge --as <app>`" in LAND and "the only argument `/land` ever passes" in LAND)
+step3 = LAND[at(LAND, "3. **Merge**"):at(LAND, "4. **Confirm the merge**")]
+check("--as is the only argument passed to /merge, in step 3",
+      "`/pr-flow:merge --as <app>`" in step3 and "the only argument `/land` ever passes" in step3)
+check("an older /merge that would ignore --as stops before it runs",
+      "does not know `--as`" in step3 and "before any of its steps runs" in step3)
+check("re-run follow-ups keep --as", "carries the same `--as <app>`" in LAND)
 check("an open PR whose branch is not on the remote stops before the merge",
       "`remote-missing`" in step1 and "not on the remote" in step1)
 check("pr-flow presence is checked first", at(step1, "pr-flow installed?") < at(step1, "assess"))

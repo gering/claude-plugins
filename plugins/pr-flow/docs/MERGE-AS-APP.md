@@ -19,7 +19,10 @@ A shim earlier on `PATH` than the real `gh` must:
    runs with a token of that app's installation. Without it, the shim passes every
    call through unchanged.
 3. **Refuse, never fall back.** An app without a key on this machine, or one not on
-   your allowlist, is an error, not a merge under your own login.
+   your allowlist (a missing allowlist allows nothing), is an error, not a merge
+   under your own login.
+4. **Name apps by their GitHub slug.** `<app>` is the App's slug, so the `mergedBy`
+   check can compare it with what GitHub reports.
 
 After the merge, `/merge` reads `mergedBy` and warns in its summary when it is not
 `<app>` / `<app>[bot]`.
@@ -28,33 +31,43 @@ After the merge, `/merge` reads `mergedBy` and warns in its summary when it is n
 
 Assumptions, adapt to your setup: each app's private key lives at
 `~/.config/github-app-<app>/private-key.pem`; a helper `gh-as <app> <gh args…>`
-mints an installation token for that app and runs the real `gh` with it as
-`GH_TOKEN`; the real `gh` is `/usr/local/bin/gh`; an optional allowlist
-`~/.config/gh-shim/merge-allow` holds one app name per line.
+mints an installation token for that app and runs the **real** `gh` (by absolute
+path, never `gh` from `PATH`, which would re-enter the shim) with it as
+`GH_TOKEN`; the real `gh` is `/usr/local/bin/gh`; the allowlist
+`~/.config/gh-shim/merge-allow` holds one app name per line and is required.
 
 ```sh
 #!/bin/sh
 # ~/.local/bin/gh — must come before the real gh on PATH
 REAL_GH=/usr/local/bin/gh
 CFG="$HOME/.config/gh-shim"
+GH_AS="$HOME/.local/bin/gh-as"
 app="${GH_APP_MERGE:-}"
 
 if [ "${1:-}" = __shim-probe ] || { [ -n "$app" ] && [ "${1:-}" = pr ] && [ "${2:-}" = merge ]; }; then
-  case "$app" in *[!a-z0-9-]*|"") echo "gh-shim: invalid app name '$app'" >&2; exit 2;; esac
-  if [ -r "$CFG/merge-allow" ] && ! grep -qxF "$app" "$CFG/merge-allow"; then
-    echo "gh-shim: '$app' is not listed in $CFG/merge-allow" >&2; exit 2
+  case "$app" in -*|*[!a-z0-9-]*|"") echo "gh-shim: invalid app name '$app'" >&2; exit 2;; esac
+  if [ ! -r "$CFG/merge-allow" ] || ! grep -qxF -- "$app" "$CFG/merge-allow"; then
+    echo "gh-shim: '$app' is not listed in $CFG/merge-allow. No fallback." >&2; exit 2
   fi
-  if [ ! -r "$HOME/.config/github-app-$app/private-key.pem" ]; then
+  if [ ! -r "$HOME/.config/github-app-$app/private-key.pem" ] || [ ! -x "$GH_AS" ]; then
     echo "gh-shim: app '$app' is not set up on this machine. No fallback." >&2; exit 2
   fi
   [ "$1" = __shim-probe ] && { echo "merge_app=$app"; exit 0; }
-  exec "$HOME/.local/bin/gh-as" "$app" "$@"
+  unset GH_APP_MERGE
+  exec "$GH_AS" "$app" "$@" || exit 2
 fi
 exec "$REAL_GH" "$@"
 ```
 
 Notes:
 
+- Never `export GH_APP_MERGE` in a shell profile: the shim cannot tell an exported
+  value from the inline prefix, so a plain `/merge` would then merge as the app
+  without the probe or the `mergedBy` check.
+- `/pr-flow:merge` stays model-invocable because `/land` invokes it, so the rule
+  that only a typed `--as` counts is prompt text, not a hard fence. The allowlist
+  and the permission prompt below are the boundaries; keep the allowlist to apps
+  you would let merge on your behalf.
 - A shim that hands calls straight to the real `gh` whenever `GH_TOKEN` is set
   makes the probe fail there; `/merge` then stops (fail-closed), which is intended.
 - The app needs *Contents: write* and *Pull requests: write* on the repo, and branch
