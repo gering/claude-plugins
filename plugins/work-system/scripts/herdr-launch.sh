@@ -60,8 +60,8 @@
 #                         — no session id needs stashing at kickoff.
 #
 # Usage:
-#   herdr-launch.sh launch <label> <worktree-abs-path> <workspace-id> [agent-selector] [session-name]
-#   herdr-launch.sh resume <label> <worktree-abs-path> <workspace-id>
+#   herdr-launch.sh launch <label> <worktree> <workspace-id> [agent-selector] [session-name]
+#   herdr-launch.sh resume <label> <worktree> <workspace-id>
 #     label          short, sidebar-friendly agent/tab name (e.g. close-herdr).
 #                    Pass it PLAIN — this helper prefixes the task's state glyph
 #                    (○ ● ◇ ◆ ✓, via herdr-tab-glyph.sh) itself, best-effort,
@@ -69,7 +69,10 @@
 #                    the plain label (see the stamping block below). herdr agent
 #                    names are server-wide: on modern herdr a label another lane
 #                    holds is retried as <label>-<repo>, -2, -3 (herdr_name= below).
-#     worktree       absolute path to the worktree (becomes the new pane's cwd)
+#     worktree       path to the worktree's top level (becomes the new pane's cwd);
+#                    a relative one is resolved against the caller's cwd, and a
+#                    path that is not a git worktree root is refused (exit 1,
+#                    stderr `not a git repository:` / `not a git worktree root:`)
 #     workspace-id   herdr workspace to open the tab in (e.g. $HERDR_WORKSPACE_ID)
 #     agent-selector (launch only) agent-registry selector: cc-harness:<id> (an
 #                    optional PATH-detected wrapper entry), a shorthand flag
@@ -98,9 +101,10 @@
 #   tab=<tab or empty>
 #   agent=<resolved agent>
 # It means a tab exists and a worker MAY be running in it, but the launch could
-# not be confirmed (a readiness timeout with no worker detected in the pane
-# afterwards, an unrecognized herdr error, a pane-id mismatch, or a rollback that
-# could not be verified). Callers must branch on
+# not be confirmed (a readiness timeout or a clean start with no running worker
+# of the expected kind detected in the pane afterwards, an unrecognized herdr
+# error, a pane-id mismatch, or a rollback that could not be verified). Callers
+# must branch on
 # `blocked` BEFORE `moved`, tell the user to inspect that tab, and must NOT launch
 # again, print the manual worker command, or save a project default.
 # resume adds three keys so the caller never reports a resume that didn't happen:
@@ -122,7 +126,9 @@
 #                        to CHECK herdr for an existing tab before reopening by hand, so
 #                        no duplicate session is created.)
 # On failure to launch (exit 1) prints nothing on stdout — the caller should show
-# the manual instructions instead. Diagnostics always go to stderr.
+# the manual instructions instead, except for a refused worktree path (stderr
+# `not a git repository:`), where there is nothing to run them in. Diagnostics
+# always go to stderr.
 set -eu
 
 # Where this script (and its sibling helpers: lib-bounded.sh, herdr-tab-glyph.sh,
@@ -160,6 +166,44 @@ command -v python3 >/dev/null 2>&1 || { echo "python3 not on PATH" >&2; exit 1; 
   exit 1
 }
 [ -d "$worktree" ] || { echo "worktree dir not found: $worktree" >&2; exit 1; }
+# herdr resolves `--cwd` against the herdr SERVER's cwd (usually $HOME), not ours,
+# so a relative path that `[ -d ]` just accepted would start the worker in the
+# wrong directory — with no repo there, and still reported as a launch. Anchor it
+# to the caller's cwd here, before anything reaches herdr, by PREFIXING `$PWD`
+# only: no `cd`/`pwd` rewrite, so the kernel resolves `..` and symlinks exactly
+# as the `[ -d ]` above did (a logical `cd` folds `link/..` differently), and an
+# absolute argument reaches herdr byte-for-byte.
+case "$worktree" in
+  /*) : ;;
+  *) echo "worktree path is relative ($worktree) — resolving it against $PWD" >&2
+     worktree="${PWD%/}/$worktree" ;;
+esac
+# It must also BE a worktree: its own top level, not a subdirectory of one and not
+# a plain directory. A worker started anywhere else finds no task to resume.
+# An inherited GIT_DIR/GIT_WORK_TREE (a hook, a wrapper) would answer for a
+# different repo than the path names, so the variables that REDIRECT the repo are
+# dropped; GIT_CONFIG_* stays, it may carry a needed safe.directory. `-ef`
+# compares the directories themselves, which a string compare gets wrong on a
+# case-insensitive filesystem (`/users/…` vs git's `/Users/…`).
+command -v git >/dev/null 2>&1 || { echo "git not on PATH" >&2; exit 1; }
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_IMPLICIT_WORK_TREE GIT_PREFIX GIT_NAMESPACE
+wt_err="$(git -C "$worktree" rev-parse --show-toplevel 2>&1 >/dev/null || true)"
+wt_top="$(git -C "$worktree" rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -z "$wt_top" ]; then
+  echo "not a git repository: $worktree${wt_err:+ (git: $(printf '%s' "$wt_err" | head -n 1 | tr -dc '[:print:]'))}" >&2
+  exit 1
+fi
+if ! [ "$wt_top" -ef "$worktree" ]; then
+  echo "not a git worktree root: $worktree (its top level is $wt_top)" >&2
+  exit 1
+fi
+# From here on the path is git's own spelling of that root — physical, on-disk
+# case, no `.`/`..`/`//` — so every later consumer agrees on it: herdr's --cwd,
+# the `cd` typed into a resume pane (a shell's LOGICAL cd folds `link/..`
+# differently), the same-worktree name-holder compare, the duplicate-tab lookup,
+# the glyph's task name and the repo slug.
+worktree="$wt_top"
 
 # The herdr-call stderr-capture tempfiles below are each cleaned up with an
 # explicit `rm -f` on their own success/failure branches, but a SIGINT/SIGTERM
@@ -259,10 +303,10 @@ RETRY_DELAY="${WORK_SYSTEM_HERDR_RETRY_DELAY:-0.5}"              # seconds betwe
 # trips first ends it.
 READY_SECONDS="${WORK_SYSTEM_HERDR_READY_SECONDS:-45}"
 DETECT_SECONDS="${WORK_SYSTEM_HERDR_DETECT_SECONDS:-45}"
-# After an `agent start` readiness timeout: how long to look for the worker herdr
-# may already have started in the pane. Short on purpose — measured live, herdr
-# detects a typed claude in under a second, and by then the start has already
-# spent its own --timeout.
+# After an `agent start` — a readiness timeout or a clean return — how long to
+# look for the worker in the pane. Short on purpose: measured live, herdr detects
+# a typed claude in under a second, and `working` counts as confirmed, so a
+# worker that is still loading does not have to reach idle inside this window.
 CONFIRM_SECONDS="${WORK_SYSTEM_HERDR_CONFIRM_SECONDS:-10}"
 ALIVE_SECONDS="${WORK_SYSTEM_HERDR_ALIVE_SECONDS:-20}"
 # The busy-retry budget is wall clock for a reason: `agent start` may REJECT
@@ -559,6 +603,44 @@ pane_agent_state() {
   run_bounded "$PROBE_SECONDS" herdr pane get "$1" 2>/dev/null | python3 -c "$extract_pane_agent_state" 2>/dev/null | tr -dc '[:print:]\n' || true
 }
 
+# confirm_native_worker <pane> — the bounded process-state confirmation of a native
+# (`agent start`) worker: herdr must detect the EXPECTED kind in THIS pane in a
+# running state (working/idle/done). `blocked` (held at a prompt), a different kind
+# or nothing → not confirmed; `unknown` is herdr's first seconds of detection and is
+# polled through. Sets `detected`/`status` for the caller's diagnostic and returns
+# 0 when confirmed. Run after a readiness timeout AND after a clean rc=0: herdr's
+# return alone is not proof that the pane holds the worker.
+confirm_native_worker() {
+  local i=0 state deadline
+  detected=""
+  status=""
+  deadline=$(( SECONDS + CONFIRM_SECONDS ))
+  while [ "$i" -lt "$DETECT_TRIES" ] && [ "$SECONDS" -lt "$deadline" ]; do
+    state="$(pane_agent_state "$1")"
+    detected="${state%%|*}"
+    status="${state#*|}"
+    if [ -n "$detected" ] && [ "$status" != unknown ] && [ -n "$status" ]; then break; fi
+    [ -n "$detected" ] && [ "$detected" != "$herdr_kind" ] && break
+    i=$((i + 1))
+    [ "$i" -lt "$DETECT_TRIES" ] && [ "$SECONDS" -lt "$deadline" ] && sleep "$RETRY_DELAY" 2>/dev/null || true
+  done
+  [ "$detected" = "$herdr_kind" ] || return 1
+  case "$status" in working|idle|done) return 0 ;; esac
+  return 1
+}
+
+# explain_unconfirmed <pane> — one stderr line naming WHY confirm_native_worker
+# said no (silent when nothing was detected: the caller's own line covers that).
+explain_unconfirmed() {
+  if [ -n "$detected" ] && [ "$detected" != "$herdr_kind" ]; then
+    echo "herdr detects '$detected' in pane $1, not the expected '$herdr_kind' — cannot confirm the launch" >&2
+  elif [ "$status" = blocked ]; then
+    echo "herdr detects $detected in pane $1, held at a prompt (blocked) — it is waiting for input" >&2
+  elif [ -n "$detected" ]; then
+    echo "herdr detects $detected in pane $1, but its state is still '${status:-unreadable}' — detection had not settled when the confirmation window ended" >&2
+  fi
+}
+
 # ---- herdr agent name: label first, then bounded fallbacks -----------------
 # herdr agent names are unique per SERVER, not per workspace: two lanes whose
 # labels derive from the same task title (e.g. the server and the app half of one
@@ -639,7 +721,10 @@ take_fallback_name() {
   if [ -z "$holder" ]; then
     fail_definitive "herdr agent name '$taken' is taken, and herdr did not say by whom — not retrying under another name, nothing was started in pane $pane"
   fi
-  if [ "${holder%/}" = "${worktree%/}" ]; then
+  # By identity, not only by string: herdr may spell the cwd differently
+  # (/var vs /private/var, letter case), and a missed match here starts a SECOND
+  # worker on this lane under a fallback name.
+  if [ "${holder%/}" = "${worktree%/}" ] || [ "$holder" -ef "$worktree" ]; then
     fail_definitive "a worker named '$taken' already runs in this worktree — not starting a second one (nothing was started in pane $pane)"
   fi
   if [ "$(pane_shell_state "$pane")" != ready ]; then
@@ -1054,48 +1139,23 @@ EOF_RESOLVE
         # healthy (measured live: detected as claude 0.6s in, timeout at 10.4s).
         # herdr then never registers the requested name either. A timeout can
         # equally mean nothing was typed (shell still busy when herdr gave up), so
-        # only herdr detecting the EXPECTED kind in THIS pane, in a running state
-        # (working/idle/done), turns it into a launch. `blocked` is a worker held
-        # at a prompt nobody was told about, so it stays unverified; `unknown` is
-        # the first seconds of detection and is polled through. Nothing is retried.
+        # only confirm_native_worker turns it into a launch. Nothing is retried.
         if [ "$start_code" = timeout ]; then
-          detected=""
-          status=""
-          i=0
-          confirm_deadline=$(( SECONDS + CONFIRM_SECONDS ))
-          while [ "$i" -lt "$DETECT_TRIES" ] && [ "$SECONDS" -lt "$confirm_deadline" ]; do
-            state="$(pane_agent_state "$pane")"
-            detected="${state%%|*}"
-            status="${state#*|}"
-            if [ -n "$detected" ] && [ "$status" != unknown ] && [ -n "$status" ]; then break; fi
-            [ -n "$detected" ] && [ "$detected" != "$herdr_kind" ] && break
-            i=$((i + 1))
-            sleep "$RETRY_DELAY" 2>/dev/null || true
-          done
-          if [ "$detected" = "$herdr_kind" ]; then
-            case "$status" in
-              working|idle|done)
-                named=yes
-                name_agent "$pane" || named=no
-                if [ "$named" = no ]; then
-                  herdr_name="$label"   # nothing registered: no fallback name to report
-                  emit_launched
-                  printf 'named=no\n'
-                else
-                  emit_launched
-                fi
-                exit 0 ;;
-            esac
+          if confirm_native_worker "$pane"; then
+            named=yes
+            name_agent "$pane" || named=no
+            if [ "$named" = no ]; then
+              herdr_name="$label"   # nothing registered: no fallback name to report
+              emit_launched
+              printf 'named=no\n'
+            else
+              emit_launched
+            fi
+            exit 0
           fi
           diag="$(herdr_diag "$start_blob" "$workspace" 0)"
           [ -n "$diag" ] && printf '%s\n' "$diag" >&2
-          if [ -n "$detected" ] && [ "$detected" != "$herdr_kind" ]; then
-            echo "herdr detects '$detected' in pane $pane, not the expected '$herdr_kind' — cannot confirm the launch" >&2
-          elif [ "$status" = blocked ]; then
-            echo "herdr detects $detected in pane $pane, held at a prompt (blocked) — it is waiting for input" >&2
-          elif [ -n "$detected" ]; then
-            echo "herdr detects $detected in pane $pane, but its state is still '${status:-unreadable}' — detection had not settled when the confirmation window ended" >&2
-          fi
+          explain_unconfirmed "$pane"
         fi
         echo "herdr agent start --kind $herdr_kind did not confirm the worker in pane $pane — it may still be coming up, so the tab was left alone" >&2
         emit_unverified
@@ -1109,6 +1169,20 @@ EOF_RESOLVE
       started_pane="$(printf '%s' "$start_json" | python3 -c "$extract_agent_pane" 2>/dev/null || true)"
       if [ "$started_pane" != "$pane" ]; then
         echo "herdr agent start reported success for pane '${started_pane:-<none>}' but the worker was requested in $pane — cannot confirm the launch" >&2
+        emit_unverified
+        exit 0
+      fi
+      # herdr's rc=0 plus the right pane id is still only herdr's word. A launch
+      # was reported for a pane that, 40 minutes later, held a bare shell and no
+      # worker (incident 2026-11-18; whether that start returned 0 is unknown).
+      # So the clean return gets the timeout path's process-state check, on every
+      # modern herdr: the expected kind in this pane, running. Anything else is
+      # unverified — never rolled back, since herdr claimed something started.
+      # Accepted residual: herdr reports a first-run screen as "idle"
+      # (herdrdev/herdr#5888), and nothing here can tell the two apart.
+      if ! confirm_native_worker "$pane"; then
+        explain_unconfirmed "$pane"
+        echo "herdr agent start --kind $herdr_kind returned success, but the worker could not be confirmed in pane $pane — the tab was left alone" >&2
         emit_unverified
         exit 0
       fi
@@ -1183,7 +1257,7 @@ EOF_RESOLVE
         exit 0
       fi
       if [ -n "$detected" ]; then
-        echo "herdr detects '$detected' in pane $pane, not the expected '$herdr_kind' — cannot confirm the launch" >&2
+        explain_unconfirmed "$pane"
         emit_unverified
         exit 0
       fi

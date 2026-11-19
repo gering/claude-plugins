@@ -1,10 +1,10 @@
 ---
 title: "herdr /kickoff + /continue-reopen Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-11-04
+updatedAt: 2026-11-19
 createdFrom: "PR #17"
-updatedFrom: "session: 2026-11-04 (task/herdr-agent-name-collision-across-spaces)"
-pluginVersion: 1.34.1
+updatedFrom: "session: 2026-11-19 (task/fix-launch-relative-worktree-and-start-check)"
+pluginVersion: 1.34.2
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -198,7 +198,7 @@ start times out at 10.4s; a start whose turn finished in 16s returned at 17s. Th
 pane-run path (cc-harness, kimi) never hit this: it confirms by detection, not by
 `agent start`'s readiness.
 
-- **A `timeout` — that code only — is confirmed from process state.** A bounded poll
+- **A `timeout` is confirmed from process state** (since 1.34.2 a clean rc=0 too, see below). A bounded poll
   (`WORK_SYSTEM_HERDR_CONFIRM_SECONDS`, 10s) of `pane get`'s `agent` + `agent_status`
   in that exact pane: the expected kind while `working`/`idle`/`done` → `moved=yes`;
   `blocked` (held at a prompt), a different kind or nothing → `blocked=unverified` as
@@ -210,6 +210,43 @@ pane-run path (cc-harness, kimi) never hit this: it confirms by detection, not b
   Best-effort — if every name is refused it is reported on stderr plus a `named=no`
   stdout line `/kickoff` relays (the caller must not advertise a name herdr gave
   someone else); the launch stays confirmed.
+
+### A clean `agent start` is confirmed too; the worktree path is checked first (1.34.2)
+
+Incident 2026-11-18 (another repo's Manager): two failed launches, both reported.
+
+- **Relative worktree → wrong cwd.** `[ -d "$worktree" ]` passed relative to the
+  caller, but herdr resolves `tab create --cwd` against the **server's** cwd
+  (`$HOME`), so claude started outside the repo. The launcher now prefixes `$PWD`
+  to a relative path (announced on stderr) and refuses a path that is not a git
+  worktree **root** (subdir or plain dir) before any herdr call, in `launch` and
+  `resume`. Review lessons (two rounds): never `cd && pwd` to anchor — a logical
+  cd folds `link/..` unlike the kernel's `[ -d ]`, `$(...)` strips a trailing
+  newline, `cd -- -` jumps to `$OLDPWD`; prefix `$PWD`, check with `[ -ef ]`
+  (APFS keeps the typed case, git returns the on-disk one), then **replace the
+  argument with git's `--show-toplevel`** so every later consumer (herdr
+  `--cwd`, the logical `cd` typed into a resume pane, the same-worktree name
+  holder compare, the tab lookup, glyph, slug) sees one canonical spelling —
+  round 1 dropped normalization entirely and round 2 found each of those
+  string-comparing the raw spelling. Unset only the repo-REDIRECTING `GIT_*`
+  vars (`GIT_DIR`, `GIT_WORK_TREE`, …), not `GIT_CONFIG_*` (a needed
+  `safe.directory`). Two refusals: `not a git repository:` (leftover/broken dir →
+  `/continue` points at `/list`) vs `not a git worktree root:` (names the top
+  level). A repo dir whose name has no `[a-z0-9]` still yields an empty slug →
+  numeric fallbacks.
+- **rc=0 is herdr's word, not proof.** On every modern herdr (0.7.5+, not only
+  0.8.2) the success path now runs the timeout path's confirmation (`confirm_native_worker`: expected kind in that pane,
+  `working`/`idle`/`done`, `unknown` polled through); anything else →
+  `blocked=unverified`, tab kept. No rename on this path: herdr registered the
+  name itself.
+- **Research (not reproduced):** `agent start --help` (0.9.5) defines success as
+  "expected agent detected … ready for input". Known keystroke-eating cases end in
+  `timeout`, not rc=0: herdrdev/herdr#3046 (typed during in-process profile load;
+  `process-info` shows only the shell, so no `agent_pane_busy`). An oh-my-zsh
+  update prompt reading a key during rc files is the same in-process class — a
+  guess for the incident, which then most likely printed `blocked=unverified`.
+  Residual: herdr reports first-run screens as `idle`/ready (#5888), so the
+  confirmation still passes a worker stuck at such a screen.
 
 ### Agent names are server-wide: `agent_name_taken` falls back
 

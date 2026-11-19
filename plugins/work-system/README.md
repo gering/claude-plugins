@@ -647,6 +647,10 @@ keeps the original branch name rather than renaming it to `task/<name>`:
   detection — the expected kind in that pane, `working`/`idle`/`done` (one held at
   a prompt stays unconfirmed) — and tries to give it the tab's agent name; if herdr
   refuses the name, `/kickoff` says so and the worker is addressed by pane.
+- On herdr 0.7.5+ a clean `agent start` is checked the same way: herdr's success
+  alone is not taken as proof that the worker runs in that pane. The worktree argument must be
+  a git worktree root (a relative one is resolved against the caller's cwd),
+  checked before anything is created.
 - If a launch can't be **confirmed** (the worker never became detectable, an
   unclassifiable herdr error, a pane-id mismatch), the tab is left in place and the
   skill tells you to look at it rather than launching a second worker onto the same
