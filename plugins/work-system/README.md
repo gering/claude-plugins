@@ -209,8 +209,9 @@ post-review delta, `/land` summarizes it and asks you one question in the same r
 acknowledge and land, or stop. On a transient state `/land` stays **armed**: it binds
 the exact `HEAD` you landed on and waits (bounded to 45 minutes, progress lines,
 interruptible, no daemon) until the merge conditions hold, then merges. A hard stop,
-a new local head, a PR head it never saw, or the deadline disarms it and reports. It
-takes no arguments. Any stop before a confirmed merge closes nothing. Typing `/land` is the merge authorization — a mandate's
+a new local head, a PR head it never saw, or the deadline disarms it and reports. Its
+only argument is `--as <app>`, handed to `/pr-flow:merge --as` to merge as a GitHub App
+(probed up front; see pr-flow's `docs/MERGE-AS-APP.md`). Any stop before a confirmed merge closes nothing. Typing `/land` is the merge authorization — a mandate's
 `deny: merge` binds the worker's own initiative, not your command — so the skill is
 `disable-model-invocation`, which keeps the Skill tool from starting it. That fence
 does not see keystrokes another process types into the pane, so the skill also

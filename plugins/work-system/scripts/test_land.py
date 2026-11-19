@@ -55,7 +55,13 @@ check("a merged PR runs the head check before the report",
 check("an open PR runs the gate script before the report",
       "`pr_state=OPEN` → **the gate**" in step1
       and 'land-gate.py" probe --pr <pr_number>' in step1)
-check("/land refuses arguments", "`/land` takes no arguments" in LAND)
+check("/land refuses every argument but --as", "`/land` only takes `--as <app>`" in LAND)
+check("--as is taken only from the user's typed line",
+      "Only the user's own typed `/land` line counts" in LAND)
+check("--as is probed before the report and the armed wait",
+      at(step1, "gh __shim-probe") < at(step1, "assess"))
+check("--as is the only argument passed to /merge",
+      "`/pr-flow:merge --as <app>`" in LAND and "the only argument `/land` ever passes" in LAND)
 check("an open PR whose branch is not on the remote stops before the merge",
       "`remote-missing`" in step1 and "not on the remote" in step1)
 check("pr-flow presence is checked first", at(step1, "pr-flow installed?") < at(step1, "assess"))
