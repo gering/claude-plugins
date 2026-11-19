@@ -1,9 +1,9 @@
 ---
 title: "Plugin settings system"
 createdAt: 2026-07-23
-updatedAt: 2026-10-17
+updatedAt: 2026-11-19
 createdFrom: "PR #40"
-updatedFrom: "branch: task/enforce-settings-numeric-bounds"
+updatedFrom: "branch: task/merge-gate-approval-and-comments"
 pluginVersion: 1.9.0
 prime: true
 ---
@@ -74,6 +74,23 @@ restated in code), a symlinked or invalid file falls back to the default with a
 note, and a remembered runtime answer (the no-bot memory) lives in the git
 common dir — never written back into the user's TOML. Revisit once discovery
 works for installed plugins.
+
+**Gate consumer — pr-flow `[merge]` (1.11.0), read from the base ref.**
+`scripts/merge-gate.py` is the second pr-flow self-reader, and the strictest:
+its settings *are* a merge authorization, so it reads `.pr-flow.toml` from the
+PR's base branch as committed (`git fetch <remote> <base>` + `git cat-file`),
+never the working tree or settings.py's resolver — otherwise the PR under
+review could commit `enabled = false` and switch off its own gate. The remote
+is the one whose configured URL matches the PR's base repository (in a fork
+checkout `origin` is the contributor's fork, which the author controls); none
+→ exit 2. Unlike `review.route`'s fall-back-to-default, every read problem
+fails closed — a typo'd key under `[merge]`, a wrong type anywhere, a
+symlink, no tomllib — because a gate that silently reverts to "off" is the one
+failure nobody notices (an unknown key outside `[merge]` only warns, so a
+newer pr-flow's setting cannot stop an older gate; the residual is a typo'd
+table name like `[mrege]`, which warns instead of failing). Types, bounds and known keys come from the schema (one
+small validator), not from a second copy. If pr-flow ever moves to
+settings.py, this reader must keep the base-ref source.
 
 **Second consumer — work-system `mandate.review_budget` (1.19.0).** Same
 self-read exception, but as one reusable helper, `scripts/ws-settings.py get

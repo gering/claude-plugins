@@ -29,6 +29,11 @@
 #       Node IDs of every Claude comment on the PR, one per line (any status) —
 #       what /cycle minimizes before a new round.
 #
+#   claude-jq
+#       Prints the shared CLAUDE_JQ definitions, so a caller that fetches
+#       comments itself (merge-gate.py) applies this one predicate in its own
+#       --jq instead of re-implementing it.
+#
 #   has-bot [<dir>]
 #       Does this repo have a comment-triggered Claude review workflow?
 #       Always emits the same four keys: has_bot=yes|no|unknown, why=,
@@ -116,7 +121,8 @@ require_iso() {
 }
 
 # The ONE definition of "a Claude comment" and of "a finished review", shared
-# by poll, latest, latest-after, comment-ids and route's evidence. Every place
+# by poll, latest, latest-after, comment-ids, route's evidence and
+# merge-gate.py (through `claude-jq`). Every place
 # used to carry its own author filter and completion marker, and they drifted:
 # poll accepted only the `**Claude finished` header the @claude comment bot
 # writes, so on a repo whose auto-review workflow posts its review directly
@@ -211,6 +217,11 @@ subcmd_comment_ids() {
   [[ -z "$pr" ]] && usage
   require_gh
   gh pr view "$pr" --json comments --jq "$CLAUDE_JQ .comments[] | select(claude_author) | .id"
+}
+
+subcmd_claude_jq() {
+  [[ $# -eq 0 ]] || { echo "claude-jq takes no arguments" >&2; exit 2; }
+  printf '%s\n' "$CLAUDE_JQ"
 }
 
 subcmd_poll() {
@@ -754,6 +765,7 @@ main() {
     latest)        subcmd_latest "$@" ;;
     latest-after)  subcmd_latest_after "$@" ;;
     comment-ids)   subcmd_comment_ids "$@" ;;
+    claude-jq)     subcmd_claude_jq "$@" ;;
     has-bot)       subcmd_has_bot "$@" ;;
     route)         subcmd_route "$@" ;;
     route-record)  subcmd_route_record "$@" ;;

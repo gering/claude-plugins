@@ -129,7 +129,9 @@ When a plugin adopts settings, it should:
    require this one may read its own file itself, **taking default, enum,
    bounds and file name from its own schema** and falling back to the default
    on a symlinked or invalid file. pr-flow's `review.route` does this
-   (`claude-review.sh route_setting`), and so does work-system through one
+   (`claude-review.sh route_setting`); pr-flow's `[merge]` gate
+   (`merge-gate.py`) reads its section the same way but from the PR's base
+   branch, and fails closed instead of falling back; and so does work-system through one
    reusable reader (`scripts/ws-settings.py get <dir> <key>`, first consumer
    `mandate.review_budget`, then `deploy.by`/`deploy.confirm`, `tasks.backend`
    and `tasks.select` (via `task-store.py`) and the string lists
