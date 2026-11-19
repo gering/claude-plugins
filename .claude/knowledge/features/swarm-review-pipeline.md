@@ -420,9 +420,19 @@ filled* — `gh pr diff <n>` (bare `--pr` resolves the current branch's PR via
   gated `findings`/`balance`, never raw backend output. Posting is outward-facing,
   so it **confirms once** before publishing (the flag authorizes the review, not
   silent publishing).
-- **`--pr` is read-only and mutually exclusive with `--fix`/`--loop`** — a
-  local-edit loop has no meaning against a remote diff; the two lifecycles need
-  their own design (deferred). Auto-review-on-push (a self-built Action running
+- **`--pr` is read-only and mutually exclusive with `--fix`** — a local edit has
+  no meaning against a remote diff. **`--loop --pr` (0.18.0) is a different mode,
+  not a PR-diff review:** the loop reviews and fixes the local tree as usual, and
+  the PR only receives one final loop report (`pr-post.py loop-target` /
+  `loop-tree` / `loop-build` / `loop-post`). The report pins the tree the loop
+  left (`loop-tree`, a throwaway-index `write-tree`) and posts only when the pushed
+  head holds exactly that tree — head-equality alone would stamp a hook's or a
+  pull's changes as reviewed. Re-runs PATCH the current `gh` user's own marker
+  comment; a failed lookup posts nothing (no blind duplicate). Secret and
+  local-path shapes are redacted with migrate's patterns, kept in sync by a test
+  (whole PEM block and the user name, not just a header, because this path
+  replaces where migrate only names a hit). The `swarm-loop-report:v1` marker is
+  advisory, not proof: unsigned and editable. Auto-review-on-push (a self-built Action running
   `agents.sh` with `XAI_API_KEY`) stays a deliberate non-goal — only the user's
   machine triggers a review.
 - **The publish path is a deterministic script, not skill prose** (swarm 0.4.1,

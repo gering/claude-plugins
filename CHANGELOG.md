@@ -499,6 +499,13 @@ entries are grouped per plugin, newest first.
 
 ## swarm
 
+### 0.18.0 — 2026-11-19
+- `--loop --pr [<number>]` (also `--fix --loop --pr`: `--loop` absorbs `--fix`) is allowed for a PR into the default branch: the loop runs on the local tree as before, and at the end one PR comment reports rounds, fixes and open findings per severity, the open items, the end state and the full head SHA. The loop's fixes must be committed and pushed first (`loop-post` checks the local head, a clean tree and the live PR head). A re-run updates the same comment, found by its marker among your own comments, instead of posting a second one.
+- The report is bound to the tree the loop left (`loop-tree` at close-out): it posts only when the pushed commit holds exactly that tree, so a hook, a pull or another commit in between cannot be stamped as reviewed. An end that claims a final review (`0-findings`, `nothing-agreed`, `no-change`) is also refused when that tree differs from the one the last review saw.
+- The comment opens with a machine-readable marker (`<!-- swarm-loop-report:v1 pr= head= rounds= end= clean= rereviewed= degraded= open= fixed= -->`; `clean=yes` only for `0-findings`, `degraded=yes` when a voice was lost) so a merge gate can see that a loop review ran on that head. It is advisory (unsigned, editable): a gate checks the author itself. Secret and local-path shapes are redacted with `work-system`'s `migrate` patterns (a test keeps the copy in sync; whole PEM blocks, user names and dash-encoded project dirs are taken out) and every cell is sanitized like the `--pr` review comment.
+- The `--pr` review comment's footer now sanitizes unknown backend names instead of printing them raw.
+- `--pr` with `--fix` alone is still refused.
+
 ### 0.17.2 — 2026-11-04
 - Absolute finding paths inside the repo no longer turn findings into `REFUTED`: the skill passes `repoRoot` (`git rev-parse --show-toplevel`), and the workflow rewrites an absolute path under that root to repo-relative before the path-safety gate, both for voice findings and for the merged cluster. `..`, `~`, out-of-repo, drive-letter and control-char paths stay rejected; nothing outside the repo is opened.
 - A path that stays unsafe is no longer sent to the verifier (whose prompt told it to REFUTE such a finding unchecked): the finding is kept as `UNVERIFIED`, counted in `balance.unverified` and the `Bilanz` line, shown with `?` in the report, and `--fix` skips it as `skipped-unsafe-path` with the reason.
