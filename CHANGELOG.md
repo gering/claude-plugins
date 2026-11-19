@@ -52,6 +52,10 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.34.2 — 2026-11-19
+- `herdr-launch.sh` anchors a relative worktree argument to the caller's cwd (herdr resolved it against its server's cwd, `$HOME`, and started the worker outside the repo while reporting a launch) and refuses, before any herdr call, a path that is not a git worktree root (`launch` and `resume`).
+- A clean modern `agent start` (rc=0) is now confirmed from process state like a readiness timeout: the expected kind in that pane, `working`/`idle`/`done`; otherwise `blocked=unverified` with the reason on stderr, tab left alone. A first-run screen herdr reports as idle (herdrdev/herdr#5888) still passes.
+
 ### 1.34.1 — 2026-11-10
 - `/kickoff` in two herdr workspaces no longer collides on the agent name: herdr agent names are server-wide, so a second lane with the same task-derived label got `agent_name_taken`, which the launcher read as ambiguous, leaving an empty shell tab reported as `blocked=unverified`. On modern herdr the launcher now retries as `<label>-<repo>`, then `-2`, `-3` (`WORK_SYSTEM_HERDR_NAME_TRIES`, default 4, clamped 1..10), and reports a fallback as `herdr_name=`. Each retry needs the holder in another worktree (`herdr agent get`) and our pane back at its bare shell prompt; a holder in this worktree, an unreadable holder or every name taken rolls the tab back and exits 1, a pane that left its prompt stays `blocked=unverified`. The timeout-path rename walks the same names; legacy herdr (0.7.0–0.7.4) never retries.
 

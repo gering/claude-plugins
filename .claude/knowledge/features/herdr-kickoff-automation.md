@@ -1,10 +1,10 @@
 ---
 title: "herdr /kickoff + /continue-reopen Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-11-04
+updatedAt: 2026-11-19
 createdFrom: "PR #17"
-updatedFrom: "session: 2026-11-04 (task/herdr-agent-name-collision-across-spaces)"
-pluginVersion: 1.34.1
+updatedFrom: "session: 2026-11-19 (task/fix-launch-relative-worktree-and-start-check)"
+pluginVersion: 1.34.2
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -210,6 +210,31 @@ pane-run path (cc-harness, kimi) never hit this: it confirms by detection, not b
   Best-effort — if every name is refused it is reported on stderr plus a `named=no`
   stdout line `/kickoff` relays (the caller must not advertise a name herdr gave
   someone else); the launch stays confirmed.
+
+### A clean `agent start` is confirmed too; the worktree path is checked first (1.34.2)
+
+Incident 2026-11-18 (another repo's Manager): two failed launches, both reported.
+
+- **Relative worktree → wrong cwd.** `[ -d "$worktree" ]` passed relative to the
+  caller, but herdr resolves `tab create --cwd` against the **server's** cwd
+  (`$HOME`), so claude started outside the repo. The launcher now anchors a
+  relative path to `$PWD` (logical `pwd`, announced on stderr) and refuses a path
+  that is not a git worktree **root** (subdir or plain dir) before any herdr call,
+  in `launch` and `resume`. Side effect: every accepted path is a repo, so
+  `repo_slug` always has a git fallback — the "no slug" case is unreachable.
+- **rc=0 is herdr's word, not proof.** The success path now runs the timeout
+  path's confirmation (`confirm_native_worker`: expected kind in that pane,
+  `working`/`idle`/`done`, `unknown` polled through); anything else →
+  `blocked=unverified`, tab kept. No rename on this path: herdr registered the
+  name itself.
+- **Research (not reproduced):** `agent start --help` (0.9.5) defines success as
+  "expected agent detected … ready for input". Known keystroke-eating cases end in
+  `timeout`, not rc=0: herdrdev/herdr#3046 (typed during in-process profile load;
+  `process-info` shows only the shell, so no `agent_pane_busy`). An oh-my-zsh
+  update prompt reading a key during rc files is the same in-process class — a
+  guess for the incident, which then most likely printed `blocked=unverified`.
+  Residual: herdr reports first-run screens as `idle`/ready (#5888), so the
+  confirmation still passes a worker stuck at such a screen.
 
 ### Agent names are server-wide: `agent_name_taken` falls back
 
