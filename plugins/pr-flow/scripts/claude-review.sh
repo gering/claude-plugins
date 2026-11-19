@@ -605,17 +605,18 @@ PY
 }
 
 # One page of the repo's most recent issue/PR comments, read once per networked
-# `route`. Prints "<total> <claude_replies> <asks> <last_claude_reply>" (the last
-# field is `-` when none), or nothing when gh cannot answer.
-#   claude_replies   comments by the Claude App (CLAUDE_JQ's claude_author). Only
-#          these veto the evidence: counting every Bot account let any third-party
-#          bot on the repo (a review or CI bot) disable it for good.
+# `route`. Prints "<total> <asks> <last_claude_reply>" (the last field is `-`
+# when none), or nothing when gh cannot answer.
 #   asks   `@claude` mentions by people the bot would actually obey (owner,
 #          member, collaborator) — an outsider's mention is ignored by the bot,
 #          so counting it let anyone on a public repo force the local route.
 #   last_claude_reply   newest comment by the Claude App (CLAUDE_JQ's
 #          claude_author, the same one `poll` reads) — the evidence that clears a remembered
-#          "no bot answered". A reply paged out of these 100 is not seen.
+#          "no bot answered". A reply paged out of these 100 is not seen. It is
+#          also the evidence veto: only a Claude App comment vetoes it, because
+#          counting every Bot account let any third-party bot on the repo (a
+#          review or CI bot) disable it for good — and `poll` would not read
+#          another bot's review anyway.
 route_evidence() {
   command -v gh >/dev/null || return 0
   ( cd "$1" && gh api 'repos/{owner}/{repo}/issues/comments?sort=created&direction=desc&per_page=100' --jq "$CLAUDE_JQ"'
@@ -623,7 +624,7 @@ route_evidence() {
       def ask: (bot | not)
         and ((.author_association // "") | IN("OWNER", "MEMBER", "COLLABORATOR"))
         and ((.body // "") | test("(^|\\s)@claude\\b"; "i"));
-      "\(length) \([.[] | select(claude_author)] | length) \([.[] | select(ask)] | length) \(([.[] | select(claude_author) | .created_at] | max) // "-")"
+      "\(length) \([.[] | select(ask)] | length) \(([.[] | select(claude_author) | .created_at] | max) // "-")"
     ' 2>/dev/null ) || true
 }
 
@@ -631,7 +632,7 @@ ROUTE_EVIDENCE_MIN_ASKS=2
 
 subcmd_route() {
   local dir="." branch="" lane_source="" offline=false root setting note
-  local mem at pr probe="" hb="" ev="" total replies asks last cleared=""
+  local mem at pr probe="" hb="" ev="" total asks last cleared=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --offline) offline=true; shift ;;
@@ -677,9 +678,9 @@ subcmd_route() {
     emit_route bot no probe "$(sed -n 's/^why=//p' <<<"$probe")"; return 0
   fi
   $offline || ev="$(route_evidence "$root")"
-  [[ "$ev" =~ ^([0-9]+)\ ([0-9]+)\ ([0-9]+)\ (.+)$ ]] || ev=""
+  [[ "$ev" =~ ^([0-9]+)\ ([0-9]+)\ (.+)$ ]] || ev=""
   if [[ -n "$ev" ]]; then
-    total="${BASH_REMATCH[1]}"; replies="${BASH_REMATCH[2]}"; asks="${BASH_REMATCH[3]}"; last="${BASH_REMATCH[4]}"
+    total="${BASH_REMATCH[1]}"; asks="${BASH_REMATCH[2]}"; last="${BASH_REMATCH[3]}"
   fi
   mem="$(route_memory "$root")"
   if [[ -n "$mem" ]]; then
@@ -697,7 +698,7 @@ subcmd_route() {
       return 0
     fi
   fi
-  if [[ -n "$ev" ]] && (( replies == 0 && asks >= ROUTE_EVIDENCE_MIN_ASKS )); then
+  if [[ -n "$ev" && "$last" = "-" ]] && (( asks >= ROUTE_EVIDENCE_MIN_ASKS )); then
     emit_route local no evidence "likely no bot: @claude was asked $asks times in the last $total comments on this repo and the Claude App never replied (not proof; a claude-code-action workflow on the default branch or review.route = github overrides it)"
     return 0
   fi
