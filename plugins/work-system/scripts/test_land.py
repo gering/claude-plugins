@@ -70,6 +70,8 @@ check("an older /merge that would ignore --as stops before it runs",
       "does not know `--as`" in step3 and "before any of its steps runs" in step3)
 check("re-run follow-ups keep --as", "append ` --as <app>` to every `/land` or `/pr-flow:merge`" in LAND)
 check("the denial follow-up names --as", "with the same `--as <app>`" in step3)
+check("a queued merge stops without closing or re-running /merge",
+      "queued, not merged" in step3 and "Never re-run `/merge` on a queued PR" in step3)
 check("an open PR whose branch is not on the remote stops before the merge",
       "`remote-missing`" in step1 and "not on the remote" in step1)
 check("pr-flow presence is checked first", at(step1, "pr-flow installed?") < at(step1, "assess"))

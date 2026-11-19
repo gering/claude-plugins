@@ -41,9 +41,11 @@ check("prefix on the merge command only",
       and "No other command gets the prefix" in step14)
 check("--as always binds the head",
       "With `MERGE_AS`, `--match-head-commit` is **always** added" in step14)
-check("the bound head must equal the local HEAD", "must equal `git rev-parse HEAD`" in step14)
+check("the bound head is the one checked after the rebase", "step 3's `CHECKED_HEAD`" in step14
+      and "keep `git rev-parse HEAD` as `CHECKED_HEAD`" in SKILL)
 check("mergedBy compared only on MERGED", "Only on `MERGED` compare the login" in step15)
-check("a queued merge skips cleanup", "no branch cleanup" in step15)
+check("a queued merge ends the skill without cleanup or a merged summary",
+      "no branch cleanup" in step15 and "none of steps 16–17" in step15)
 
 if FAILS:
     print("FAIL:")

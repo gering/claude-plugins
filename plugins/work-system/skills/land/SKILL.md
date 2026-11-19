@@ -258,6 +258,10 @@ waiting for; every other stop is final for this run.
 3. **Merge** — invoke `/pr-flow:merge` and let it run with all its own gates and
    questions (preflight, rebase, CI, reviews, method, doc warnings). Do not answer its
    questions for the user and do not pass flags that skip them.
+   - `/merge` reports the PR **queued, not merged** (a merge queue) → stop: "Queued,
+     not merged yet. Nothing was closed. Run `/land --as <app>` again once the PR has
+     merged — it then checks who merged it and closes." Never re-run `/merge` on a
+     queued PR.
    - With `--as <app>` from the user's `/land`, invoke it as `/pr-flow:merge --as <app>`
      — the only argument `/land` ever passes. When the skill loads, check that its
      `## Arguments` section lists `--as` (pr-flow 1.10.0 and later). An older `/merge`
@@ -282,7 +286,8 @@ waiting for; every other stop is final for this run.
      denied the merge. Type `/pr-flow:merge` in this tab (with the same `--as <app>`,
      if you gave one — your explicit command clears the denial), then `/land` again: the PR is merged by then, so it confirms and
      closes." Add that the README's "Auto mode and the local review gate" shows the
-     `autoMode.allow` rule that lets `/land` merge a covered lane.
+     `autoMode.allow` rule that lets `/land` merge a covered lane — except under
+     `--as`, which that rule deliberately leaves to the user.
    - `/merge` reports the merge, **or** reports an error *after* `gh pr merge` ran (its
      post-merge `git checkout <base>` / branch delete fails in a worktree whenever the
      main checkout holds the base branch) → go to step 4. Neither the

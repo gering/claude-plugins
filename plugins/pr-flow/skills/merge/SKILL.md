@@ -73,6 +73,9 @@ argument-hint: "[--as <github-app>]"
    - The working tree is already clean (step 2), so `/rebase --auto` won't stash/pop anything.
    - `/rebase --auto` still aborts cleanly on conflicts (no destructive behavior skipped — only the routine confirmation is skipped).
    - If `/rebase` aborts due to conflicts → stop this skill: "Merge requires up-to-date branch. Resolve conflicts, then re-run `/merge`."
+   - With `MERGE_AS`: once `/rebase` returned cleanly, keep `git rev-parse HEAD` as
+     `CHECKED_HEAD` — the commit steps 4–13 check, and the one step 14 binds the
+     merge to.
    - Proceed **only** when `/rebase` returned cleanly (up-to-date, or rebased and force-pushed). Any other stop — a diverged or unresolved lease, a rejected or failed push — stops this skill with `/rebase`'s message: the PR head is not the branch you meant to merge.
 
 4. **Refresh PR state** (GitHub recomputes after push/rebase):
@@ -326,20 +329,19 @@ argument-hint: "[--as <github-app>]"
       from its `head=` line, typed in literally (shell variables do not survive
       between steps): GitHub then refuses a head pushed after the check instead of
       merging it unreviewed.
-    - With `MERGE_AS`, `--match-head-commit` is **always** added: a merge under
-      another identity must be bound to the head you checked. Without step 6b's
-      `head=` (outside a lane, or step 6b N/A), read
-      `gh pr view <N> --json headRefOid --jq .headRefOid` right before the merge; it
-      must equal `git rev-parse HEAD` (the tree steps 2–13 checked), else stop: "The
-      PR head is not your local HEAD — not merged." Pass that full SHA, typed in
-      literally.
+    - With `MERGE_AS`, `--match-head-commit` is **always** added, once: step 6b's
+      `head=` when it passed, else step 3's `CHECKED_HEAD` (full SHA, typed in
+      literally). A head that moved since the checks then makes GitHub refuse the
+      merge instead of merging an unchecked commit under another identity.
     - **Never pass `--admin`.** If branch protection blocks the merge: stop and surface the error. Root-cause over workaround.
     - **Permission denied** (the auto-mode classifier refused `gh pr merge`, e.g.
       "Merge Without Review") → stop; do not retry or rephrase the command. Report the
       denial and step 6b's verdict, and say: "Type `/pr-flow:merge` yourself (with
       the same `--as <app>`, if you gave one) — an
       explicit command clears this denial. To allow it for lanes with a covering local
-      review, see work-system's README, 'Auto mode and the local review gate'."
+      review, see work-system's README, 'Auto mode and the local review gate'." With
+      `MERGE_AS`, leave out that README pointer: a merge under another identity is
+      meant to be confirmed by hand each time.
     - Capture output + exit code
 
 15. **Post-merge actions**:
@@ -348,8 +350,9 @@ argument-hint: "[--as <github-app>]"
       `<MERGE_AS>[bot]`, put "⚠️ merged by `<login>`, not `<MERGE_AS>`" into the
       final summary (it cannot be undone: report it, do not retry). Any other state
       (queued, still open) is not a merge — report that state, never as a merge by
-      someone else, and skip the rest of this step: no branch cleanup, no `/close`
-      offer, no deploy until the PR has actually merged.
+      someone else. End the skill there with "⏳ PR #<N> is queued, not merged yet —
+      the `mergedBy` check runs once it has merged (`/land --as <MERGE_AS>` does it)":
+      no branch cleanup, no `/close` offer, no deploy, and none of steps 16–17.
     - If checkout base chosen: `git checkout <BASE> && git pull origin <BASE>`
     - **Local branch handling** — detect backup convention and execute directly (no prompt):
       - Run: `git for-each-ref --format='%(refname:short)' refs/heads/ | grep -E '^(backup|archive|old)/' | head -5`

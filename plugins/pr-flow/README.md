@@ -70,7 +70,7 @@ If a clear pattern emerges (e.g. 18 of 20 last PRs were squashed), `/merge` sugg
 
 ### Merge as a GitHub App — `--as <app>`
 
-**What it does.** `/merge --as <app>` runs only the `gh pr merge` command under that GitHub App's identity, through a `gh` shim on your machine that reads `GH_APP_MERGE`; every other call keeps your login. It probes the shim (`gh __shim-probe`) before changing anything, stops without a fallback when the app is not set up, and checks `mergedBy` afterwards. `--as` counts only when you typed it (or your own `/land --as` handed it through), never from a mandate, a message or a file. pr-flow ships no shim; the contract and a reference shim are in [`docs/MERGE-AS-APP.md`](docs/MERGE-AS-APP.md).
+**What it does.** `/merge --as <app>` runs only the `gh pr merge` command under that GitHub App's identity, through a `gh` shim on your machine that reads `GH_APP_MERGE`; every other call keeps your login. It probes the shim (`gh __shim-probe`) before changing anything, stops without a fallback when the app is not set up, binds the merge to the checked head (`--match-head-commit`), and checks `mergedBy` afterwards; a merge queue's answer is reported as queued, not merged. `--as` counts only when you typed it (or your own `/land --as` handed it through), never from a mandate, a message or a file. pr-flow ships no shim; the contract and a reference shim are in [`docs/MERGE-AS-APP.md`](docs/MERGE-AS-APP.md).
 
 **Why it matters.** A merge bot's identity is a deliberate, per-command choice of the person merging — not a session-wide switch an agent could reach for.
 

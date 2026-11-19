@@ -24,8 +24,10 @@ A shim earlier on `PATH` than the real `gh` must:
 4. **Name apps by their GitHub slug.** `<app>` is the App's slug, so the `mergedBy`
    check can compare it with what GitHub reports.
 
-After the merge, `/merge` reads `mergedBy` and warns in its summary when it is not
-`<app>` / `<app>[bot]`.
+`/merge --as` always binds the merge to the head it checked (`--match-head-commit`).
+After the merge it reads `mergedBy` and warns in its summary when it is not
+`<app>` / `<app>[bot]`. A merge queue can answer with a queued PR instead: `/merge`
+then reports it as queued, and `/land --as <app>` checks `mergedBy` once it merged.
 
 ## Reference shim (example, not shipped)
 
@@ -49,7 +51,8 @@ if [ "${1:-}" = __shim-probe ] || { [ -n "$app" ] && [ "${1:-}" = pr ] && [ "${2
   if [ ! -r "$CFG/merge-allow" ] || ! grep -qxF -- "$app" "$CFG/merge-allow"; then
     echo "gh-shim: '$app' is not listed in $CFG/merge-allow. No fallback." >&2; exit 2
   fi
-  if [ ! -f "$HOME/.config/github-app-$app/private-key.pem" ] || [ ! -f "$GH_AS" ] || [ ! -x "$GH_AS" ]; then
+  key="$HOME/.config/github-app-$app/private-key.pem"
+  if [ ! -f "$key" ] || [ ! -r "$key" ] || [ ! -f "$GH_AS" ] || [ ! -x "$GH_AS" ]; then
     echo "gh-shim: app '$app' is not set up on this machine. No fallback." >&2; exit 2
   fi
   [ "$1" = __shim-probe ] && { echo "merge_app=$app"; exit 0; }
@@ -66,8 +69,8 @@ Notes:
   without the probe or the `mergedBy` check.
 - `/pr-flow:merge` stays model-invocable because `/land` invokes it, so the rule
   that only a typed `--as` counts is prompt text, not a hard fence. The allowlist
-  and the permission prompt below are the boundaries; keep the allowlist to apps
-  you would let merge on your behalf.
+  and the permission prompt below narrow what a session does on its own; keep the
+  allowlist to apps you would let merge on your behalf.
 - A shim that hands calls straight to the real `gh` whenever `GH_TOKEN` is set
   makes the probe fail there; `/merge` then stops (fail-closed), which is intended.
 - The app needs *Contents: write* and *Pull requests: write* on the repo, and branch
