@@ -212,7 +212,9 @@ interruptible, no daemon) until the merge conditions hold, then merges. A hard s
 a new local head, a PR head it never saw, or the deadline disarms it and reports. Its
 only argument is `--as <app>`, handed to `/pr-flow:merge --as` (pr-flow 1.10.0+) to merge as a GitHub App
 (probed before an open PR is gated, `mergedBy` checked on a merged one; see pr-flow's
-`docs/MERGE-AS-APP.md`). Any stop before a confirmed merge closes nothing. Typing `/land` is the merge authorization — a mandate's
+`docs/MERGE-AS-APP.md`). pr-flow's merge gate (opt-in approval on the head, open PR
+threads and comments; see pr-flow's README) applies to `/land` too, with or without
+`--as`; `/land` needs pr-flow 1.11.0+ for it, and stops otherwise. Any stop before a confirmed merge closes nothing. Typing `/land` is the merge authorization — a mandate's
 `deny: merge` binds the worker's own initiative, not your command — so the skill is
 `disable-model-invocation`, which keeps the Skill tool from starting it. That fence
 does not see keystrokes another process types into the pane, so the skill also

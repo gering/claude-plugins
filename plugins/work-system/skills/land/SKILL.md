@@ -265,6 +265,15 @@ waiting for; every other stop is final for this run.
      its steps runs, stop:
      "Not merged — this pr-flow does not know `--as`; update it or run `/land`
      without it. Nothing was closed." Stop the same way when `/merge` refuses `--as`.
+   - **Merge gate** (approval on head, open PR items) runs inside `/merge` (its step
+     6c), with or without `--as`. When the skill loads, check that it has it: its
+     `Base directory` line names pr-flow 1.11.0 or later, or its step 6c runs
+     `merge-gate.py`. An older `/merge` would merge past a repo's configured gate
+     without a word, and only the gate itself can read that config safely, so stop
+     before any of its steps, whatever the repo configures: "Not merged — this
+     pr-flow predates the merge gate; update it. Nothing was closed."
+     Its `yes-merge-anyway` for open PR items is the user's own answer, like step
+     13's — never give it for them.
    - **Any `/merge` stop or error** → run step 4's **lane check** first. A lane torn
      down while `/merge` ran (a Manager merged the PR with `--delete-branch`, a manual
      `git worktree remove`) surfaces as a `/merge` failure; `worktree_state=gone`

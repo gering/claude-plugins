@@ -46,6 +46,61 @@
           "description": "Review route: auto probes the bot and remembers a no-answer per repo; github always posts the mention; local goes straight to /swarm:review."
         }
       }
+    },
+    "merge": {
+      "type": "object",
+      "description": "Merge gate for repos without branch protection. /merge reads it from the base branch on the remote, never from the working tree.",
+      "properties": {
+        "require_approval": {
+          "type": "object",
+          "description": "Refuse to merge without approving reviews on the head being merged.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Turn the approval gate on."
+            },
+            "count": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1,
+              "description": "Approvals needed."
+            },
+            "on_head": {
+              "type": "boolean",
+              "default": true,
+              "description": "Count only approvals of the exact head commit being merged."
+            },
+            "exclude_author": {
+              "type": "boolean",
+              "default": true,
+              "description": "The PR author's own approval does not count."
+            },
+            "allow_bots": {
+              "type": "boolean",
+              "default": false,
+              "description": "Count approvals by bot accounts (e.g. a GitHub Actions workflow). Bots skip the collaborator check, so a workflow the PR adds could approve it; list the bot in approvers to bound it."
+            },
+            "approvers": {
+              "type": "array",
+              "items": { "type": "string" },
+              "default": [],
+              "description": "If non-empty, only these logins count."
+            },
+            "ignore": {
+              "type": "array",
+              "items": { "type": "string" },
+              "default": [],
+              "description": "Logins whose approval never counts."
+            }
+          }
+        },
+        "require_comments_addressed": {
+          "type": "boolean",
+          "default": false,
+          "description": "Open review threads and unanswered PR comments block the merge outright instead of asking for an acknowledgement."
+        }
+      }
     }
   }
 }

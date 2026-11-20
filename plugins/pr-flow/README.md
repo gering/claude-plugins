@@ -62,6 +62,31 @@ If a clear pattern emerges (e.g. 18 of 20 last PRs were squashed), `/merge` sugg
 
 **Why it matters.** A lane's review is local, not a GitHub approval; this gate is what makes "reviewed" checkable before a merge, rebase and squash included.
 
+### Merge gate for repos without branch protection
+
+**What it does.** Before the merge plan, `/merge` runs `scripts/merge-gate.py` against the head it is about to merge. Two checks:
+
+- **Approval on head** (opt-in): refuses the merge unless enough people approved *that exact commit*. A reviewer's latest approve / request-changes / dismiss counts (a later comment-only review doesn't cancel an approval); any open "changes requested" blocks; the PR author's own approval, bot approvals (a GitHub Actions workflow) and a deleted account's approval don't count by default. The refusal names the head, the approvals counted, the ones on an older head and the ones not counted, and why. No `[m]erge anyway`, and no override through `--as`, a mandate or a message. The merge then runs with `--match-head-commit`, so a push after the check is refused.
+- **Open PR items** (always on): unresolved review threads whose last comment isn't the PR author's, and comments or review bodies (not an approval's) by others (humans or bots, but not the Claude App's review, which `/merge` reads already — unless someone else replied in a thread it opened) posted after the author's last activity. They are listed in the merge plan (author, link, a flattened excerpt treated as data) and need an explicit `yes-merge-anyway`, or block outright with `require_comments_addressed = true`.
+
+```toml
+[merge.require_approval]
+enabled = true
+count = 1               # approvals needed
+on_head = true          # only approvals of the exact head count
+exclude_author = true
+allow_bots = false      # e.g. github-actions[bot]; see the note below
+approvers = []          # if set, only these logins count
+ignore = []             # logins that never count
+
+[merge]
+require_comments_addressed = false
+```
+
+The config is read from `.pr-flow.toml` **as committed on the PR's base branch**, fetched from the remote that points at the base repository (not a fork's `origin`), never from your working tree, so a PR can't switch off the gate that checks it. An unreadable config there (bad TOML, an unknown key under `[merge]`, a wrong type, a symlink, Python < 3.11) stops the merge instead of skipping the gate. Without an `approvers` list, only approvals by people with write access count (an owner/member/collaborator who also holds the repository permission admin or write; read and triage don't count, and an unreadable permission stops the merge) (with `allow_bots`, bots skip that check — a workflow the PR adds could then approve it, so name the bot in `approvers`). Unknown keys elsewhere in the file only warn in the merge plan, so a newer pr-flow's setting doesn't stop an older gate. Open items are judged against the author's last activity — one cutoff, not per-item reply tracking; the author's own `@claude` trigger is not an answer. `/check` reports the same verdict read-only. `/land` gets the same gate through `/merge`, with or without `--as`, and refuses a pr-flow older than the gate.
+
+**Why it matters.** On plans without branch protection or rulesets (private repos on GitHub Free), "another dev approved the current head" is a team rule GitHub doesn't enforce. The gate in `/merge` is then the only technical lock, and the open-items list catches review comments that would otherwise be merged past unread.
+
 ### No deploy from a work-system lane
 
 **What it does.** Before running a deploy the project's instructions call for after a merge, `/merge` asks work-system (through its mandate shim, `deploy-owner`) who owns it. Inside a lane with `deploy.by = "manager"` (work-system's default) it does not deploy; it names where the deploy procedure is documented, and the Manager deploys from the main checkout after the close. Outside a lane, with `deploy.by = "worker"`, or without work-system, the project's instructions apply unchanged.
@@ -119,7 +144,7 @@ If a clear pattern emerges (e.g. 18 of 20 last PRs were squashed), `/merge` sugg
 | `/check` | Read-only snapshot: CI status, human reviews, latest Claude feedback, merge-readiness verdict |
 | `/fix` | Walk through issues from the latest review as a numbered checklist and implement fixes interactively |
 | `/rebase` | Rebase + force-push (with lease) onto the PR's actual base branch; asks only on a predicted conflict |
-| `/merge` | Merge the PR safely — detect method, verify CI + reviews + open issues, execute, clean up; `--as <app>` merges as a GitHub App |
+| `/merge` | Merge the PR safely — detect method, verify CI + reviews + open issues, the merge gate (opt-in approval on head, open PR threads/comments), execute, clean up; `--as <app>` merges as a GitHub App |
 
 ## Typical workflow
 
