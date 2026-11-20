@@ -1303,6 +1303,34 @@ check("long title, taken once: fallback valid and reported",
       and NAME_RE.fullmatch(kv(r.stdout)["herdr_name"]))
 e.close()
 
+# absurd pin / long repo: fallbacks that cannot fit are dropped, never fatal,
+# and the walk is bounded (a dropped suffix repeats a name)
+e = Env(taken_cases(("", NAME_TAKEN, 1)), log_argv=True, api="modern")
+wt = repo_worktree(e, repo="muellmann_4_server_and_more_stuff", task="audit")
+Path(wt, "TASK.md").write_text("# A\n\nissue: #" + "1" * 40 + "\n")
+r = subprocess.run(["bash", str(SCRIPT), "launch", LONG, wt, "w1"], env=e.env,
+                   capture_output=True, text=True, timeout=60)
+names = started_names(e)
+check("absurd pin: launch tried valid names only, no derivation failure",
+      names and all(NAME_RE.fullmatch(n) for n in names)
+      and "cannot derive" not in r.stderr and len(set(names)) == len(names))
+e.close()
+
+# a label herdr already accepts is kept verbatim (no dodge of the holder check)
+e = Env(modern_cases(), log_argv=True, api="modern")
+r = e.run("launch", "fix--login_", repo_worktree(e), "w1")
+check("valid label kept verbatim", started_names(e) == ["fix--login_"]
+      and "herdr_name" not in r.stdout)
+e.close()
+
+# a word-boundary cut never guts the name down to its first short word
+e = Env(modern_cases(), log_argv=True, api="modern")
+r = e.run("launch", "A " + "verylongword" * 4, repo_worktree(e), "w1")
+names = started_names(e)
+check("short first word: hard cut, not a one-letter name",
+      len(names) == 1 and len(names[0]) == 32 and NAME_RE.fullmatch(names[0]))
+e.close()
+
 # herdr refusing the name anyway (a future rule) is definitive: rolled back
 INVALID = jsonlib.dumps({"error": {"code": "invalid_agent_name", "message": "bad name"}})
 e = Env(modern_cases(**{"agent start": ("", INVALID, 1)}), log_argv=True, api="modern")

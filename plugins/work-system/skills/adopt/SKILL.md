@@ -236,6 +236,7 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
 
     Tab:       <LABEL>   (workspace <HERDR_WORKSPACE_ID>, opened in the background)
     Agent:     <the helper's `agent=` line; for grok add "→ <model=> (<model_source=>)" from `resolve` — `grok:latest` alone does not say what runs>
+    Agent name: <herdr_name= value>   (only when present — normalized or taken)
     Location:  .claude/worktrees/<task-name>
     Branch:    <current-branch-name>   (original branch, unless step 8 renamed it)
     Task file: TASK.md (drafted from the branch — review it)

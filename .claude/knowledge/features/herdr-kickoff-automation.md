@@ -234,8 +234,8 @@ an empty shell tab that read as a started lane (incident 2026-11-04).
   `<label>-<repo>-2`, `-3`, bounded by `WORK_SYSTEM_HERDR_NAME_TRIES` (4 names).
   The retry costs no busy-retry budget. Same walk on the timeout-path rename (no
   holder check there: the worker is already confirmed in our pane).
-- A fallback name is reported as a `herdr_name=` stdout line (absent when the plain
-  label took). All names taken → `fail_definitive`: tab rolled back, exit 1, the
+- A fallback (or normalized) name is reported as a `herdr_name=` stdout line
+  (absent when the label itself took). All names taken → `fail_definitive`: tab rolled back, exit 1, the
   caller's manual block — a loud failure, never a shell tab posing as a lane.
 - The test models the incident with a *stateful* stub server that registers names
   across two launches in two workspaces, rather than only canned replies.
@@ -250,6 +250,11 @@ an empty shell tab that read as a started lane (incident 2026-11-04).
   fallback suffix *cumulatively* (`<stem>-<N>-<repo>-<n>`), so no fallback drops
   the number or exceeds 32. The tab label and `-n` session name keep the caller's
   label; only the agent name is normalized, and a changed one is `herdr_name=`.
+  A label herdr already accepts is kept verbatim: normalizing `fix--login` to
+  `fix-login` would let a relaunch dodge `agent_name_taken`, the only trigger of
+  the same-worktree holder check. A fallback that cannot be made valid is dropped,
+  never fatal, and the fallback walk is bounded (a dropped suffix repeats a name —
+  an unbounded `while` hung on exactly that during the fix).
   The ~60-char *branch* in that incident is a separate cause: `task-store.py`
   `slugify` caps at 60 chars mid-word.
 - **Not every startup error is the busy case.** `agent_not_ready` ("blocked during

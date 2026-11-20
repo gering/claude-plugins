@@ -626,10 +626,14 @@ keeps the original branch name rather than renaming it to `task/<name>`:
 - The tab is **named after the task** (shortened for a readable sidebar — see
   `skills/kickoff/SKILL.md` step 14 for the exact rule), so the sidebar shows one
   clear entry per task instead of a wall of identical agents. The same short label
-  names the herdr agent (and, for a claude worker, the `-n` session). herdr agent
-  names are unique per herdr *server*, so when another lane already holds the label
-  (often the same task title in another workspace) the worker is named
-  `<label>-<repo>` (then `-2`, `-3`) and `/kickoff` reports that name; a worker of
+  names the herdr agent (and, for a claude worker, the `-n` session). herdr only
+  takes agent names of the form `[a-z][a-z0-9_-]*` up to 32 chars, so a label that
+  does not fit is normalized (lowercase, umlauts spelled out, other characters to
+  `-`, a long one cut at a word boundary plus `-<N>` from the task's issue), and
+  `/kickoff` reports the name. Agent names are unique per herdr *server*, so when
+  another lane already holds it (often the same task title in another workspace)
+  the worker is named `<name>-<repo>` (then `-2`, `-3`, all within 32 chars) and
+  `/kickoff` reports that name; a worker of
   *this* worktree holding it stops the launch instead of starting a second one. The task's
   branch — `task/<name>` from `/kickoff`, or the original branch `/adopt` kept — is
   unchanged, so the resume flow still resolves the task.
@@ -975,8 +979,9 @@ stamp `◉` on the main-root tabs — no separate trigger. Only tabs sitting
 renamed (one cd into a subdir and yours is left alone); a tab is renamed only
 when its label actually changes, your chosen label is kept and merely prefixed,
 and outside herdr everything is a silent no-op. The glyph lives in the **tab
-label** and nowhere else — the herdr agent name and the `claude -n` session name
-keep the plain label, since those are stable identities.
+label** and nowhere else — the herdr agent name (the label, normalized only where
+herdr requires it) and the `claude -n` session name stay glyph-free, since those
+are stable identities.
 
 ### Interactive programs in temporary tabs
 
