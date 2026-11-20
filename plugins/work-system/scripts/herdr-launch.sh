@@ -65,10 +65,12 @@
 #     label          short, sidebar-friendly agent/tab name (e.g. close-herdr).
 #                    Pass it PLAIN — this helper prefixes the task's state glyph
 #                    (○ ● ◇ ◆ ✓, via herdr-tab-glyph.sh) itself, best-effort,
-#                    onto the TAB LABEL only; the agent and session names keep
-#                    the plain label (see the stamping block below). herdr agent
-#                    names are server-wide: on modern herdr a label another lane
-#                    holds is retried as <label>-<repo>, -2, -3 (herdr_name= below).
+#                    onto the TAB LABEL only; the session name keeps the plain
+#                    label (see the stamping block below). The herdr agent name
+#                    is the label normalized to herdr's rule ([a-z][a-z0-9_-]*,
+#                    <= 32; see build_name_candidates). Agent names are
+#                    server-wide: on modern herdr a name another lane holds is
+#                    retried as <name>-<repo>, -2, -3 (herdr_name= below).
 #     worktree       absolute path to the worktree (becomes the new pane's cwd)
 #     workspace-id   herdr workspace to open the tab in (e.g. $HERDR_WORKSPACE_ID)
 #     agent-selector (launch only) agent-registry selector: cc-harness:<id> (an
@@ -86,7 +88,8 @@
 #   agent=<name>     (launch only) the resolved CLI×model (e.g. codex:gpt-5.6-sol,
 #                     or plain `claude` for the legacy no-selector path)
 #   herdr_name=<n>   (launch only, only when it differs from <label>) the herdr
-#                     agent name the worker got, because another lane held the label
+#                     agent name the worker got: the label normalized to a valid
+#                     herdr name, or a fallback because another lane held it
 #   named=no         (launch only, rare) a worker confirmed after a readiness
 #                     timeout did not get its herdr agent name — address it by pane
 # launch selector errors (nothing spawned): exit 2 = unknown selector; exit 3 =
@@ -484,8 +487,9 @@ herdr_error_code() {
 #              started and the created tab can be rolled back: a usage error (exit
 #              2, plain text — "unsupported interactive agent kind", "missing
 #              required --pane", "unknown option: …"), a no-such-pane/placement
-#              error code, or agent_name_taken (the launch retries that one under a
-#              fallback name first — see build_name_candidates).
+#              error code, agent_name_taken (the launch retries that one under a
+#              fallback name first — see build_name_candidates), or
+#              invalid_agent_name (herdr checks the name before anything else).
 #   ambiguous  anything else, INCLUDING a readiness timeout: the worker may be
 #              coming up in that pane. Never rolled back, never retried. The
 #              native-start caller confirms a `timeout` from process state
@@ -496,7 +500,7 @@ classify_start_failure() {
   [ "$rc" = 2 ] && { printf 'definitive\n'; return 0; }
   case "$code" in
     agent_pane_busy) printf 'busy\n' ;;
-    agent_pane_not_found|agent_target_not_found|agent_placement_not_found|pane_not_found|agent_name_taken)
+    agent_pane_not_found|agent_target_not_found|agent_placement_not_found|pane_not_found|agent_name_taken|invalid_agent_name)
       printf 'definitive\n' ;;
     *) printf 'ambiguous\n' ;;
   esac
@@ -567,13 +571,30 @@ pane_agent_state() {
 # rejection is immediate (exit 1) and types NOTHING into the pane — the shell keeps
 # the foreground. Older builds were not checked, so every retry is still gated on
 # process state and on who holds the name (take_fallback_name). Candidates:
-# `<label>`, `<label>-<repo>` (the main checkout's dir name, which is what usually
-# tells two such spaces apart), then `<label>-<repo>-2`, `-3`, … up to $NAME_TRIES
-# names in all. The plain label stays the common case. MODERN path only: the
+# `<name>`, `<name>-<repo>` (the main checkout's dir name, which is what usually
+# tells two such spaces apart), then `<name>-<repo>-2`, `-3`, … up to $NAME_TRIES
+# names in all, where <name> is the normalized label (below). The first name
+# stays the common case. MODERN path only: the
 # legacy placer (0.7.0-0.7.4) was never observed rejecting a name, so it keeps
 # failing loudly on the first refusal instead of retrying blind.
-# repo_slug → the main checkout's directory name as a name-safe slug, or empty.
-repo_slug() {
+#
+# Every candidate is also a VALID herdr agent name. herdr (src/app/agents.rs
+# valid_agent_name, read at v0.9.5) accepts `[a-z][a-z0-9_-]*`, at most 32
+# bytes, and refuses anything else with invalid_agent_name — on `agent start` and
+# `agent rename` alike. A caller may still pass a long title (the skills ask for
+# a short label, but prose enforces nothing), so the label is normalized here:
+# a label herdr already accepts is kept AS IS (a rewrite would dodge the
+# same-worktree check that agent_name_taken triggers against a worker started
+# under that exact name); any other is lowercased, umlauts spelled out (ä → ae),
+# other characters → `-`, a leading non-letter prefixed with `t-`. One that is still too long is cut at a word
+# boundary and, when TASK.md pins `issue: #N`, ends in `-N` — two long titles
+# sharing a prefix stay apart. Fallback suffixes are fitted the same way, so
+# `<name>-<repo>-2` is ≤ 32 too; a fallback that still cannot be made valid (an
+# absurd pin or repo name) is dropped, never fatal. Deterministic: same inputs,
+# same names.
+# repo_dir → the main checkout's directory name (raw; slugged with the label), or
+# empty.
+repo_dir() {
   local main=""
   case "$worktree" in
     */.claude/worktrees/*) main="${worktree%/.claude/worktrees/*}" ;;
@@ -581,27 +602,96 @@ repo_slug() {
        main="${main%/.git}" ;;
   esac
   [ -n "$main" ] || return 0
-  printf '%s' "${main##*/}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' \
-    | sed -e 's/--*/-/g' -e 's/^-//' -e 's/-$//'
+  printf '%s' "${main##*/}"
+}
+
+# argv: <label> <repo-dir or ""> <TASK.md path> <tries> → one candidate per line.
+name_candidates_py='import os, re, sys, unicodedata
+MAX = 32
+VALID = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+label, repo, task_md, tries = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+def slug(s):
+    t = unicodedata.normalize("NFC", s).lower()
+    t = t.translate(str.maketrans({"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss"}))
+    t = "".join(c for c in unicodedata.normalize("NFKD", t) if not unicodedata.combining(c))
+    t = re.sub(r"[^a-z0-9_-]+", "-", t)
+    return re.sub(r"-{2,}", "-", t).strip("-_")
+def cut(s, room):
+    """s shortened to <= room chars, at a word boundary when one is in reach."""
+    if len(s) <= room:
+        return s
+    head = s[:room]
+    if s[room] not in "-_":
+        b = max(head.rfind("-"), head.rfind("_"))
+        if b >= room // 2:  # a word boundary, unless it would gut the name
+            head = head[:b]
+    return head.rstrip("-_")
+def fit(stem, suffix):
+    if not suffix or len(suffix) > MAX - 2:  # no room for a stem: drop the suffix
+        return cut(stem, MAX)
+    stem = cut(stem, MAX - len(suffix) - 1)
+    return f"{stem}-{suffix}" if stem else suffix
+issue = ""
+try:
+    fd = os.open(task_md, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, encoding="utf-8", errors="replace") as f:
+        for _ in range(20):
+            line = f.readline(512)  # bounded: a huge body line is not a pin
+            m = re.fullmatch(r"issue: #([0-9]+)\n?", line)
+            if m:
+                issue = m.group(1)
+                break
+except (OSError, ValueError):
+    pass
+s = label if VALID.fullmatch(label) else (slug(label) or "task")
+if not "a" <= s[0] <= "z":
+    s = "t-" + s
+tail = []
+if len(s) > MAX and issue and len(issue) <= 8:  # a longer "pin" is not a real one
+    if s.endswith("-" + issue):
+        s = s[: -len(issue) - 1]
+    tail = [issue]
+base = fit(s, "-".join(tail))
+r = cut(slug(repo), 16)
+out = [base]
+if r and len(out) < tries and base != r and not base.endswith("-" + r):
+    tail.append(r)
+    out.append(fit(s, "-".join(tail)))
+for n in range(2, 2 + 3 * tries):  # bounded: a dropped suffix repeats a name
+    if len(out) >= tries:
+        break
+    c = fit(s, "-".join(tail + [str(n)]))
+    if c not in out:
+        out.append(c)
+print("\n".join([out[0]] + [c for c in out[1:] if VALID.fullmatch(c)]))'
+
+# valid_herdr_name <name> → 0 when herdr would accept it (rule above).
+valid_herdr_name() {
+  [ "${#1}" -le 32 ] && [[ "$1" =~ ^[a-z][a-z0-9_-]*$ ]]
 }
 
 # build_name_candidates → fills name_candidates[], sets name_idx=0, herdr_name.
+# Exits 1 before anything is created when no valid name comes out.
 build_name_candidates() {
-  local slug base n=2
-  name_candidates=("$label")
-  base="$label"
-  slug="$(repo_slug)"
-  if [ -n "$slug" ] && [ "${#name_candidates[@]}" -lt "$NAME_TRIES" ]; then
-    case "$label" in
-      "$slug"|*-"$slug") : ;;
-      *) base="$label-$slug"; name_candidates+=("$base") ;;
-    esac
+  local c out
+  name_candidates=()
+  out="$(python3 -I -c "$name_candidates_py" "$label" "$(repo_dir)" "$worktree/TASK.md" "$NAME_TRIES" 2>/dev/null || true)"
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    if ! valid_herdr_name "$c"; then
+      echo "cannot derive a valid herdr agent name from the label '$label' (got '$c'; herdr needs a lowercase letter first, then a-z 0-9 - _, at most 32 chars) — nothing was created" >&2
+      exit 1
+    fi
+    name_candidates+=("$c")
+  done <<EOF
+$out
+EOF
+  if [ "${#name_candidates[@]}" -eq 0 ]; then
+    echo "cannot derive a herdr agent name from the label '$label' — nothing was created" >&2
+    exit 1
   fi
-  while [ "${#name_candidates[@]}" -lt "$NAME_TRIES" ]; do
-    name_candidates+=("$base-$n"); n=$((n + 1))
-  done
   name_idx=0
-  herdr_name="$label"
+  herdr_name="${name_candidates[0]}"
 }
 
 # next_agent_name → advance herdr_name to the next candidate; 1 when none is left.
@@ -653,12 +743,17 @@ take_fallback_name() {
   echo "herdr agent name '$taken' is already in use by another lane — retrying as '$herdr_name'" >&2
 }
 
-# emit_launched — the confirmed-launch stdout contract. `herdr_name=` appears only
-# when herdr registered the worker under a fallback name, so the caller can say
-# which name `agent read/prompt` answers to.
+# emit_herdr_name — `herdr_name=` appears only when the worker's herdr agent name
+# differs from the label (normalized, or a fallback another lane forced), so the
+# caller can say which name `agent read/prompt` answers to.
+emit_herdr_name() {
+  if [ "${herdr_name:-$label}" != "$label" ]; then printf 'herdr_name=%s\n' "$herdr_name"; fi
+}
+
+# emit_launched — the confirmed-launch stdout contract.
 emit_launched() {
   printf 'pane=%s\ntab=%s\nmoved=yes\nagent=%s\n' "$pane" "$tab" "$agent_name"
-  if [ "${herdr_name:-$label}" != "$label" ]; then printf 'herdr_name=%s\n' "$herdr_name"; fi
+  emit_herdr_name
 }
 
 # name_agent <pane> — give a confirmed worker the herdr agent name its timed-out
@@ -869,7 +964,7 @@ EOF_RESOLVE
       # discarded) so a failure can surface herdr's actual error.code/message instead
       # of only the generic "no pane id" guard below.
       start_err="$(mktemp)"
-      start_json="$(herdr agent start "$label" --workspace "$workspace" \
+      start_json="$(herdr agent start "$herdr_name" --workspace "$workspace" \
         --cwd "$worktree" --no-focus -- "${worker_argv[@]}" 2>"$start_err" || true)"
       pane="$(printf '%s' "$start_json" | python3 -c "$extract_agent_pane" 2>/dev/null || true)"
 
@@ -936,6 +1031,7 @@ EOF_RESOLVE
         [ -n "$diag" ] && printf '%s\n' "$diag" >&2
         echo "herdr pane move --new-tab failed for pane $pane (worker still running; no dedicated tab)" >&2
         printf 'pane=%s\ntab=\nmoved=no\nagent=%s\n' "$pane" "$agent_name"
+        emit_herdr_name
       fi
       exit 0
     fi

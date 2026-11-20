@@ -1,10 +1,10 @@
 ---
 title: "herdr /kickoff + /continue-reopen Automation"
 createdAt: 2026-06-24
-updatedAt: 2026-11-04
+updatedAt: 2026-11-20
 createdFrom: "PR #17"
-updatedFrom: "session: 2026-11-04 (task/herdr-agent-name-collision-across-spaces)"
-pluginVersion: 1.34.1
+updatedFrom: "session: 2026-11-20 (task/fix-herdr-agent-name-length)"
+pluginVersion: 1.36.1
 prime: false
 reindexedAt: 2026-07-12
 ---
@@ -234,11 +234,29 @@ an empty shell tab that read as a started lane (incident 2026-11-04).
   `<label>-<repo>-2`, `-3`, bounded by `WORK_SYSTEM_HERDR_NAME_TRIES` (4 names).
   The retry costs no busy-retry budget. Same walk on the timeout-path rename (no
   holder check there: the worker is already confirmed in our pane).
-- A fallback name is reported as a `herdr_name=` stdout line (absent when the plain
-  label took). All names taken → `fail_definitive`: tab rolled back, exit 1, the
+- A fallback (or normalized) name is reported as a `herdr_name=` stdout line
+  (absent when the label itself took). All names taken → `fail_definitive`: tab rolled back, exit 1, the
   caller's manual block — a loud failure, never a shell tab posing as a lane.
 - The test models the incident with a *stateful* stub server that registers names
   across two launches in two workspaces, rather than only canned replies.
+- **The name must also be valid** (work-system 1.36.1). herdr's rule, read from its
+  source (`src/app/agents.rs` `valid_agent_name`, v0.9.5 — research, not a test):
+  `[a-z][a-z0-9_-]*`, at most 32 bytes; anything else is `invalid_agent_name`, on
+  `agent start` and `agent rename`, checked before the pane is touched (so it is
+  *definitive*: roll the tab back). Root cause of the 2026-11-20 incident: the skill
+  prose said "~32 chars", but a caller passed a ~60-char issue title and no script
+  enforced it. The launcher now normalizes the label itself (umlauts spelled out,
+  word-boundary cut, `-<N>` from TASK.md's `issue: #N` when cut) and fits every
+  fallback suffix *cumulatively* (`<stem>-<N>-<repo>-<n>`), so no fallback drops
+  the number or exceeds 32. The tab label and `-n` session name keep the caller's
+  label; only the agent name is normalized, and a changed one is `herdr_name=`.
+  A label herdr already accepts is kept verbatim: normalizing `fix--login` to
+  `fix-login` would let a relaunch dodge `agent_name_taken`, the only trigger of
+  the same-worktree holder check. A fallback that cannot be made valid is dropped,
+  never fatal, and the fallback walk is bounded (a dropped suffix repeats a name —
+  an unbounded `while` hung on exactly that during the fix).
+  The ~60-char *branch* in that incident is a separate cause: `task-store.py`
+  `slugify` caps at 60 chars mid-word.
 - **Not every startup error is the busy case.** `agent_not_ready` ("blocked during
   startup") is CC's trust dialog in an untrusted cwd — the agent is stuck, not
   working, so it stays ambiguous → `unverified`.
