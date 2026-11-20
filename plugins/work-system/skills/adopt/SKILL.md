@@ -210,7 +210,8 @@ The Bash tool persists CWD between calls — a bare `cd .claude/worktrees/<task>
     sidebar-friendly `LABEL` from the **resolved task name** (`<task-name>` from step 3,
     which already stripped `task/`/`feature/`/`fix/`… prefixes — so the label stays
     sensible even when step 8 kept the *original* branch name). Drop filler words,
-    hard-cap ~32 chars, pass it PLAIN (the helper prefixes the task's state glyph onto
+    ~32 chars at most (the helper normalizes it to a valid herdr agent name and reports a
+    changed one as `herdr_name=`), pass it PLAIN (the helper prefixes the task's state glyph onto
     the tab label). The worktree path is absolute — build it from the `<main-repo>`
     captured in step 1 (never from a drifted CWD):
 

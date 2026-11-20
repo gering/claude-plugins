@@ -459,7 +459,9 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
 
     Derive a short, sidebar-friendly label from the task name — drop filler words
     (`automate`, `in`, …) so it reads punchy (e.g. `automate-close-in-herdr` →
-    `close-herdr`), hard-cap ~32 chars. Pass it PLAIN — the launch helper
+    `close-herdr`), ~32 chars at most. The helper turns it into a valid herdr agent
+    name itself (lowercase, `a-z 0-9 - _`, ≤ 32) and reports a changed one as
+    `herdr_name=`. Pass it PLAIN — the launch helper
     prefixes the task's state glyph (`○ ● ◇ ◆ ✓`, e.g. `● close-herdr`) onto the
     **tab label** itself, mirroring the `[ws …]` statusline. This `LABEL` names the
     herdr agent, the tab, and (for a claude worker) the `-n` session — but the glyph
@@ -496,8 +498,9 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
       stderr, which says what could not be confirmed.
     - **exit 0 with `moved=yes`** → the task is running in its own background tab
       (`tab=<id>`) with worker `agent=<cli:model>`. Report success (template below).
-      A `herdr_name=<name>` line means another lane (often the same task title in
-      another workspace) holds the label, so the worker got that fallback name —
+      A `herdr_name=<name>` line means the worker got another agent name than the
+      label: the label normalized to herdr's rule, or a fallback because another
+      lane (often the same task title in another workspace) holds it —
       fill the template's `Agent name:` line with it and relay the helper's stderr.
       A `named=no` line means herdr refused every name: add one line that the
       worker is addressed by pane `<pane>`, and relay the helper's stderr.
@@ -529,7 +532,7 @@ is a per-repo committed file (`.claude/work-system-agent`), set via
     Worktree created and launched in herdr!
 
     Tab:      <LABEL>   (workspace <HERDR_WORKSPACE_ID>, opened in the background)
-    Agent name: <herdr_name= value>   (only when present — the label was taken)
+    Agent name: <herdr_name= value>   (only when present — normalized or taken)
     Agent:    <name= line>  (grok: add "→ <model=> (<model_source=>)" from step 12 — `grok:latest` alone does not say what runs)
     Location: .claude/worktrees/<task-name>
     Branch:   task/<task-name>

@@ -52,6 +52,9 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.36.1 — 2026-11-20
+- `herdr-launch.sh` derives the herdr agent name from the label under herdr's own rule (`[a-z][a-z0-9_-]*`, at most 32 chars, from herdr's `valid_agent_name`): umlauts spelled out, other characters to `-`, a long label cut at a word boundary and, with an `issue: #N` pin in TASK.md, suffixed `-N`. The `<repo>`/`-2` fallbacks stay within the limit and keep that number. A name that still fails is refused before anything is created, and herdr's `invalid_agent_name` is a definitive failure (the empty tab is rolled back). A label passed as a ~60-char issue title used to fail the first launch.
+
 ### 1.36.0 — 2026-11-19
 - `/land --as <app>` hands `--as` unchanged to `/pr-flow:merge` (needs pr-flow 1.10.0) to merge as a GitHub App; it is the only argument `/land` takes, counts only from the user's own typed line, and is probed (`gh __shim-probe`) on an open PR before the gate and any armed wait (an already merged PR gets a `mergedBy` check instead, and so does the confirmed merge when `/merge` never reached its own); an older `/merge` that would ignore it stops before it runs, and every re-run hint keeps `--as`. Report, confirmation and close keep the default identity.
 

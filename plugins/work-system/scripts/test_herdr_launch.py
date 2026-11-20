@@ -35,6 +35,7 @@ Covers:
 """
 import json as jsonlib
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -1218,6 +1219,105 @@ r3 = e.run("launch", "staging-live-years", server, "w3")
 check("two spaces: re-launching the first lane stops instead of a second worker",
       r3.returncode == 1 and "already runs in this worktree" in r3.stderr
       and "rolled back" in r3.stderr)
+e.close()
+
+# --- agent names follow herdr's rule: [a-z][a-z0-9_-]*, <= 32 -------------- #
+# Read from herdr's source (src/app/agents.rs valid_agent_name, v0.9.5); herdr
+# answers anything else with invalid_agent_name. The incident: a ~60-char issue
+# title passed as the label was refused on the first launch.
+NAME_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+LONG = "Audit log: monotonic timestamps across writers (S4 dropped backfill)"
+
+
+def started_names(e):
+    return [s[2] for s in e.call_args("agent start")]
+
+
+e = Env(modern_cases(), log_argv=True, api="modern")
+wt = repo_worktree(e, task="audit")
+Path(wt, "TASK.md").write_text("# Audit\n\nissue: #191\n\nbody\n")
+r = e.run("launch", LONG, wt, "w1")
+names = started_names(e)
+check("long title: started under one valid name with the issue number",
+      r.returncode == 0 and len(names) == 1 and NAME_RE.fullmatch(names[0])
+      and names[0] == "audit-log-monotonic-191")
+check("long title: the caller learns the name (herdr_name=)",
+      kv(r.stdout).get("herdr_name") == "audit-log-monotonic-191")
+check("long title: the tab keeps the caller's label",
+      LONG in " ".join(sum(e.call_args("tab create"), [])))
+e.close()
+
+# no issue pin → cut at a word boundary, never mid-word
+e = Env(modern_cases(), log_argv=True, api="modern")
+r = e.run("launch", LONG, repo_worktree(e), "w1")
+names = started_names(e)
+check("long title, no issue: word-boundary cut, valid",
+      names == ["audit-log-monotonic-timestamps"] and r.returncode == 0)
+e.close()
+
+# umlauts and special characters; a leading digit gets a letter in front
+for raw, want in (("Müll-Tour: Straße öffnen!", "muell-tour-strasse-oeffnen"),
+                  ("Café  déjà_vu / v2.1", "cafe-deja_vu-v2-1"),
+                  ("191 fix login", "t-191-fix-login")):
+    e = Env(modern_cases(), log_argv=True, api="modern")
+    r = e.run("launch", raw, repo_worktree(e), "w1")
+    check(f"normalized {raw!r} → {want}",
+          started_names(e) == [want] and kv(r.stdout).get("herdr_name") == want)
+    e.close()
+
+# a label with nothing left (CJK only) still yields a valid name
+e = Env(modern_cases(), log_argv=True, api="modern")
+r = e.run("launch", "任务", repo_worktree(e), "w1")
+check("nothing to slug: falls back to 'task'", started_names(e) == ["task"])
+e.close()
+
+# a valid short label stays untouched: no herdr_name= line
+e = Env(modern_cases(), log_argv=True, api="modern")
+r = e.run("launch", "close-herdr", repo_worktree(e), "w1")
+check("valid label: unchanged, no herdr_name=",
+      started_names(e) == ["close-herdr"] and "herdr_name" not in r.stdout)
+e.close()
+
+# collision with the long-title name: every fallback is valid and <= 32 too
+e = Env(taken_cases(("", NAME_TAKEN, 1)), log_argv=True, api="modern")
+wt = repo_worktree(e, repo="muellmann_4_server_and_more", task="audit")
+Path(wt, "TASK.md").write_text("# Audit\n\nissue: #191\n")
+r = e.run("launch", LONG, wt, "w1")
+names = started_names(e)
+check("long title, all taken: 4 distinct valid names, each <= 32",
+      len(names) == 4 and len(set(names)) == 4
+      and all(NAME_RE.fullmatch(n) for n in names) and r.returncode == 1)
+check("long title, all taken: fallbacks keep the issue, the repo tag and a counter",
+      all("-191" in n for n in names)
+      and names[1].endswith("-191-muellmann_4") and names[2].endswith("-muellmann_4-2")
+      and names[3].endswith("-muellmann_4-3"))
+e.close()
+
+# collision, then success: the fallback is what herdr_name= reports
+e = Env(taken_cases([("", NAME_TAKEN, 1), (AGENT_STARTED, "", 0)]), log_argv=True, api="modern")
+wt = repo_worktree(e, task="audit")
+Path(wt, "TASK.md").write_text("# Audit\n\nissue: #191\n")
+r = e.run("launch", LONG, wt, "w1")
+check("long title, taken once: fallback valid and reported",
+      kv(r.stdout).get("herdr_name") == "audit-log-monotonic-191-my-app"
+      and NAME_RE.fullmatch(kv(r.stdout)["herdr_name"]))
+e.close()
+
+# herdr refusing the name anyway (a future rule) is definitive: rolled back
+INVALID = jsonlib.dumps({"error": {"code": "invalid_agent_name", "message": "bad name"}})
+e = Env(modern_cases(**{"agent start": ("", INVALID, 1)}), log_argv=True, api="modern")
+r = e.run("launch", "t", repo_worktree(e), "w1")
+check("invalid_agent_name from herdr: exit 1, tab rolled back, error relayed",
+      r.returncode == 1 and len(e.call_args("tab close")) == 1
+      and "invalid_agent_name" in r.stderr)
+e.close()
+
+# legacy herdr gets the normalized name as well
+e = Env({"agent start": (LEGACY_STARTED, "", 0), "pane move": (LEGACY_MOVED, "", 0)},
+        log_argv=True, api="legacy")
+r = e.run("launch", "Close Herdr", repo_worktree(e), "w1")
+check("legacy: normalized name started and reported",
+      started_names(e) == ["close-herdr"] and kv(r.stdout).get("herdr_name") == "close-herdr")
 e.close()
 
 # Invoked by BARE NAME (no slash in $0), sibling helpers must still resolve — a
