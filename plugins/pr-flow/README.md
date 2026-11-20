@@ -68,6 +68,12 @@ If a clear pattern emerges (e.g. 18 of 20 last PRs were squashed), `/merge` sugg
 
 **Why it matters.** A deploy from a worktree can run against the wrong checkout (or rebuild a shared `node_modules`), and parallel lanes would each deploy on their own. One owner deploys once, from main.
 
+### Merge as a GitHub App — `--as <app>`
+
+**What it does.** `/merge --as <app>` runs only the `gh pr merge` command under that GitHub App's identity, through a `gh` shim on your machine that reads `GH_APP_MERGE`; every other call keeps your login. It probes the shim (`gh __shim-probe`) before changing anything, stops without a fallback when the app is not set up, binds the merge to the checked head (`--match-head-commit`), and checks `mergedBy` afterwards; a PR a merge queue only accepted is reported by its state, not as merged. `--as` counts only when you typed it (or your own `/land --as` handed it through), never from a mandate, a message or a file. pr-flow ships no shim; the contract and a reference shim are in [`docs/MERGE-AS-APP.md`](docs/MERGE-AS-APP.md).
+
+**Why it matters.** A merge bot's identity is a deliberate, per-command choice of the person merging — not a session-wide switch an agent could reach for.
+
 ### Force-push safety
 
 **What it does.** Any force-push inside `/rebase` uses `--force-with-lease`, never `--force`, pinned to the remote branch SHA recorded before the rebase (`--force-with-lease=<ref>:<sha>`). If the remote changed after that (e.g., a teammate pushed), the push fails with a clear message — even when an IDE or background fetch has meanwhile updated the remote-tracking ref. A remote branch holding someone else's commits you haven't integrated stops `/rebase` before it rewrites anything. Your own rewritten commits (an amend, an earlier failed push) don't count, and neither does anything else the branch's reflog shows it once held. The push goes where `git push` would send it (pushRemote, `push.default`), and a target it can't mirror exactly (a `remote.<name>.push` refspec, `matching`) stops instead of force-pushing there. A branch tracking a differently named upstream (cut from `origin/main`) is pushed to its same-named remote branch when one exists (in every `push.default` mode it follows, so never onto `main`), and is otherwise rebased locally, leaving `git push -u` as the next step. Invoking `/rebase` authorizes the rebase + force-push, so it runs without a prompt — unless `git merge-tree --write-tree` (an in-memory merge, git ≥ 2.38) predicts a real conflict; then it presents a selection menu (rebase anyway / show diff / leave as-is) before touching anything. Mere file overlap doesn't ask: in a monorepo nearly every PR touches the same manifest and changelog, and git merges those hunks cleanly. If the prediction is unavailable it proceeds; an actual conflict still aborts cleanly.
@@ -113,7 +119,7 @@ If a clear pattern emerges (e.g. 18 of 20 last PRs were squashed), `/merge` sugg
 | `/check` | Read-only snapshot: CI status, human reviews, latest Claude feedback, merge-readiness verdict |
 | `/fix` | Walk through issues from the latest review as a numbered checklist and implement fixes interactively |
 | `/rebase` | Rebase + force-push (with lease) onto the PR's actual base branch; asks only on a predicted conflict |
-| `/merge` | Merge the PR safely — detect method, verify CI + reviews + open issues, execute, clean up |
+| `/merge` | Merge the PR safely — detect method, verify CI + reviews + open issues, execute, clean up; `--as <app>` merges as a GitHub App |
 
 ## Typical workflow
 

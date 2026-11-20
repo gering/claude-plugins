@@ -52,6 +52,9 @@ entries are grouped per plugin, newest first.
 
 ## work-system
 
+### 1.36.0 — 2026-11-19
+- `/land --as <app>` hands `--as` unchanged to `/pr-flow:merge` (needs pr-flow 1.10.0) to merge as a GitHub App; it is the only argument `/land` takes, counts only from the user's own typed line, and is probed (`gh __shim-probe`) on an open PR before the gate and any armed wait (an already merged PR gets a `mergedBy` check instead, and so does the confirmed merge when `/merge` never reached its own); an older `/merge` that would ignore it stops before it runs, and every re-run hint keeps `--as`. Report, confirmation and close keep the default identity.
+
 ### 1.35.0 — 2026-11-18
 - New lanes get `review_budget: 5` (was 3) for the `standard` and `merge-delegated` presets; `draft-only` stays 0, recorded mandates and a repo's `[mandate] review_budget` keep their value.
 - Manager follow-ups follow `tasks.backend`: on github each one is a `work-system:followup` issue (plus `followup:ask|deploy|blocked`, deduplicated by a body marker; `resolve #N` closes only such issues), scanned with `migrate`'s patterns before publishing (exit 5 on a hit); a failing gh is exit 4, never a write to the local file. Under `auto` only local task files keep follow-ups in the file; legacy `F<n>` entries do not, but stay listed and resolvable on github. Follow-up issues are never tasks, in any `tasks.select` mode. On local, `tasks/ROADMAP.md` stays the record, and `/close` commits it with the archive (and via `archive-task.sh roadmap-push` after 10b) once the repo has committed it, after scanning the whole file.
@@ -378,6 +381,9 @@ entries are grouped per plugin, newest first.
 - Add `/work-adopt` skill; store worktrees under `.claude/worktrees/`.
 
 ## pr-flow
+
+### 1.10.0 — 2026-11-19
+- `/merge --as <app>` runs only the `gh pr merge` command as a GitHub App, prefixed with `GH_APP_MERGE='<app>'` for a `gh` shim on the user's machine; every other call keeps the default identity. Accepted only from the user's typed command line (or their `/land --as`), never from a mandate, message or file; `<app>` must be a GitHub App slug (`^[a-z0-9][a-z0-9-]*$`), any other argument stops. A shim probe (`gh __shim-probe` → `merge_app=<app>`) runs before anything is changed and stops without a fallback; a merge under `--as` is always bound with `--match-head-commit` (the lane's reviewed head, else the head checked after the rebase); after the merge a `mergedBy` mismatch is reported, and a PR a merge queue only accepted is reported by its state, not as merged; a failed merge command stays a failure. Under `--as`, the README's suggested `autoMode.allow` rule leaves the merge to the user — update an installed copy of that rule. Hermetic test: `test_merge_as.py`. No shim is shipped: `docs/MERGE-AS-APP.md` documents the contract, a reference shim (required allowlist, `gh pr merge` only, no `--admin`, no fallback) and its limits: the key file is the real boundary on a shared machine, and `--as` never stands in for a second person's approval.
 
 ### 1.9.3 — 2026-11-19
 - `claude-review.sh route`'s evidence shortcut ("likely no bot") now counts only replies by the Claude App (`claude_author`, the predicate `poll` uses) instead of every Bot account. A third-party bot commenting on the repo (a review or CI bot) disabled the shortcut for good, so every `/cycle` posted `@claude review` and burned a 10-minute poll before switching to local. The owner/member/collaborator `asks` filter and the ≥2-asks threshold are unchanged; the veto reads the newest Claude App comment the route already fetched for clearing the memory, so the bot count is gone from the evidence line. README and `REVIEW-ROUTING.md` describe the shortcut.

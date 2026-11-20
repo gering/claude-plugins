@@ -38,7 +38,7 @@ Generic task and worktree workflow system for Claude Code. Keep tasks as GitHub 
 | `/continue` | Resume the current task (in a worktree); or `/continue <task>` from the main session reopens the task's herdr tab and resumes it |
 | `/status` | Check task status (PRs, branches, commits) |
 | `/close` | Clean up after merge (worktree, branches; closes the issue or archives the task file). `--delegate` preselects handing the close to the Manager |
-| `/land` | In the worktree tab: handoff report → `/pr-flow:merge` → confirmed merge → `/close --delegate` |
+| `/land` | In the worktree tab: handoff report → `/pr-flow:merge` → confirmed merge → `/close --delegate`; `--as <app>` merges as a GitHub App |
 | `/list` | Overview of all tasks, worktrees, and status |
 | `/migrate` | (invoke as `/work-system:migrate`; knowledge-system has its own `/migrate`) Move local task files (open → open issues, archived → closed issues) to GitHub Issues, then switch `tasks.backend` to `github`; dry run, secret scan and one confirmation first |
 | `/manager` | (invoke as `/work-system:manager`) Status of this herdr space's workers: who works, who waits on a question, which PR is ready for merge — shown to you, never answered or merged |
@@ -209,8 +209,10 @@ post-review delta, `/land` summarizes it and asks you one question in the same r
 acknowledge and land, or stop. On a transient state `/land` stays **armed**: it binds
 the exact `HEAD` you landed on and waits (bounded to 45 minutes, progress lines,
 interruptible, no daemon) until the merge conditions hold, then merges. A hard stop,
-a new local head, a PR head it never saw, or the deadline disarms it and reports. It
-takes no arguments. Any stop before a confirmed merge closes nothing. Typing `/land` is the merge authorization — a mandate's
+a new local head, a PR head it never saw, or the deadline disarms it and reports. Its
+only argument is `--as <app>`, handed to `/pr-flow:merge --as` (pr-flow 1.10.0+) to merge as a GitHub App
+(probed before an open PR is gated, `mergedBy` checked on a merged one; see pr-flow's
+`docs/MERGE-AS-APP.md`). Any stop before a confirmed merge closes nothing. Typing `/land` is the merge authorization — a mandate's
 `deny: merge` binds the worker's own initiative, not your command — so the skill is
 `disable-model-invocation`, which keeps the Skill tool from starting it. That fence
 does not see keystrokes another process types into the pane, so the skill also
@@ -528,12 +530,16 @@ is allowed when the user invoked /land or /pr-flow:merge for that PR in this ses
 the lane's local review is the review gate, checked by `mandate.sh covered` before
 the merge (or, with `via=user-ack`, the user acknowledged the summarized delta in
 `/land` or `/pr-flow:merge`; that record persists in the lane's `MANDATE.md`
-with its `acked_at`).
+with its `acked_at`). Not a merge prefixed with GH_APP_MERGE (`--as`): the user
+confirms each of those.
 ```
 
 Without the rule, a denied merge makes `/land` stop with the exact follow-up: type
 `/pr-flow:merge` yourself (an explicit command clears the denial), then `/land` again
-to confirm and close.
+to confirm and close — both with the same `--as <app>` if you landed with one. The
+rule above describes a plain `gh pr merge`; a merge under `--as` runs as
+`GH_APP_MERGE='<app>' gh pr merge …` and is meant to stay outside it, so you confirm
+each merge under another identity yourself.
 
 ## Insight reports at handoff and close (optional)
 

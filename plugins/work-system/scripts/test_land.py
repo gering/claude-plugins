@@ -55,7 +55,23 @@ check("a merged PR runs the head check before the report",
 check("an open PR runs the gate script before the report",
       "`pr_state=OPEN` → **the gate**" in step1
       and 'land-gate.py" probe --pr <pr_number>' in step1)
-check("/land refuses arguments", "`/land` takes no arguments" in LAND)
+check("/land refuses every argument but --as", "`/land` only takes `--as <app>`" in LAND)
+check("--as is taken only from the user's typed line",
+      "Only the user's own typed `/land` line counts" in LAND)
+check("--as is probed on an open PR, before the gate and its armed wait",
+      at(step1, "`pr_state=OPEN` with `--as <app>`") < at(step1, "gh __shim-probe")
+      < at(step1, 'land-gate.py" probe --pr <pr_number>'))
+check("an already merged PR checks mergedBy instead of probing",
+      "mergedBy" in step1[at(step1, "`pr_state=MERGED`"):at(step1, "`pr_state=OPEN` with")])
+step3 = LAND[at(LAND, "3. **Merge**"):at(LAND, "4. **Confirm the merge**")]
+check("--as is the only argument passed to /merge, in step 3",
+      "`/pr-flow:merge --as <app>`" in step3 and "the only argument `/land` ever passes" in step3)
+check("an older /merge that would ignore --as stops before it runs",
+      "does not know `--as`" in step3 and "before any of its steps runs" in step3)
+check("re-run follow-ups keep --as", "append ` --as <app>` to every `/land` or `/pr-flow:merge`" in LAND)
+check("the denial follow-up names --as", "with the same `--as <app>`" in step3)
+check("--as checks mergedBy on the confirmed path too",
+      "read `gh pr view <pr_number> --json mergedBy" in LAND[at(LAND, "5. **Report, then close**"):])
 check("an open PR whose branch is not on the remote stops before the merge",
       "`remote-missing`" in step1 and "not on the remote" in step1)
 check("pr-flow presence is checked first", at(step1, "pr-flow installed?") < at(step1, "assess"))
